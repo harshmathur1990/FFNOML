@@ -95,53 +95,54 @@ class SpectralConv2dFactor(nn.Module):
 
     def forward(self, x, dx, dy):
 
-        B, Cin, D, H, W = x.shape
+    B, Cin, D, H, W = x.shape
 
-        dx = _to_spacing_value(dx, x)
-        dy = _to_spacing_value(dy, x)
+    dx = _to_spacing_value(dx, x)
+    dy = _to_spacing_value(dy, x)
 
-        with torch.amp.autocast("cuda", enabled=False):
-            x_ft = torch.fft.rfft2(x, dim=(-2, -1))
+    orig_dtype = x.dtype
 
-            out_ft = torch.zeros(
-                B,
-                self.out_channels,
-                D,
-                H,
-                W // 2 + 1,
-                device=x.device,
-                dtype=torch.cfloat,
-            )
+    with torch.amp.autocast("cuda", enabled=False):
+        x = x.float()   # <<< THIS IS THE MISSING LINE
 
-            my = min(self.modes_y, H)
-            mx = min(self.modes_x, W // 2 + 1)
+        x_ft = torch.fft.rfft2(x, dim=(-2, -1))
 
-            # physical frequencies
-            ky = torch.fft.fftfreq(H, d=dy, device=x.device)[:my]
-            kx = torch.fft.rfftfreq(W, d=dx, device=x.device)[:mx]
+        out_ft = torch.zeros(
+            B,
+            self.out_channels,
+            D,
+            H,
+            W // 2 + 1,
+            device=x.device,
+            dtype=torch.cfloat,
+        )
 
-            ky = 2 * math.pi * ky
-            kx = 2 * math.pi * kx
+        my = min(self.modes_y, H)
+        mx = min(self.modes_x, W // 2 + 1)
 
-            ky_grid, kx_grid = torch.meshgrid(ky, kx, indexing="ij")
+        ky = torch.fft.fftfreq(H, d=dy, device=x.device)[:my]
+        kx = torch.fft.rfftfreq(W, d=dx, device=x.device)[:mx]
 
-            k_feat = torch.stack([kx_grid, ky_grid], dim=-1)  # [my,mx,2]
+        ky = 2 * math.pi * ky
+        kx = 2 * math.pi * kx
 
-            gate = self.freq_mlp(k_feat)  # [my,mx,2]
+        ky_grid, kx_grid = torch.meshgrid(ky, kx, indexing="ij")
+        k_feat = torch.stack([kx_grid, ky_grid], dim=-1)
 
-            gate = torch.view_as_complex(gate.contiguous())  # complex scaling
+        gate = self.freq_mlp(k_feat.float())
+        gate = torch.view_as_complex(gate.contiguous())
 
-            weight = self.weight[:, :, :my, :mx] * gate[None, None, :, :]
+        weight = self.weight[:, :, :my, :mx] * gate[None, None, :, :]
 
-            out_ft[:, :, :, :my, :mx] = torch.einsum(
-                "b i d y x, i o y x -> b o d y x",
-                x_ft[:, :, :, :my, :mx],
-                weight,
-            )
+        out_ft[:, :, :, :my, :mx] = torch.einsum(
+            "b i d y x, i o y x -> b o d y x",
+            x_ft[:, :, :, :my, :mx],
+            weight,
+        )
 
-            y = torch.fft.irfft2(out_ft, s=(H, W), dim=(-2, -1))
+        y = torch.fft.irfft2(out_ft, s=(H, W), dim=(-2, -1))
 
-        return y
+    return y.to(orig_dtype)
 
 
 # --------------------------------------------
