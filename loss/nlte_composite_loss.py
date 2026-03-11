@@ -555,7 +555,7 @@ class NLTECompositeLoss(nn.Module):
         # expand physics loss to batch
         L_S = L_S.expand_as(L_data)
 
-        L_total = L_data + L_S
+        L_total = L_data   # + L_S
 
         if self.debug and not self._debug_triggered:
             if torch.isnan(L_total):

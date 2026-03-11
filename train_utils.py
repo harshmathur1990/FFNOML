@@ -103,8 +103,6 @@ def compute_loss(pred, target, weight, loss_fn, T):
     else:
         loss = loss.mean()
 
-    loss = loss.mean()
-
     return loss, components
 
 

@@ -147,12 +147,12 @@ MODEL_CONFIG = dict(
 
     width=64,
 
-    modes_y=24,
-    modes_x=24,
+    modes_y=16,
+    modes_x=16,
 
-    n_layers=8,
+    n_layers=6,
 
-    z_kernel=21,
+    z_kernel=9,
 
     dropout=0.1,
     mlp_expansion=2
