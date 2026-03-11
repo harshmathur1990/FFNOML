@@ -140,33 +140,6 @@ def _extract_patches_xy(X, Y, patch, stride):
     return Xp, Yp
 
 
-def _extract_grid_patches(X, Y, splits):
-
-    patches_X = []
-    patches_Y = []
-
-    _, _, nx, ny = X.shape
-
-    px = nx // splits
-    py = ny // splits
-
-    for i in range(splits):
-        for j in range(splits):
-
-            xs = i * px
-            xe = xs + px
-
-            ys = j * py
-            ye = ys + py
-
-            patches_X.append(X[:, :, xs:xe, ys:ye])
-            patches_Y.append(Y[:, :, xs:xe, ys:ye])
-
-    patches_X = np.stack(patches_X)
-    patches_Y = np.stack(patches_Y)
-
-    return patches_X, patches_Y
-
 # ------------------------------------------------------------
 # Downsampling with anti-alias filter
 # ------------------------------------------------------------

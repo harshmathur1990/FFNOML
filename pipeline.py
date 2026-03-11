@@ -88,8 +88,8 @@ def load_multi3d_blocks(dataset_entries):
             m3d = Multi3dOut(directory=mpath)
             m3d.readall()
 
-            lte = m3d.atom.nstar * 1e6
-            nlte = m3d.atom.n * 1e6
+            lte = m3d.atom.nstar[:] * 1e6
+            nlte = m3d.atom.n[:] * 1e6
 
             if lte_block is None:
                 lte_block = lte
@@ -107,13 +107,13 @@ def load_multi3d_blocks(dataset_entries):
                 if hasattr(atmos, "readall"):
                     atmos.readall()
 
-                rho = atmos.rho * 1e3
-                temp = atmos.temp
-                vx = atmos.vx
-                vy = atmos.vy
-                vz = atmos.vz
-                ne = atmos.ne * 1e6
-                z_scale = m3d.geometry.z * 1e-2
+                rho = atmos.rho[:] * 1e3
+                temp = atmos.temp[:]
+                vx = atmos.vx[:]
+                vy = atmos.vy[:]
+                vz = atmos.vz[:]
+                ne = atmos.ne[:] * 1e6
+                z_scale = m3d.geometry.z[:] * 1e-2
                 dx, dy = compute_dx_dy(mesh_path)
 
         atmos_list.append(atmos)
