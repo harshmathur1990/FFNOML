@@ -15,6 +15,10 @@ from FFNONet import (
 import torch.distributed as dist
 
 
+def is_main():
+    return not dist.is_initialized() or dist.get_rank() == 0
+
+
 def read_mesh(mesh_file):
     """
     Reads mesh file from Bifrost or MULTI3D.
@@ -196,50 +200,55 @@ def load_pred_data(mesh_file, atmos_file):
 
 if __name__ == '__main__':
 
-    if not os.path.exists(TRAIN_FILE):
-        multi3d_atmos = load_multi3d_blocks(MULTI3D_TRAIN_DATA)
+    if is_main():
 
-        build_dataset_ffno(
-            multi3d_atmos['temp_list'],
-            multi3d_atmos['vx_list'],
-            multi3d_atmos['vy_list'],
-            multi3d_atmos['vz_list'],
-            multi3d_atmos['ne_list'],
-            multi3d_atmos['lte_list'],
-            multi3d_atmos['nlte_list'],
-            multi3d_atmos['rho_list'],
-            multi3d_atmos['z_list'],
-            multi3d_atmos['dx_list'],
-            multi3d_atmos['dy_list'],
-            save_path=TRAIN_FILE,
-            ndep=NDEP,
-            patch=PATCH,
-            stride=STRIDE,
-            scales=SCALES
-        )
+        if not os.path.exists(TRAIN_FILE):
 
-    if not os.path.exists(TEST_FILE):
-        multi3d_atmos = load_multi3d_blocks(MULTI3D_VAL_DATA)
+            multi3d_atmos = load_multi3d_blocks(MULTI3D_TRAIN_DATA)
 
-        build_dataset_ffno(
-            multi3d_atmos['temp_list'],
-            multi3d_atmos['vx_list'],
-            multi3d_atmos['vy_list'],
-            multi3d_atmos['vz_list'],
-            multi3d_atmos['ne_list'],
-            multi3d_atmos['lte_list'],
-            multi3d_atmos['nlte_list'],
-            multi3d_atmos['rho_list'],
-            multi3d_atmos['z_list'],
-            multi3d_atmos['dx_list'],
-            multi3d_atmos['dy_list'],
-            save_path=TEST_FILE,
-            ndep=NDEP,
-            patch=PATCH,
-            stride=STRIDE,
-            scales=SCALES
-        )
+            build_dataset_ffno(
+                multi3d_atmos['temp_list'],
+                multi3d_atmos['vx_list'],
+                multi3d_atmos['vy_list'],
+                multi3d_atmos['vz_list'],
+                multi3d_atmos['ne_list'],
+                multi3d_atmos['lte_list'],
+                multi3d_atmos['nlte_list'],
+                multi3d_atmos['rho_list'],
+                multi3d_atmos['z_list'],
+                multi3d_atmos['dx_list'],
+                multi3d_atmos['dy_list'],
+                save_path=TRAIN_FILE,
+                ndep=NDEP,
+                patch=PATCH,
+                stride=STRIDE,
+                scales=SCALES
+            )
 
+        if not os.path.exists(TEST_FILE):
+            multi3d_atmos = load_multi3d_blocks(MULTI3D_VAL_DATA)
+
+            build_dataset_ffno(
+                multi3d_atmos['temp_list'],
+                multi3d_atmos['vx_list'],
+                multi3d_atmos['vy_list'],
+                multi3d_atmos['vz_list'],
+                multi3d_atmos['ne_list'],
+                multi3d_atmos['lte_list'],
+                multi3d_atmos['nlte_list'],
+                multi3d_atmos['rho_list'],
+                multi3d_atmos['z_list'],
+                multi3d_atmos['dx_list'],
+                multi3d_atmos['dy_list'],
+                save_path=TEST_FILE,
+                ndep=NDEP,
+                patch=PATCH,
+                stride=STRIDE,
+                scales=SCALES
+            )
+
+    if dist.is_initialized():
+        dist.barrier()
 
     if not os.path.exists(MODEL_FILE):
         ffno_train_model(
