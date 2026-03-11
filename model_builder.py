@@ -1,0 +1,102 @@
+import sys
+import torch
+
+from models.ffno_model import FFNO3D
+from loss.nlte_composite_loss import NLTECompositeLoss
+from weighted_mse_loss import WeightedMSE
+
+
+class ModelBuilder:
+
+    def __init__(
+        self,
+        model,
+        *,
+        model_config,
+        chi,
+        lines,
+        wave,
+        levels,
+        atom_names,
+        device="cuda",
+        lr=2e-4,
+        weight_decay=1e-4,
+        amp=True,
+    ):
+
+        if model == "FFNO3D":
+            self.model_cls = FFNO3D
+        else:
+            sys.stderr.write(f"Invalid Model class: {model}")
+            sys.exit(-1)
+
+        self.model_config = model_config
+        self.device = device
+
+        self.lr = lr
+        self.weight_decay = weight_decay
+        self.amp = amp
+
+        self.chi = chi
+        self.lines = lines
+        self.wave = wave
+        self.levels = levels
+        self.atom_names = atom_names
+
+    # ------------------------------------------------
+    # MODEL
+    # ------------------------------------------------
+
+    def build_model(self):
+
+        model = self.model_cls(**self.model_config)
+        model = model.to(self.device)
+
+        return model
+
+    # ------------------------------------------------
+    # OPTIMIZER / LOSS / AMP
+    # ------------------------------------------------
+
+    def build_training_components(self, model):
+
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=self.lr,
+            weight_decay=self.weight_decay,
+        )
+
+        mse_loss = WeightedMSE()
+
+        mse_loss = mse_loss.to(self.device)
+
+        loss_fn = NLTECompositeLoss(
+            chi=self.chi,
+            lines=self.lines,
+            wave=self.wave,
+            levels=self.levels,
+            data_loss_func=mse_loss,
+            atom_names=self.atom_names,
+        )
+
+        loss_fn = loss_fn.to(self.device)
+
+        scaler = None
+        if self.amp and self.device.startswith("cuda"):
+            scaler = torch.cuda.amp.GradScaler()
+
+        return optimizer, loss_fn, scaler
+
+    # ------------------------------------------------
+    # BUILD
+    # ------------------------------------------------
+
+    def build(self):
+
+        model = self.build_model()
+
+        optimizer, loss_fn, scaler = self.build_training_components(
+            model
+        )
+
+        return model, optimizer, loss_fn, scaler
