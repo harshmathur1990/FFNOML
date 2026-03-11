@@ -120,6 +120,7 @@ class ModelBuilder:
             levels=self.levels,
             data_loss_func=mse_loss,
             atom_names=self.atom_names,
+            debug=True
         )
 
         loss_fn = loss_fn.to(self.device)

@@ -13,10 +13,147 @@ from FFNONet import (
     ffno_predict_populations
 )
 import torch.distributed as dist
+import argparse
 
 
-def is_main():
-    return not dist.is_initialized() or dist.get_rank() == 0
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--build", action="store_true")
+    parser.add_argument("--train", action="store_true")
+    parser.add_argument("--predict", action="store_true")
+    return parser.parse_args()
+
+
+def build_datasets():
+
+    if not os.path.exists(TRAIN_FILE):
+
+        multi3d_atmos = load_multi3d_blocks(MULTI3D_TRAIN_DATA)
+
+        build_dataset_ffno(
+            multi3d_atmos['temp_list'],
+            multi3d_atmos['vx_list'],
+            multi3d_atmos['vy_list'],
+            multi3d_atmos['vz_list'],
+            multi3d_atmos['ne_list'],
+            multi3d_atmos['lte_list'],
+            multi3d_atmos['nlte_list'],
+            multi3d_atmos['rho_list'],
+            multi3d_atmos['z_list'],
+            multi3d_atmos['dx_list'],
+            multi3d_atmos['dy_list'],
+            save_path=TRAIN_FILE,
+            ndep=NDEP,
+            patch=PATCH,
+            stride=STRIDE,
+            scales=SCALES
+        )
+
+    if not os.path.exists(TEST_FILE):
+
+        multi3d_atmos = load_multi3d_blocks(MULTI3D_VAL_DATA)
+
+        build_dataset_ffno(
+            multi3d_atmos['temp_list'],
+            multi3d_atmos['vx_list'],
+            multi3d_atmos['vy_list'],
+            multi3d_atmos['vz_list'],
+            multi3d_atmos['ne_list'],
+            multi3d_atmos['lte_list'],
+            multi3d_atmos['nlte_list'],
+            multi3d_atmos['rho_list'],
+            multi3d_atmos['z_list'],
+            multi3d_atmos['dx_list'],
+            multi3d_atmos['dy_list'],
+            save_path=TEST_FILE,
+            ndep=NDEP,
+            patch=PATCH,
+            stride=STRIDE,
+            scales=SCALES
+        )
+
+
+def train_model():
+
+    ffno_train_model(
+        model=MODEL,
+        train_h5=TRAIN_FILE,
+        val_h5=TEST_FILE,
+        save_path=MODEL_FILE,
+        lines=lines,
+        wave=wave,
+        chi=chi,
+        levels=levels,
+        atom_names=atom_names,
+        model_config=MODEL_CONFIG,
+        dataset_type=DATASET_TYPE,
+        num_epochs=NUM_EPOCHS,
+        batch_size=BATCH_SIZE,
+        lr=LEARNING_RATE,
+        weight_decay=WEIGHT_DECAY,
+        num_workers=NUM_WORKERS,
+        pin_memory=PIN_MEMORY,
+        amp=AMP,
+        grad_clip=GRAD_CLIP,
+        device=DEVICE,
+        multi_gpu=MULTI_GPU,
+        patience=PATIENCE,
+        min_delta=MIN_DELTA
+    )
+
+
+def run_predictions():
+
+    for PRED_ATMOS in MULTI3D_PRED_DATA:
+
+        PREDICT_FILE = MODEL_DIR + f"3D_sim_predict_{PRED_ATMOS['NAME']}.hdf5"
+
+        OUTPUT_FILE  = MODEL_DIR + f"output_3D_sim_s5_{PRED_ATMOS['NAME']}_{MODEL}.hdf5"
+
+        DIAGNOSTIC_PATH = MODEL_DIR + f"diagnostics_3D_sim_s5_{PRED_ATMOS['NAME']}_{MODEL}.npz"
+
+        if not os.path.exists(OUTPUT_FILE):
+
+            if not os.path.exists(PREDICT_FILE):
+
+                rho, z_scale, temp, vx, vy, vz, ne, dx, dy = load_pred_data(
+                    mesh_file=PRED_ATMOS['MESH'],
+                    atmos_file=PRED_ATMOS['MULTI3D_ATMOS']
+                )
+
+                build_solving_set_ffno(
+                    rho=rho,
+                    z_scale=z_scale,
+                    temp=temp,
+                    vx=vx,
+                    vy=vy,
+                    vz=vz,
+                    ne=ne,
+                    dx=dx,
+                    dy=dy,
+                    save_path=PREDICT_FILE,
+                    ndep=NDEP
+                )
+
+            ffno_predict_populations(
+                model=MODEL,
+                checkpoint_path=MODEL_FILE,
+                solve_h5=PREDICT_FILE,
+                train_h5=TRAIN_FILE,
+                save_path=OUTPUT_FILE,
+                model_config=MODEL_CONFIG,
+                lines=lines,
+                wave=wave,
+                chi=chi,
+                levels=levels,
+                atom_names=atom_names,
+                diagnostic_path=DIAGNOSTIC_PATH,
+                cuda=CUDA,
+                amp=AMP,
+                tiled=TILED,
+                patch=PATCH,
+                stride=STRIDE
+            )
 
 
 def read_mesh(mesh_file):
@@ -198,136 +335,18 @@ def load_pred_data(mesh_file, atmos_file):
     return rho, z_scale, temp, vx, vy, vz, ne, dx, dy
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
 
-    if is_main():
+    args = parse_args()
 
-        if not os.path.exists(TRAIN_FILE):
+    if args.build:
+        build_datasets()
 
-            multi3d_atmos = load_multi3d_blocks(MULTI3D_TRAIN_DATA)
+    elif args.train:
+        train_model()
 
-            build_dataset_ffno(
-                multi3d_atmos['temp_list'],
-                multi3d_atmos['vx_list'],
-                multi3d_atmos['vy_list'],
-                multi3d_atmos['vz_list'],
-                multi3d_atmos['ne_list'],
-                multi3d_atmos['lte_list'],
-                multi3d_atmos['nlte_list'],
-                multi3d_atmos['rho_list'],
-                multi3d_atmos['z_list'],
-                multi3d_atmos['dx_list'],
-                multi3d_atmos['dy_list'],
-                save_path=TRAIN_FILE,
-                ndep=NDEP,
-                patch=PATCH,
-                stride=STRIDE,
-                scales=SCALES
-            )
+    elif args.predict:
+        run_predictions()
 
-        if not os.path.exists(TEST_FILE):
-            multi3d_atmos = load_multi3d_blocks(MULTI3D_VAL_DATA)
-
-            build_dataset_ffno(
-                multi3d_atmos['temp_list'],
-                multi3d_atmos['vx_list'],
-                multi3d_atmos['vy_list'],
-                multi3d_atmos['vz_list'],
-                multi3d_atmos['ne_list'],
-                multi3d_atmos['lte_list'],
-                multi3d_atmos['nlte_list'],
-                multi3d_atmos['rho_list'],
-                multi3d_atmos['z_list'],
-                multi3d_atmos['dx_list'],
-                multi3d_atmos['dy_list'],
-                save_path=TEST_FILE,
-                ndep=NDEP,
-                patch=PATCH,
-                stride=STRIDE,
-                scales=SCALES
-            )
-
-    if dist.is_initialized():
-        dist.barrier()
-
-    if not os.path.exists(MODEL_FILE):
-        ffno_train_model(
-            model=MODEL,
-            train_h5=TRAIN_FILE,
-            val_h5=TEST_FILE,
-            save_path=MODEL_FILE,
-            lines=lines,
-            wave=wave,
-            chi=chi,
-            levels=levels,
-            atom_names=atom_names,
-            model_config=MODEL_CONFIG,
-            dataset_type=DATASET_TYPE,
-            num_epochs=NUM_EPOCHS,
-            batch_size=BATCH_SIZE,
-            lr=LEARNING_RATE,
-            weight_decay=WEIGHT_DECAY,
-            num_workers=NUM_WORKERS,
-            pin_memory=PIN_MEMORY,
-            amp=AMP,
-            grad_clip=GRAD_CLIP,
-            device=DEVICE,
-            multi_gpu=MULTI_GPU,
-            patience=PATIENCE,
-            min_delta=MIN_DELTA
-        )
-
-        # clean shutdown of distributed backend
-        if dist.is_available() and dist.is_initialized():
-            dist.destroy_process_group()
-
-    for PRED_ATMOS in MULTI3D_PRED_DATA:
-
-        PREDICT_FILE = MODEL_DIR + f"3D_sim_predict_{PRED_ATMOS['NAME']}.hdf5"
-
-        OUTPUT_FILE  = MODEL_DIR + f"output_3D_sim_s5_{PRED_ATMOS['NAME']}_{MODEL}.hdf5"
-
-        DIAGNOSTIC_PATH = MODEL_DIR + f"diagnostics_3D_sim_s5_{PRED_ATMOS['NAME']}_{MODEL}.hdf5"
-
-        if not os.path.exists(OUTPUT_FILE):
-
-            if not os.path.exists(PREDICT_FILE):
-
-                rho, z_scale, temp, vx, vy, vz, ne, dx, dy = load_pred_data(
-                    mesh_file=PRED_ATMOS['MESH'],
-                    atmos_file=PRED_ATMOS['MULTI3D_ATMOS']
-                )
-
-                build_solving_set_ffno(
-                    rho=rho,
-                    z_scale=z_scale,
-                    temp=temp,
-                    vx=vx,
-                    vy=vy,
-                    vz=vz,
-                    ne=ne,
-                    dx=dx,
-                    dy=dy,
-                    save_path=PREDICT_FILE,
-                    ndep=NDEP
-                )
-
-            ffno_predict_populations(
-                model=MODEL,
-                checkpoint_path=MODEL_FILE,
-                solve_h5=PREDICT_FILE,
-                train_h5=TRAIN_FILE,          # <-- add this
-                save_path=OUTPUT_FILE,
-                model_config=MODEL_CONFIG,
-                lines=lines,
-                wave=wave,
-                chi=chi,
-                levels=levels,
-                atom_names=atom_names,
-                diagnostic_path=DIAGNOSTIC_PATH,
-                cuda=CUDA,
-                amp=AMP,
-                tiled=TILED,
-                patch=PATCH,
-                stride=STRIDE,
-            )
+    else:
+        raise RuntimeError("Specify one of: --build, --train, --predict")

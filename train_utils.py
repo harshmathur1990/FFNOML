@@ -91,12 +91,12 @@ def extract_temperature(X):
        T: (B, Nz, H, W)
     """
     logT = X[:, 0]
-    T = 10.0 ** logT
+    T = 10.0 ** (logT * 10)
     return T
 
 
 def compute_loss(pred, target, weight, loss_fn, T):
-    loss, components = loss_fn(T, pred, target)
+    loss, components = loss_fn(T, pred * 10, target * 10)
 
     if weight is not None:
         loss = (loss * weight).sum() / (weight.sum() + 1e-12)
