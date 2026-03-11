@@ -3,7 +3,7 @@ import torch
 
 from models.ffno_model import FFNO3D
 from loss.nlte_composite_loss import NLTECompositeLoss
-from weighted_mse_loss import WeightedMSE
+from loss.weighted_mse_loss import WeightedMSE
 
 
 class ModelBuilder:

@@ -1,25 +1,23 @@
 import torch
+from tqdm import tqdm
 
 
 def extract_temperature(X):
     """
-    X: (B, C, Nz, k, k)
-       channel 0 is assumed to be log10(T)
+    X: (B, C, Nz, H, W)
+       channel 0 is log10(T)
+
     returns:
-       T: (B, Nz)
+       T: (B, Nz, H, W)
     """
-    k = X.shape[-1]
-    center = k // 2
-
-    logT = X[:, 0, :, center, center]   # (B, Nz)
-    T = 10.0 ** logT                    # convert log10(T) -> T
-
+    logT = X[:, 0]
+    T = 10.0 ** logT
     return T
 
 
 def compute_loss(pred, target, weight, loss_fn, T):
 
-    loss, components = loss_fn(T, pred, target)   # (B)
+    loss, components = loss_fn(T, pred, target)
 
     if weight is not None:
         loss = loss * weight
@@ -36,15 +34,20 @@ def train_one_epoch(
     loss_fn,
     scaler,
     device,
+    epoch,
+    num_epochs,
     amp=True,
     grad_clip=1.0,
-    log_every=50,
 ):
 
     model.train()
     running = 0.0
 
-    for it, (x, y, dx, dy, scale, weight) in enumerate(loader, start=1):
+    lr = optimizer.param_groups[0]["lr"]
+
+    pbar = tqdm(loader, desc=f"epoch {epoch}/{num_epochs}", leave=False)
+
+    for it, (x, y, dx, dy, scale, weight) in enumerate(pbar, start=1):
 
         x = x.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True)
@@ -61,7 +64,6 @@ def train_one_epoch(
 
             pred = model(x, dx, dy)
 
-            # ---- extract T from input cube ----
             T = extract_temperature(x)
 
             loss, components = compute_loss(
@@ -78,36 +80,48 @@ def train_one_epoch(
             loss.backward()
 
         if grad_clip is not None and grad_clip > 0:
-            scaler.unscale_(optimizer)
+            if scaler is not None:
+                scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
 
-        scaler.step(optimizer)
-        scaler.update()
+        if scaler is not None:
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            optimizer.step()
 
         running += loss.item()
 
-        if (it % log_every) == 0:
-            avg = running / it
+        # ---------------------------
+        # build tqdm metrics
+        # ---------------------------
 
-            if components is not None and isinstance(components, dict):
-                msg = f"iter {it:05d}/{len(loader)} train_loss={avg:.6e}"
+        postfix = {
+            "loss": f"{loss.item():.2e}",
+            "lr": f"{lr:.1e}",
+        }
 
-                if "data" in components:
-                    msg += f" data={components['data'].item():.6e}"
-                if "source" in components:
-                    msg += f" source={components['source'].item():.6e}"
+        if device.startswith("cuda"):
+            mem = torch.cuda.memory_allocated() / 1024**3
+            postfix["gpu_mem"] = f"{mem:.2f}G"
 
-                if "source_per_atom" in components and "atom_names" in components:
-                    spa = components["source_per_atom"]
-                    names = components["atom_names"]
-                    atom_terms = ", ".join(
-                        f"{n}={spa[j].item():.3e}" for j, n in enumerate(names)
-                    )
-                    msg += f" [{atom_terms}]"
+        if components is not None and isinstance(components, dict):
 
-                print(msg)
-            else:
-                print(f"iter {it:05d}/{len(loader)} train_loss={avg:.6e}")
+            if "data" in components:
+                postfix["L1"] = f"{components['data'].item():.2e}"
+
+            if "source" in components:
+                postfix["L2"] = f"{components['source'].item():.2e}"
+
+            if "source_per_atom" in components and "atom_names" in components:
+
+                spa = components["source_per_atom"]
+                names = components["atom_names"]
+
+                for j, n in enumerate(names):
+                    postfix[n] = f"{spa[j].item():.2e}"
+
+        pbar.set_postfix(postfix)
 
     return running / max(1, len(loader))
 
@@ -125,9 +139,11 @@ def validate(
     tot = 0.0
     n = 0
 
+    pbar = tqdm(loader, desc="val", leave=False)
+
     with torch.no_grad():
 
-        for x, y, dx, dy, scale, weight in loader:
+        for x, y, dx, dy, scale, weight in pbar:
 
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
@@ -138,7 +154,6 @@ def validate(
             if weight is not None:
                 weight = weight.to(device, non_blocking=True)
 
-            # ---- extract T from input cube ----
             T = extract_temperature(x)
 
             with torch.cuda.amp.autocast(enabled=(amp and device.startswith("cuda"))):
@@ -155,6 +170,8 @@ def validate(
 
             tot += loss.item()
             n += 1
+
+            pbar.set_postfix(loss=f"{loss.item():.2e}")
 
     return tot / max(1, n)
 
@@ -197,6 +214,8 @@ def train(
             loss_fn=loss_fn,
             scaler=scaler,
             device=device,
+            epoch=epoch,
+            num_epochs=num_epochs,
             amp=amp,
             grad_clip=grad_clip,
         )
