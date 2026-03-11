@@ -102,9 +102,8 @@ def train_one_epoch(
             loss.backward()
 
         if grad_clip is not None and grad_clip > 0:
-            real_params = [p for p in model.parameters() if p.grad is not None and not p.is_complex()]
-            if len(real_params) > 0:
-                torch.nn.utils.clip_grad_norm_(real_params, grad_clip)
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
 
         if scaler is not None:
             scaler.step(optimizer)

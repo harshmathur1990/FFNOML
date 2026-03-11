@@ -58,10 +58,12 @@ class PointwiseMLP(nn.Module):
 # --------------------------------------------
 class SpectralConv2dFactor(nn.Module):
     """
-    Metric-aware spectral convolution.
+    Metric-aware spectral convolution with real-valued parameters.
 
-    The kernel becomes a function of physical frequency:
-        W = W(kx, ky)
+    We store spectral weights as separate real and imaginary parts:
+        W = W_r + i W_i
+
+    and do all complex multiplications manually.
     """
 
     def __init__(self, in_channels, out_channels, modes_y, modes_x, hidden=32):
@@ -74,28 +76,37 @@ class SpectralConv2dFactor(nn.Module):
 
         scale = 1.0 / (in_channels * out_channels)
 
-        # base complex spectral weights
-        self.weight = nn.Parameter(
+        # base spectral weights: real + imag stored separately
+        self.weight_real = nn.Parameter(
             scale * torch.randn(
                 in_channels,
                 out_channels,
                 modes_y,
                 modes_x,
-                dtype=torch.cfloat,
+                dtype=torch.float32,
+            )
+        )
+        self.weight_imag = nn.Parameter(
+            scale * torch.randn(
+                in_channels,
+                out_channels,
+                modes_y,
+                modes_x,
+                dtype=torch.float32,
             )
         )
 
-        # small network mapping (kx,ky) → scaling
+        # maps (kx, ky) -> complex gate = gate_real + i gate_imag
         self.freq_mlp = nn.Sequential(
             nn.Linear(2, hidden),
             nn.GELU(),
             nn.Linear(hidden, hidden),
             nn.GELU(),
-            nn.Linear(hidden, 2)   # real + imag scaling
+            nn.Linear(hidden, 2),   # [real, imag]
         )
 
     def forward(self, x, dx, dy):
-
+        # x: [B, Cin, D, H, W]
         B, Cin, D, H, W = x.shape
 
         dx = _to_spacing_value(dx, x)
@@ -103,23 +114,19 @@ class SpectralConv2dFactor(nn.Module):
 
         orig_dtype = x.dtype
 
+        # Keep spectral branch in fp32 for FFT stability/support
         with torch.amp.autocast("cuda", enabled=False):
+            x32 = x.float()
 
-            x_ft = torch.fft.rfft2(x.float(), dim=(-2, -1))
-
-            out_ft = torch.zeros(
-                B,
-                self.out_channels,
-                D,
-                H,
-                W // 2 + 1,
-                device=x.device,
-                dtype=x_ft.dtype,
-            )
+            # x_ft: complex64
+            x_ft = torch.fft.rfft2(x32, dim=(-2, -1))
+            x_ft_real = x_ft.real
+            x_ft_imag = x_ft.imag
 
             my = min(self.modes_y, H)
             mx = min(self.modes_x, W // 2 + 1)
 
+            # physical frequencies
             ky = torch.fft.fftfreq(H, d=dy, device=x.device)[:my]
             kx = torch.fft.rfftfreq(W, d=dx, device=x.device)[:mx]
 
@@ -127,18 +134,56 @@ class SpectralConv2dFactor(nn.Module):
             kx = 2 * math.pi * kx
 
             ky_grid, kx_grid = torch.meshgrid(ky, kx, indexing="ij")
-            k_feat = torch.stack([kx_grid, ky_grid], dim=-1)
+            k_feat = torch.stack([kx_grid, ky_grid], dim=-1).float()   # [my, mx, 2]
 
-            gate = self.freq_mlp(k_feat.float())
-            gate = torch.view_as_complex(gate.contiguous())
+            # gate: [my, mx, 2]
+            gate = self.freq_mlp(k_feat)
+            gate_real = gate[..., 0]
+            gate_imag = gate[..., 1]
 
-            weight = self.weight[:, :, :my, :mx] * gate[None, None, :, :]
+            # base weights
+            w0_real = self.weight_real[:, :, :my, :mx]   # [Cin, Cout, my, mx]
+            w0_imag = self.weight_imag[:, :, :my, :mx]
 
-            out_ft[:, :, :, :my, :mx] = torch.einsum(
-                "b i d y x, i o y x -> b o d y x",
-                x_ft[:, :, :, :my, :mx],
-                weight,
+            # complex multiply:
+            # (w0_real + i w0_imag) * (gate_real + i gate_imag)
+            w_real = (
+                w0_real * gate_real[None, None, :, :]
+                - w0_imag * gate_imag[None, None, :, :]
             )
+            w_imag = (
+                w0_real * gate_imag[None, None, :, :]
+                + w0_imag * gate_real[None, None, :, :]
+            )
+
+            # Allocate output Fourier coeffs as real + imag separately
+            out_ft_real = torch.zeros(
+                B, self.out_channels, D, H, W // 2 + 1,
+                device=x.device, dtype=torch.float32
+            )
+            out_ft_imag = torch.zeros(
+                B, self.out_channels, D, H, W // 2 + 1,
+                device=x.device, dtype=torch.float32
+            )
+
+            # x_ft * weight, done manually:
+            # (a + ib)(c + id) = (ac - bd) + i(ad + bc)
+            a = x_ft_real[:, :, :, :my, :mx]
+            b = x_ft_imag[:, :, :, :my, :mx]
+            c = w_real
+            d = w_imag
+
+            out_ft_real[:, :, :, :my, :mx] = (
+                torch.einsum("b i d y x, i o y x -> b o d y x", a, c)
+                - torch.einsum("b i d y x, i o y x -> b o d y x", b, d)
+            )
+            out_ft_imag[:, :, :, :my, :mx] = (
+                torch.einsum("b i d y x, i o y x -> b o d y x", a, d)
+                + torch.einsum("b i d y x, i o y x -> b o d y x", b, c)
+            )
+
+            # Reconstruct complex tensor only for irfft2
+            out_ft = torch.complex(out_ft_real, out_ft_imag)
 
             y = torch.fft.irfft2(out_ft, s=(H, W), dim=(-2, -1))
 
