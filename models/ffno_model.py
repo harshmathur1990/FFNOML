@@ -2,6 +2,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 
 # --------------------------------------------
@@ -294,7 +295,7 @@ class FFNO3D(nn.Module):
         x = self.lift(x)
 
         for blk in self.blocks:
-            x = blk(x, dx=dx, dy=dy)
+            x = checkpoint(lambda t: blk(t, dx=dx, dy=dy), x)
 
         x = self.act(self.proj1(x))
         y = self.proj2(x)

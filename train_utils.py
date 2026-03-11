@@ -205,6 +205,8 @@ def train(
 
     epochs_no_improve = 0
 
+    torch.cuda.empty_cache()
+
     for epoch in range(1, num_epochs + 1):
 
         train_loss = train_one_epoch(
