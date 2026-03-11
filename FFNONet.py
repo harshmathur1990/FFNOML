@@ -27,7 +27,7 @@ from interp_utils import interpolate_everything
 from train_utils import train
 from scipy.ndimage import gaussian_filter
 from model_builder import ModelBuilder
-from data.dataloader_builder import DataLoaderBuilder
+from data_builder import DataLoaderBuilder
 
 
 # ============================================================
