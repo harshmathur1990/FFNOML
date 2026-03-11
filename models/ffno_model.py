@@ -295,7 +295,7 @@ class FFNO3D(nn.Module):
         x = self.lift(x)
 
         for blk in self.blocks:
-            x = checkpoint(lambda t: blk(t, dx=dx, dy=dy), x)
+            x = checkpoint(lambda t: blk(t, dx=dx, dy=dy), x, use_reentrant=False)
 
         x = self.act(self.proj1(x))
         y = self.proj2(x)

@@ -60,11 +60,21 @@ def train_one_epoch(
 
         optimizer.zero_grad(set_to_none=True)
 
-        with torch.cuda.amp.autocast(enabled=(amp and device.startswith("cuda"))):
+        with torch.amp.autocast("cuda", enabled=(amp and device.startswith("cuda"))):
 
             pred = model(x, dx, dy)
 
             T = extract_temperature(x)
+
+            # T: (B, Nz, Ny, Nx)
+            # logb_pred: (B, levels, Nz, Ny, Nx)
+            B, L, Nz, Ny, Nx = pred.shape
+
+            # flatten spatial dimensions
+            pred = pred.permute(0,3,4,1,2).reshape(B*Ny*Nx, L, Nz)
+            y = y.permute(0,3,4,1,2).reshape(B*Ny*Nx, L, Nz)
+
+            T = T.permute(0,2,3,1).reshape(B*Ny*Nx, Nz)
 
             loss, components = compute_loss(
                 pred=pred,

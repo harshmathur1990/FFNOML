@@ -83,7 +83,7 @@ class ModelBuilder:
 
         scaler = None
         if self.amp and self.device.startswith("cuda"):
-            scaler = torch.cuda.amp.GradScaler()
+            scaler = torch.amp.GradScaler("cuda")
 
         return optimizer, loss_fn, scaler
 
