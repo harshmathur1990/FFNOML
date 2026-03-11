@@ -193,7 +193,7 @@ def load_pred_data(mesh_file, atmos_file):
 if __name__ == '__main__':
 
     if not os.path.exists(TRAIN_FILE):
-    	(
+        (
             atmos_list,
             rho_list,
             z_list,
