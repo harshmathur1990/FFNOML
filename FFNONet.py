@@ -41,12 +41,12 @@ def _prepare_input_features(temp, vx, vy, vz, ne, rho):
     """
     return np.stack(
         [
-            np.log10(temp),
+            np.log10(temp) / 10,
             vx / 100.0,
             vy / 100.0,
             vz / 100.0,
-            np.log10(ne),
-            np.log10(rho),
+            np.log10(ne) / 10,
+            np.log10(rho) / 10,
         ],
         axis=-1,
     )
@@ -57,7 +57,7 @@ def _compute_departure_coefficients(lte, nlte, eps=1e-30):
     lte/nlte: [nx, ny, nz, nlev] or [nx, ny, nz, Cout]
     return: log10(nlte/lte)
     """
-    return np.log10((nlte + eps) / (lte + eps))
+    return (np.log10((nlte + eps) / (lte + eps))) / 10
 
 
 def _make_inputs_ch_first(
