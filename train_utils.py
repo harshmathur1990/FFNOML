@@ -27,13 +27,22 @@ def compute_loss(pred, target, weight, loss_fn, T):
     return loss, components
 
 
-def flatten_columns(logb, T):
+def flatten_columns_logb(logb):
+    """
+    logb: (B, L, Nz, Ny, Nx)
+    -> (B*Ny*Nx, L, Nz)
+    """
     B, L, Nz, Ny, Nx = logb.shape
+    return logb.permute(0,3,4,1,2).reshape(B*Ny*Nx, L, Nz)
 
-    logb = logb.permute(0,3,4,1,2).reshape(B*Ny*Nx, L, Nz)
-    T = T.permute(0,2,3,1).reshape(B*Ny*Nx, Nz)
 
-    return logb, T
+def flatten_columns_T(T):
+    """
+    T: (B, Nz, Ny, Nx)
+    -> (B*Ny*Nx, Nz)
+    """
+    B, Nz, Ny, Nx = T.shape
+    return T.permute(0,2,3,1).reshape(B*Ny*Nx, Nz)
 
 
 def train_one_epoch(
@@ -75,8 +84,9 @@ def train_one_epoch(
 
             T = extract_temperature(x)
 
-            pred, T = flatten_columns(pred, T)
-            y, _ = flatten_columns(y, T)
+            pred = flatten_columns_logb(pred)
+            y = flatten_columns_logb(y)
+            T = flatten_columns_T(T)
 
             loss, components = compute_loss(
                 pred=pred,
@@ -172,8 +182,9 @@ def validate(
 
                 pred = model(x, dx, dy)
 
-                pred, T = flatten_columns(pred, T)
-                y, _ = flatten_columns(y, T)
+                pred = flatten_columns_logb(pred)
+                y = flatten_columns_logb(y)
+                T = flatten_columns_T(T)
 
                 loss, _ = compute_loss(
                     pred=pred,
