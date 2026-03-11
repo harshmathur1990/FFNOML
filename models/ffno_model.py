@@ -130,7 +130,7 @@ class SpectralConv2dFactor(nn.Module):
 
         gate = torch.view_as_complex(gate.contiguous())  # complex scaling
 
-        weight = self.weight[:, :, :my, :mx] * gate[None, None, :, :]
+        weight = self.weight[:, :, :my, :mx].to(x_ft.dtype) * gate[None, None, :, :]
 
         out_ft[:, :, :, :my, :mx] = torch.einsum(
             "b i d y x, i o y x -> b o d y x",
