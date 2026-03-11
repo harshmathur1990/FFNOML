@@ -2,7 +2,7 @@ import sys
 import torch
 import torch.distributed as dist
 
-from models.ffno_model import FFNO3D
+from models.ffno_model import *
 from loss.nlte_composite_loss import NLTECompositeLoss
 from loss.weighted_mse_loss import WeightedMSE
 
