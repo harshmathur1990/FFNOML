@@ -61,9 +61,13 @@ def train_one_epoch(
     model.train()
     running = 0.0
 
+    nn = 0
+
+    comp_sums = {}
+
     lr = optimizer.param_groups[0]["lr"]
 
-    pbar = tqdm(loader, desc=f"epoch {epoch}/{num_epochs}", leave=False)
+    pbar = tqdm(loader, desc=f"epoch {epoch}/{num_epochs}", leave=True)
 
     for it, (x, y, dx, dy, scale, weight) in enumerate(pbar, start=1):
 
@@ -102,7 +106,8 @@ def train_one_epoch(
             loss.backward()
 
         if grad_clip is not None and grad_clip > 0:
-            scaler.unscale_(optimizer)
+            if scaler is not None:
+                scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
 
         if scaler is not None:
@@ -112,6 +117,23 @@ def train_one_epoch(
             optimizer.step()
 
         running += loss.item()
+        nn += 1
+
+        # ----------------
+        # accumulate components
+        # ----------------
+
+        if components is not None:
+
+            for k, v in components.items():
+
+                if isinstance(v, torch.Tensor):
+                    v = v.detach().mean().item()
+
+                if k not in comp_sums:
+                    comp_sums[k] = 0.0
+
+                comp_sums[k] += v
 
         # ---------------------------
         # build tqdm metrics
@@ -144,7 +166,13 @@ def train_one_epoch(
 
         pbar.set_postfix(postfix)
 
-    return running / max(1, len(loader))
+    # ----------------
+    # average components
+    # ----------------
+
+    comp_avg = {k: v / max(1, nn) for k, v in comp_sums.items()}
+
+    return running / max(1, nn), comp_avg
 
 
 def validate(
@@ -160,7 +188,9 @@ def validate(
     tot = 0.0
     n = 0
 
-    pbar = tqdm(loader, desc="val", leave=False)
+    comp_sums = {}
+
+    pbar = tqdm(loader, desc="val", leave=True)
 
     with torch.no_grad():
 
@@ -185,7 +215,7 @@ def validate(
                 y = flatten_columns_logb(y)
                 T = flatten_columns_T(T)
 
-                loss, _ = compute_loss(
+                loss, components = compute_loss(
                     pred=pred,
                     target=y,
                     weight=weight,
@@ -196,9 +226,31 @@ def validate(
             tot += loss.item()
             n += 1
 
+            # ----------------
+            # accumulate components
+            # ----------------
+
+            if components is not None:
+
+                for k, v in components.items():
+
+                    if isinstance(v, torch.Tensor):
+                        v = v.detach().mean().item()
+
+                    if k not in comp_sums:
+                        comp_sums[k] = 0.0
+
+                    comp_sums[k] += v
+
             pbar.set_postfix(loss=f"{loss.item():.2e}")
 
-    return tot / max(1, n)
+    # ----------------
+    # average components
+    # ----------------
+
+    comp_avg = {k: v / max(1, n) for k, v in comp_sums.items()}
+
+    return tot / max(1, n), comp_avg
 
 
 def train(
@@ -234,7 +286,7 @@ def train(
 
     for epoch in range(1, num_epochs + 1):
 
-        train_loss = train_one_epoch(
+        train_loss, train_comp = train_one_epoch(
             model=model,
             loader=train_loader,
             optimizer=optimizer,
@@ -249,7 +301,7 @@ def train(
 
         if val_loader is not None:
 
-            val_loss = validate(
+            val_loss, val_comp = validate(
                 model=model,
                 loader=val_loader,
                 loss_fn=loss_fn,
@@ -271,6 +323,8 @@ def train(
                         opt_state=optimizer.state_dict(),
                         train_loss=train_loss,
                         val_loss=val_loss,
+                        train_components=train_comp,
+                        val_components=val_comp,
                     ),
                     save_path,
                 )
@@ -278,7 +332,9 @@ def train(
                 print(
                     f"[Epoch {epoch:03d}] "
                     f"train={train_loss:.6e} "
-                    f"val={val_loss:.6e} (saved best)"
+                    f"val={val_loss:.6e} (saved best)",
+                    f"L1={train_comp.get('data',0):.3e} "
+                    f"L2={train_comp.get('source',0):.3e}"
                 )
 
             else:
@@ -288,7 +344,9 @@ def train(
                 print(
                     f"[Epoch {epoch:03d}] "
                     f"train={train_loss:.6e} "
-                    f"val={val_loss:.6e}"
+                    f"val={val_loss:.6e}",
+                    f"L1={train_comp.get('data',0):.3e} "
+                    f"L2={train_comp.get('source',0):.3e}"
                 )
 
                 if es_enabled and epochs_no_improve > patience:
