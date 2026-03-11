@@ -27,6 +27,15 @@ def compute_loss(pred, target, weight, loss_fn, T):
     return loss, components
 
 
+def flatten_columns(logb, T):
+    B, L, Nz, Ny, Nx = logb.shape
+
+    logb = logb.permute(0,3,4,1,2).reshape(B*Ny*Nx, L, Nz)
+    T = T.permute(0,2,3,1).reshape(B*Ny*Nx, Nz)
+
+    return logb, T
+
+
 def train_one_epoch(
     model,
     loader,
@@ -66,15 +75,8 @@ def train_one_epoch(
 
             T = extract_temperature(x)
 
-            # T: (B, Nz, Ny, Nx)
-            # logb_pred: (B, levels, Nz, Ny, Nx)
-            B, L, Nz, Ny, Nx = pred.shape
-
-            # flatten spatial dimensions
-            pred = pred.permute(0,3,4,1,2).reshape(B*Ny*Nx, L, Nz)
-            y = y.permute(0,3,4,1,2).reshape(B*Ny*Nx, L, Nz)
-
-            T = T.permute(0,2,3,1).reshape(B*Ny*Nx, Nz)
+            pred, T = flatten_columns(pred, T)
+            y, _ = flatten_columns(y, T)
 
             loss, components = compute_loss(
                 pred=pred,
@@ -90,9 +92,9 @@ def train_one_epoch(
             loss.backward()
 
         if grad_clip is not None and grad_clip > 0:
-            if scaler is not None:
-                scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            real_params = [p for p in model.parameters() if p.grad is not None and not p.is_complex()]
+            if len(real_params) > 0:
+                torch.nn.utils.clip_grad_norm_(real_params, grad_clip)
 
         if scaler is not None:
             scaler.step(optimizer)
@@ -166,9 +168,12 @@ def validate(
 
             T = extract_temperature(x)
 
-            with torch.cuda.amp.autocast(enabled=(amp and device.startswith("cuda"))):
+            with torch.amp.autocast("cuda", enabled=(amp and device.startswith("cuda"))):
 
                 pred = model(x, dx, dy)
+
+                pred, T = flatten_columns(pred, T)
+                y, _ = flatten_columns(y, T)
 
                 loss, _ = compute_loss(
                     pred=pred,
