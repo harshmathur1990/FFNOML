@@ -145,7 +145,7 @@ MODEL = "FFNO3D"
 
 MODEL_CONFIG = dict(
 
-    width=128,
+    width=64,
 
     modes_y=24,
     modes_x=24,

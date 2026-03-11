@@ -437,6 +437,8 @@ def build_dataset_ffno(
 
     weights *= len(weights)
 
+    weights /= weights.mean()
+
     # --------------------------------------------
     # save dataset
     # --------------------------------------------

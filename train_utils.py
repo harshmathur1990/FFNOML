@@ -99,7 +99,9 @@ def compute_loss(pred, target, weight, loss_fn, T):
     loss, components = loss_fn(T, pred, target)
 
     if weight is not None:
-        loss = loss * weight
+        loss = (loss * weight).sum() / (weight.sum() + 1e-12)
+    else:
+        loss = loss.mean()
 
     loss = loss.mean()
 
