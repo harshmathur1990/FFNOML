@@ -564,6 +564,10 @@ def ffno_train_model(
 
     model, optimizer, loss_fn, scaler = builder.build()
 
+    print(model)
+
+    sys.exit(-1)
+
     data_builder = DataLoaderBuilder(
         dataset_type=dataset_type,
         batch_size=batch_size,

@@ -8,7 +8,7 @@ from loss.weighted_mse_loss import WeightedMSE
 
 from functools import partial
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
+from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 
 class ModelBuilder:
 
@@ -86,8 +86,8 @@ class ModelBuilder:
         if self.multi_gpu:
 
             auto_wrap_policy = partial(
-                size_based_auto_wrap_policy,
-                min_num_params=int(1e6),
+                transformer_auto_wrap_policy,
+                transformer_layer_cls={FFNOBlock3d},
             )
 
             model = FSDP(
