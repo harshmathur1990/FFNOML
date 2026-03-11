@@ -1,4 +1,4 @@
-# NLTE Radiative Transfer with Fourier Neural Operators (FFNO)
+# NLTE Radiative Transfer with Factorized Fourier Neural Operators (FFNO)
 
 Physics-informed machine learning framework for predicting **NLTE departure coefficients** in 3-D stellar atmospheres using **Factorized Fourier Neural Operators (FFNO)**.
 
