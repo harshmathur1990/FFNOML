@@ -103,9 +103,8 @@ class SpectralConv2dFactor(nn.Module):
         orig_dtype = x.dtype
 
         with torch.amp.autocast("cuda", enabled=False):
-            x = x.float()   # <<< THIS IS THE MISSING LINE
 
-            x_ft = torch.fft.rfft2(x, dim=(-2, -1))
+            x_ft = torch.fft.rfft2(x.float(), dim=(-2, -1))
 
             out_ft = torch.zeros(
                 B,
@@ -114,7 +113,7 @@ class SpectralConv2dFactor(nn.Module):
                 H,
                 W // 2 + 1,
                 device=x.device,
-                dtype=torch.cfloat,
+                dtype=x_ft.dtype,
             )
 
             my = min(self.modes_y, H)
