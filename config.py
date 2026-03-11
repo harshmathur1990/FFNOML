@@ -167,9 +167,9 @@ MODEL_FILE = MODEL_DIR + f"3D_sim_train_s123.pt"
 
 # Dataset Params
 NDEP=400
-PATCH=96
-STRIDE=48
-SCALES=(1,2,3,4)
+PATCH=64
+STRIDE=32
+SCALES=(1,2,3,4,5)
 
 
 # Training Params

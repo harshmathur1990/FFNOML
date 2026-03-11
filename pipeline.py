@@ -116,6 +116,9 @@ def load_multi3d_blocks(dataset_entries):
                 z_scale = m3d.geometry.z[:] * 1e-2
                 dx, dy = compute_dx_dy(mesh_path)
 
+                dx = np.abs(dx)
+                dy = np.abs(dy)
+
         atmos_list.append(atmos)
         rho_list.append(rho)
         z_list.append(z_scale)
@@ -193,33 +196,20 @@ def load_pred_data(mesh_file, atmos_file):
 if __name__ == '__main__':
 
     if not os.path.exists(TRAIN_FILE):
-        (
-            atmos_list,
-            rho_list,
-            z_list,
-            temp_list,
-            vx_list,
-            vy_list,
-            vz_list,
-            ne_list,
-            lte_list,
-            nlte_list,
-            dx_list,
-            dy_list
-        ) = load_multi3d_blocks(MULTI3D_TRAIN_DATA)
+        multi3d_atmos = load_multi3d_blocks(MULTI3D_TRAIN_DATA)
 
         build_dataset_ffno(
-            temp_list,
-            vx_list,
-            vy_list,
-            vz_list,
-            ne_list,
-            lte_list,
-            nlte_list,
-            rho_list,
-            z_list,
-            dx_list,
-            dy_list,
+            multi3d_atmos['temp_list'],
+            multi3d_atmos['vx_list'],
+            multi3d_atmos['vy_list'],
+            multi3d_atmos['vz_list'],
+            multi3d_atmos['ne_list'],
+            multi3d_atmos['lte_list'],
+            multi3d_atmos['nlte_list'],
+            multi3d_atmos['rho_list'],
+            multi3d_atmos['z_list'],
+            multi3d_atmos['dx_list'],
+            multi3d_atmos['dy_list'],
             save_path=TRAIN_FILE,
             ndep=NDEP,
             patch=PATCH,
@@ -228,34 +218,20 @@ if __name__ == '__main__':
         )
 
     if not os.path.exists(TEST_FILE):
-        (
-            atmos_list,
-            rho_list,
-            z_list,
-            temp_list,
-            vx_list,
-            vy_list,
-            vz_list,
-            ne_list,
-            lte_list,
-            nlte_list,
-            dx_list,
-            dy_list
-        ) = load_multi3d_blocks(MULTI3D_VAL_DATA)
+        multi3d_atmos = load_multi3d_blocks(MULTI3D_VAL_DATA)
 
-    
         build_dataset_ffno(
-            temp_list,
-            vx_list,
-            vy_list,
-            vz_list,
-            ne_list,
-            lte_list,
-            nlte_list,
-            rho_list,
-            z_list,
-            dx_list,
-            dy_list,
+            multi3d_atmos['temp_list'],
+            multi3d_atmos['vx_list'],
+            multi3d_atmos['vy_list'],
+            multi3d_atmos['vz_list'],
+            multi3d_atmos['ne_list'],
+            multi3d_atmos['lte_list'],
+            multi3d_atmos['nlte_list'],
+            multi3d_atmos['rho_list'],
+            multi3d_atmos['z_list'],
+            multi3d_atmos['dx_list'],
+            multi3d_atmos['dy_list'],
             save_path=TEST_FILE,
             ndep=NDEP,
             patch=PATCH,
