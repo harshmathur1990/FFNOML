@@ -6,6 +6,9 @@ from models.ffno_model import FFNO3D
 from loss.nlte_composite_loss import NLTECompositeLoss
 from loss.weighted_mse_loss import WeightedMSE
 
+from functools import partial
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
 
 class ModelBuilder:
 
@@ -82,11 +85,9 @@ class ModelBuilder:
 
         if self.multi_gpu:
 
-            from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-            from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
-
-            auto_wrap_policy = size_based_auto_wrap_policy(
-                min_num_params=1e6
+            auto_wrap_policy = partial(
+                size_based_auto_wrap_policy,
+                min_num_params=int(1e6),
             )
 
             model = FSDP(

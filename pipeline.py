@@ -12,6 +12,7 @@ from FFNONet import (
     ffno_train_model,
     ffno_predict_populations
 )
+import torch.distributed as dist
 
 
 def read_mesh(mesh_file):
@@ -266,6 +267,10 @@ if __name__ == '__main__':
             patience=PATIENCE,
             min_delta=MIN_DELTA
         )
+
+        # clean shutdown of distributed backend
+        if dist.is_available() and dist.is_initialized():
+            dist.destroy_process_group()
 
     for PRED_ATMOS in MULTI3D_PRED_DATA:
 
