@@ -262,6 +262,7 @@ if __name__ == '__main__':
             amp=AMP,
             grad_clip=GRAD_CLIP,
             device=DEVICE,
+            multi_gpu=MULTI_GPU,
             patience=PATIENCE,
             min_delta=MIN_DELTA
         )

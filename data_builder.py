@@ -1,7 +1,13 @@
 import torch
+import torch.distributed as dist
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 
 from data.dataset import H5PatchDataset, H5CubeDataset
+
+
+def is_distributed():
+    return dist.is_available() and dist.is_initialized()
 
 
 class DataLoaderBuilder:
@@ -45,15 +51,29 @@ class DataLoaderBuilder:
 
     def build_dataloader(self, dataset, shuffle):
 
+        sampler = None
+
+        if is_distributed():
+
+            sampler = DistributedSampler(
+                dataset,
+                shuffle=shuffle,
+                drop_last=False,
+            )
+
+            shuffle = False  # sampler handles shuffling
+
         loader = DataLoader(
             dataset,
             batch_size=self.batch_size,
             shuffle=shuffle,
+            sampler=sampler,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
+            persistent_workers=self.num_workers > 0,
         )
 
-        return loader
+        return loader, sampler
 
     # ------------------------------------------------
     # TRAIN / VAL
@@ -63,20 +83,21 @@ class DataLoaderBuilder:
 
         train_dataset = self.build_dataset(train_h5)
 
-        train_loader = self.build_dataloader(
+        train_loader, train_sampler = self.build_dataloader(
             train_dataset,
             shuffle=True,
         )
 
         val_loader = None
+        val_sampler = None
 
         if val_h5 is not None:
 
             val_dataset = self.build_dataset(val_h5)
 
-            val_loader = self.build_dataloader(
+            val_loader, val_sampler = self.build_dataloader(
                 val_dataset,
                 shuffle=False,
             )
 
-        return train_loader, val_loader
+        return train_loader, val_loader, train_sampler, val_sampler

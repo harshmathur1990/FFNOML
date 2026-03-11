@@ -1,5 +1,6 @@
 import sys
 import torch
+import torch.distributed as dist
 
 from models.ffno_model import FFNO3D
 from loss.nlte_composite_loss import NLTECompositeLoss
@@ -22,6 +23,7 @@ class ModelBuilder:
         lr=2e-4,
         weight_decay=1e-4,
         amp=True,
+        multi_gpu=False,
     ):
 
         if model == "FFNO3D":
@@ -43,6 +45,31 @@ class ModelBuilder:
         self.levels = levels
         self.atom_names = atom_names
 
+        self.multi_gpu = multi_gpu
+
+        self.rank = 0
+        self.world_size = 1
+
+        if self.multi_gpu:
+            self._init_distributed()
+
+    # ------------------------------------------------
+    # DISTRIBUTED INIT
+    # ------------------------------------------------
+
+    def _init_distributed(self):
+
+        if not dist.is_initialized():
+
+            dist.init_process_group("nccl")
+
+        self.rank = dist.get_rank()
+        self.world_size = dist.get_world_size()
+
+        torch.cuda.set_device(self.rank)
+
+        self.device = f"cuda:{self.rank}"
+
     # ------------------------------------------------
     # MODEL
     # ------------------------------------------------
@@ -50,7 +77,23 @@ class ModelBuilder:
     def build_model(self):
 
         model = self.model_cls(**self.model_config)
+
         model = model.to(self.device)
+
+        if self.multi_gpu:
+
+            from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+            from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
+
+            auto_wrap_policy = size_based_auto_wrap_policy(
+                min_num_params=1e6
+            )
+
+            model = FSDP(
+                model,
+                auto_wrap_policy=auto_wrap_policy,
+                device_id=torch.cuda.current_device(),
+            )
 
         return model
 
@@ -67,7 +110,6 @@ class ModelBuilder:
         )
 
         mse_loss = WeightedMSE()
-
         mse_loss = mse_loss.to(self.device)
 
         loss_fn = NLTECompositeLoss(

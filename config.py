@@ -1,4 +1,5 @@
 import numpy as np
+import os
 
 
 SIMULATIONS = {
@@ -138,7 +139,7 @@ MULTI3D_PRED_DATA = [
 
 
 NDEP = 400
-MULTI_GPU = False
+MULTI_GPU = True
 
 MODEL = "FFNO3D"
 

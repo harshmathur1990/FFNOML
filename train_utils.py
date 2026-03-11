@@ -1,5 +1,85 @@
+import os
 import torch
+import torch.distributed as dist
 from tqdm import tqdm
+
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp import StateDictType, FullStateDictConfig
+
+
+def is_dist():
+    return dist.is_available() and dist.is_initialized()
+
+
+def get_rank():
+    return dist.get_rank() if is_dist() else 0
+
+
+def get_world_size():
+    return dist.get_world_size() if is_dist() else 1
+
+
+def is_main_process():
+    return get_rank() == 0
+
+
+def reduce_mean_scalar(value, device):
+    """
+    Average a python float across all ranks.
+    """
+    t = torch.tensor(float(value), device=device, dtype=torch.float64)
+    if is_dist():
+        dist.all_reduce(t, op=dist.ReduceOp.SUM)
+        t /= get_world_size()
+    return t.item()
+
+
+def reduce_sum_scalar(value, device):
+    """
+    Sum a python float across all ranks.
+    """
+    t = torch.tensor(float(value), device=device, dtype=torch.float64)
+    if is_dist():
+        dist.all_reduce(t, op=dist.ReduceOp.SUM)
+    return t.item()
+
+
+def reduce_components(comp_sums, count, device):
+    """
+    Reduce averaged component statistics across ranks.
+
+    comp_sums: local sums over batches on this rank
+    count: number of local batches on this rank
+    """
+    if count == 0:
+        return {}
+
+    out = {}
+
+    for k, v in comp_sums.items():
+        if isinstance(v, (int, float)):
+            t = torch.tensor(v, device=device, dtype=torch.float64)
+        elif isinstance(v, torch.Tensor):
+            t = v.detach().to(device=device, dtype=torch.float64)
+        else:
+            # skip non-numeric entries like atom_names
+            continue
+
+        if is_dist():
+            dist.all_reduce(t, op=dist.ReduceOp.SUM)
+
+        total_count = torch.tensor(float(count), device=device, dtype=torch.float64)
+        if is_dist():
+            dist.all_reduce(total_count, op=dist.ReduceOp.SUM)
+
+        t = t / total_count
+
+        if t.ndim == 0:
+            out[k] = t.item()
+        else:
+            out[k] = t.cpu()
+
+    return out
 
 
 def extract_temperature(X):
@@ -16,7 +96,6 @@ def extract_temperature(X):
 
 
 def compute_loss(pred, target, weight, loss_fn, T):
-
     loss, components = loss_fn(T, pred, target)
 
     if weight is not None:
@@ -33,7 +112,7 @@ def flatten_columns_logb(logb):
     -> (B*Ny*Nx, L, Nz)
     """
     B, L, Nz, Ny, Nx = logb.shape
-    return logb.permute(0,3,4,1,2).reshape(B*Ny*Nx, L, Nz)
+    return logb.permute(0, 3, 4, 1, 2).reshape(B * Ny * Nx, L, Nz)
 
 
 def flatten_columns_T(T):
@@ -42,7 +121,74 @@ def flatten_columns_T(T):
     -> (B*Ny*Nx, Nz)
     """
     B, Nz, Ny, Nx = T.shape
-    return T.permute(0,2,3,1).reshape(B*Ny*Nx, Nz)
+    return T.permute(0, 2, 3, 1).reshape(B * Ny * Nx, Nz)
+
+
+def _accumulate_components(comp_sums, components):
+    """
+    Accumulate numeric component statistics.
+    Keeps vectors such as source_per_atom as vectors.
+    Skips non-numeric metadata like atom_names.
+    """
+    if components is None or not isinstance(components, dict):
+        return
+
+    for k, v in components.items():
+        if isinstance(v, torch.Tensor):
+            v = v.detach()
+
+            if v.ndim == 0:
+                v = v.item()
+            else:
+                v = v.to(dtype=torch.float64).cpu()
+
+        elif isinstance(v, (int, float)):
+            v = float(v)
+
+        else:
+            continue
+
+        if k not in comp_sums:
+            if isinstance(v, torch.Tensor):
+                comp_sums[k] = v.clone()
+            else:
+                comp_sums[k] = v
+        else:
+            comp_sums[k] += v
+
+
+def _make_postfix(loss, lr, device, components):
+    postfix = {
+        "loss": f"{loss:.2e}",
+        "lr": f"{lr:.1e}",
+    }
+
+    if isinstance(device, str) and device.startswith("cuda"):
+        mem = torch.cuda.memory_allocated(device) / 1024**3
+        postfix["gpu_mem"] = f"{mem:.2f}G"
+
+    if components is not None and isinstance(components, dict):
+        if "data" in components and torch.is_tensor(components["data"]):
+            postfix["L1"] = f"{components['data'].item():.2e}"
+        elif "data" in components:
+            postfix["L1"] = f"{float(components['data']):.2e}"
+
+        if "source" in components and torch.is_tensor(components["source"]):
+            postfix["L2"] = f"{components['source'].item():.2e}"
+        elif "source" in components:
+            postfix["L2"] = f"{float(components['source']):.2e}"
+
+        if "source_per_atom" in components and "atom_names" in components:
+            spa = components["source_per_atom"]
+            names = components["atom_names"]
+
+            if torch.is_tensor(spa):
+                spa = spa.detach().cpu()
+
+            for j, n in enumerate(names):
+                postfix[n] = f"{float(spa[j]):.2e}"
+
+    return postfix
 
 
 def train_one_epoch(
@@ -55,25 +201,26 @@ def train_one_epoch(
     epoch,
     num_epochs,
     amp=True,
-    grad_clip=1.0,
+    grad_clip=1.0
 ):
 
     model.train()
     running = 0.0
-
-    nn = 0
-
+    n_batches = 0
     comp_sums = {}
 
     lr = optimizer.param_groups[0]["lr"]
 
-    pbar = tqdm(loader, desc=f"epoch {epoch}/{num_epochs}", leave=True)
+    pbar = tqdm(
+        loader,
+        desc=f"epoch {epoch}/{num_epochs}",
+        leave=True,
+        disable=not is_main_process(),
+    )
 
-    for it, (x, y, dx, dy, scale, weight) in enumerate(pbar, start=1):
-
+    for x, y, dx, dy, scale, weight in pbar:
         x = x.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True)
-
         dx = dx.to(device, non_blocking=True)
         dy = dy.to(device, non_blocking=True)
 
@@ -82,8 +229,7 @@ def train_one_epoch(
 
         optimizer.zero_grad(set_to_none=True)
 
-        with torch.amp.autocast("cuda", enabled=(amp and device.startswith("cuda"))):
-
+        with torch.amp.autocast("cuda", enabled=(amp and str(device).startswith("cuda"))):
             pred = model(x, dx, dy)
 
             T = extract_temperature(x)
@@ -108,7 +254,12 @@ def train_one_epoch(
         if grad_clip is not None and grad_clip > 0:
             if scaler is not None:
                 scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+
+            # FSDP-safe clipping
+            if isinstance(model, FSDP):
+                model.clip_grad_norm_(grad_clip)
+            else:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
 
         if scaler is not None:
             scaler.step(optimizer)
@@ -117,62 +268,19 @@ def train_one_epoch(
             optimizer.step()
 
         running += loss.item()
-        nn += 1
+        n_batches += 1
 
-        # ----------------
-        # accumulate components
-        # ----------------
+        _accumulate_components(comp_sums, components)
 
-        if components is not None:
+        if is_main_process():
+            postfix = _make_postfix(loss.item(), lr, device, components)
+            pbar.set_postfix(postfix)
 
-            for k, v in components.items():
+    local_avg_loss = running / max(1, n_batches)
+    global_avg_loss = reduce_mean_scalar(local_avg_loss, device)
+    global_comp = reduce_components(comp_sums, n_batches, device)
 
-                if isinstance(v, torch.Tensor):
-                    v = v.detach().mean().item()
-
-                if k not in comp_sums:
-                    comp_sums[k] = 0.0
-
-                comp_sums[k] += v
-
-        # ---------------------------
-        # build tqdm metrics
-        # ---------------------------
-
-        postfix = {
-            "loss": f"{loss.item():.2e}",
-            "lr": f"{lr:.1e}",
-        }
-
-        if device.startswith("cuda"):
-            mem = torch.cuda.memory_allocated() / 1024**3
-            postfix["gpu_mem"] = f"{mem:.2f}G"
-
-        if components is not None and isinstance(components, dict):
-
-            if "data" in components:
-                postfix["L1"] = f"{components['data'].item():.2e}"
-
-            if "source" in components:
-                postfix["L2"] = f"{components['source'].item():.2e}"
-
-            if "source_per_atom" in components and "atom_names" in components:
-
-                spa = components["source_per_atom"]
-                names = components["atom_names"]
-
-                for j, n in enumerate(names):
-                    postfix[n] = f"{spa[j].item():.2e}"
-
-        pbar.set_postfix(postfix)
-
-    # ----------------
-    # average components
-    # ----------------
-
-    comp_avg = {k: v / max(1, nn) for k, v in comp_sums.items()}
-
-    return running / max(1, nn), comp_avg
+    return global_avg_loss, global_comp
 
 
 def validate(
@@ -182,23 +290,23 @@ def validate(
     device,
     amp=True,
 ):
-
     model.eval()
 
-    tot = 0.0
-    n = 0
-
+    running = 0.0
+    n_batches = 0
     comp_sums = {}
 
-    pbar = tqdm(loader, desc="val", leave=True)
+    pbar = tqdm(
+        loader,
+        desc="val",
+        leave=True,
+        disable=not is_main_process(),
+    )
 
     with torch.no_grad():
-
         for x, y, dx, dy, scale, weight in pbar:
-
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
-
             dx = dx.to(device, non_blocking=True)
             dy = dy.to(device, non_blocking=True)
 
@@ -207,8 +315,7 @@ def validate(
 
             T = extract_temperature(x)
 
-            with torch.amp.autocast("cuda", enabled=(amp and device.startswith("cuda"))):
-
+            with torch.amp.autocast("cuda", enabled=(amp and str(device).startswith("cuda"))):
                 pred = model(x, dx, dy)
 
                 pred = flatten_columns_logb(pred)
@@ -223,34 +330,63 @@ def validate(
                     T=T,
                 )
 
-            tot += loss.item()
-            n += 1
+            running += loss.item()
+            n_batches += 1
 
-            # ----------------
-            # accumulate components
-            # ----------------
+            _accumulate_components(comp_sums, components)
 
-            if components is not None:
+            if is_main_process():
+                postfix = {"loss": f"{loss.item():.2e}"}
+                if components is not None and isinstance(components, dict):
+                    if "data" in components:
+                        v = components["data"]
+                        postfix["L1"] = f"{float(v.item() if torch.is_tensor(v) else v):.2e}"
+                    if "source" in components:
+                        v = components["source"]
+                        postfix["L2"] = f"{float(v.item() if torch.is_tensor(v) else v):.2e}"
+                pbar.set_postfix(postfix)
 
-                for k, v in components.items():
+    local_avg_loss = running / max(1, n_batches)
+    global_avg_loss = reduce_mean_scalar(local_avg_loss, device)
+    global_comp = reduce_components(comp_sums, n_batches, device)
 
-                    if isinstance(v, torch.Tensor):
-                        v = v.detach().mean().item()
+    return global_avg_loss, global_comp
 
-                    if k not in comp_sums:
-                        comp_sums[k] = 0.0
 
-                    comp_sums[k] += v
+def save_checkpoint_fsdp(
+    model,
+    optimizer,
+    epoch,
+    train_loss,
+    val_loss,
+    train_comp,
+    val_comp,
+    save_path,
+):
+    """
+    Save a FULL state dict so inference can load it normally on one GPU / CPU.
+    Only rank 0 writes.
+    """
+    if isinstance(model, FSDP):
+        cfg = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+        with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, cfg):
+            model_state = model.state_dict()
+    else:
+        model_state = model.state_dict()
 
-            pbar.set_postfix(loss=f"{loss.item():.2e}")
+    if not is_main_process():
+        return
 
-    # ----------------
-    # average components
-    # ----------------
-
-    comp_avg = {k: v / max(1, n) for k, v in comp_sums.items()}
-
-    return tot / max(1, n), comp_avg
+    ckpt = dict(
+        epoch=epoch,
+        model_state=model_state,
+        opt_state=optimizer.state_dict(),
+        train_loss=train_loss,
+        val_loss=val_loss,
+        train_components=train_comp,
+        val_components=val_comp,
+    )
+    torch.save(ckpt, save_path)
 
 
 def train(
@@ -282,9 +418,14 @@ def train(
 
     epochs_no_improve = 0
 
-    torch.cuda.empty_cache()
+    if str(device).startswith("cuda"):
+        torch.cuda.empty_cache()
 
     for epoch in range(1, num_epochs + 1):
+
+        # Important when using DistributedSampler
+        if hasattr(train_loader, "sampler") and hasattr(train_loader.sampler, "set_epoch"):
+            train_loader.sampler.set_epoch(epoch)
 
         train_loss, train_comp = train_one_epoch(
             model=model,
@@ -300,6 +441,8 @@ def train(
         )
 
         if val_loader is not None:
+            if hasattr(val_loader, "sampler") and hasattr(val_loader.sampler, "set_epoch"):
+                val_loader.sampler.set_epoch(epoch)
 
             val_loss, val_comp = validate(
                 model=model,
@@ -312,57 +455,59 @@ def train(
             improved = (best_val - val_loss) > min_delta
 
             if improved:
-
                 best_val = val_loss
                 epochs_no_improve = 0
 
-                torch.save(
-                    dict(
-                        epoch=epoch,
-                        model_state=model.state_dict(),
-                        opt_state=optimizer.state_dict(),
-                        train_loss=train_loss,
-                        val_loss=val_loss,
-                        train_components=train_comp,
-                        val_components=val_comp,
-                    ),
-                    save_path,
+                save_checkpoint_fsdp(
+                    model=model,
+                    optimizer=optimizer,
+                    epoch=epoch,
+                    train_loss=train_loss,
+                    val_loss=val_loss,
+                    train_comp=train_comp,
+                    val_comp=val_comp,
+                    save_path=save_path,
                 )
 
-                print(
-                    f"[Epoch {epoch:03d}] "
-                    f"train={train_loss:.6e} "
-                    f"val={val_loss:.6e} (saved best)",
-                    f"L1={train_comp.get('data',0):.3e} "
-                    f"L2={train_comp.get('source',0):.3e}"
-                )
+                if is_main_process():
+                    msg = (
+                        f"[Epoch {epoch:03d}] "
+                        f"train={train_loss:.6e} "
+                        f"val={val_loss:.6e} (saved best) "
+                        f"L1={train_comp.get('data', 0):.3e} "
+                        f"L2={train_comp.get('source', 0):.3e}"
+                    )
+                    print(msg)
 
             else:
-
                 epochs_no_improve += 1
 
-                print(
-                    f"[Epoch {epoch:03d}] "
-                    f"train={train_loss:.6e} "
-                    f"val={val_loss:.6e}",
-                    f"L1={train_comp.get('data',0):.3e} "
-                    f"L2={train_comp.get('source',0):.3e}"
-                )
+                if is_main_process():
+                    msg = (
+                        f"[Epoch {epoch:03d}] "
+                        f"train={train_loss:.6e} "
+                        f"val={val_loss:.6e} "
+                        f"L1={train_comp.get('data', 0):.3e} "
+                        f"L2={train_comp.get('source', 0):.3e}"
+                    )
+                    print(msg)
 
                 if es_enabled and epochs_no_improve > patience:
-                    print(f"Early stopping triggered (patience={patience})")
+                    if is_main_process():
+                        print(f"Early stopping triggered (patience={patience})")
                     break
 
         else:
-
-            torch.save(
-                dict(
-                    epoch=epoch,
-                    model_state=model.state_dict(),
-                    opt_state=optimizer.state_dict(),
-                    train_loss=train_loss,
-                ),
-                save_path,
+            save_checkpoint_fsdp(
+                model=model,
+                optimizer=optimizer,
+                epoch=epoch,
+                train_loss=train_loss,
+                val_loss=None,
+                train_comp=train_comp,
+                val_comp=None,
+                save_path=save_path,
             )
 
-            print(f"[Epoch {epoch:03d}] train={train_loss:.6e} (saved)")
+            if is_main_process():
+                print(f"[Epoch {epoch:03d}] train={train_loss:.6e} (saved)")

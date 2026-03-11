@@ -533,6 +533,7 @@ def ffno_train_model(
     amp=True,
     grad_clip=1.0,
     device="cuda",
+    multi_gpu=False,
     patience=10,
     min_delta=1e-5
 ):
@@ -542,11 +543,12 @@ def ffno_train_model(
 
     Cin, Cout = _read_io_channels(train_h5)
     
+    model_config = dict(model_config)
     model_config["in_channels"] = Cin
     model_config["out_channels"] = Cout
 
     builder = ModelBuilder(
-        model="FFNO3D",
+        model=model,
         model_config=model_config,
         chi=chi,
         lines=lines,
@@ -556,7 +558,8 @@ def ffno_train_model(
         device=device,
         lr=lr,
         weight_decay=weight_decay,
-        amp=amp
+        amp=amp,
+        multi_gpu=multi_gpu
     )
 
     model, optimizer, loss_fn, scaler = builder.build()
@@ -568,7 +571,7 @@ def ffno_train_model(
         pin_memory=pin_memory
     )
 
-    train_loader, val_loader = data_builder.build(
+    train_loader, val_loader, _, _ = data_builder.build(
         train_h5,
         val_h5,
     )
@@ -583,7 +586,7 @@ def ffno_train_model(
         scaler,
         save_path,
         num_epochs=num_epochs,
-        device=device,
+        device=builder.device,
         amp=amp,
         grad_clip=grad_clip,
         early_stopping=dict(
@@ -624,7 +627,7 @@ def _predict_tiled(model, X, dx, dy, patch, stride, device="cuda", amp=True):
     i0, j0 = 0, 0
     x0 = X[:, :, :, i0:i0+patch, j0:j0+patch]
 
-    with torch.cuda.amp.autocast(enabled=(amp and device.startswith("cuda"))):
+    with torch.amp.autocast("cuda", enabled=(amp and str(device).startswith("cuda"))):
         y0 = model(x0, dx, dy)
 
     Cout = y0.shape[1]
@@ -634,15 +637,15 @@ def _predict_tiled(model, X, dx, dy, patch, stride, device="cuda", amp=True):
 
     w2 = _hann_2d(patch, device=device, dtype=y0.dtype)[None, None, None, :, :]
 
-    for i in range(0, nx, stride):
-        for j in range(0, ny, stride):
+    for i in range(0, nx - patch + 1, stride):
+        for j in range(0, ny - patch + 1, stride):
 
             i0 = min(i, nx - patch)
             j0 = min(j, ny - patch)
 
             xt = X[:, :, :, i0:i0+patch, j0:j0+patch]
 
-            with torch.cuda.amp.autocast(enabled=(amp and device.startswith("cuda"))):
+            with torch.amp.autocast("cuda", enabled=(amp and str(device).startswith("cuda"))):
                 yt = model(xt, dx, dy)
 
             Y_acc[:, :, :, i0:i0+patch, j0:j0+patch] += yt * w2
@@ -685,11 +688,12 @@ def ffno_predict_populations(
 
     Cin, Cout = _read_io_channels(train_h5)
 
+    model_config = dict(model_config)
     model_config["in_channels"] = Cin
     model_config["out_channels"] = Cout
 
     builder = ModelBuilder(
-        model="FFNO3D",
+        model=model,
         model_config=model_config,
         chi=chi,
         lines=lines,
@@ -697,9 +701,10 @@ def ffno_predict_populations(
         levels=levels,
         atom_names=atom_names,
         device=device,
-        lr=lr,
-        weight_decay=weight_decay,
-        amp=amp
+        lr=0.0,
+        weight_decay=0.0,
+        amp=amp,
+        multi_gpu=False
     )
 
     model, optimizer, loss_fn, scaler = builder.build()
@@ -724,7 +729,7 @@ def ffno_predict_populations(
         dx = dx.to(device)
         dy = dy.to(device)
 
-        with torch.no_grad(), torch.cuda.amp.autocast(enabled=(amp and device.startswith("cuda"))):
+        with torch.no_grad(), torch.amp.autocast("cuda", enabled=(amp and str(device).startswith("cuda"))):
             pred_log = model(X, dx, dy)
     else:
         pred_log = _predict_tiled(
