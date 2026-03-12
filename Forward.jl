@@ -44,7 +44,7 @@ train_dir = "training"
 
 pred_h5 = joinpath(
     train_dir,
-    "sunnynet_output_3D_sim_s5_en024048_hion_$(snap)_$(model).hdf5"
+    "output_3D_sim_s5_en024048_hion_$(snap)_$(model).hdf5"
 )
 
 out_h5 = joinpath(
