@@ -82,7 +82,7 @@ def reduce_components(comp_sums, count, device):
     return out
 
 
-def extract_temperature(X, c=1):
+def extract_temperature(X, tscale):
     """
     X: (B, C, Nz, H, W)
        channel 0 is log10(T)
