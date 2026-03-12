@@ -716,7 +716,7 @@ def ffno_predict_populations(
         device=device,
         lr=0.0,
         weight_decay=0.0,
-        amp=amp,
+        amp=False,
         multi_gpu=False,
         debug_loss=False
     )
