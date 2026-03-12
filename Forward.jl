@@ -371,16 +371,18 @@ function lte_pops_saha(atom, atmos::Atmosphere3D)
 end
 
 function load_pred_depcoeff(pred_h5::String, pred_key::String)
-    f = h5open(pred_h5, "r")
-    raw = HDF5.readmmap(f[pred_key])
-    close(f)
+    h5open(pred_h5, "r") do f
+        dset = f[pred_key]
 
-    # notebook:
-    # dep_coeff = PermutedDimsArray(raw, (3, 4, 2, 1))
-    # so assume raw is (nlevels, nz, ny, nx) or similar; this permutation yields (ny?, nx?, ?, ?).
-    # We keep EXACT permutation from notebook.
-    dep_coeff = PermutedDimsArray(raw, (3, 4, 2, 1))
-    return dep_coeff
+        raw = try
+            HDF5.readmmap(dset)
+        catch err
+            @warn "Falling back to normal HDF5 read for $pred_key" exception=(err, catch_backtrace())
+            read(dset)
+        end
+
+        return PermutedDimsArray(raw, (3, 4, 2, 1))
+    end
 end
 
 function load_multi3d_pops(pops_file::String, atmos::Atmosphere3D, nlevels::Int)
