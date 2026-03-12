@@ -314,6 +314,9 @@ def load_pred_data(mesh_file, atmos_file):
 
     dx, dy = compute_dx_dy(mesh_file)
 
+    dx = np.abs(dx)
+    dy = np.abs(dy)
+
     print(f"Grid size from mesh: nx={nx}, ny={ny}, nz={nz}")
 
     # --- Load atmosphere ---
