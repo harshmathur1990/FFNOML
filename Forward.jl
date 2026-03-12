@@ -82,7 +82,7 @@ const CONFIG_ML = (
     model = model,
 
     pred_h5 = pred_h5,
-    pred_key = "populations",
+    pred_key = "departure_coefficients",
 
     plot_diagnostics = false,
 
