@@ -622,15 +622,17 @@ def _hann_2d(patch, device, dtype):
 
 
 def _tile_positions(n, patch, stride):
-    """
-    Ensure full coverage of the domain.
-    """
-    pos = list(range(0, n - patch + 1, stride))
 
-    if pos[-1] != n - patch:
-        pos.append(n - patch)
+    pos = []
 
-    return pos
+    x = 0
+    while x + patch < n:
+        pos.append(x)
+        x += stride
+
+    pos.append(n - patch)
+
+    return sorted(set(pos))
 
 
 @torch.no_grad()
@@ -778,11 +780,12 @@ def ffno_predict_populations(
     atom_names,
     diagnostic_path=None,
     cuda=True,
-    amp=True,
     tiled=True,
     patch=128,
     stride=64,
 ):
+    amp = False
+
     """
     Predict log-departure coeffs -> convert to departure coeffs -> (optional) to populations downstream.
 
@@ -812,7 +815,7 @@ def ffno_predict_populations(
         device=device,
         lr=0.0,
         weight_decay=0.0,
-        amp=False,
+        amp=amp,
         multi_gpu=False,
         debug_loss=False
     )
@@ -867,7 +870,7 @@ def ffno_predict_populations(
             patch=patch,
             stride=stride,
             device=device,
-            amp=False
+            amp=amp
         )
 
     if torch.isnan(pred_log).any():

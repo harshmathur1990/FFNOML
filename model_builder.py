@@ -4,7 +4,7 @@ import torch.distributed as dist
 
 from models.ffno_model import *
 from loss.nlte_composite_loss import NLTECompositeLoss
-from loss.weighted_mse_loss import WeightedMSE
+from loss.weighted_mse_loss import WeightedMSE_L1
 
 from functools import partial
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
@@ -113,7 +113,7 @@ class ModelBuilder:
             weight_decay=self.weight_decay,
         )
 
-        mse_loss = WeightedMSE()
+        mse_loss = WeightedMSE_L1()
         mse_loss = mse_loss.to(self.device)
 
         loss_fn = NLTECompositeLoss(
