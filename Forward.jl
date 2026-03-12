@@ -371,17 +371,23 @@ function lte_pops_saha(atom, atmos::Atmosphere3D)
 end
 
 function load_pred_depcoeff(pred_h5::String, pred_key::String)
+
     h5open(pred_h5, "r") do f
-        dset = f[pred_key]
+        raw = read(f[pred_key])
 
-        raw = try
-            HDF5.readmmap(dset)
-        catch err
-            @warn "Falling back to normal HDF5 read for $pred_key" exception=(err, catch_backtrace())
-            read(dset)
-        end
+        println("raw size = ", size(raw))
 
-        return PermutedDimsArray(raw, (3, 4, 2, 1))
+        # remove batch dimension
+        raw4 = dropdims(raw; dims=1)
+
+        println("after dropdims = ", size(raw4))  # (6,400,252,252)
+
+        # (levels, z, y, x) -> (x, y, z, levels)
+        dep_coeff = PermutedDimsArray(raw4, (4, 3, 2, 1))
+
+        println("dep_coeff size = ", size(dep_coeff))  # (252,252,400,6)
+
+        return dep_coeff
     end
 end
 
