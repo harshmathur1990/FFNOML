@@ -473,7 +473,8 @@ class NLTECompositeLoss(nn.Module):
         self,
         T,
         logb_pred,
-        logb_true
+        logb_true,
+        tscale=1
     ):
 
         if logb_pred.shape[1] != int(self.levels.sum()):
@@ -520,8 +521,8 @@ class NLTECompositeLoss(nn.Module):
             start = level_offsets[i]
             end   = level_offsets[i+1]
 
-            logb_pred_atom = logb_pred[:, start:end, :]
-            logb_true_atom = logb_true[:, start:end, :]
+            logb_pred_atom = logb_pred[:, start:end, :] * tscale
+            logb_true_atom = logb_true[:, start:end, :] * tscale
 
             chi_i   = self.chi[i]
             lines_i = self.lines[i]
@@ -531,7 +532,7 @@ class NLTECompositeLoss(nn.Module):
             # ---- predicted source ----
             _, x_pred = compute_Sv_all_lines_T_batched(
                 T=T,
-                logb=logb_pred_atom * 10,
+                logb=logb_pred_atom,
                 chi=chi_i,
                 lines=lines_i,
                 nu=nu_i,
@@ -543,7 +544,7 @@ class NLTECompositeLoss(nn.Module):
             # ---- true source ----
             _, x_true = compute_Sv_all_lines_T_batched(
                 T=T,
-                logb=logb_true_atom * 10,
+                logb=logb_true_atom,
                 chi=chi_i,
                 lines=lines_i,
                 nu=nu_i,
@@ -589,7 +590,7 @@ class NLTECompositeLoss(nn.Module):
             _check_tensor(L_S_atoms, f"L_S_atoms {rank}", True)
             _check_tensor(L_S, f"L_S {rank}", True)
 
-        L_total = L_data + 1e-4 * L_S
+        L_total = L_data + (L_S / (tscale * 10))
 
         if self.print_loss:
             _check_tensor(L_total, f"L_total {rank}", True)

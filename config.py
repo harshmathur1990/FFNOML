@@ -193,3 +193,6 @@ DATASET_TYPE = "patch"
 # Prediction params
 CUDA = DEVICE == "cuda"
 TILED = True
+
+
+TENSOR_SCALE = 100.0

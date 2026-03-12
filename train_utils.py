@@ -82,7 +82,7 @@ def reduce_components(comp_sums, count, device):
     return out
 
 
-def extract_temperature(X):
+def extract_temperature(X, c=1):
     """
     X: (B, C, Nz, H, W)
        channel 0 is log10(T)
@@ -91,12 +91,12 @@ def extract_temperature(X):
        T: (B, Nz, H, W)
     """
     logT = X[:, 0]
-    T = 10.0 ** (logT)
+    T = 10.0 ** (logT * tscale)
     return T
 
 
-def compute_loss(pred, target, weight, loss_fn, T):
-    loss, components = loss_fn(T, pred, target)
+def compute_loss(pred, target, weight, loss_fn, T, tscale=1):
+    loss, components = loss_fn(T, pred, target, tscale=tscale)
 
     if weight is not None:
         loss = (loss * weight).sum() / (weight.sum() + 1e-12)
@@ -201,7 +201,8 @@ def train_one_epoch(
     epoch,
     num_epochs,
     amp=True,
-    grad_clip=1.0
+    grad_clip=1.0,
+    tscale=1
 ):
 
     model.train()
@@ -232,7 +233,7 @@ def train_one_epoch(
         with torch.amp.autocast("cuda", enabled=(amp and str(device).startswith("cuda"))):
             pred = model(x, dx, dy)
 
-            T = extract_temperature(x)
+            T = extract_temperature(x, tscale=tscale)
 
             pred = flatten_columns_logb(pred)
             y = flatten_columns_logb(y)
@@ -244,6 +245,7 @@ def train_one_epoch(
                 weight=weight,
                 loss_fn=loss_fn,
                 T=T,
+                tscale=tscale
             )
 
         if scaler is not None:
@@ -289,6 +291,7 @@ def validate(
     loss_fn,
     device,
     amp=True,
+    tscale=1
 ):
     model.eval()
 
@@ -313,7 +316,7 @@ def validate(
             if weight is not None:
                 weight = weight.to(device, non_blocking=True)
 
-            T = extract_temperature(x)
+            T = extract_temperature(x, tscale=tscale)
 
             with torch.amp.autocast("cuda", enabled=(amp and str(device).startswith("cuda"))):
                 pred = model(x, dx, dy)
@@ -328,6 +331,7 @@ def validate(
                     weight=weight,
                     loss_fn=loss_fn,
                     T=T,
+                    tscale=tscale
                 )
 
             running += loss.item()
@@ -403,6 +407,7 @@ def train(
     amp=True,
     grad_clip=1.0,
     early_stopping=None,
+    tscale=1
 ):
 
     best_val = float("inf")
@@ -438,6 +443,7 @@ def train(
             num_epochs=num_epochs,
             amp=amp,
             grad_clip=grad_clip,
+            tscale=tscale
         )
 
         if val_loader is not None:
@@ -450,6 +456,7 @@ def train(
                 loss_fn=loss_fn,
                 device=device,
                 amp=amp,
+                tscale=tscale
             )
 
             improved = (best_val - val_loss) > min_delta

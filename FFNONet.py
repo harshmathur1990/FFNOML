@@ -34,50 +34,49 @@ from data_builder import DataLoaderBuilder
 # ---------------- PREPROCESSING ------------------------------
 # ============================================================
 
-LOG_SCALE = 1.0
-
-def _prepare_input_features(temp, vx, vy, vz, ne, rho):
+def _prepare_input_features(temp, vx, vy, vz, ne, rho, tscale=1):
     """
     temp: [nx, ny, nz]
     returns features: [nx, ny, nz, Cin]
     """
     return np.stack(
         [
-            np.log10(temp) / LOG_SCALE,
-            vx / 100.0,
-            vy / 100.0,
-            vz / 100.0,
-            np.log10(ne) / LOG_SCALE,
-            np.log10(rho) / LOG_SCALE,
+            np.log10(temp) / tscale,
+            vx / 1000.0,
+            vy / 1000.0,
+            vz / 1000.0,
+            np.log10(ne) / tscale,
+            np.log10(rho) / tscale,
         ],
         axis=-1,
     )
 
 
-def _compute_departure_coefficients(lte, nlte, eps=1e-30):
+def _compute_departure_coefficients(lte, nlte, eps=1e-30, tscale=1):
     """
     lte/nlte: [nx, ny, nz, nlev] or [nx, ny, nz, Cout]
     return: log10(nlte/lte)
     """
-    return np.log10((nlte + eps) / (lte + eps)) / LOG_SCALE
+    return np.log10((nlte + eps) / (lte + eps)) / tscale
 
 
-def invert_log_departure(pred_log):
-    return torch.pow(10.0, pred_log * LOG_SCALE)
+def invert_log_departure(pred_log, tscale=1):
+    return torch.pow(10.0, pred_log * tscale)
 
 
 def _make_inputs_ch_first(
     rho, z_scale,
     temp, vx, vy, vz, ne,
     *,
-    ndep
+    ndep,
+    tscale
 ):
     """
     returns inputs: [Cin, ndep, nx, ny]  (channel-first with depth first)
     """
     cmass_grid = np.logspace(-6, 2, ndep)
 
-    features = _prepare_input_features(temp, vx, vy, vz, ne, rho)  # [nx,ny,nz,Cin]
+    features = _prepare_input_features(temp, vx, vy, vz, ne, rho, tscale)  # [nx,ny,nz,Cin]
 
     features = interpolate_everything(
         rho, z_scale, features, cmass_grid
@@ -93,13 +92,14 @@ def _make_targets_ch_first(
     lte, nlte,
     *,
     ndep,
+    tscale
 ):
     """
     returns dep: [Cout, ndep, nx, ny]
     """
     cmass_grid = np.logspace(-6, 2, ndep)
 
-    dep = _compute_departure_coefficients(lte, nlte)  # [nx,ny,nz,Cout] (or nlev)
+    dep = _compute_departure_coefficients(lte, nlte, tscale)  # [nx,ny,nz,Cout] (or nlev)
 
     dep = interpolate_everything(
         rho, z_scale, dep, cmass_grid
@@ -348,7 +348,8 @@ def build_dataset_ffno(
     ndep=400,
     patch=96,
     stride=48,
-    scales=(1,2,3,4)
+    scales=(1,2,3,4),
+    tscale=1
 ):
 
     if os.path.isfile(save_path):
@@ -380,11 +381,13 @@ def build_dataset_ffno(
         X, cmass_grid = _make_inputs_ch_first(
             rho, z, temp, vx, vy, vz, ne,
             ndep=ndep,
+            tscale=tscale
         )
 
         Y = _make_targets_ch_first(
             rho, z, lte, nlte,
             ndep=ndep,
+            tscale=tscale
         )
 
         if cmass_grid_ref is None:
@@ -484,6 +487,7 @@ def build_solving_set_ffno(
     dy,
     save_path,
     ndep=400,
+    tscale=1
 ):
     """
     Build dataset for prediction (no targets).
@@ -503,6 +507,7 @@ def build_solving_set_ffno(
         vz,
         ne,
         ndep=ndep,
+        tscale=tscale
     )  # [Cin, D, nx, ny]
 
     _save_hdf5_cube(
@@ -544,7 +549,8 @@ def ffno_train_model(
     multi_gpu=False,
     debug_loss=False,
     patience=10,
-    min_delta=1e-5
+    min_delta=1e-5,
+    tscale=1
 ):
 
     if os.path.isfile(save_path):
@@ -604,6 +610,7 @@ def ffno_train_model(
             patience=patience,
             min_delta=min_delta,
         ),
+        tscale=tscale
     )
 
 
@@ -783,6 +790,7 @@ def ffno_predict_populations(
     tiled=True,
     patch=128,
     stride=64,
+    tscale=1
 ):
     amp = False
 
@@ -886,7 +894,7 @@ def ffno_predict_populations(
     )
 
     # pred_log is log10(dep). Convert to linear dep:
-    dep = invert_log_departure(pred_log).float().cpu().numpy()  # [1,Cout,D,nx,ny]
+    dep = invert_log_departure(pred_log, tscale=tscale).float().cpu().numpy()  # [1,Cout,D,nx,ny]
 
     # Save
     with h5py.File(save_path, "w") as f:
