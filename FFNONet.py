@@ -634,19 +634,43 @@ def _predict_tiled(model, X, dx, dy, patch, stride, device="cuda", amp=True):
 
     assert patch <= nx and patch <= ny
 
-    i0, j0 = 0, 0
-    x0 = X[:, :, :, i0:i0+patch, j0:j0+patch]
+    # ---------------------------------------------------------
+    # quick sanity checks
+    # ---------------------------------------------------------
+    if torch.isnan(X).any():
+        print("NaN detected in input cube")
+
+    if torch.isinf(X).any():
+        print("Inf detected in input cube")
+
+    print("Input range:", X.min().item(), X.max().item())
+    print("dx:", dx)
+    print("dy:", dy)
+
+    # ---------------------------------------------------------
+    # probe first tile
+    # ---------------------------------------------------------
+    x0 = X[:, :, :, 0:patch, 0:patch]
 
     with torch.amp.autocast("cuda", enabled=(amp and str(device).startswith("cuda"))):
         y0 = model(x0, dx, dy)
 
+    if torch.isnan(y0).any():
+        print("NaN detected in FIRST tile prediction")
+
     Cout = y0.shape[1]
 
+    # ---------------------------------------------------------
+    # accumulators
+    # ---------------------------------------------------------
     Y_acc = torch.zeros((1, Cout, D, nx, ny), device=device, dtype=y0.dtype)
     W_acc = torch.zeros((1, 1, 1, nx, ny), device=device, dtype=y0.dtype)
 
     w2 = _hann_2d(patch, device=device, dtype=y0.dtype)[None, None, None, :, :]
 
+    # ---------------------------------------------------------
+    # tiled prediction
+    # ---------------------------------------------------------
     for i in range(0, nx - patch + 1, stride):
         for j in range(0, ny - patch + 1, stride):
 
@@ -655,16 +679,46 @@ def _predict_tiled(model, X, dx, dy, patch, stride, device="cuda", amp=True):
 
             xt = X[:, :, :, i0:i0+patch, j0:j0+patch]
 
+            if torch.isnan(xt).any():
+                print("NaN in tile input", i0, j0)
+
             with torch.amp.autocast("cuda", enabled=(amp and str(device).startswith("cuda"))):
                 yt = model(xt, dx, dy)
 
-            if torch.isnan(yt).any():
-                print("NaN detected in tile", i0, j0)
+            # -------------------------------------------------
+            # NaN detection
+            # -------------------------------------------------
+            if torch.isnan(yt).any() or torch.isinf(yt).any():
 
+                print(f"NaN/Inf detected in tile ({i0},{j0})")
+
+                finite = yt[torch.isfinite(yt)]
+
+                if finite.numel() > 0:
+                    print(
+                        "Tile prediction range:",
+                        finite.min().item(),
+                        finite.max().item()
+                    )
+
+                # prevent contamination of accumulator
+                yt = torch.nan_to_num(yt, nan=0.0, posinf=0.0, neginf=0.0)
+
+            # -------------------------------------------------
+            # accumulate
+            # -------------------------------------------------
             Y_acc[:, :, :, i0:i0+patch, j0:j0+patch] += yt * w2
             W_acc[:, :, :, i0:i0+patch, j0:j0+patch] += w2
 
-    return Y_acc / (W_acc + 1e-12)
+    # ---------------------------------------------------------
+    # normalize
+    # ---------------------------------------------------------
+    out = Y_acc / (W_acc + 1e-12)
+
+    if torch.isnan(out).any():
+        print("NaN present in final stitched prediction")
+
+    return out
 
 
 def ffno_predict_populations(
@@ -730,6 +784,13 @@ def ffno_predict_populations(
         if torch.isnan(p).any():
             print("NaN weights in", name)
 
+
+    for name, buf in model.named_buffers():
+        if torch.isnan(buf).any():
+            print("NaN in buffer:", name, buf.shape)
+        if torch.isinf(buf).any():
+            print("Inf in buffer:", name, buf.shape)
+
     model.eval()
 
     with h5py.File(solve_h5, "r") as f:
@@ -743,6 +804,8 @@ def ffno_predict_populations(
     dx = torch.from_numpy(dx)
     dy = torch.from_numpy(dy)
 
+    print("dx =", dx, dx.dtype, dx.shape)
+    print("dy =", dy, dy.dtype, dy.shape)
     print("X nan:", np.isnan(X).sum())
     print("X inf:", np.isinf(X).sum())
 
