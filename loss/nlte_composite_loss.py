@@ -4,9 +4,14 @@ import torch.nn.functional as F
 import numpy as np
 import os
 
-rank = int(os.environ["RANK"])
-local_rank = int(os.environ["LOCAL_RANK"])
-world_size = int(os.environ["WORLD_SIZE"])
+try:
+    rank = int(os.environ["RANK"])
+    local_rank = int(os.environ["LOCAL_RANK"])
+    world_size = int(os.environ["WORLD_SIZE"])
+except:
+    rank = 0
+    local_rank = 0
+    world_size = 1
 
 
 c_AHz = np.float32(2.99792458e18)  # Hz * Å
