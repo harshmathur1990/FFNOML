@@ -2,6 +2,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+import os
+
+rank = int(os.environ["RANK"])
+local_rank = int(os.environ["LOCAL_RANK"])
+world_size = int(os.environ["WORLD_SIZE"])
 
 
 c_AHz = np.float32(2.99792458e18)  # Hz * Å
@@ -533,11 +538,11 @@ class NLTECompositeLoss(nn.Module):
             )
 
             if self.print_once:
-                _range_stats(T, "T")
-                _range_stats(logb_pred_atom, "logb_pred_atom")
-                _range_stats(logb_true_atom, "logb_true_atom")
-                _range_stats(x_pred, "x_pred")
-                _range_stats(x_true, "x_true")
+                _check_tensor(T, f"T {rank}", True)
+                _check_tensor(logb_pred_atom, f"logb_pred_atom {rank}", True)
+                _check_tensor(logb_true_atom, f"logb_true_atom{rank}", True)
+                _check_tensor(x_pred, f"x_pred {rank}", True)
+                _check_tensor(x_true, f"x_true {rank}", True)
                 self.print_once = False
 
 
@@ -566,8 +571,8 @@ class NLTECompositeLoss(nn.Module):
         L_S = L_S_atoms.mean()   # scalar per batch
 
         if self.print_loss:
-            _range_stats(L_S_atoms, "L_S_atoms")
-            _range_stats(L_S, "L_S")
+            _check_tensor(L_S_atoms, f"L_S_atoms {rank}", True)
+            _check_tensor(L_S, f"L_S {rank}", True)
 
         # expand physics loss to batch
         # L_S = L_S.expand_as(L_data)
