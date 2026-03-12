@@ -34,7 +34,7 @@ from data_builder import DataLoaderBuilder
 # ---------------- PREPROCESSING ------------------------------
 # ============================================================
 
-LOG_SCALE = 10.0
+LOG_SCALE = 1.0
 
 def _prepare_input_features(temp, vx, vy, vz, ne, rho):
     """
@@ -43,12 +43,12 @@ def _prepare_input_features(temp, vx, vy, vz, ne, rho):
     """
     return np.stack(
         [
-            np.log10(temp) / 10,
+            np.log10(temp) / LOG_SCALE,
             vx / 100.0,
             vy / 100.0,
             vz / 100.0,
-            np.log10(ne) / 10,
-            np.log10(rho) / 10,
+            np.log10(ne) / LOG_SCALE,
+            np.log10(rho) / LOG_SCALE,
         ],
         axis=-1,
     )
