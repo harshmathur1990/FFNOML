@@ -580,7 +580,7 @@ class NLTECompositeLoss(nn.Module):
         L_total = L_data   # + L_S
 
         if self.print_loss:
-            _check_tensor(L_total, f"L_total {rank}")
+            _check_tensor(L_total, f"L_total {rank}", True)
             self.print_loss = False
 
         if self.debug and not self._debug_triggered:
