@@ -34,6 +34,8 @@ from data_builder import DataLoaderBuilder
 # ---------------- PREPROCESSING ------------------------------
 # ============================================================
 
+LOG_SCALE = 10.0
+
 def _prepare_input_features(temp, vx, vy, vz, ne, rho):
     """
     temp: [nx, ny, nz]
@@ -57,7 +59,11 @@ def _compute_departure_coefficients(lte, nlte, eps=1e-30):
     lte/nlte: [nx, ny, nz, nlev] or [nx, ny, nz, Cout]
     return: log10(nlte/lte)
     """
-    return (np.log10((nlte + eps) / (lte + eps))) / 10
+    return np.log10((nlte + eps) / (lte + eps)) / LOG_SCALE
+
+
+def invert_log_departure(pred_log):
+    return torch.pow(10.0, pred_log * LOG_SCALE)
 
 
 def _make_inputs_ch_first(
@@ -749,7 +755,7 @@ def ffno_predict_populations(
         )
 
     # pred_log is log10(dep). Convert to linear dep:
-    dep = (10.0 ** pred_log).float().cpu().numpy()  # [1,Cout,D,nx,ny]
+    dep = invert_log_departure(pred_log).float().cpu().numpy()  # [1,Cout,D,nx,ny]
 
     # Save
     with h5py.File(save_path, "w") as f:
