@@ -658,6 +658,9 @@ def _predict_tiled(model, X, dx, dy, patch, stride, device="cuda", amp=True):
             with torch.amp.autocast("cuda", enabled=(amp and str(device).startswith("cuda"))):
                 yt = model(xt, dx, dy)
 
+            if torch.isnan(yt).any():
+                print("NaN detected in tile", i0, j0)
+
             Y_acc[:, :, :, i0:i0+patch, j0:j0+patch] += yt * w2
             W_acc[:, :, :, i0:i0+patch, j0:j0+patch] += w2
 
@@ -722,6 +725,11 @@ def ffno_predict_populations(
 
     ckpt = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(ckpt["model_state"])
+
+    for name, p in model.named_parameters():
+        if torch.isnan(p).any():
+            print("NaN weights in", name)
+
     model.eval()
 
     with h5py.File(solve_h5, "r") as f:
@@ -734,6 +742,9 @@ def ffno_predict_populations(
     X = torch.from_numpy(X)
     dx = torch.from_numpy(dx)
     dy = torch.from_numpy(dy)
+
+    print("X nan:", np.isnan(X).sum())
+    print("X inf:", np.isinf(X).sum())
 
     if not tiled:
         X = X.to(device)
@@ -753,6 +764,16 @@ def ffno_predict_populations(
             device=device,
             amp=amp
         )
+
+    if torch.isnan(pred_log).any():
+    print("NaN in prediction")
+
+    if torch.isinf(pred_log).any():
+        print("Inf in prediction")
+
+    print("pred_log range:",
+          pred_log.min().item(),
+          pred_log.max().item())
 
     # pred_log is log10(dep). Convert to linear dep:
     dep = invert_log_departure(pred_log).float().cpu().numpy()  # [1,Cout,D,nx,ny]
