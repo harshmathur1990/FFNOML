@@ -452,6 +452,10 @@ class NLTECompositeLoss(nn.Module):
 
         self.atom_names = atom_names
 
+        self.print_once = True
+
+        self.print_loss = True
+
     def forward(
         self,
         T,
@@ -528,6 +532,15 @@ class NLTECompositeLoss(nn.Module):
                 return_x=True
             )
 
+            if self.print_once:
+                _range_stats(T, "T")
+                _range_stats(logb_pred_atom, "logb_pred_atom")
+                _range_stats(logb_true_atom, "logb_true_atom")
+                _range_stats(x_pred, "x_pred")
+                _range_stats(x_true, "x_true")
+                self.print_once = False
+
+
             # ---- store loss, do NOT sum yet ----
             L_atom = self.data_loss(x_pred, x_true)
 
@@ -552,10 +565,18 @@ class NLTECompositeLoss(nn.Module):
 
         L_S = L_S_atoms.mean()   # scalar per batch
 
+        if self.print_loss:
+            _range_stats(L_S_atoms, "L_S_atoms")
+            _range_stats(L_S, "L_S")
+
         # expand physics loss to batch
-        L_S = L_S.expand_as(L_data)
+        # L_S = L_S.expand_as(L_data)
 
         L_total = L_data   # + L_S
+
+        if self.print_loss:
+            _range_stats(L_total, "L_total")
+            self.print_loss = False
 
         if self.debug and not self._debug_triggered:
             if torch.isnan(L_total):

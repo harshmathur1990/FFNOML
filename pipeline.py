@@ -97,6 +97,7 @@ def train_model():
         grad_clip=GRAD_CLIP,
         device=DEVICE,
         multi_gpu=MULTI_GPU,
+        debug_loss=DEBUG_LOSS,
         patience=PATIENCE,
         min_delta=MIN_DELTA
     )

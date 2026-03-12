@@ -166,6 +166,8 @@ MODEL_DIR  = f"training/"
 MODEL_FILE = MODEL_DIR + f"3D_sim_train_s123.pt"
 
 
+DEBUG_LOSS = False
+
 # Dataset Params
 NDEP=400
 PATCH=64

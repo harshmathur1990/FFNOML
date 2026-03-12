@@ -536,6 +536,7 @@ def ffno_train_model(
     grad_clip=1.0,
     device="cuda",
     multi_gpu=False,
+    debug_loss=False,
     patience=10,
     min_delta=1e-5
 ):
@@ -561,7 +562,8 @@ def ffno_train_model(
         lr=lr,
         weight_decay=weight_decay,
         amp=amp,
-        multi_gpu=multi_gpu
+        multi_gpu=multi_gpu,
+        debug_loss=debug_loss
     )
 
     model, optimizer, loss_fn, scaler = builder.build()
@@ -706,7 +708,8 @@ def ffno_predict_populations(
         lr=0.0,
         weight_decay=0.0,
         amp=amp,
-        multi_gpu=False
+        multi_gpu=False,
+        debug_loss=False
     )
 
     model, optimizer, loss_fn, scaler = builder.build()
