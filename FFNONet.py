@@ -76,7 +76,7 @@ def _make_inputs_ch_first(
     """
     cmass_grid = np.logspace(-6, 2, ndep)
 
-    features = _prepare_input_features(temp, vx, vy, vz, ne, rho, tscale)  # [nx,ny,nz,Cin]
+    features = _prepare_input_features(temp, vx, vy, vz, ne, rho, tscale=tscale)  # [nx,ny,nz,Cin]
 
     features = interpolate_everything(
         rho, z_scale, features, cmass_grid
