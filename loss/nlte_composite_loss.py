@@ -540,7 +540,7 @@ class NLTECompositeLoss(nn.Module):
             if self.print_once:
                 _check_tensor(T, f"T {rank}", True)
                 _check_tensor(logb_pred_atom, f"logb_pred_atom {rank}", True)
-                _check_tensor(logb_true_atom, f"logb_true_atom{rank}", True)
+                _check_tensor(logb_true_atom, f"logb_true_atom {rank}", True)
                 _check_tensor(x_pred, f"x_pred {rank}", True)
                 _check_tensor(x_true, f"x_true {rank}", True)
                 self.print_once = False
@@ -580,7 +580,7 @@ class NLTECompositeLoss(nn.Module):
         L_total = L_data   # + L_S
 
         if self.print_loss:
-            _range_stats(L_total, "L_total")
+            _check_tensor(L_total, f"L_total {rank}")
             self.print_loss = False
 
         if self.debug and not self._debug_triggered:
