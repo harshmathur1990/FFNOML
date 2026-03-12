@@ -766,14 +766,16 @@ def ffno_predict_populations(
         )
 
     if torch.isnan(pred_log).any():
-    print("NaN in prediction")
+        print("NaN in prediction")
 
     if torch.isinf(pred_log).any():
         print("Inf in prediction")
 
-    print("pred_log range:",
-          pred_log.min().item(),
-          pred_log.max().item())
+    print(
+        "pred_log range:",
+        pred_log.min().item(),
+        pred_log.max().item()
+    )
 
     # pred_log is log10(dep). Convert to linear dep:
     dep = invert_log_departure(pred_log).float().cpu().numpy()  # [1,Cout,D,nx,ny]
