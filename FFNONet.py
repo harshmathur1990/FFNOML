@@ -621,6 +621,18 @@ def _hann_2d(patch, device, dtype):
     return ww
 
 
+def _tile_positions(n, patch, stride):
+    """
+    Ensure full coverage of the domain.
+    """
+    pos = list(range(0, n - patch + 1, stride))
+
+    if pos[-1] != n - patch:
+        pos.append(n - patch)
+
+    return pos
+
+
 @torch.no_grad()
 def _predict_tiled(model, X, dx, dy, patch, stride, device="cuda", amp=True):
 
@@ -634,60 +646,65 @@ def _predict_tiled(model, X, dx, dy, patch, stride, device="cuda", amp=True):
 
     assert patch <= nx and patch <= ny
 
-    # ---------------------------------------------------------
-    # quick sanity checks
-    # ---------------------------------------------------------
-    if torch.isnan(X).any():
-        print("NaN detected in input cube")
-
-    if torch.isinf(X).any():
-        print("Inf detected in input cube")
-
+    print("=== TILE PREDICTION DEBUG ===")
+    print("Input shape:", X.shape)
     print("Input range:", X.min().item(), X.max().item())
     print("dx:", dx)
     print("dy:", dy)
 
-    # ---------------------------------------------------------
+    if torch.isnan(X).any():
+        print("WARNING: NaN detected in input")
+
+    if torch.isinf(X).any():
+        print("WARNING: Inf detected in input")
+
+    # ------------------------------------------------
     # probe first tile
-    # ---------------------------------------------------------
+    # ------------------------------------------------
+
     x0 = X[:, :, :, 0:patch, 0:patch]
 
     with torch.amp.autocast("cuda", enabled=(amp and str(device).startswith("cuda"))):
         y0 = model(x0, dx, dy)
 
     if torch.isnan(y0).any():
-        print("NaN detected in FIRST tile prediction")
+        print("WARNING: NaN detected in FIRST tile output")
+
+    if torch.isinf(y0).any():
+        print("WARNING: Inf detected in FIRST tile output")
 
     Cout = y0.shape[1]
 
-    # ---------------------------------------------------------
+    # ------------------------------------------------
     # accumulators
-    # ---------------------------------------------------------
+    # ------------------------------------------------
+
     Y_acc = torch.zeros((1, Cout, D, nx, ny), device=device, dtype=y0.dtype)
     W_acc = torch.zeros((1, 1, 1, nx, ny), device=device, dtype=y0.dtype)
 
     w2 = _hann_2d(patch, device=device, dtype=y0.dtype)[None, None, None, :, :]
 
-    # ---------------------------------------------------------
-    # tiled prediction
-    # ---------------------------------------------------------
-    for i in range(0, nx - patch + 1, stride):
-        for j in range(0, ny - patch + 1, stride):
+    # ------------------------------------------------
+    # tile positions
+    # ------------------------------------------------
 
-            i0 = min(i, nx - patch)
-            j0 = min(j, ny - patch)
+    xs = _tile_positions(nx, patch, stride)
+    ys = _tile_positions(ny, patch, stride)
+
+    print("Tile grid:", len(xs), "x", len(ys))
+
+    # ------------------------------------------------
+    # tiled inference
+    # ------------------------------------------------
+
+    for i0 in xs:
+        for j0 in ys:
 
             xt = X[:, :, :, i0:i0+patch, j0:j0+patch]
-
-            if torch.isnan(xt).any():
-                print("NaN in tile input", i0, j0)
 
             with torch.amp.autocast("cuda", enabled=(amp and str(device).startswith("cuda"))):
                 yt = model(xt, dx, dy)
 
-            # -------------------------------------------------
-            # NaN detection
-            # -------------------------------------------------
             if torch.isnan(yt).any() or torch.isinf(yt).any():
 
                 print(f"NaN/Inf detected in tile ({i0},{j0})")
@@ -696,27 +713,52 @@ def _predict_tiled(model, X, dx, dy, patch, stride, device="cuda", amp=True):
 
                 if finite.numel() > 0:
                     print(
-                        "Tile prediction range:",
+                        "Tile output range:",
                         finite.min().item(),
                         finite.max().item()
                     )
 
-                # prevent contamination of accumulator
-                yt = torch.nan_to_num(yt, nan=0.0, posinf=0.0, neginf=0.0)
+                # prevent contamination
+                yt = torch.nan_to_num(
+                    yt,
+                    nan=0.0,
+                    posinf=0.0,
+                    neginf=0.0
+                )
 
-            # -------------------------------------------------
-            # accumulate
-            # -------------------------------------------------
             Y_acc[:, :, :, i0:i0+patch, j0:j0+patch] += yt * w2
             W_acc[:, :, :, i0:i0+patch, j0:j0+patch] += w2
 
-    # ---------------------------------------------------------
-    # normalize
-    # ---------------------------------------------------------
-    out = Y_acc / (W_acc + 1e-12)
+    # ------------------------------------------------
+    # check weight coverage
+    # ------------------------------------------------
+
+    zero_pixels = (W_acc == 0).sum().item()
+
+    print("W_acc min:", W_acc.min().item())
+    print("Uncovered pixels:", zero_pixels)
+
+    if zero_pixels > 0:
+        print("WARNING: some pixels were not covered by tiles")
+
+    # ------------------------------------------------
+    # normalize safely
+    # ------------------------------------------------
+
+    W_acc = torch.clamp(W_acc, min=1e-12)
+
+    out = Y_acc / W_acc
 
     if torch.isnan(out).any():
-        print("NaN present in final stitched prediction")
+        print("WARNING: NaN present after stitching")
+
+    if torch.isinf(out).any():
+        print("WARNING: Inf present after stitching")
+
+    out = torch.nan_to_num(out)
+
+    print("Output range:", out.min().item(), out.max().item())
+    print("=== TILE PREDICTION END ===")
 
     return out
 
@@ -825,7 +867,7 @@ def ffno_predict_populations(
             patch=patch,
             stride=stride,
             device=device,
-            amp=amp
+            amp=False
         )
 
     if torch.isnan(pred_log).any():

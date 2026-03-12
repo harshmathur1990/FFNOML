@@ -150,7 +150,6 @@ def run_predictions():
                 atom_names=atom_names,
                 diagnostic_path=DIAGNOSTIC_PATH,
                 cuda=CUDA,
-                amp=AMP,
                 tiled=TILED,
                 patch=PATCH,
                 stride=STRIDE
