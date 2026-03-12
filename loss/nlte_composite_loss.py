@@ -461,6 +461,8 @@ class NLTECompositeLoss(nn.Module):
 
         self.print_loss = True
 
+        self.print_data_loss = True
+
     def forward(
         self,
         T,
@@ -484,7 +486,14 @@ class NLTECompositeLoss(nn.Module):
             _validate_physics_inputs(T, logb_pred, stage="forward (post-clamp)")
 
         # ------------------ DATA LOSS ------------------ #
+
         L_data = self.data_loss(logb_pred, logb_true)
+
+        if self.print_data_loss:
+            _check_tensor(logb_pred, f"logb_pred {rank}", True)
+            _check_tensor(logb_true, f"logb_true {rank}", True)
+            _check_tensor(L_data, f"L_data {rank}", True)
+            self.print_data_loss = False
 
         if self.debug and not self._debug_triggered:
             _nan_stats(L_data, "L_data")
