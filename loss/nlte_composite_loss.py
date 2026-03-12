@@ -516,7 +516,7 @@ class NLTECompositeLoss(nn.Module):
             # ---- predicted source ----
             _, x_pred = compute_Sv_all_lines_T_batched(
                 T=T,
-                logb=logb_pred_atom,
+                logb=logb_pred_atom * 10,
                 chi=chi_i,
                 lines=lines_i,
                 nu=nu_i,
@@ -528,7 +528,7 @@ class NLTECompositeLoss(nn.Module):
             # ---- true source ----
             _, x_true = compute_Sv_all_lines_T_batched(
                 T=T,
-                logb=logb_true_atom,
+                logb=logb_true_atom * 10,
                 chi=chi_i,
                 lines=lines_i,
                 nu=nu_i,
@@ -539,8 +539,8 @@ class NLTECompositeLoss(nn.Module):
 
             if self.print_once:
                 _check_tensor(T, f"T {rank}", True)
-                _check_tensor(logb_pred_atom, f"logb_pred_atom {rank}", True)
-                _check_tensor(logb_true_atom, f"logb_true_atom {rank}", True)
+                _check_tensor(logb_pred_atom * 10, f"logb_pred_atom {rank}", True)
+                _check_tensor(logb_true_atom * 10, f"logb_true_atom {rank}", True)
                 _check_tensor(x_pred, f"x_pred {rank}", True)
                 _check_tensor(x_true, f"x_true {rank}", True)
                 self.print_once = False
