@@ -384,7 +384,9 @@ function load_pred_depcoeff(pred_h5::String, pred_key::String)
 
         # now already in correct order
         # (nx, ny, nz, levels)
-        return raw4
+
+        dep_coeff = PermutedDimsArray(raw4, (2, 1, 3, 4))
+        return dep_coeff
     end
 end
 
