@@ -252,7 +252,7 @@ def _save_hdf5_patches(
         if weights is not None:
             f.create_dataset("weights", data=weights.astype(np.float32))
 
-        f.create_dataset("tscale", data=np.array([dy], dtype=np.int32))
+        f.create_dataset("tscale", data=tscale)
 
         f.create_dataset(
             "cmass_grid",
@@ -303,7 +303,7 @@ def _save_hdf5_cube(path, X, cmass_grid, dx, dy, tscale, attrs=None):
         f.create_dataset("dx", data=np.array([dx], dtype=np.float32))
         f.create_dataset("dy", data=np.array([dy], dtype=np.float32))
 
-        f.create_dataset("tscale", data=np.array([dy], dtype=np.int32))
+        f.create_dataset("tscale", data=tscale)
 
         f.create_dataset(
             "cmass_grid",
