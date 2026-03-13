@@ -19,6 +19,7 @@
 #
 # ============================================================
 
+import sys
 import os
 import numpy as np
 import h5py
@@ -99,7 +100,7 @@ def _make_targets_ch_first(
     """
     cmass_grid = np.logspace(-6, 2, ndep)
 
-    dep = _compute_departure_coefficients(lte, nlte, tscale)  # [nx,ny,nz,Cout] (or nlev)
+    dep = _compute_departure_coefficients(lte, nlte, tscale=tscale)  # [nx,ny,nz,Cout] (or nlev)
 
     dep = interpolate_everything(
         rho, z_scale, dep, cmass_grid
@@ -186,6 +187,7 @@ def _save_hdf5_patches(
     *,
     scales=None,
     weights=None,
+    tscale=1,
     attrs=None,
 ):
     """
@@ -250,6 +252,8 @@ def _save_hdf5_patches(
         if weights is not None:
             f.create_dataset("weights", data=weights.astype(np.float32))
 
+        f.create_dataset("tscale", data=np.array([dy], dtype=np.int32))
+
         f.create_dataset(
             "cmass_grid",
             data=cmass_grid.astype(np.float64),
@@ -272,7 +276,7 @@ def _save_hdf5_patches(
             f.attrs["n_scales"] = int(len(np.unique(scales)))
 
 
-def _save_hdf5_cube(path, X, cmass_grid, dx, dy, attrs=None):
+def _save_hdf5_cube(path, X, cmass_grid, dx, dy, tscale, attrs=None):
     """
     Save inference cube.
 
@@ -299,6 +303,8 @@ def _save_hdf5_cube(path, X, cmass_grid, dx, dy, attrs=None):
         f.create_dataset("dx", data=np.array([dx], dtype=np.float32))
         f.create_dataset("dy", data=np.array([dy], dtype=np.float32))
 
+        f.create_dataset("tscale", data=np.array([dy], dtype=np.int32))
+
         f.create_dataset(
             "cmass_grid",
             data=cmass_grid.astype(np.float64),
@@ -322,6 +328,16 @@ def _read_io_channels(h5_path):
         Cin = int(f.attrs["Cin"])
         Cout = int(f.attrs["Cout"])
     return Cin, Cout
+
+
+def read_tscale(h5_path):
+    """
+    Reads tscale from training HDF5 file.
+    """
+    with h5py.File(h5_path, "r") as f:
+        tscale = f['tscale'][()] if 'tscale' in f.keys() else None
+
+    return tscale
 
 
 # ============================================================
@@ -461,6 +477,7 @@ def build_dataset_ffno(
         cmass_grid_ref,
         scales=scale_all,
         weights=weights,
+        tscale=tscale,
         attrs=dict(
             ndep=int(ndep),
             patch=int(patch),
@@ -516,6 +533,7 @@ def build_solving_set_ffno(
         cmass_grid,
         dx,
         dy,
+        tscale,
         attrs=dict(ndep=int(ndep)),
     )
 
@@ -558,6 +576,12 @@ def ffno_train_model(
 
     Cin, Cout = _read_io_channels(train_h5)
     
+    tscale_read = read_tscale(train_h5)
+
+    if tscale_read is None or tscale_read != tscale:
+        sys.stderr(f"\n tscale_read is {tscale_read} and tscale is {tscale} \n")
+        sys.exit(-1)
+
     model_config = dict(model_config)
     model_config["in_channels"] = Cin
     model_config["out_channels"] = Cout
@@ -807,6 +831,19 @@ def ffno_predict_populations(
     device = "cuda" if (cuda and torch.cuda.is_available()) else "cpu"
 
     Cin, Cout = _read_io_channels(train_h5)
+
+    tscale_read = read_tscale(train_h5)
+
+    if tscale_read is None or tscale_read != tscale:
+        sys.stderr(f"\n tscale_read is {tscale_read} and tscale is {tscale} \n")
+        sys.exit(-1)
+
+    tscale_solve = read_tscale(solve_h5)
+
+    if tscale_solve is None or tscale_solve != tscale:
+        sys.stderr(f"\n tscale_solve is {tscale_solve} and tscale is {tscale} \n")
+        sys.exit(-1)
+
 
     model_config = dict(model_config)
     model_config["in_channels"] = Cin
