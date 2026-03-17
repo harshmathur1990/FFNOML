@@ -579,7 +579,7 @@ def ffno_train_model(
     tscale_read = read_tscale(train_h5)
 
     if tscale_read is None or tscale_read != tscale:
-        sys.stderr(f"\n tscale_read is {tscale_read} and tscale is {tscale} \n")
+        sys.stderr.write(f"\n tscale_read is {tscale_read} and tscale is {tscale} \n")
         sys.exit(-1)
 
     model_config = dict(model_config)
@@ -835,13 +835,13 @@ def ffno_predict_populations(
     tscale_read = read_tscale(train_h5)
 
     if tscale_read is None or tscale_read != tscale:
-        sys.stderr(f"\n tscale_read is {tscale_read} and tscale is {tscale} \n")
+        sys.stderr.write(f"\n tscale_read is {tscale_read} and tscale is {tscale} \n")
         sys.exit(-1)
 
     tscale_solve = read_tscale(solve_h5)
 
     if tscale_solve is None or tscale_solve != tscale:
-        sys.stderr(f"\n tscale_solve is {tscale_solve} and tscale is {tscale} \n")
+        sys.stderr.write(f"\n tscale_solve is {tscale_solve} and tscale is {tscale} \n")
         sys.exit(-1)
 
     model_config = dict(model_config)
