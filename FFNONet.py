@@ -653,17 +653,12 @@ def _hann_2d(patch, device, dtype):
 
 
 def _tile_positions(n, patch, stride):
+    pos = list(range(0, n - patch + 1, stride))
 
-    pos = []
+    if pos[-1] != n - patch:
+        pos.append(n - patch)
 
-    x = 0
-    while x + patch < n:
-        pos.append(x)
-        x += stride
-
-    pos.append(n - patch)
-
-    return sorted(set(pos))
+    return pos
 
 
 @torch.no_grad()
@@ -723,6 +718,9 @@ def _predict_tiled(model, X, dx, dy, patch, stride, device="cuda", amp=True):
 
     xs = _tile_positions(nx, patch, stride)
     ys = _tile_positions(ny, patch, stride)
+
+    assert all(x + patch <= nx for x in xs)
+    assert all(y + patch <= ny for y in ys)
 
     print("Tile grid:", len(xs), "x", len(ys))
 
@@ -931,6 +929,12 @@ def ffno_predict_populations(
 
     # pred_log is log10(dep). Convert to linear dep:
     dep = invert_log_departure(pred_log, tscale=tscale).float().cpu().numpy()  # [1,Cout,D,nx,ny]
+
+    print(
+        "pred_log range:",
+        dep.min().item(),
+        dep.max().item()
+    )
 
     # Save
     with h5py.File(save_path, "w") as f:
