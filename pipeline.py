@@ -156,7 +156,8 @@ def run_predictions():
                 cuda=CUDA,
                 tiled=TILED,
                 patch=PATCH,
-                stride=STRIDE
+                stride=STRIDE,
+                tscale=TENSOR_SCALE
             )
 
 
