@@ -931,7 +931,7 @@ def ffno_predict_populations(
     dep = invert_log_departure(pred_log, tscale=tscale).float().cpu().numpy()  # [1,Cout,D,nx,ny]
 
     print(
-        "pred_log range:",
+        "dep range:",
         dep.min().item(),
         dep.max().item()
     )
