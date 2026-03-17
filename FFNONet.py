@@ -642,12 +642,10 @@ def ffno_train_model(
 # ---------------- PREDICTION (FFNO) --------------------------
 # ============================================================
 
-def _hann_2d(patch, device, dtype):
-    """
-    Smooth blending window to reduce seams in tiled prediction.
-    """
+def _hann_2d(patch, device, dtype, eps=1e-3):
     w = torch.hann_window(patch, device=device, dtype=dtype)
-    ww = torch.outer(w, w)  # [P,P]
+    w = torch.clamp(w, min=eps)
+    ww = torch.outer(w, w)
     ww = ww / (ww.max() + 1e-12)
     return ww
 
@@ -723,6 +721,10 @@ def _predict_tiled(model, X, dx, dy, patch, stride, device="cuda", amp=True):
     assert all(y + patch <= ny for y in ys)
 
     print("Tile grid:", len(xs), "x", len(ys))
+
+    print(f"patch={patch}, stride={stride}, nx={nx}, ny={ny}")
+    print("xs =", xs)
+    print("ys =", ys)
 
     # ------------------------------------------------
     # tiled inference
