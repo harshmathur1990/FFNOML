@@ -844,7 +844,6 @@ def ffno_predict_populations(
         sys.stderr(f"\n tscale_solve is {tscale_solve} and tscale is {tscale} \n")
         sys.exit(-1)
 
-
     model_config = dict(model_config)
     model_config["in_channels"] = Cin
     model_config["out_channels"] = Cout
