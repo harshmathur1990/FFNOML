@@ -91,7 +91,9 @@ class MultiScaleVertical(nn.Module):
         self.act = nn.GELU()
 
     def forward(self, x):
-        y = self.k3(x) + self.k5(x) + self.k9(x)
+        y = self.k3(x)
+        y += self.k5(x)
+        y += self.k9(x)
         return self.act(self.gn(y))
 
 
