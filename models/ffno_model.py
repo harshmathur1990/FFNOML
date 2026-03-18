@@ -140,7 +140,7 @@ class VerticalPhysicsStack(nn.Module):
         Ncol = B * H * W
         x = x.view(Ncol, C, D)
 
-        chunk = 1024  # 🔥 tune this (2048–8192 depending on GPU)
+        chunk = 128  # 🔥 tune this (2048–8192 depending on GPU)
 
         x_out = torch.empty_like(x)
 
