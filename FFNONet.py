@@ -387,6 +387,8 @@ def build_dataset_ffno(
     if os.path.isfile(save_path):
         raise IOError(f"Output exists: {save_path}")
 
+    cmass_grid_ref = None
+
     if stat_file is None:
         # ============================================================
         # -------- PASS 1: compute global normalization stats ---------
@@ -394,8 +396,6 @@ def build_dataset_ffno(
 
         X_stats_list = []
         Y_stats_list = []
-
-        cmass_grid_ref = None
 
         for temp, vx, vy, vz, ne, lte, nlte, rho, z in zip(
             temp_list,
@@ -418,11 +418,6 @@ def build_dataset_ffno(
                 rho, z, lte, nlte,
                 ndep=ndep
             )
-
-            if cmass_grid_ref is None:
-                cmass_grid_ref = cmass_grid
-            elif not np.allclose(cmass_grid_ref, cmass_grid):
-                raise ValueError("cmass_grid mismatch")
 
             mx, sx = compute_channel_stats(X)
             my, sy = compute_channel_stats(Y)
@@ -489,6 +484,11 @@ def build_dataset_ffno(
             rho, z, lte, nlte,
             ndep=ndep
         )
+
+        if cmass_grid_ref is None:
+                cmass_grid_ref = cmass_grid
+            elif not np.allclose(cmass_grid_ref, cmass_grid):
+                raise ValueError("cmass_grid mismatch")
 
         # ---------------- NORMALIZE HERE ----------------
         X = normalize_channels(X, mean_X, std_X)
