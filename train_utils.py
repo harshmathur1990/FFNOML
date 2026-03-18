@@ -46,31 +46,28 @@ def reduce_sum_scalar(value, device):
 
 def reduce_components(comp_sums, count, device):
     """
-    Reduce averaged component statistics across ranks.
-
+    Reduce component sums across ranks, then divide by total batch count.
     comp_sums: local sums over batches on this rank
-    count: number of local batches on this rank
+    count: local number of batches on this rank
     """
-    if count == 0:
-        return {}
-
     out = {}
+
+    total_count = torch.tensor(float(count), device=device, dtype=torch.float64)
+    if is_dist():
+        dist.all_reduce(total_count, op=dist.ReduceOp.SUM)
+
+    total_count = max(total_count.item(), 1.0)
 
     for k, v in comp_sums.items():
         if isinstance(v, (int, float)):
-            t = torch.tensor(v, device=device, dtype=torch.float64)
+            t = torch.tensor(float(v), device=device, dtype=torch.float64)
         elif isinstance(v, torch.Tensor):
             t = v.detach().to(device=device, dtype=torch.float64)
         else:
-            # skip non-numeric entries like atom_names
             continue
 
         if is_dist():
             dist.all_reduce(t, op=dist.ReduceOp.SUM)
-
-        total_count = torch.tensor(float(count), device=device, dtype=torch.float64)
-        if is_dist():
-            dist.all_reduce(total_count, op=dist.ReduceOp.SUM)
 
         t = t / total_count
 
@@ -124,9 +121,9 @@ def flatten_columns_T(T):
     return T.permute(0, 2, 3, 1).reshape(B * Ny * Nx, Nz)
 
 
-def _accumulate_components(comp_sums, components):
+def _accumulate_components(comp_sums, components, weight_factor=1.0):
     """
-    Accumulate numeric component statistics.
+    Accumulate numeric component statistics with optional weighting.
     Keeps vectors such as source_per_atom as vectors.
     Skips non-numeric metadata like atom_names.
     """
@@ -147,6 +144,8 @@ def _accumulate_components(comp_sums, components):
 
         else:
             continue
+
+        v = v * weight_factor
 
         if k not in comp_sums:
             if isinstance(v, torch.Tensor):
@@ -269,17 +268,21 @@ def train_one_epoch(
         else:
             optimizer.step()
 
-        running += loss.item()
-        n_batches += 1
+        running += loss.item() * pred.shape[0]   # number of columns
+        n_batches += pred.shape[0]
 
-        _accumulate_components(comp_sums, components)
+        weight_factor = pred.shape[0]
+        _accumulate_components(comp_sums, components, weight_factor=weight_factor)
 
         if is_main_process():
-            postfix = _make_postfix(loss.item(), lr, device, components)
+            avg_so_far = running / max(1, n_batches)
+            postfix = _make_postfix(avg_so_far, lr, device, components)
             pbar.set_postfix(postfix)
 
-    local_avg_loss = running / max(1, n_batches)
-    global_avg_loss = reduce_mean_scalar(local_avg_loss, device)
+    global_running = reduce_sum_scalar(running, device)
+    global_batches = reduce_sum_scalar(n_batches, device)
+
+    global_avg_loss = global_running / max(1, global_batches)
     global_comp = reduce_components(comp_sums, n_batches, device)
 
     return global_avg_loss, global_comp
@@ -334,13 +337,15 @@ def validate(
                     tscale=tscale
                 )
 
-            running += loss.item()
-            n_batches += 1
+            running += loss.item() * pred.shape[0]   # number of columns
+            n_batches += pred.shape[0]
 
-            _accumulate_components(comp_sums, components)
+            weight_factor = pred.shape[0]
+            _accumulate_components(comp_sums, components, weight_factor=weight_factor)
 
             if is_main_process():
-                postfix = {"loss": f"{loss.item():.2e}"}
+                avg_so_far = running / max(1, n_batches)
+                postfix = {"loss": f"{avg_so_far:.2e}"}
                 if components is not None and isinstance(components, dict):
                     if "data" in components:
                         v = components["data"]
@@ -350,8 +355,10 @@ def validate(
                         postfix["L2"] = f"{float(v.item() if torch.is_tensor(v) else v):.2e}"
                 pbar.set_postfix(postfix)
 
-    local_avg_loss = running / max(1, n_batches)
-    global_avg_loss = reduce_mean_scalar(local_avg_loss, device)
+    global_running = reduce_sum_scalar(running, device)
+    global_batches = reduce_sum_scalar(n_batches, device)
+
+    global_avg_loss = global_running / max(1, global_batches)
     global_comp = reduce_components(comp_sums, n_batches, device)
 
     return global_avg_loss, global_comp
