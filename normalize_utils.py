@@ -1,4 +1,5 @@
 import numpy as np
+import h5py
 
 
 def compute_channel_stats(X):
