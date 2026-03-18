@@ -149,10 +149,12 @@ MODEL_CONFIG = dict(
 
     n_layers=6,
 
-    z_kernel=9,
-
     dropout=0.2,
-    mlp_expansion=2
+    mlp_expansion=2,
+    vertical_hidden=256,
+    padding=0,
+    checkpoint_blocks=True,
+    use_gating=True
 )
 
 
