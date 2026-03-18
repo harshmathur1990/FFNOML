@@ -305,46 +305,91 @@ class FFNOBlock3d(nn.Module):
         if use_gating:
             self.alpha_spec = nn.Parameter(torch.tensor(1.0))
             self.alpha_pw   = nn.Parameter(torch.tensor(1.0))
-            self.alpha_vert = nn.Parameter(torch.tensor(0.5))
-            self.alpha_mlp  = nn.Parameter(torch.tensor(0.5))
+            self.alpha_vert = nn.Parameter(torch.tensor(1.0))
+            self.alpha_mlp  = nn.Parameter(torch.tensor(1.0))
         else:
             self.register_buffer("alpha_spec", torch.tensor(1.0))
             self.register_buffer("alpha_pw",   torch.tensor(1.0))
             self.register_buffer("alpha_vert", torch.tensor(1.0))
             self.register_buffer("alpha_mlp",  torch.tensor(1.0))
 
-    def forward(self, x, dx, dy):
-        # ------------------------------------------------
+    def forward(self, x, dx, dy, collect_stats=False):
+        stats = {} if collect_stats else None
+
+        # -------------------------------
         # Horizontal operator
-        # ------------------------------------------------
-        y = (
-            self.alpha_spec * self.spec_hw(x, dx=dx, dy=dy)
-            + self.alpha_pw * self.pw_hw(x)
-        )
+        # -------------------------------
+        spec = self.spec_hw(x, dx=dx, dy=dy)
+        pw   = self.pw_hw(x)
+
+        y = self.alpha_spec * spec + self.alpha_pw * pw
+
+        if collect_stats:
+            with torch.no_grad():
+                stats["spec_norm"] = spec.norm().item()
+                stats["pw_norm"]   = pw.norm().item()
+                stats["alpha_spec"] = float(self.alpha_spec.item())
+                stats["alpha_pw"]   = float(self.alpha_pw.item())
+
         y = self.norm1(y)
         y = self.act(y)
         y = self.drop(y)
+
+        x_before = x
         x = x + y
 
-        # ------------------------------------------------
-        # Vertical physics stack
-        # ------------------------------------------------
-        z = self.alpha_vert * self.vertical(x)
+        if collect_stats:
+            with torch.no_grad():
+                stats["horizontal_update"] = (x - x_before).norm().item()
+
+        # -------------------------------
+        # Vertical physics
+        # -------------------------------
+        vert = self.vertical(x)
+        z = self.alpha_vert * vert
+
+        if collect_stats:
+            with torch.no_grad():
+                stats["vertical_norm"] = vert.norm().item()
+                stats["alpha_vert"]    = float(self.alpha_vert.item())
+
         z = self.norm2(z)
         z = self.act(z)
         z = self.drop(z)
+
+        x_before = x
         x = x + z
 
-        # ------------------------------------------------
-        # Local nonlinear refinement
-        # ------------------------------------------------
-        m = self.alpha_mlp * self.mlp(x)
+        if collect_stats:
+            with torch.no_grad():
+                stats["vertical_update"] = (x - x_before).norm().item()
+
+        # -------------------------------
+        # MLP refinement
+        # -------------------------------
+        mlp_out = self.mlp(x)
+        m = self.alpha_mlp * mlp_out
+
+        if collect_stats:
+            with torch.no_grad():
+                stats["mlp_norm"] = mlp_out.norm().item()
+                stats["alpha_mlp"] = float(self.alpha_mlp.item())
+
         m = self.norm3(m)
         m = self.act(m)
         m = self.drop(m)
+
+        x_before = x
         x = x + m
 
-        return x
+        if collect_stats:
+            with torch.no_grad():
+                stats["mlp_update"] = (x - x_before).norm().item()
+
+        if collect_stats:
+            return x, stats
+        else:
+            return x
 
 
 # ============================================================
@@ -400,28 +445,32 @@ class FFNO3D(nn.Module):
         self.proj2 = nn.Conv3d(width * 2, out_channels, kernel_size=1)
         self.act = nn.GELU()
 
-    def _run_block(self, blk, x, dx, dy):
-        if self.checkpoint_blocks and self.training:
+    def _run_block(self, blk, x, dx, dy, collect_stats=False):
+        if self.checkpoint_blocks and self.training and not collect_stats:
             return checkpoint(
-                lambda t: blk(t, dx=dx, dy=dy),
+                lambda t: blk(t, dx=dx, dy=dy, collect_stats=False),
                 x,
                 use_reentrant=False,
             )
         else:
-            return blk(x, dx=dx, dy=dy)
+            return blk(x, dx=dx, dy=dy, collect_stats=collect_stats)
 
-    def forward(self, x, dx, dy):
-        # x: [B, Cin, D, H, W]
+    def forward(self, x, dx, dy, collect_stats=False):
+        all_stats = [] if collect_stats else None
 
         if self.padding > 0:
             p = self.padding
-            # Pad W, then H, then D
             x = F.pad(x, (p, p, p, p, p, p), mode="replicate")
 
         x = self.lift(x)
 
-        for blk in self.blocks:
-            x = self._run_block(blk, x, dx, dy)
+        for i, blk in enumerate(self.blocks):
+            if collect_stats:
+                x, s = self._run_block(blk, x, dx, dy, collect_stats=True)
+                s["layer"] = i
+                all_stats.append(s)
+            else:
+                x = self._run_block(blk, x, dx, dy, collect_stats=False)
 
         x = self.act(self.proj1(x))
         y = self.proj2(x)
@@ -430,4 +479,7 @@ class FFNO3D(nn.Module):
             p = self.padding
             y = y[:, :, p:-p, p:-p, p:-p]
 
-        return y
+        if collect_stats:
+            return y, all_stats
+        else:
+            return y

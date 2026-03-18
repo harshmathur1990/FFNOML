@@ -110,6 +110,44 @@ def flatten_columns_T(T):
     return T.permute(0, 2, 3, 1).reshape(B * Ny * Nx, Nz)
 
 
+def _accumulate_model_stats(stats_sums, stats_list, weight_factor=1.0):
+    """
+    stats_list: list of dicts, typically one dict per block/layer.
+    Accumulates numeric stats across validation batches.
+    """
+    if stats_list is None:
+        return
+
+    for layer_stats in stats_list:
+        if not isinstance(layer_stats, dict):
+            continue
+
+        for k, v in layer_stats.items():
+            if k == "layer":
+                continue
+
+            if isinstance(v, torch.Tensor):
+                v = v.detach()
+                if v.ndim == 0:
+                    v = v.item()
+                else:
+                    v = v.to(dtype=torch.float64).cpu()
+            elif isinstance(v, (int, float)):
+                v = float(v)
+            else:
+                continue
+
+            v = v * weight_factor
+
+            if k not in stats_sums:
+                if isinstance(v, torch.Tensor):
+                    stats_sums[k] = v.clone()
+                else:
+                    stats_sums[k] = v
+            else:
+                stats_sums[k] += v
+
+
 def _accumulate_components(comp_sums, components, weight_factor=1.0):
     """
     Accumulate numeric component statistics with optional weighting.
@@ -179,6 +217,20 @@ def _make_postfix(loss, lr, device, components):
                 postfix[n] = f"{float(spa[j]):.2e}"
 
     return postfix
+
+
+def save_epoch_stats(stats, epoch, save_dir):
+    if not is_main_process():
+        return
+
+    os.makedirs(save_dir, exist_ok=True)
+    path = os.path.join(save_dir, f"epoch_{epoch:04d}_stats.pt")
+
+    payload = {
+        "epoch": epoch,
+        "stats": stats,
+    }
+    torch.save(payload, path)
 
 
 def train_one_epoch(
@@ -308,6 +360,8 @@ def validate(
 
     running_comp = {}
 
+    model_stats_sums = {}
+
     pbar = tqdm(
         loader,
         desc="val",
@@ -328,7 +382,7 @@ def validate(
             T = extract_temperature(x, tscale=tscale)
 
             with torch.amp.autocast("cuda", enabled=(amp and str(device).startswith("cuda"))):
-                pred = model(x, dx, dy)
+                pred, stats = model(x, dx, dy, collect_stats=True)
 
                 pred = flatten_columns_logb(pred)
                 y = flatten_columns_logb(y)
@@ -354,6 +408,8 @@ def validate(
             # local running (for tqdm)
             _accumulate_components(running_comp, components, weight_factor=weight_factor)
 
+            _accumulate_model_stats(model_stats_sums, stats, weight_factor=pred.shape[0])
+
             if is_main_process():
                 avg_so_far = running / max(1, n_columns)
 
@@ -361,7 +417,8 @@ def validate(
                 for k, v in running_comp.items():
                     avg_comp[k] = v / max(1, n_columns)
 
-                postfix = _make_postfix(avg_so_far, device, avg_comp)
+                postfix = _make_postfix(avg_so_far, None, device, avg_comp)
+
                 pbar.set_postfix(postfix)
 
     global_running = reduce_sum_scalar(running, device)
@@ -370,7 +427,9 @@ def validate(
     global_avg_loss = global_running / max(1, global_batches)
     global_comp = reduce_components(comp_sums, n_columns, device)
 
-    return global_avg_loss, global_comp
+    global_model_stats = reduce_components(model_stats_sums, n_columns, device)
+
+    return global_avg_loss, global_comp, global_model_stats
 
 
 def save_checkpoint_fsdp(
@@ -466,7 +525,7 @@ def train(
             if hasattr(val_loader, "sampler") and hasattr(val_loader.sampler, "set_epoch"):
                 val_loader.sampler.set_epoch(epoch)
 
-            val_loss, val_comp = validate(
+            val_loss, val_comp, val_stats = validate(
                 model=model,
                 loader=val_loader,
                 loss_fn=loss_fn,
@@ -476,6 +535,8 @@ def train(
             )
 
             improved = (best_val - val_loss) > min_delta
+
+            save_epoch_stats(val_stats, epoch, save_dir=save_path + "_stats")
 
             if improved:
                 best_val = val_loss
