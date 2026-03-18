@@ -406,7 +406,7 @@ class NLTECompositeLoss(nn.Module):
         data_loss_func,
         atom_names=["H", "Ca"], 
         lam=1e-1,
-        lam_S=1e-1,
+        lam_S=1e-2,
         min_stride=2,
         max_frac=0.25,
         delta=1e-1,
@@ -560,16 +560,16 @@ class NLTECompositeLoss(nn.Module):
 
 
             # ---- store loss, do NOT sum yet ----
-            # L_atom = self.data_loss(x_pred, x_true)
+            L_atom = self.data_loss(x_pred, x_true)
 
-            x_pred_safe = torch.clamp(x_pred, min=-30.0, max=30.0)
-            x_true_safe = torch.clamp(x_true, min=-30.0, max=30.0)
+            # x_pred_safe = torch.clamp(x_pred, min=-30.0, max=30.0)
+            # x_true_safe = torch.clamp(x_true, min=-30.0, max=30.0)
 
-            y_pred = torch.expm1(x_pred_safe)
-            y_true = torch.expm1(x_true_safe)
+            # y_pred = torch.expm1(x_pred_safe)
+            # y_true = torch.expm1(x_true_safe)
 
-            rel = (y_pred - y_true) / (torch.abs(y_true) + 1e-3)
-            L_atom = (rel ** 2).mean()
+            # rel = (y_pred - y_true) / (torch.abs(y_true) + 1e-3)
+            # L_atom = (rel ** 2).mean()
             
             if not torch.isfinite(L_atom):
                 print(f"[PHYSICS WARNING] Atom {i} produced non-finite loss: {L_atom.item()}")
