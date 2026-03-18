@@ -42,12 +42,12 @@ def _prepare_input_features(temp, vx, vy, vz, ne, rho, tscale=1):
     """
     return np.stack(
         [
-            np.log10(temp) / tscale,
-            vx / tscale / 10,
-            vy / tscale / 10,
-            vz / tscale / 10,
-            np.log10(ne) / tscale / 10,
-            np.log10(rho) / tscale / 10,
+            np.log10(temp),
+            vx / 100,
+            vy / 100,
+            vz / 100,
+            np.log10(ne),
+            np.log10(rho),
         ],
         axis=-1,
     )
@@ -58,11 +58,11 @@ def _compute_departure_coefficients(lte, nlte, eps=1e-30, tscale=1):
     lte/nlte: [nx, ny, nz, nlev] or [nx, ny, nz, Cout]
     return: log10(nlte/lte)
     """
-    return np.log10((nlte + eps) / (lte + eps)) / tscale / 10
+    return np.log10((nlte + eps) / (lte + eps))
 
 
 def invert_log_departure(pred_log, tscale=1):
-    return torch.pow(10.0, pred_log * tscale * 10)
+    return torch.pow(10.0, pred_log)
 
 
 def _make_inputs_ch_first(

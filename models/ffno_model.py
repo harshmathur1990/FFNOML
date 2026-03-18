@@ -26,11 +26,15 @@ def _to_spacing_value(spacing, x):
     raise TypeError(f"Unsupported spacing type: {type(spacing)}")
 
 
+# def _gn(channels, max_groups=8):
+#     g = min(max_groups, channels)
+#     while g > 1 and channels % g != 0:
+#         g -= 1
+#     return nn.GroupNorm(g, channels)
+
+
 def _gn(channels, max_groups=8):
-    g = min(max_groups, channels)
-    while g > 1 and channels % g != 0:
-        g -= 1
-    return nn.GroupNorm(g, channels)
+    return nn.Identity()
 
 
 # ============================================================

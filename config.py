@@ -151,7 +151,7 @@ MODEL_CONFIG = dict(
 
     dropout=0.2,
     mlp_expansion=2,
-    vertical_hidden=256,
+    vertical_hidden=64,
     padding=0,
     checkpoint_blocks=True,
     use_gating=True
@@ -194,4 +194,4 @@ CUDA = DEVICE == "cuda"
 TILED = True
 
 
-TENSOR_SCALE = 100.0
+TENSOR_SCALE = 1.0

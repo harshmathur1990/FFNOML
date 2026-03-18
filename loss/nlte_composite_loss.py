@@ -518,8 +518,8 @@ class NLTECompositeLoss(nn.Module):
             start = level_offsets[i]
             end   = level_offsets[i+1]
 
-            logb_pred_atom = logb_pred[:, start:end, :] * tscale * 10
-            logb_true_atom = logb_true[:, start:end, :] * tscale * 10
+            logb_pred_atom = logb_pred[:, start:end, :]
+            logb_true_atom = logb_true[:, start:end, :]
 
             chi_i   = self.chi[i]
             lines_i = self.lines[i]

@@ -77,7 +77,7 @@ def extract_temperature(X, tscale):
        T: (B, Nz, H, W)
     """
     logT = X[:, 0]
-    T = 10.0 ** (logT * tscale)
+    T = 10.0 ** (logT)
     return T
 
 
