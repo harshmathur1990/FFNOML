@@ -5,17 +5,13 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
 
-# --------------------------------------------
+# ============================================================
 # Helpers
-# --------------------------------------------
+# ============================================================
 def _to_spacing_value(spacing, x):
     """
-    Convert spacing to a scalar float/tensor usable by torch.fft.fftfreq.
-
-    Accepts:
-      - python float/int
-      - 0-d torch tensor
-      - 1-element torch tensor
+    Convert spacing to scalar float usable by torch.fft.fftfreq.
+    Accepts python float/int or 0-d / 1-element tensor.
     """
     if isinstance(spacing, (float, int)):
         return float(spacing)
@@ -23,20 +19,28 @@ def _to_spacing_value(spacing, x):
     if torch.is_tensor(spacing):
         if spacing.numel() != 1:
             raise ValueError(
-                "For this spectral layer, spacing must currently be scalar "
-                "(python float/int or tensor with one element)."
+                "spacing must be scalar (float/int or tensor with one element)."
             )
         return float(spacing.detach().item())
 
     raise TypeError(f"Unsupported spacing type: {type(spacing)}")
 
 
-# --------------------------------------------
-# Pointwise MLP
-# --------------------------------------------
-class PointwiseMLP(nn.Module):
-    """Channel MLP using 1x1x1 convs."""
+def _gn(channels, max_groups=8):
+    g = min(max_groups, channels)
+    while g > 1 and channels % g != 0:
+        g -= 1
+    return nn.GroupNorm(g, channels)
 
+
+# ============================================================
+# Basic blocks
+# ============================================================
+class PointwiseMLP(nn.Module):
+    """
+    Channel MLP via 1x1x1 convs.
+    Input/Output: [B, C, D, H, W]
+    """
     def __init__(self, width, expansion=2, dropout=0.0):
         super().__init__()
         hidden = width * expansion
@@ -53,29 +57,120 @@ class PointwiseMLP(nn.Module):
         return x
 
 
-# --------------------------------------------
-# Factorized Spectral Convs
-# --------------------------------------------
+class Residual1DBlock(nn.Module):
+    """
+    Residual block along depth only.
+    Input/Output: [Ncol, C, D]
+    """
+    def __init__(self, ch, k=5):
+        super().__init__()
+        p = k // 2
+        self.conv1 = nn.Conv1d(ch, ch, kernel_size=k, padding=p, bias=False)
+        self.gn1 = _gn(ch)
+        self.conv2 = nn.Conv1d(ch, ch, kernel_size=k, padding=p, bias=False)
+        self.gn2 = _gn(ch)
+        self.act = nn.GELU()
+
+    def forward(self, x):
+        y = self.act(self.gn1(self.conv1(x)))
+        y = self.gn2(self.conv2(y))
+        return self.act(x + y)
+
+
+class MultiScaleVertical(nn.Module):
+    """
+    Parallel depth-only kernels for different vertical coupling scales.
+    Input/Output: [Ncol, C, D]
+    """
+    def __init__(self, ch):
+        super().__init__()
+        self.k3 = nn.Conv1d(ch, ch, kernel_size=3, padding=1, bias=False)
+        self.k5 = nn.Conv1d(ch, ch, kernel_size=5, padding=2, bias=False)
+        self.k9 = nn.Conv1d(ch, ch, kernel_size=9, padding=4, bias=False)
+        self.gn = _gn(ch)
+        self.act = nn.GELU()
+
+    def forward(self, x):
+        y = self.k3(x) + self.k5(x) + self.k9(x)
+        return self.act(self.gn(y))
+
+
+class VerticalPhysicsStack(nn.Module):
+    """
+    Strong vertical mixer operating independently on each (y, x) column.
+
+    Input/Output: [B, C, D, H, W]
+
+    Strategy:
+      1. project channels
+      2. reshape each (y,x) column into a batch item
+      3. run deep multi-scale residual 1D depth network
+      4. reshape back
+      5. project back to original width
+    """
+    def __init__(self, channels, hidden=256, dropout=0.0):
+        super().__init__()
+
+        self.in_proj = nn.Sequential(
+            nn.Conv1d(channels, hidden, kernel_size=1, bias=False),
+            _gn(hidden),
+            nn.GELU(),
+        )
+
+        self.vertical_net = nn.Sequential(
+            MultiScaleVertical(hidden),
+            Residual1DBlock(hidden, k=5),
+            Residual1DBlock(hidden, k=5),
+            MultiScaleVertical(hidden),
+            Residual1DBlock(hidden, k=5),
+        )
+
+        self.out_proj = nn.Conv1d(hidden, channels, kernel_size=1)
+
+        self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+
+    def forward(self, x):
+        # x: [B, C, D, H, W]
+        B, C, D, H, W = x.shape
+
+        # [B, C, D, H, W] -> [B, H, W, C, D]
+        x = x.permute(0, 3, 4, 1, 2).contiguous()
+
+        # treat each column independently: [B*H*W, C, D]
+        x = x.view(B * H * W, C, D)
+
+        x = self.in_proj(x)
+        x = self.vertical_net(x)
+        x = self.drop(x)
+        x = self.out_proj(x)
+
+        # back to volume: [B, H, W, C, D]
+        x = x.view(B, H, W, C, D)
+
+        # [B, C, D, H, W]
+        x = x.permute(0, 3, 4, 1, 2).contiguous()
+
+        return x
+
+
+# ============================================================
+# Spectral conv in horizontal plane
+# ============================================================
 class SpectralConv2dFull(nn.Module):
     """
-    Full-spectrum metric-aware spectral convolution (NO truncation).
+    Full-spectrum metric-aware spectral convolution over (H, W),
+    applied independently at each depth plane.
 
-    Differences vs original:
-      - uses ALL Fourier modes
-      - no zeroing of high frequencies
-      - weights are global (Cin x Cout)
-      - frequency-dependent gating handles spectral variation
+    Input/Output: [B, C, D, H, W]
     """
-
     def __init__(self, in_channels, out_channels, hidden=32):
         super().__init__()
 
         self.in_channels = in_channels
         self.out_channels = out_channels
 
-        scale = 1.0 / (in_channels * out_channels)
+        scale = 1.0 / max(1, in_channels * out_channels)
 
-        # global complex channel mixing
         self.weight_real = nn.Parameter(
             scale * torch.randn(in_channels, out_channels, dtype=torch.float32)
         )
@@ -83,8 +178,6 @@ class SpectralConv2dFull(nn.Module):
             scale * torch.randn(in_channels, out_channels, dtype=torch.float32)
         )
 
-        # (kx, ky) -> complex gate
-        # remove useless sign(kx)
         self.freq_mlp = nn.Sequential(
             nn.Linear(4, hidden),
             nn.GELU(),
@@ -94,6 +187,7 @@ class SpectralConv2dFull(nn.Module):
         )
 
     def forward(self, x, dx, dy):
+        # x: [B, Cin, D, H, W]
         B, Cin, D, H, W = x.shape
 
         dx = _to_spacing_value(dx, x)
@@ -104,187 +198,188 @@ class SpectralConv2dFull(nn.Module):
         with torch.amp.autocast("cuda", enabled=False):
             x32 = x.float()
 
+            # FFT only on horizontal plane
             x_ft = torch.fft.rfft2(x32, dim=(-2, -1))
-            x_ft_real = x_ft.real
-            x_ft_imag = x_ft.imag
+            xr = x_ft.real
+            xi = x_ft.imag
 
-            # full frequencies (NO truncation)
             ky = torch.fft.fftfreq(H, d=dy, device=x.device)
             kx = torch.fft.rfftfreq(W, d=dx, device=x.device)
 
-            ky = 2 * math.pi * ky
-            kx = 2 * math.pi * kx
+            ky = 2.0 * math.pi * ky
+            kx = 2.0 * math.pi * kx
 
-            k_scale = 1e5   # tune this
-            kx = kx * k_scale
+            # rescale for stable MLP inputs
+            k_scale = 1e5
             ky = ky * k_scale
+            kx = kx * k_scale
 
             ky_grid, kx_grid = torch.meshgrid(ky, kx, indexing="ij")
-
             k_mag = torch.sqrt(kx_grid**2 + ky_grid**2 + 1e-12)
 
-            k_feat = torch.stack([
-                kx_grid,
-                ky_grid,
-                k_mag,
-                torch.sign(ky_grid)
-            ], dim=-1)
+            k_feat = torch.stack(
+                [
+                    kx_grid,
+                    ky_grid,
+                    k_mag,
+                    torch.sign(ky_grid),
+                ],
+                dim=-1,
+            )  # [H, Wf, 4]
 
-            gate = self.freq_mlp(k_feat)
+            gate = self.freq_mlp(k_feat)  # [H, Wf, 2]
             gate_real = gate[..., 0]
             gate_imag = gate[..., 1]
 
-            # global complex weights
-            wr = self.weight_real[:, :, None, None]
+            wr = self.weight_real[:, :, None, None]   # [Cin, Cout, 1, 1]
             wi = self.weight_imag[:, :, None, None]
 
-            gr = gate_real[None, None, :, :]
+            gr = gate_real[None, None, :, :]          # [1, 1, H, Wf]
             gi = gate_imag[None, None, :, :]
 
             w_real = wr * gr - wi * gi
             w_imag = wr * gi + wi * gr
 
-            # complex multiplication
-            a = x_ft_real
-            b = x_ft_imag
-            c = w_real
-            d = w_imag
-
             out_ft_real = (
-                torch.einsum("b i d y x, i o y x -> b o d y x", a, c)
-                - torch.einsum("b i d y x, i o y x -> b o d y x", b, d)
+                torch.einsum("b i d y x, i o y x -> b o d y x", xr, w_real)
+                - torch.einsum("b i d y x, i o y x -> b o d y x", xi, w_imag)
             )
             out_ft_imag = (
-                torch.einsum("b i d y x, i o y x -> b o d y x", a, d)
-                + torch.einsum("b i d y x, i o y x -> b o d y x", b, c)
+                torch.einsum("b i d y x, i o y x -> b o d y x", xr, w_imag)
+                + torch.einsum("b i d y x, i o y x -> b o d y x", xi, w_real)
             )
 
             out_ft = torch.complex(out_ft_real, out_ft_imag)
-
             y = torch.fft.irfft2(out_ft, s=(H, W), dim=(-2, -1))
 
         return y.to(orig_dtype)
 
 
-# --------------------------------------------
-# Depth mixer
-# --------------------------------------------
-class DepthMixer1d(nn.Module):
+# ============================================================
+# FFNO block with strong vertical physics
+# ============================================================
+class FFNOBlock3d(nn.Module):
     """
-    Local 1D convolution along depth (z) for vertical coupling.
-    Operates on each (y,x) column independently.
+    Hybrid FFNO block:
+      - global spectral mixing in (H, W)
+      - pointwise local channel mixing
+      - strong vertical physics stack along D
+      - pointwise MLP refinement
 
     Input/Output: [B, C, D, H, W]
     """
-
-    def __init__(self, channels, k=7, dropout=0.0):
-        super().__init__()
-        p = k // 2
-        self.conv = nn.Conv3d(
-            channels,
-            channels,
-            kernel_size=(k, 1, 1),
-            padding=(p, 0, 0),
-        )
-        self.act = nn.GELU()
-        self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
-
-    def forward(self, x):
-        x = self.conv(x)
-        x = self.act(x)
-        x = self.drop(x)
-        return x
-
-
-# --------------------------------------------
-# FFNO block
-# --------------------------------------------
-class FFNOBlock3d(nn.Module):
-    """
-    Factorized block:
-      - global spectral mixing in (H,W) per depth plane
-      - local vertical mixing in z via conv
-      - residual + pointwise MLP
-    """
-
     def __init__(
         self,
         width,
-        z_kernel=7,
         dropout=0.0,
         mlp_expansion=2,
+        vertical_hidden=256,
+        use_gating=True,
     ):
         super().__init__()
 
-        self.spec_hw = SpectralConv2dFull(
-            width,
-            width
-        )
+        self.spec_hw = SpectralConv2dFull(width, width)
         self.pw_hw = nn.Conv3d(width, width, kernel_size=1)
 
-        self.z_mix = DepthMixer1d(width, k=z_kernel, dropout=dropout)
+        self.vertical = VerticalPhysicsStack(
+            channels=width,
+            hidden=vertical_hidden,
+            dropout=dropout,
+        )
+
         self.mlp = PointwiseMLP(
             width,
             expansion=mlp_expansion,
             dropout=dropout,
         )
 
+        self.norm1 = _gn(width)
+        self.norm2 = _gn(width)
+        self.norm3 = _gn(width)
+
         self.act = nn.GELU()
         self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
-        self.alpha_spec = nn.Parameter(torch.tensor([1.0]))
-        self.alpha_pw   = nn.Parameter(torch.tensor([1.0]))
-        self.alpha_z    = nn.Parameter(torch.tensor([1.0]))
-        self.alpha_mlp  = nn.Parameter(torch.tensor([1.0]))
+        self.use_gating = use_gating
+
+        if use_gating:
+            self.alpha_spec = nn.Parameter(torch.tensor(1.0))
+            self.alpha_pw   = nn.Parameter(torch.tensor(1.0))
+            self.alpha_vert = nn.Parameter(torch.tensor(0.5))
+            self.alpha_mlp  = nn.Parameter(torch.tensor(0.5))
+        else:
+            self.register_buffer("alpha_spec", torch.tensor(1.0))
+            self.register_buffer("alpha_pw",   torch.tensor(1.0))
+            self.register_buffer("alpha_vert", torch.tensor(1.0))
+            self.register_buffer("alpha_mlp",  torch.tensor(1.0))
 
     def forward(self, x, dx, dy):
-        # HW spectral + pointwise, residual
-        # y = self.spec_hw(x, dx=dx, dy=dy) + self.pw_hw(x)
-        y = self.alpha_spec * self.spec_hw(x, dx=dx, dy=dy) + \
-            self.alpha_pw   * self.pw_hw(x)
+        # ------------------------------------------------
+        # Horizontal operator
+        # ------------------------------------------------
+        y = (
+            self.alpha_spec * self.spec_hw(x, dx=dx, dy=dy)
+            + self.alpha_pw * self.pw_hw(x)
+        )
+        y = self.norm1(y)
         y = self.act(y)
         y = self.drop(y)
         x = x + y
 
-        # vertical local mixing, residual
-        z = self.alpha_z * self.z_mix(x)
+        # ------------------------------------------------
+        # Vertical physics stack
+        # ------------------------------------------------
+        z = self.alpha_vert * self.vertical(x)
+        z = self.norm2(z)
+        z = self.act(z)
+        z = self.drop(z)
         x = x + z
 
+        # ------------------------------------------------
+        # Local nonlinear refinement
+        # ------------------------------------------------
         m = self.alpha_mlp * self.mlp(x)
+        m = self.norm3(m)
+        m = self.act(m)
+        m = self.drop(m)
         x = x + m
 
         return x
 
 
-# --------------------------------------------
-# Full FFNO model
-# --------------------------------------------
+# ============================================================
+# Full model
+# ============================================================
 class FFNO3D(nn.Module):
     """
-    RT-friendly Factorized FNO:
-      - full volume in/out
-      - spectral in (x,y), vertical conv in z
+    Updated hybrid FFNO for RT-like 3D volumes.
 
     Input:  [B, Cin, D, H, W]
     Output: [B, Cout, D, H, W]
 
-    Forward requires dx and dy so the spectral operator is metric-aware.
-    """
+    Horizontal nonlocal coupling:
+        spectral operator over (H, W)
 
+    Vertical physics:
+        deep multi-scale residual column network over D
+    """
     def __init__(
         self,
         in_channels,
         out_channels,
         width=64,
         n_layers=6,
-        z_kernel=9,
         dropout=0.1,
         mlp_expansion=2,
+        vertical_hidden=256,
         padding=0,
+        checkpoint_blocks=True,
+        use_gating=True,
     ):
         super().__init__()
 
         self.padding = padding
+        self.checkpoint_blocks = checkpoint_blocks
 
         self.lift = nn.Conv3d(in_channels, width, kernel_size=1)
 
@@ -292,9 +387,10 @@ class FFNO3D(nn.Module):
             [
                 FFNOBlock3d(
                     width=width,
-                    z_kernel=z_kernel,
                     dropout=dropout,
                     mlp_expansion=mlp_expansion,
+                    vertical_hidden=vertical_hidden,
+                    use_gating=use_gating,
                 )
                 for _ in range(n_layers)
             ]
@@ -304,17 +400,28 @@ class FFNO3D(nn.Module):
         self.proj2 = nn.Conv3d(width * 2, out_channels, kernel_size=1)
         self.act = nn.GELU()
 
+    def _run_block(self, blk, x, dx, dy):
+        if self.checkpoint_blocks and self.training:
+            return checkpoint(
+                lambda t: blk(t, dx=dx, dy=dy),
+                x,
+                use_reentrant=False,
+            )
+        else:
+            return blk(x, dx=dx, dy=dy)
+
     def forward(self, x, dx, dy):
         # x: [B, Cin, D, H, W]
 
         if self.padding > 0:
             p = self.padding
+            # Pad W, then H, then D
             x = F.pad(x, (p, p, p, p, p, p), mode="replicate")
 
         x = self.lift(x)
 
         for blk in self.blocks:
-            x = checkpoint(lambda t: blk(t, dx=dx, dy=dy), x, use_reentrant=False)
+            x = self._run_block(blk, x, dx, dy)
 
         x = self.act(self.proj1(x))
         y = self.proj2(x)

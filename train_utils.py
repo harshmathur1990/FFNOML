@@ -23,17 +23,6 @@ def is_main_process():
     return get_rank() == 0
 
 
-def reduce_mean_scalar(value, device):
-    """
-    Average a python float across all ranks.
-    """
-    t = torch.tensor(float(value), device=device, dtype=torch.float64)
-    if is_dist():
-        dist.all_reduce(t, op=dist.ReduceOp.SUM)
-        t /= get_world_size()
-    return t.item()
-
-
 def reduce_sum_scalar(value, device):
     """
     Sum a python float across all ranks.
@@ -159,8 +148,10 @@ def _accumulate_components(comp_sums, components, weight_factor=1.0):
 def _make_postfix(loss, lr, device, components):
     postfix = {
         "loss": f"{loss:.2e}",
-        "lr": f"{lr:.1e}",
     }
+
+    if lr is not None:
+        postfix["lr"] = f"{lr:.1e}"
 
     if isinstance(device, str) and device.startswith("cuda"):
         mem = torch.cuda.memory_allocated(device) / 1024**3
@@ -206,8 +197,10 @@ def train_one_epoch(
 
     model.train()
     running = 0.0
-    n_batches = 0
+    n_columns = 0
     comp_sums = {}
+
+    running_comp = {}
 
     lr = optimizer.param_groups[0]["lr"]
 
@@ -269,21 +262,32 @@ def train_one_epoch(
             optimizer.step()
 
         running += loss.item() * pred.shape[0]   # number of columns
-        n_batches += pred.shape[0]
+        n_columns += pred.shape[0]
 
         weight_factor = pred.shape[0]
+
+        # global (for epoch summary)
         _accumulate_components(comp_sums, components, weight_factor=weight_factor)
 
+        # local running (for tqdm)
+        _accumulate_components(running_comp, components, weight_factor=weight_factor)
+
         if is_main_process():
-            avg_so_far = running / max(1, n_batches)
-            postfix = _make_postfix(avg_so_far, lr, device, components)
+            avg_so_far = running / max(1, n_columns)
+
+            avg_comp = {}
+            for k, v in running_comp.items():
+                avg_comp[k] = v / max(1, n_columns)
+            
+            postfix = _make_postfix(avg_so_far, lr, device, avg_comp)
+
             pbar.set_postfix(postfix)
 
     global_running = reduce_sum_scalar(running, device)
-    global_batches = reduce_sum_scalar(n_batches, device)
+    global_batches = reduce_sum_scalar(n_columns, device)
 
     global_avg_loss = global_running / max(1, global_batches)
-    global_comp = reduce_components(comp_sums, n_batches, device)
+    global_comp = reduce_components(comp_sums, n_columns, device)
 
     return global_avg_loss, global_comp
 
@@ -299,8 +303,10 @@ def validate(
     model.eval()
 
     running = 0.0
-    n_batches = 0
+    n_columns = 0
     comp_sums = {}
+
+    running_comp = {}
 
     pbar = tqdm(
         loader,
@@ -338,28 +344,31 @@ def validate(
                 )
 
             running += loss.item() * pred.shape[0]   # number of columns
-            n_batches += pred.shape[0]
+            n_columns += pred.shape[0]
 
             weight_factor = pred.shape[0]
+
+            # global (epoch summary)
             _accumulate_components(comp_sums, components, weight_factor=weight_factor)
 
+            # local running (for tqdm)
+            _accumulate_components(running_comp, components, weight_factor=weight_factor)
+
             if is_main_process():
-                avg_so_far = running / max(1, n_batches)
-                postfix = {"loss": f"{avg_so_far:.2e}"}
-                if components is not None and isinstance(components, dict):
-                    if "data" in components:
-                        v = components["data"]
-                        postfix["L1"] = f"{float(v.item() if torch.is_tensor(v) else v):.2e}"
-                    if "source" in components:
-                        v = components["source"]
-                        postfix["L2"] = f"{float(v.item() if torch.is_tensor(v) else v):.2e}"
+                avg_so_far = running / max(1, n_columns)
+
+                avg_comp = {}
+                for k, v in running_comp.items():
+                    avg_comp[k] = v / max(1, n_columns)
+
+                postfix = _make_postfix(avg_so_far, device, avg_comp)
                 pbar.set_postfix(postfix)
 
     global_running = reduce_sum_scalar(running, device)
-    global_batches = reduce_sum_scalar(n_batches, device)
+    global_batches = reduce_sum_scalar(n_columns, device)
 
     global_avg_loss = global_running / max(1, global_batches)
-    global_comp = reduce_components(comp_sums, n_batches, device)
+    global_comp = reduce_components(comp_sums, n_columns, device)
 
     return global_avg_loss, global_comp
 
