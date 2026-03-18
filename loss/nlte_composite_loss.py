@@ -396,9 +396,6 @@ def _validate_physics_inputs(T, logb, stage="input", strict=False):
 
 
 class NLTECompositeLoss(nn.Module):
-    """
-    Total loss = WeightedMSE(log b) + lambda * zig-zag regularization on S_nu
-    """
 
     def __init__(
         self,
@@ -409,7 +406,7 @@ class NLTECompositeLoss(nn.Module):
         data_loss_func,
         atom_names=["H", "Ca"], 
         lam=1e-1,
-        lam_S=1e-2,
+        lam_S=1e-1,
         min_stride=2,
         max_frac=0.25,
         delta=1e-1,
@@ -521,8 +518,8 @@ class NLTECompositeLoss(nn.Module):
             start = level_offsets[i]
             end   = level_offsets[i+1]
 
-            logb_pred_atom = logb_pred[:, start:end, :] * tscale
-            logb_true_atom = logb_true[:, start:end, :] * tscale
+            logb_pred_atom = logb_pred[:, start:end, :] * tscale * 10
+            logb_true_atom = logb_true[:, start:end, :] * tscale * 10
 
             chi_i   = self.chi[i]
             lines_i = self.lines[i]
@@ -563,8 +560,17 @@ class NLTECompositeLoss(nn.Module):
 
 
             # ---- store loss, do NOT sum yet ----
-            L_atom = self.data_loss(x_pred, x_true)
+            # L_atom = self.data_loss(x_pred, x_true)
 
+            x_pred_safe = torch.clamp(x_pred, min=-30.0, max=30.0)
+            x_true_safe = torch.clamp(x_true, min=-30.0, max=30.0)
+
+            y_pred = torch.expm1(x_pred_safe)
+            y_true = torch.expm1(x_true_safe)
+
+            rel = (y_pred - y_true) / (torch.abs(y_true) + 1e-3)
+            L_atom = (rel ** 2).mean()
+            
             if not torch.isfinite(L_atom):
                 print(f"[PHYSICS WARNING] Atom {i} produced non-finite loss: {L_atom.item()}")
 
@@ -590,7 +596,9 @@ class NLTECompositeLoss(nn.Module):
             _check_tensor(L_S_atoms, f"L_S_atoms {rank}", True)
             _check_tensor(L_S, f"L_S {rank}", True)
 
-        L_total = L_data + (L_S / (tscale * 10))
+        # L_total = L_data + (L_S / (tscale * 10))
+
+        L_total = L_data + self.lam_S * L_S
 
         if self.print_loss:
             _check_tensor(L_total, f"L_total {rank}", True)
