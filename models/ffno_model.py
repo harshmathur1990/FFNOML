@@ -139,34 +139,36 @@ class VerticalPhysicsStack(nn.Module):
         # x: [B, C, D, H, W]
         B, C, D, H, W = x.shape
 
-        # [B, C, D, H, W] -> [B, H, W, C, D]
-        x = x.permute(0, 3, 4, 1, 2).contiguous()
+        # -> [B, H, W, C, D]
+        x = x.permute(0, 3, 4, 1, 2)   # NO contiguous
 
-        # treat each column independently: [B*H*W, C, D]
-        Ncol = B * H * W
-        x = x.view(Ncol, C, D)
+        # flatten spatial only (safe, view-like)
+        x = x.reshape(B, H * W, C, D)  # [B, HW, C, D]
 
-        chunk = 128  # 🔥 tune this (2048–8192 depending on GPU)
+        chunk = 128
 
-        x_out = torch.empty_like(x)
+        for i in range(0, H * W, chunk):
+            # take chunk across ALL batch
+            xi = x[:, i:i+chunk]              # [B, chunk, C, D]
 
-        for i in range(0, Ncol, chunk):
-            xi = x[i:i+chunk]
+            # merge batch + chunk
+            xi = xi.reshape(-1, C, D)         # [B*chunk, C, D]
 
             yi = self.in_proj(xi)
             yi = self.vertical_net(yi)
-            yi = self.drop(yi)
             yi = self.out_proj(yi)
 
-            x_out[i:i+chunk] = yi
+            # restore shape
+            yi = yi.reshape(B, -1, C, D)      # [B, chunk, C, D]
 
-        x = x_out
+            # write back
+            x[:, i:i+chunk] = yi
 
-        # back to volume: [B, H, W, C, D]
-        x = x.view(B, H, W, C, D)
+        # restore spatial
+        x = x.reshape(B, H, W, C, D)
 
-        # [B, C, D, H, W]
-        x = x.permute(0, 3, 4, 1, 2).contiguous()
+        # back to original layout
+        x = x.permute(0, 3, 4, 1, 2)   # NO contiguous
 
         return x
 
