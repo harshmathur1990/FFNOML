@@ -88,15 +88,6 @@ def flatten_columns_logb(logb):
     return logb.permute(0, 3, 4, 1, 2).reshape(B * Ny * Nx, L, Nz)
 
 
-def flatten_columns_T(T):
-    """
-    T: (B, Nz, Ny, Nx)
-    -> (B*Ny*Nx, Nz)
-    """
-    B, Nz, Ny, Nx = T.shape
-    return T.permute(0, 2, 3, 1).reshape(B * Ny * Nx, Nz)
-
-
 def _accumulate_model_stats(stats_sums, stats_list, weight_factor=1.0):
     """
     stats_list: list of dicts, typically one dict per block/layer.
@@ -265,7 +256,7 @@ def train_one_epoch(
 
             pred = flatten_columns_logb(pred)
             y = flatten_columns_logb(y)
-            T = flatten_columns_T(T)
+            x = flatten_columns_logb(x)
 
             loss, components = compute_loss(
                 pred=pred,
@@ -366,7 +357,7 @@ def validate(
 
                 pred = flatten_columns_logb(pred)
                 y = flatten_columns_logb(y)
-                T = flatten_columns_T(T)
+                x = flatten_columns_logb(x)
 
                 loss, components = compute_loss(
                     pred=pred,
