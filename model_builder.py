@@ -28,6 +28,8 @@ class ModelBuilder:
         amp=True,
         multi_gpu=False,
         debug_loss=False,
+        mean_X=0,
+        std_X=1,
         mean_Y=0,
         std_Y=1
     ):
@@ -57,6 +59,10 @@ class ModelBuilder:
         self.world_size = 1
 
         self.debug_loss = debug_loss
+
+        self.mean_X = mean_X
+
+        self.std_X = std_X
 
         self.mean_Y = mean_Y
 
@@ -130,6 +136,8 @@ class ModelBuilder:
             data_loss_func=mse_loss,
             atom_names=self.atom_names,
             debug=self.debug_loss,
+            mean_X=self.mean_X,
+            std_X=self.std_X,
             mean_Y=self.mean_Y,
             std_Y=self.std_Y
         )

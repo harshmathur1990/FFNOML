@@ -395,6 +395,29 @@ def _validate_physics_inputs(T, logb, stage="input", strict=False):
             print(msg)
 
 
+def extract_temperature(X, mean_X, std_X):
+    """
+    X: (B, C, Nz, H, W)  [normalized]
+    mean_X, std_X: [C]
+
+    returns:
+        T: (B, Nz, H, W)
+    """
+
+    # get normalized logT
+    logT_norm = X[:, 0]   # (B, Nz, H, W)
+
+    # de-normalize ONLY temperature channel
+    mean_T = mean_X[0]
+    std_T  = std_X[0]
+
+    logT = logT_norm * std_T + mean_T
+
+    T = torch.pow(10.0, logT)
+
+    return T
+
+
 class NLTECompositeLoss(nn.Module):
 
     def __init__(
@@ -412,6 +435,8 @@ class NLTECompositeLoss(nn.Module):
         delta=1e-1,
         return_components=True,
         debug=False,
+        mean_X=0,
+        std_X=1,
         mean_Y=0,
         std_Y=1
     ):
@@ -468,15 +493,22 @@ class NLTECompositeLoss(nn.Module):
 
         self.print_data_loss = True
 
+        self.register_buffer("mean_X", torch.tensor(mean_X, dtype=torch.float32))
+        self.register_buffer("std_X", torch.tensor(std_X, dtype=torch.float32))
         self.register_buffer("mean_Y", torch.tensor(mean_Y, dtype=torch.float32))
         self.register_buffer("std_Y", torch.tensor(std_Y, dtype=torch.float32))
 
     def forward(
         self,
-        T,
+        X,
         logb_pred,
         logb_true,
     ):
+
+        std_x = self.std_X.to(X.dtype)[None, :, None]
+        mean_x = self.mean_X.to(X.dtype)[None, :, None]
+        
+        T = extract_temperature(X, std_x, mean_x)
 
         if logb_pred.shape[1] != int(self.levels.sum()):
             raise ValueError(
