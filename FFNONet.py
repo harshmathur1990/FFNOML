@@ -486,9 +486,9 @@ def build_dataset_ffno(
         )
 
         if cmass_grid_ref is None:
-                cmass_grid_ref = cmass_grid
-            elif not np.allclose(cmass_grid_ref, cmass_grid):
-                raise ValueError("cmass_grid mismatch")
+            cmass_grid_ref = cmass_grid
+        elif not np.allclose(cmass_grid_ref, cmass_grid):
+            raise ValueError("cmass_grid mismatch")
 
         # ---------------- NORMALIZE HERE ----------------
         X = normalize_channels(X, mean_X, std_X)
