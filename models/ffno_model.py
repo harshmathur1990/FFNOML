@@ -137,12 +137,24 @@ class VerticalPhysicsStack(nn.Module):
         x = x.permute(0, 3, 4, 1, 2).contiguous()
 
         # treat each column independently: [B*H*W, C, D]
-        x = x.view(B * H * W, C, D)
+        Ncol = B * H * W
+        x = x.view(Ncol, C, D)
 
-        x = self.in_proj(x)
-        x = self.vertical_net(x)
-        x = self.drop(x)
-        x = self.out_proj(x)
+        chunk = 1024  # 🔥 tune this (2048–8192 depending on GPU)
+
+        x_out = torch.empty_like(x)
+
+        for i in range(0, Ncol, chunk):
+            xi = x[i:i+chunk]
+
+            yi = self.in_proj(xi)
+            yi = self.vertical_net(yi)
+            yi = self.drop(yi)
+            yi = self.out_proj(yi)
+
+            x_out[i:i+chunk] = yi
+
+        x = x_out
 
         # back to volume: [B, H, W, C, D]
         x = x.view(B, H, W, C, D)
@@ -326,8 +338,8 @@ class FFNOBlock3d(nn.Module):
 
         if collect_stats:
             with torch.no_grad():
-                stats["spec_norm"] = spec.norm().item()
-                stats["pw_norm"]   = pw.norm().item()
+                stats["spec_norm"] = spec.abs().mean().item()
+                stats["pw_norm"]   = pw.abs().mean().item()
                 stats["alpha_spec"] = float(self.alpha_spec.item())
                 stats["alpha_pw"]   = float(self.alpha_pw.item())
 
@@ -340,7 +352,7 @@ class FFNOBlock3d(nn.Module):
 
         if collect_stats:
             with torch.no_grad():
-                stats["horizontal_update"] = (x - x_before).norm().item()
+                stats["horizontal_update"] = (x - x_before).abs().mean().item()
 
         # -------------------------------
         # Vertical physics
@@ -350,7 +362,7 @@ class FFNOBlock3d(nn.Module):
 
         if collect_stats:
             with torch.no_grad():
-                stats["vertical_norm"] = vert.norm().item()
+                stats["vertical_norm"] = vert.abs().mean().item()
                 stats["alpha_vert"]    = float(self.alpha_vert.item())
 
         z = self.norm2(z)
@@ -362,7 +374,7 @@ class FFNOBlock3d(nn.Module):
 
         if collect_stats:
             with torch.no_grad():
-                stats["vertical_update"] = (x - x_before).norm().item()
+                stats["vertical_update"] = (x - x_before).abs().mean().item()
 
         # -------------------------------
         # MLP refinement
@@ -372,7 +384,7 @@ class FFNOBlock3d(nn.Module):
 
         if collect_stats:
             with torch.no_grad():
-                stats["mlp_norm"] = mlp_out.norm().item()
+                stats["mlp_norm"] = mlp_out.abs().mean().item()
                 stats["alpha_mlp"] = float(self.alpha_mlp.item())
 
         m = self.norm3(m)
@@ -384,7 +396,7 @@ class FFNOBlock3d(nn.Module):
 
         if collect_stats:
             with torch.no_grad():
-                stats["mlp_update"] = (x - x_before).norm().item()
+                stats["mlp_update"] = (x - x_before).abs().mean().item()
 
         if collect_stats:
             return x, stats
