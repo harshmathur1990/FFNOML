@@ -303,15 +303,15 @@ class FFNOBlock3d(nn.Module):
         self.use_gating = use_gating
 
         if use_gating:
-            self.alpha_spec = nn.Parameter(torch.tensor(1.0))
-            self.alpha_pw   = nn.Parameter(torch.tensor(1.0))
-            self.alpha_vert = nn.Parameter(torch.tensor(1.0))
-            self.alpha_mlp  = nn.Parameter(torch.tensor(1.0))
+            self.alpha_spec = nn.Parameter(torch.ones(1))
+            self.alpha_pw   = nn.Parameter(torch.ones(1))
+            self.alpha_vert = nn.Parameter(torch.ones(1))
+            self.alpha_mlp  = nn.Parameter(torch.ones(1))
         else:
-            self.register_buffer("alpha_spec", torch.tensor(1.0))
-            self.register_buffer("alpha_pw",   torch.tensor(1.0))
-            self.register_buffer("alpha_vert", torch.tensor(1.0))
-            self.register_buffer("alpha_mlp",  torch.tensor(1.0))
+            self.register_buffer("alpha_spec", torch.ones(1))
+            self.register_buffer("alpha_pw",   torch.ones(1))
+            self.register_buffer("alpha_vert", torch.ones(1))
+            self.register_buffer("alpha_mlp",  torch.ones(1))
 
     def forward(self, x, dx, dy, collect_stats=False):
         stats = {} if collect_stats else None
