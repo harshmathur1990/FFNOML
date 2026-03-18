@@ -598,7 +598,7 @@ class NLTECompositeLoss(nn.Module):
 
         # L_total = L_data + (L_S / (tscale * 10))
 
-        L_total = L_data + self.lam_S * L_S
+        L_total = L_data #+ self.lam_S * L_S
 
         if self.print_loss:
             _check_tensor(L_total, f"L_total {rank}", True)
