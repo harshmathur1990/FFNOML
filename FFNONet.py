@@ -938,6 +938,10 @@ def ffno_predict_populations(
         dep.max().item()
     )
 
+    dep = np.transpose(dep, (0, 3, 4, 2, 1)).astype(np.float32, copy=False)
+
+    dep = dep[0]
+
     # Save
     with h5py.File(save_path, "w") as f:
         d = f.create_dataset("departure_coefficients", data=dep, compression="gzip", compression_opts=4, shuffle=True)

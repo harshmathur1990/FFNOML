@@ -375,18 +375,9 @@ function load_pred_depcoeff(pred_h5::String, pred_key::String)
     h5open(pred_h5, "r") do f
         raw = read(f[pred_key])
 
-        println("raw size = ", size(raw))
-
-        # remove batch dimension
-        raw4 = dropdims(raw; dims=5)
-
-        println("after dropdims = ", size(raw4))
-
-        # now already in correct order
-        # (nx, ny, nz, levels)
-
-        dep_coeff = PermutedDimsArray(raw4, (2, 1, 3, 4))
+        dep_coeff = PermutedDimsArray(raw, (3, 4, 2, 1))
         return dep_coeff
+
     end
 end
 
