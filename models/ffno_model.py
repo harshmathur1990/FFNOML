@@ -23,7 +23,7 @@ def _to_spacing_value(spacing, x):
     if torch.is_tensor(spacing):
         if spacing.numel() != 1:
             raise ValueError(
-                "For this spectral layer, dx and dy must currently be scalar "
+                "For this spectral layer, spacing must currently be scalar "
                 "(python float/int or tensor with one element)."
             )
         return float(spacing.detach().item())
@@ -56,57 +56,44 @@ class PointwiseMLP(nn.Module):
 # --------------------------------------------
 # Factorized Spectral Convs
 # --------------------------------------------
-class SpectralConv2dFactor(nn.Module):
+class SpectralConv2dFull(nn.Module):
     """
-    Metric-aware spectral convolution with real-valued parameters.
+    Full-spectrum metric-aware spectral convolution (NO truncation).
 
-    We store spectral weights as separate real and imaginary parts:
-        W = W_r + i W_i
-
-    and do all complex multiplications manually.
+    Differences vs original:
+      - uses ALL Fourier modes
+      - no zeroing of high frequencies
+      - weights are global (Cin x Cout)
+      - frequency-dependent gating handles spectral variation
     """
 
-    def __init__(self, in_channels, out_channels, modes_y, modes_x, hidden=32):
+    def __init__(self, in_channels, out_channels, hidden=32):
         super().__init__()
 
         self.in_channels = in_channels
         self.out_channels = out_channels
-        self.modes_y = modes_y
-        self.modes_x = modes_x
 
         scale = 1.0 / (in_channels * out_channels)
 
-        # base spectral weights: real + imag stored separately
+        # global complex channel mixing
         self.weight_real = nn.Parameter(
-            scale * torch.randn(
-                in_channels,
-                out_channels,
-                modes_y,
-                modes_x,
-                dtype=torch.float32,
-            )
+            scale * torch.randn(in_channels, out_channels, dtype=torch.float32)
         )
         self.weight_imag = nn.Parameter(
-            scale * torch.randn(
-                in_channels,
-                out_channels,
-                modes_y,
-                modes_x,
-                dtype=torch.float32,
-            )
+            scale * torch.randn(in_channels, out_channels, dtype=torch.float32)
         )
 
-        # maps (kx, ky) -> complex gate = gate_real + i gate_imag
+        # (kx, ky) -> complex gate
+        # remove useless sign(kx)
         self.freq_mlp = nn.Sequential(
-            nn.Linear(2, hidden),
+            nn.Linear(4, hidden),
             nn.GELU(),
             nn.Linear(hidden, hidden),
             nn.GELU(),
-            nn.Linear(hidden, 2),   # [real, imag]
+            nn.Linear(hidden, 2),
         )
 
     def forward(self, x, dx, dy):
-        # x: [B, Cin, D, H, W]
         B, Cin, D, H, W = x.shape
 
         dx = _to_spacing_value(dx, x)
@@ -114,75 +101,64 @@ class SpectralConv2dFactor(nn.Module):
 
         orig_dtype = x.dtype
 
-        # Keep spectral branch in fp32 for FFT stability/support
         with torch.amp.autocast("cuda", enabled=False):
             x32 = x.float()
 
-            # x_ft: complex64
             x_ft = torch.fft.rfft2(x32, dim=(-2, -1))
             x_ft_real = x_ft.real
             x_ft_imag = x_ft.imag
 
-            my = min(self.modes_y, H)
-            mx = min(self.modes_x, W // 2 + 1)
-
-            # physical frequencies
-            ky = torch.fft.fftfreq(H, d=dy, device=x.device)[:my]
-            kx = torch.fft.rfftfreq(W, d=dx, device=x.device)[:mx]
+            # full frequencies (NO truncation)
+            ky = torch.fft.fftfreq(H, d=dy, device=x.device)
+            kx = torch.fft.rfftfreq(W, d=dx, device=x.device)
 
             ky = 2 * math.pi * ky
             kx = 2 * math.pi * kx
 
-            ky_grid, kx_grid = torch.meshgrid(ky, kx, indexing="ij")
-            k_feat = torch.stack([kx_grid, ky_grid], dim=-1).float()   # [my, mx, 2]
+            k_scale = 1e5   # tune this
+            kx = kx * k_scale
+            ky = ky * k_scale
 
-            # gate: [my, mx, 2]
+            ky_grid, kx_grid = torch.meshgrid(ky, kx, indexing="ij")
+
+            k_mag = torch.sqrt(kx_grid**2 + ky_grid**2 + 1e-12)
+
+            k_feat = torch.stack([
+                kx_grid,
+                ky_grid,
+                k_mag,
+                torch.sign(ky_grid)
+            ], dim=-1)
+
             gate = self.freq_mlp(k_feat)
             gate_real = gate[..., 0]
             gate_imag = gate[..., 1]
 
-            # base weights
-            w0_real = self.weight_real[:, :, :my, :mx]   # [Cin, Cout, my, mx]
-            w0_imag = self.weight_imag[:, :, :my, :mx]
+            # global complex weights
+            wr = self.weight_real[:, :, None, None]
+            wi = self.weight_imag[:, :, None, None]
 
-            # complex multiply:
-            # (w0_real + i w0_imag) * (gate_real + i gate_imag)
-            w_real = (
-                w0_real * gate_real[None, None, :, :]
-                - w0_imag * gate_imag[None, None, :, :]
-            )
-            w_imag = (
-                w0_real * gate_imag[None, None, :, :]
-                + w0_imag * gate_real[None, None, :, :]
-            )
+            gr = gate_real[None, None, :, :]
+            gi = gate_imag[None, None, :, :]
 
-            # Allocate output Fourier coeffs as real + imag separately
-            out_ft_real = torch.zeros(
-                B, self.out_channels, D, H, W // 2 + 1,
-                device=x.device, dtype=torch.float32
-            )
-            out_ft_imag = torch.zeros(
-                B, self.out_channels, D, H, W // 2 + 1,
-                device=x.device, dtype=torch.float32
-            )
+            w_real = wr * gr - wi * gi
+            w_imag = wr * gi + wi * gr
 
-            # x_ft * weight, done manually:
-            # (a + ib)(c + id) = (ac - bd) + i(ad + bc)
-            a = x_ft_real[:, :, :, :my, :mx]
-            b = x_ft_imag[:, :, :, :my, :mx]
+            # complex multiplication
+            a = x_ft_real
+            b = x_ft_imag
             c = w_real
             d = w_imag
 
-            out_ft_real[:, :, :, :my, :mx] = (
+            out_ft_real = (
                 torch.einsum("b i d y x, i o y x -> b o d y x", a, c)
                 - torch.einsum("b i d y x, i o y x -> b o d y x", b, d)
             )
-            out_ft_imag[:, :, :, :my, :mx] = (
+            out_ft_imag = (
                 torch.einsum("b i d y x, i o y x -> b o d y x", a, d)
                 + torch.einsum("b i d y x, i o y x -> b o d y x", b, c)
             )
 
-            # Reconstruct complex tensor only for irfft2
             out_ft = torch.complex(out_ft_real, out_ft_imag)
 
             y = torch.fft.irfft2(out_ft, s=(H, W), dim=(-2, -1))
@@ -234,19 +210,15 @@ class FFNOBlock3d(nn.Module):
     def __init__(
         self,
         width,
-        modes_y,
-        modes_x,
         z_kernel=7,
         dropout=0.0,
         mlp_expansion=2,
     ):
         super().__init__()
 
-        self.spec_hw = SpectralConv2dFactor(
+        self.spec_hw = SpectralConv2dFull(
             width,
-            width,
-            modes_y,
-            modes_x,
+            width
         )
         self.pw_hw = nn.Conv3d(width, width, kernel_size=1)
 
@@ -260,19 +232,25 @@ class FFNOBlock3d(nn.Module):
         self.act = nn.GELU()
         self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
+        self.alpha_spec = nn.Parameter(torch.tensor(1.0))
+        self.alpha_pw   = nn.Parameter(torch.tensor(1.0))
+        self.alpha_z    = nn.Parameter(torch.tensor(1.0))
+        self.alpha_mlp  = nn.Parameter(torch.tensor(1.0))
+
     def forward(self, x, dx, dy):
         # HW spectral + pointwise, residual
-        y = self.spec_hw(x, dx=dx, dy=dy) + self.pw_hw(x)
+        # y = self.spec_hw(x, dx=dx, dy=dy) + self.pw_hw(x)
+        y = self.alpha_spec * self.spec_hw(x, dx=dx, dy=dy) + \
+            self.alpha_pw   * self.pw_hw(x)
         y = self.act(y)
         y = self.drop(y)
         x = x + y
 
         # vertical local mixing, residual
-        z = self.z_mix(x)
+        z = self.alpha_z * self.z_mix(x)
         x = x + z
 
-        # channel MLP, residual
-        m = self.mlp(x)
+        m = self.alpha_mlp * self.mlp(x)
         x = x + m
 
         return x
@@ -298,8 +276,6 @@ class FFNO3D(nn.Module):
         in_channels,
         out_channels,
         width=64,
-        modes_y=16,
-        modes_x=16,
         n_layers=6,
         z_kernel=9,
         dropout=0.1,
@@ -316,8 +292,6 @@ class FFNO3D(nn.Module):
             [
                 FFNOBlock3d(
                     width=width,
-                    modes_y=modes_y,
-                    modes_x=modes_x,
                     z_kernel=z_kernel,
                     dropout=dropout,
                     mlp_expansion=mlp_expansion,
