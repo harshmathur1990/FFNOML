@@ -27,7 +27,9 @@ class ModelBuilder:
         weight_decay=1e-4,
         amp=True,
         multi_gpu=False,
-        debug_loss=False
+        debug_loss=False,
+        mean_Y=0,
+        std_Y=1
     ):
 
         if model == "FFNO3D":
@@ -55,6 +57,10 @@ class ModelBuilder:
         self.world_size = 1
 
         self.debug_loss = debug_loss
+
+        self.mean_Y = mean_Y
+
+        self.std_Y = std_Y
 
         if self.multi_gpu:
             self._init_distributed()
@@ -123,7 +129,9 @@ class ModelBuilder:
             levels=self.levels,
             data_loss_func=mse_loss,
             atom_names=self.atom_names,
-            debug=self.debug_loss
+            debug=self.debug_loss,
+            mean_Y=self.mean_Y,
+            std_Y=self.std_Y
         )
 
         loss_fn = loss_fn.to(self.device)

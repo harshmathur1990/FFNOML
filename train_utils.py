@@ -68,21 +68,31 @@ def reduce_components(comp_sums, count, device):
     return out
 
 
-def extract_temperature(X, tscale):
+def extract_temperature(X, mean_X, std_X):
     """
-    X: (B, C, Nz, H, W)
-       channel 0 is log10(T)
+    X: (B, C, Nz, H, W)  [normalized]
+    mean_X, std_X: [C]
 
     returns:
-       T: (B, Nz, H, W)
+        T: (B, Nz, H, W)
     """
-    logT = X[:, 0]
-    T = 10.0 ** (logT)
+
+    # get normalized logT
+    logT_norm = X[:, 0]   # (B, Nz, H, W)
+
+    # de-normalize ONLY temperature channel
+    mean_T = mean_X[0]
+    std_T  = std_X[0]
+
+    logT = logT_norm * std_T + mean_T
+
+    T = torch.pow(10.0, logT)
+
     return T
 
 
-def compute_loss(pred, target, weight, loss_fn, T, tscale=1):
-    loss, components = loss_fn(T, pred, target, tscale=tscale)
+def compute_loss(pred, target, weight, loss_fn, T):
+    loss, components = loss_fn(T, pred, target)
 
     if weight is not None:
         loss = (loss * weight).sum() / (weight.sum() + 1e-12)
@@ -244,7 +254,6 @@ def train_one_epoch(
     num_epochs,
     amp=True,
     grad_clip=1.0,
-    tscale=1
 ):
 
     model.train()
@@ -277,7 +286,7 @@ def train_one_epoch(
         with torch.amp.autocast("cuda", enabled=(amp and str(device).startswith("cuda"))):
             pred = model(x, dx, dy)
 
-            T = extract_temperature(x, tscale=tscale)
+            T = extract_temperature(x)
 
             pred = flatten_columns_logb(pred)
             y = flatten_columns_logb(y)
@@ -288,8 +297,7 @@ def train_one_epoch(
                 target=y,
                 weight=weight,
                 loss_fn=loss_fn,
-                T=T,
-                tscale=tscale
+                T=T
             )
 
         if scaler is not None:
@@ -349,8 +357,7 @@ def validate(
     loader,
     loss_fn,
     device,
-    amp=True,
-    tscale=1
+    amp=True
 ):
     model.eval()
 
@@ -379,7 +386,7 @@ def validate(
             if weight is not None:
                 weight = weight.to(device, non_blocking=True)
 
-            T = extract_temperature(x, tscale=tscale)
+            T = extract_temperature(x)
 
             with torch.amp.autocast("cuda", enabled=(amp and str(device).startswith("cuda"))):
                 pred, stats = model(x, dx, dy, collect_stats=True)
@@ -393,8 +400,7 @@ def validate(
                     target=y,
                     weight=weight,
                     loss_fn=loss_fn,
-                    T=T,
-                    tscale=tscale
+                    T=T
                 )
 
             running += loss.item() * pred.shape[0]   # number of columns
@@ -482,7 +488,6 @@ def train(
     amp=True,
     grad_clip=1.0,
     early_stopping=None,
-    tscale=1
 ):
 
     best_val = float("inf")
@@ -518,7 +523,6 @@ def train(
             num_epochs=num_epochs,
             amp=amp,
             grad_clip=grad_clip,
-            tscale=tscale
         )
 
         if val_loader is not None:
@@ -531,7 +535,6 @@ def train(
                 loss_fn=loss_fn,
                 device=device,
                 amp=amp,
-                tscale=tscale
             )
 
             improved = (best_val - val_loss) > min_delta

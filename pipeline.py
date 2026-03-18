@@ -47,7 +47,7 @@ def build_datasets():
             patch=PATCH,
             stride=STRIDE,
             scales=SCALES,
-            tscale=TENSOR_SCALE
+            stat_file=None
         )
 
     if not os.path.exists(TEST_FILE):
@@ -71,7 +71,7 @@ def build_datasets():
             patch=PATCH,
             stride=STRIDE,
             scales=SCALES,
-            tscale=TENSOR_SCALE
+            stat_file=TRAIN_FILE
         )
 
 
@@ -102,7 +102,6 @@ def train_model():
         debug_loss=DEBUG_LOSS,
         patience=PATIENCE,
         min_delta=MIN_DELTA,
-        tscale=TENSOR_SCALE
     )
 
 
@@ -137,7 +136,6 @@ def run_predictions():
                     dy=dy,
                     save_path=PREDICT_FILE,
                     ndep=NDEP,
-                    tscale=TENSOR_SCALE
                 )
 
             ffno_predict_populations(
@@ -157,7 +155,6 @@ def run_predictions():
                 tiled=TILED,
                 patch=PATCH,
                 stride=STRIDE,
-                tscale=TENSOR_SCALE
             )
 
 

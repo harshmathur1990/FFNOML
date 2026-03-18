@@ -29,13 +29,14 @@ from train_utils import train
 from scipy.ndimage import gaussian_filter
 from model_builder import ModelBuilder
 from data_builder import DataLoaderBuilder
+from normalize_utils import *
 
 
 # ============================================================
 # ---------------- PREPROCESSING ------------------------------
 # ============================================================
 
-def _prepare_input_features(temp, vx, vy, vz, ne, rho, tscale=1):
+def _prepare_input_features(temp, vx, vy, vz, ne, rho):
     """
     temp: [nx, ny, nz]
     returns features: [nx, ny, nz, Cin]
@@ -43,9 +44,9 @@ def _prepare_input_features(temp, vx, vy, vz, ne, rho, tscale=1):
     return np.stack(
         [
             np.log10(temp),
-            vx / 100,
-            vy / 100,
-            vz / 100,
+            vx,
+            vy,
+            vz,
             np.log10(ne),
             np.log10(rho),
         ],
@@ -53,7 +54,7 @@ def _prepare_input_features(temp, vx, vy, vz, ne, rho, tscale=1):
     )
 
 
-def _compute_departure_coefficients(lte, nlte, eps=1e-30, tscale=1):
+def _compute_departure_coefficients(lte, nlte, eps=1e-30):
     """
     lte/nlte: [nx, ny, nz, nlev] or [nx, ny, nz, Cout]
     return: log10(nlte/lte)
@@ -61,7 +62,7 @@ def _compute_departure_coefficients(lte, nlte, eps=1e-30, tscale=1):
     return np.log10((nlte + eps) / (lte + eps))
 
 
-def invert_log_departure(pred_log, tscale=1):
+def invert_log_departure(pred_log):
     return torch.pow(10.0, pred_log)
 
 
@@ -69,15 +70,14 @@ def _make_inputs_ch_first(
     rho, z_scale,
     temp, vx, vy, vz, ne,
     *,
-    ndep,
-    tscale
+    ndep
 ):
     """
     returns inputs: [Cin, ndep, nx, ny]  (channel-first with depth first)
     """
     cmass_grid = np.logspace(-6, 2, ndep)
 
-    features = _prepare_input_features(temp, vx, vy, vz, ne, rho, tscale=tscale)  # [nx,ny,nz,Cin]
+    features = _prepare_input_features(temp, vx, vy, vz, ne, rho)  # [nx,ny,nz,Cin]
 
     features = interpolate_everything(
         rho, z_scale, features, cmass_grid
@@ -92,15 +92,14 @@ def _make_targets_ch_first(
     rho, z_scale,
     lte, nlte,
     *,
-    ndep,
-    tscale
+    ndep
 ):
     """
     returns dep: [Cout, ndep, nx, ny]
     """
     cmass_grid = np.logspace(-6, 2, ndep)
 
-    dep = _compute_departure_coefficients(lte, nlte, tscale=tscale)  # [nx,ny,nz,Cout] (or nlev)
+    dep = _compute_departure_coefficients(lte, nlte)  # [nx,ny,nz,Cout] (or nlev)
 
     dep = interpolate_everything(
         rho, z_scale, dep, cmass_grid
@@ -187,11 +186,14 @@ def _save_hdf5_patches(
     *,
     scales=None,
     weights=None,
-    tscale=1,
+    mean_X=None,
+    std_X=None,
+    mean_Y=None,
+    std_Y=None,
     attrs=None,
 ):
     """
-    Save training patches.
+    Save training patches + normalization stats.
 
     Parameters
     ----------
@@ -202,10 +204,10 @@ def _save_hdf5_patches(
     dys : [N]
 
     scales : [N] optional
-        resolution scale factor
-
     weights : [N] optional
-        sample weight for loss
+
+    mean_X, std_X : [Cin]
+    mean_Y, std_Y : [Cout]
 
     cmass_grid : [D]
     """
@@ -216,12 +218,25 @@ def _save_hdf5_patches(
     attrs = attrs or {}
 
     N = Xp.shape[0]
+    Cin = Xp.shape[1]
+    Cout = Yp.shape[1]
+
+    # ------------------------------------------------------------
+    # sanity checks (VERY IMPORTANT)
+    # ------------------------------------------------------------
+    if mean_X is not None:
+        assert mean_X.shape[0] == Cin, "mean_X shape mismatch"
+        assert std_X.shape[0] == Cin, "std_X shape mismatch"
+
+    if mean_Y is not None:
+        assert mean_Y.shape[0] == Cout, "mean_Y shape mismatch"
+        assert std_Y.shape[0] == Cout, "std_Y shape mismatch"
 
     with h5py.File(path, "w") as f:
 
-        # ------------------------------------------------
+        # ========================================================
         # main datasets
-        # ------------------------------------------------
+        # ========================================================
 
         f.create_dataset(
             "inputs",
@@ -242,9 +257,9 @@ def _save_hdf5_patches(
         f.create_dataset("dx", data=dxs.astype(np.float32))
         f.create_dataset("dy", data=dys.astype(np.float32))
 
-        # ------------------------------------------------
+        # ========================================================
         # optional metadata datasets
-        # ------------------------------------------------
+        # ========================================================
 
         if scales is not None:
             f.create_dataset("scale", data=scales.astype(np.int32))
@@ -252,31 +267,44 @@ def _save_hdf5_patches(
         if weights is not None:
             f.create_dataset("weights", data=weights.astype(np.float32))
 
-        f.create_dataset("tscale", data=tscale)
-
         f.create_dataset(
             "cmass_grid",
             data=cmass_grid.astype(np.float64),
         )
 
-        # ------------------------------------------------
+        # ========================================================
+        # NORMALIZATION STATS (NEW)
+        # ========================================================
+
+        if mean_X is not None:
+            f.create_dataset("mean_X", data=mean_X.astype(np.float32))
+            f.create_dataset("std_X", data=std_X.astype(np.float32))
+
+        if mean_Y is not None:
+            f.create_dataset("mean_Y", data=mean_Y.astype(np.float32))
+            f.create_dataset("std_Y", data=std_Y.astype(np.float32))
+
+        # ========================================================
         # attributes
-        # ------------------------------------------------
+        # ========================================================
 
         for k, v in attrs.items():
             f.attrs[k] = v
 
         f.attrs["N"] = N
-        f.attrs["Cin"] = Xp.shape[1]
-        f.attrs["Cout"] = Yp.shape[1]
+        f.attrs["Cin"] = Cin
+        f.attrs["Cout"] = Cout
         f.attrs["D"] = Xp.shape[2]
         f.attrs["P"] = Xp.shape[3]
 
         if scales is not None:
             f.attrs["n_scales"] = int(len(np.unique(scales)))
 
+        # flag for downstream safety
+        f.attrs["normalized"] = int(mean_X is not None)
 
-def _save_hdf5_cube(path, X, cmass_grid, dx, dy, tscale, attrs=None):
+
+def _save_hdf5_cube(path, X, cmass_grid, dx, dy, attrs=None):
     """
     Save inference cube.
 
@@ -303,8 +331,6 @@ def _save_hdf5_cube(path, X, cmass_grid, dx, dy, tscale, attrs=None):
         f.create_dataset("dx", data=np.array([dx], dtype=np.float32))
         f.create_dataset("dy", data=np.array([dy], dtype=np.float32))
 
-        f.create_dataset("tscale", data=tscale)
-
         f.create_dataset(
             "cmass_grid",
             data=cmass_grid.astype(np.float64),
@@ -328,16 +354,6 @@ def _read_io_channels(h5_path):
         Cin = int(f.attrs["Cin"])
         Cout = int(f.attrs["Cout"])
     return Cin, Cout
-
-
-def read_tscale(h5_path):
-    """
-    Reads tscale from training HDF5 file.
-    """
-    with h5py.File(h5_path, "r") as f:
-        tscale = f['tscale'][()] if 'tscale' in f.keys() else None
-
-    return tscale
 
 
 # ============================================================
@@ -365,11 +381,83 @@ def build_dataset_ffno(
     patch=96,
     stride=48,
     scales=(1,2,3,4),
-    tscale=1
+    stat_file=None
 ):
 
     if os.path.isfile(save_path):
         raise IOError(f"Output exists: {save_path}")
+
+    if stat_file is None:
+        # ============================================================
+        # -------- PASS 1: compute global normalization stats ---------
+        # ============================================================
+
+        X_stats_list = []
+        Y_stats_list = []
+
+        cmass_grid_ref = None
+
+        for temp, vx, vy, vz, ne, lte, nlte, rho, z in zip(
+            temp_list,
+            vx_list,
+            vy_list,
+            vz_list,
+            ne_list,
+            lte_list,
+            nlte_list,
+            rho_list,
+            z_list,
+        ):
+
+            X, cmass_grid = _make_inputs_ch_first(
+                rho, z, temp, vx, vy, vz, ne,
+                ndep=ndep
+            )
+
+            Y = _make_targets_ch_first(
+                rho, z, lte, nlte,
+                ndep=ndep
+            )
+
+            if cmass_grid_ref is None:
+                cmass_grid_ref = cmass_grid
+            elif not np.allclose(cmass_grid_ref, cmass_grid):
+                raise ValueError("cmass_grid mismatch")
+
+            mx, sx = compute_channel_stats(X)
+            my, sy = compute_channel_stats(Y)
+
+            X_stats_list.append((mx, sx))
+            Y_stats_list.append((my, sy))
+
+        # ------------------------------------------------------------
+        # GLOBAL stats (across simulations)
+        # ------------------------------------------------------------
+
+        means_X = np.stack([m for m, s in X_stats_list])
+        stds_X  = np.stack([s for m, s in X_stats_list])
+
+        means_Y = np.stack([m for m, s in Y_stats_list])
+        stds_Y  = np.stack([s for m, s in Y_stats_list])
+
+        mean_X = means_X.mean(axis=0)
+        std_X  = stds_X.mean(axis=0)
+
+        mean_Y = means_Y.mean(axis=0)
+        std_Y  = stds_Y.mean(axis=0)
+
+    else:
+        mean_X, std_X, mean_Y, std_Y = read_normalization(stat_file)
+
+    print("==== NORMALIZATION STATS ====")
+    print("mean_X:", mean_X)
+    print("std_X :", std_X)
+    print("mean_Y:", mean_Y)
+    print("std_Y :", std_Y)
+
+    # ============================================================
+    # -------- PASS 2: build dataset (with normalization) ---------
+    # ============================================================
 
     X_all = []
     Y_all = []
@@ -377,8 +465,6 @@ def build_dataset_ffno(
     dx_all = []
     dy_all = []
     scale_all = []
-
-    cmass_grid_ref = None
 
     for temp, vx, vy, vz, ne, lte, nlte, rho, z, dx, dy in zip(
         temp_list,
@@ -396,20 +482,17 @@ def build_dataset_ffno(
 
         X, cmass_grid = _make_inputs_ch_first(
             rho, z, temp, vx, vy, vz, ne,
-            ndep=ndep,
-            tscale=tscale
+            ndep=ndep
         )
 
         Y = _make_targets_ch_first(
             rho, z, lte, nlte,
-            ndep=ndep,
-            tscale=tscale
+            ndep=ndep
         )
 
-        if cmass_grid_ref is None:
-            cmass_grid_ref = cmass_grid
-        elif not np.allclose(cmass_grid_ref, cmass_grid):
-            raise ValueError("cmass_grid mismatch")
+        # ---------------- NORMALIZE HERE ----------------
+        X = normalize_channels(X, mean_X, std_X)
+        Y = normalize_channels(Y, mean_Y, std_Y)
 
         for s in scales:
 
@@ -436,9 +519,9 @@ def build_dataset_ffno(
             dy_all.append(np.full(n, dy * s))
             scale_all.append(np.full(n, s))
 
-    # --------------------------------------------
+    # ------------------------------------------------------------
     # concatenate
-    # --------------------------------------------
+    # ------------------------------------------------------------
 
     if len(X_all) == 0:
         raise RuntimeError("No patches generated. Check patch size and scales.")
@@ -450,9 +533,9 @@ def build_dataset_ffno(
     dy_all = np.concatenate(dy_all)
     scale_all = np.concatenate(scale_all)
 
-    # --------------------------------------------
-    # compute weights
-    # --------------------------------------------
+    # ------------------------------------------------------------
+    # weights (per scale balancing)
+    # ------------------------------------------------------------
 
     weights = np.zeros_like(scale_all, dtype=np.float32)
 
@@ -461,12 +544,19 @@ def build_dataset_ffno(
         weights[mask] = 1.0 / mask.sum()
 
     weights *= len(weights)
-
     weights /= weights.mean()
 
-    # --------------------------------------------
+    # ------------------------------------------------------------
+    # sanity check
+    # ------------------------------------------------------------
+
+    print("==== DATA CHECK ====")
+    print("X mean:", X_all.mean(), "std:", X_all.std())
+    print("Y mean:", Y_all.mean(), "std:", Y_all.std())
+
+    # ============================================================
     # save dataset
-    # --------------------------------------------
+    # ============================================================
 
     _save_hdf5_patches(
         save_path,
@@ -477,13 +567,16 @@ def build_dataset_ffno(
         cmass_grid_ref,
         scales=scale_all,
         weights=weights,
-        tscale=tscale,
         attrs=dict(
             ndep=int(ndep),
             patch=int(patch),
             stride=int(stride),
             scales=np.array(scales),
         ),
+        mean_X=mean_X,
+        std_X=std_X,
+        mean_Y=mean_Y,
+        std_Y=std_Y,
     )
 
 
@@ -503,8 +596,7 @@ def build_solving_set_ffno(
     dx,
     dy,
     save_path,
-    ndep=400,
-    tscale=1
+    ndep=400
 ):
     """
     Build dataset for prediction (no targets).
@@ -523,8 +615,7 @@ def build_solving_set_ffno(
         vy,
         vz,
         ne,
-        ndep=ndep,
-        tscale=tscale
+        ndep=ndep
     )  # [Cin, D, nx, ny]
 
     _save_hdf5_cube(
@@ -533,7 +624,6 @@ def build_solving_set_ffno(
         cmass_grid,
         dx,
         dy,
-        tscale,
         attrs=dict(ndep=int(ndep)),
     )
 
@@ -567,20 +657,15 @@ def ffno_train_model(
     multi_gpu=False,
     debug_loss=False,
     patience=10,
-    min_delta=1e-5,
-    tscale=1
+    min_delta=1e-5
 ):
 
     if os.path.isfile(save_path):
         raise IOError(f"Output exists: {save_path}")
 
     Cin, Cout = _read_io_channels(train_h5)
-    
-    tscale_read = read_tscale(train_h5)
 
-    if tscale_read is None or tscale_read != tscale:
-        sys.stderr.write(f"\n tscale_read is {tscale_read} and tscale is {tscale} \n")
-        sys.exit(-1)
+    _, _, mean_Y, std_Y = read_normalization(train_h5)
 
     model_config = dict(model_config)
     model_config["in_channels"] = Cin
@@ -599,7 +684,9 @@ def ffno_train_model(
         weight_decay=weight_decay,
         amp=amp,
         multi_gpu=multi_gpu,
-        debug_loss=debug_loss
+        debug_loss=debug_loss,
+        mean_Y=mean_Y,
+        std_Y=std_Y
     )
 
     model, optimizer, loss_fn, scaler = builder.build()
@@ -633,8 +720,7 @@ def ffno_train_model(
             enabled=True,
             patience=patience,
             min_delta=min_delta,
-        ),
-        tscale=tscale
+        )
     )
 
 
@@ -813,8 +899,7 @@ def ffno_predict_populations(
     cuda=True,
     tiled=True,
     patch=128,
-    stride=64,
-    tscale=1
+    stride=64
 ):
     amp = False
 
@@ -832,17 +917,7 @@ def ffno_predict_populations(
 
     Cin, Cout = _read_io_channels(train_h5)
 
-    tscale_read = read_tscale(train_h5)
-
-    if tscale_read is None or tscale_read != tscale:
-        sys.stderr.write(f"\n tscale_read is {tscale_read} and tscale is {tscale} \n")
-        sys.exit(-1)
-
-    tscale_solve = read_tscale(solve_h5)
-
-    if tscale_solve is None or tscale_solve != tscale:
-        sys.stderr.write(f"\n tscale_solve is {tscale_solve} and tscale is {tscale} \n")
-        sys.exit(-1)
+    mean_X, std_X, mean_Y, std_Y = read_normalization(train_h5)
 
     model_config = dict(model_config)
     model_config["in_channels"] = Cin
@@ -889,14 +964,21 @@ def ffno_predict_populations(
         dx = f["dx"][...]
         dy = f["dy"][...]
     
-    X = torch.from_numpy(X)
-    dx = torch.from_numpy(dx)
-    dy = torch.from_numpy(dy)
+    X = torch.from_numpy(X).to(device)
+    dx = torch.from_numpy(dx).to(device)
+    dy = torch.from_numpy(dy).to(device)
+
+    mean_X_t = torch.from_numpy(mean_X).float()[None, :, None, None, None].to(device)
+    std_X_t  = torch.from_numpy(std_X).float()[None, :, None, None, None].to(device)
+
+    X = (X - mean_X_t) / std_X_t
 
     print("dx =", dx, dx.dtype, dx.shape)
     print("dy =", dy, dy.dtype, dy.shape)
-    print("X nan:", np.isnan(X).sum())
-    print("X inf:", np.isinf(X).sum())
+    print("X nan:", torch.isnan(X).sum().item())
+    print("X inf:", torch.isinf(X).sum().item())
+
+    print("X mean:", X.mean().item(), "std:", X.std().item())
 
     if not tiled:
         X = X.to(device)
@@ -924,13 +1006,27 @@ def ffno_predict_populations(
         print("Inf in prediction")
 
     print(
-        "pred_log range:",
+        "pred_log (normalized) range:",
+        pred_log.min().item(),
+        pred_log.max().item()
+    )
+
+    # ------------------------------------------------
+    # DENORMALIZE OUTPUT (log space)
+    # ------------------------------------------------
+    mean_Y_t = torch.from_numpy(mean_Y).float()[None, :, None, None, None].to(pred_log.device)
+    std_Y_t  = torch.from_numpy(std_Y).float()[None, :, None, None, None].to(pred_log.device)
+
+    pred_log = pred_log * std_Y_t + mean_Y_t
+
+    print(
+        "pred_log (denorm) range:",
         pred_log.min().item(),
         pred_log.max().item()
     )
 
     # pred_log is log10(dep). Convert to linear dep:
-    dep = invert_log_departure(pred_log, tscale=tscale).float().cpu().numpy()  # [1,Cout,D,nx,ny]
+    dep = invert_log_departure(pred_log).float().cpu().numpy()  # [1,Cout,D,nx,ny]
 
     print(
         "dep range:",

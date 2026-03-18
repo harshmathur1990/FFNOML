@@ -149,7 +149,7 @@ MODEL_CONFIG = dict(
 
     n_layers=6,
 
-    dropout=0.2,
+    dropout=0.1,
     mlp_expansion=2,
     vertical_hidden=64,
     padding=0,
