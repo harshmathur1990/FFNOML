@@ -232,10 +232,10 @@ class FFNOBlock3d(nn.Module):
         self.act = nn.GELU()
         self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
-        self.alpha_spec = nn.Parameter(torch.tensor(1.0))
-        self.alpha_pw   = nn.Parameter(torch.tensor(1.0))
-        self.alpha_z    = nn.Parameter(torch.tensor(1.0))
-        self.alpha_mlp  = nn.Parameter(torch.tensor(1.0))
+        self.alpha_spec = nn.Parameter(torch.tensor([1.0]))
+        self.alpha_pw   = nn.Parameter(torch.tensor([1.0]))
+        self.alpha_z    = nn.Parameter(torch.tensor([1.0]))
+        self.alpha_mlp  = nn.Parameter(torch.tensor([1.0]))
 
     def forward(self, x, dx, dy):
         # HW spectral + pointwise, residual
