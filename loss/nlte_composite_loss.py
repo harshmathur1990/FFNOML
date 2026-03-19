@@ -505,8 +505,8 @@ class NLTECompositeLoss(nn.Module):
         logb_true,
     ):
 
-        std_x = self.std_X.to(X.dtype)[None, :, None]
-        mean_x = self.mean_X.to(X.dtype)[None, :, None]
+        std_x = self.std_X.to(X.dtype)
+        mean_x = self.mean_X.to(X.dtype)
         
         T = extract_temperature(X, std_x, mean_x)
 
