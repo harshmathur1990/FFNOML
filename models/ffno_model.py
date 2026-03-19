@@ -26,11 +26,15 @@ def _to_spacing_value(spacing, x):
     raise TypeError(f"Unsupported spacing type: {type(spacing)}")
 
 
-def _norm3d(channels):
-    return nn.InstanceNorm3d(channels, affine=True)
+def _gn(channels, max_groups=8):
+    g = min(max_groups, channels)
+    while g > 1 and channels % g != 0:
+        g -= 1
+    return return nn.GroupNorm(g, channels)
 
-def _norm1d(channels):
-    return nn.InstanceNorm1d(channels, affine=True)
+
+# def _gn(channels, max_groups=8):
+    # return nn.Identity()
 
 
 # ============================================================
@@ -66,9 +70,9 @@ class Residual1DBlock(nn.Module):
         super().__init__()
         p = k // 2
         self.conv1 = nn.Conv1d(ch, ch, kernel_size=k, padding=p, bias=False)
-        self.gn1 = _norm1d(ch)
+        self.gn1 = _gn(ch)
         self.conv2 = nn.Conv1d(ch, ch, kernel_size=k, padding=p, bias=False)
-        self.gn2 = _norm1d(ch)
+        self.gn2 = _gn(ch)
         self.act = nn.GELU()
 
     def forward(self, x):
@@ -87,7 +91,7 @@ class MultiScaleVertical(nn.Module):
         self.k3 = nn.Conv1d(ch, ch, kernel_size=3, padding=1, bias=False)
         self.k5 = nn.Conv1d(ch, ch, kernel_size=5, padding=2, bias=False)
         self.k9 = nn.Conv1d(ch, ch, kernel_size=9, padding=4, bias=False)
-        self.gn = _norm1d(ch)
+        self.gn = _gn(ch)
         self.act = nn.GELU()
 
     def forward(self, x):
@@ -115,7 +119,7 @@ class VerticalPhysicsStack(nn.Module):
 
         self.in_proj = nn.Sequential(
             nn.Conv1d(channels, hidden, kernel_size=1, bias=False),
-            _norm1d(hidden),
+            _gn(hidden),
             nn.GELU(),
         )
 
@@ -135,31 +139,36 @@ class VerticalPhysicsStack(nn.Module):
         # x: [B, C, D, H, W]
         B, C, D, H, W = x.shape
 
-        # [B, H, W, C, D]
-        x = x.permute(0, 3, 4, 1, 2)
+        # -> [B, H, W, C, D]
+        x = x.permute(0, 3, 4, 1, 2)   # NO contiguous
 
-        # [B, HW, C, D]
-        x = x.reshape(B, H * W, C, D)
+        # flatten spatial only (safe, view-like)
+        x = x.reshape(B, H * W, C, D)  # [B, HW, C, D]
 
-        chunk = 32
-        out_chunks = []
+        chunk = 128
 
         for i in range(0, H * W, chunk):
-            xi = x[:, i:i+chunk]          # [B, chunk, C, D]
-            ncols = xi.shape[1]
+            # take chunk across ALL batch
+            xi = x[:, i:i+chunk]              # [B, chunk, C, D]
 
-            xi = xi.reshape(B * ncols, C, D)   # [B*ncols, C, D]
+            # merge batch + chunk
+            xi = xi.reshape(-1, C, D)         # [B*chunk, C, D]
 
             yi = self.in_proj(xi)
             yi = self.vertical_net(yi)
             yi = self.out_proj(yi)
 
-            yi = yi.reshape(B, ncols, C, D)    # [B, chunk, C, D]
-            out_chunks.append(yi)
+            # restore shape
+            yi = yi.reshape(B, -1, C, D)      # [B, chunk, C, D]
 
-        x = torch.cat(out_chunks, dim=1)       # [B, HW, C, D]
+            # write back
+            x[:, i:i+chunk] = yi
+
+        # restore spatial
         x = x.reshape(B, H, W, C, D)
-        x = x.permute(0, 3, 4, 1, 2)
+
+        # back to original layout
+        x = x.permute(0, 3, 4, 1, 2)   # NO contiguous
 
         return x
 
@@ -196,9 +205,6 @@ class SpectralConv2dFull(nn.Module):
             nn.GELU(),
             nn.Linear(hidden, 2),
         )
-
-        nn.init.zeros_(self.freq_mlp[-1].weight)
-        nn.init.ones_(self.freq_mlp[-1].bias)
 
     def forward(self, x, dx, dy):
         # x: [B, Cin, D, H, W]
@@ -307,9 +313,9 @@ class FFNOBlock3d(nn.Module):
             dropout=dropout,
         )
 
-        self.norm1 = _norm3d(width)
-        self.norm2 = _norm3d(width)
-        self.norm3 = _norm3d(width)
+        self.norm1 = _gn(width)
+        self.norm2 = _gn(width)
+        self.norm3 = _gn(width)
 
         self.act = nn.GELU()
         self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
@@ -461,40 +467,11 @@ class FFNO3D(nn.Module):
 
     def _run_block(self, blk, x, dx, dy, collect_stats=False):
         if self.checkpoint_blocks and self.training and not collect_stats:
-            # horizontal branch normally
-            spec = blk.spec_hw(x, dx=dx, dy=dy)
-            pw   = blk.pw_hw(x)
-
-            y = blk.alpha_spec * spec + blk.alpha_pw * pw
-            y = blk.norm1(y)
-            y = blk.act(y)
-            y = blk.drop(y)
-
-            x = x + y
-
-            # checkpoint only the vertical core, then apply the same post-processing
-            vert = checkpoint(
-                lambda z: blk.vertical(z),
+            return checkpoint(
+                lambda t: blk(t, dx=dx, dy=dy, collect_stats=False),
                 x,
                 use_reentrant=False,
             )
-            z = blk.alpha_vert * vert
-            z = blk.norm2(z)
-            z = blk.act(z)
-            z = blk.drop(z)
-
-            x = x + z
-
-            # mlp branch exactly as in forward
-            mlp_out = blk.mlp(x)
-            m = blk.alpha_mlp * mlp_out
-            m = blk.norm3(m)
-            m = blk.act(m)
-            m = blk.drop(m)
-
-            x = x + m
-            return x
-
         else:
             return blk(x, dx=dx, dy=dy, collect_stats=collect_stats)
 
