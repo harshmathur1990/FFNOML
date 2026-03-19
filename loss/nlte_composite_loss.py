@@ -626,7 +626,7 @@ class NLTECompositeLoss(nn.Module):
             _check_tensor(L_S_atoms, f"L_S_atoms {rank}", True)
             _check_tensor(L_S, f"L_S {rank}", True)
 
-        L_total = L_data + self.lam_S * L_S
+        L_total = L_data # + self.lam_S * L_S
 
         if self.print_loss:
             _check_tensor(L_total, f"L_total {rank}", True)
