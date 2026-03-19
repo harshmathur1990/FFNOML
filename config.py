@@ -169,9 +169,9 @@ DEBUG_LOSS = False
 
 # Dataset Params
 NDEP=400
-PATCH=64
-STRIDE=32
-SCALES=(1,2,3,4,5)
+PATCH=32
+STRIDE=16
+SCALES=(1,2,3,4,5,6,7,8)
 
 
 # Training Params
