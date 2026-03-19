@@ -101,18 +101,86 @@ class MultiScaleVertical(nn.Module):
         return self.act(self.gn(y))
 
 
+# class VerticalPhysicsStack(nn.Module):
+#     """
+#     Strong vertical mixer operating independently on each (y, x) column.
+
+#     Input/Output: [B, C, D, H, W]
+
+#     Strategy:
+#       1. project channels
+#       2. reshape each (y,x) column into a batch item
+#       3. run deep multi-scale residual 1D depth network
+#       4. reshape back
+#       5. project back to original width
+#     """
+#     def __init__(self, channels, hidden=256, dropout=0.0):
+#         super().__init__()
+
+#         self.in_proj = nn.Sequential(
+#             nn.Conv1d(channels, hidden, kernel_size=1, bias=False),
+#             _gn(hidden),
+#             nn.GELU(),
+#         )
+
+#         self.vertical_net = nn.Sequential(
+#             MultiScaleVertical(hidden),
+#             Residual1DBlock(hidden, k=5),
+#             Residual1DBlock(hidden, k=5),
+#             MultiScaleVertical(hidden),
+#             Residual1DBlock(hidden, k=5),
+#         )
+
+#         self.out_proj = nn.Conv1d(hidden, channels, kernel_size=1)
+
+#         self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+
+#     def forward(self, x):
+#         # x: [B, C, D, H, W]
+#         B, C, D, H, W = x.shape
+
+#         # -> [B, H, W, C, D]
+#         x = x.permute(0, 3, 4, 1, 2)   # NO contiguous
+
+#         # flatten spatial only (safe, view-like)
+#         x = x.reshape(B, H * W, C, D)  # [B, HW, C, D]
+
+#         chunk = 128
+
+#         for i in range(0, H * W, chunk):
+#             # take chunk across ALL batch
+#             xi = x[:, i:i+chunk]              # [B, chunk, C, D]
+
+#             # merge batch + chunk
+#             xi = xi.reshape(-1, C, D)         # [B*chunk, C, D]
+
+#             yi = self.in_proj(xi)
+#             yi = self.vertical_net(yi)
+#             yi = self.out_proj(yi)
+
+#             # restore shape
+#             yi = yi.reshape(B, -1, C, D)      # [B, chunk, C, D]
+
+#             # write back
+#             x[:, i:i+chunk] = yi
+
+#         # restore spatial
+#         x = x.reshape(B, H, W, C, D)
+
+#         # back to original layout
+#         x = x.permute(0, 3, 4, 1, 2)   # NO contiguous
+
+#         return x
+
+
 class VerticalPhysicsStack(nn.Module):
     """
     Strong vertical mixer operating independently on each (y, x) column.
 
-    Input/Output: [B, C, D, H, W]
-
-    Strategy:
-      1. project channels
-      2. reshape each (y,x) column into a batch item
-      3. run deep multi-scale residual 1D depth network
-      4. reshape back
-      5. project back to original width
+    SAFE VERSION:
+      - no in-place writes
+      - autograd friendly
+      - chunked processing preserved
     """
     def __init__(self, channels, hidden=256, dropout=0.0):
         super().__init__()
@@ -139,39 +207,36 @@ class VerticalPhysicsStack(nn.Module):
         # x: [B, C, D, H, W]
         B, C, D, H, W = x.shape
 
-        # -> [B, H, W, C, D]
-        x = x.permute(0, 3, 4, 1, 2)   # NO contiguous
+        # [B, H, W, C, D]
+        x = x.permute(0, 3, 4, 1, 2)
 
-        # flatten spatial only (safe, view-like)
-        x = x.reshape(B, H * W, C, D)  # [B, HW, C, D]
+        # [B, HW, C, D]
+        x = x.reshape(B, H * W, C, D)
 
         chunk = 128
+        outputs = []
 
         for i in range(0, H * W, chunk):
-            # take chunk across ALL batch
             xi = x[:, i:i+chunk]              # [B, chunk, C, D]
-
-            # merge batch + chunk
             xi = xi.reshape(-1, C, D)         # [B*chunk, C, D]
 
             yi = self.in_proj(xi)
             yi = self.vertical_net(yi)
             yi = self.out_proj(yi)
 
-            # restore shape
             yi = yi.reshape(B, -1, C, D)      # [B, chunk, C, D]
+            outputs.append(yi)
 
-            # write back
-            x[:, i:i+chunk] = yi
+        # concatenate instead of in-place write
+        x = torch.cat(outputs, dim=1)
 
-        # restore spatial
+        # [B, H, W, C, D]
         x = x.reshape(B, H, W, C, D)
 
-        # back to original layout
-        x = x.permute(0, 3, 4, 1, 2)   # NO contiguous
+        # back to [B, C, D, H, W]
+        x = x.permute(0, 3, 4, 1, 2)
 
         return x
-
 
 # ============================================================
 # Spectral conv in horizontal plane
@@ -278,16 +343,149 @@ class SpectralConv2dFull(nn.Module):
 # ============================================================
 # FFNO block with strong vertical physics
 # ============================================================
+# class FFNOBlock3d(nn.Module):
+#     """
+#     Hybrid FFNO block:
+#       - global spectral mixing in (H, W)
+#       - pointwise local channel mixing
+#       - strong vertical physics stack along D
+#       - pointwise MLP refinement
+
+#     Input/Output: [B, C, D, H, W]
+#     """
+#     def __init__(
+#         self,
+#         width,
+#         dropout=0.0,
+#         mlp_expansion=2,
+#         vertical_hidden=256,
+#         use_gating=True,
+#     ):
+#         super().__init__()
+
+#         self.spec_hw = SpectralConv2dFull(width, width)
+#         self.pw_hw = nn.Conv3d(width, width, kernel_size=1)
+
+#         self.vertical = VerticalPhysicsStack(
+#             channels=width,
+#             hidden=vertical_hidden,
+#             dropout=dropout,
+#         )
+
+#         self.mlp = PointwiseMLP(
+#             width,
+#             expansion=mlp_expansion,
+#             dropout=dropout,
+#         )
+
+#         self.norm1 = _gn(width)
+#         self.norm2 = _gn(width)
+#         self.norm3 = _gn(width)
+
+#         self.act = nn.GELU()
+#         self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+
+#         self.use_gating = use_gating
+
+#         if use_gating:
+#             self.alpha_spec = nn.Parameter(torch.ones(1) * 3)
+#             self.alpha_pw   = nn.Parameter(torch.ones(1))
+#             self.alpha_vert = nn.Parameter(torch.ones(1))
+#             self.alpha_mlp  = nn.Parameter(torch.ones(1))
+#         else:
+#             self.register_buffer("alpha_spec", torch.ones(1) * 3)
+#             self.register_buffer("alpha_pw",   torch.ones(1))
+#             self.register_buffer("alpha_vert", torch.ones(1))
+#             self.register_buffer("alpha_mlp",  torch.ones(1))
+
+#     def forward(self, x, dx, dy, collect_stats=False):
+#         stats = {} if collect_stats else None
+
+#         # -------------------------------
+#         # Horizontal operator
+#         # -------------------------------
+#         spec = self.spec_hw(x, dx=dx, dy=dy)
+#         pw   = self.pw_hw(x)
+
+#         y = self.alpha_spec * spec + self.alpha_pw * pw
+
+#         if collect_stats:
+#             with torch.no_grad():
+#                 stats["spec_norm"] = spec.abs().mean().item()
+#                 stats["pw_norm"]   = pw.abs().mean().item()
+#                 stats["alpha_spec"] = float(self.alpha_spec.item())
+#                 stats["alpha_pw"]   = float(self.alpha_pw.item())
+
+#         y = self.norm1(y)
+#         y = self.act(y)
+#         y = self.drop(y)
+
+#         x_before = x
+#         x = x + y
+
+#         if collect_stats:
+#             with torch.no_grad():
+#                 stats["horizontal_update"] = (x - x_before).abs().mean().item()
+
+#         # -------------------------------
+#         # Vertical physics
+#         # -------------------------------
+#         vert = self.vertical(x)
+#         z = self.alpha_vert * vert
+
+#         if collect_stats:
+#             with torch.no_grad():
+#                 stats["vertical_norm"] = vert.abs().mean().item()
+#                 stats["alpha_vert"]    = float(self.alpha_vert.item())
+
+#         z = self.norm2(z)
+#         z = self.act(z)
+#         z = self.drop(z)
+
+#         x_before = x
+#         x = x + z
+
+#         if collect_stats:
+#             with torch.no_grad():
+#                 stats["vertical_update"] = (x - x_before).abs().mean().item()
+
+#         # -------------------------------
+#         # MLP refinement
+#         # -------------------------------
+#         mlp_out = self.mlp(x)
+#         m = self.alpha_mlp * mlp_out
+
+#         if collect_stats:
+#             with torch.no_grad():
+#                 stats["mlp_norm"] = mlp_out.abs().mean().item()
+#                 stats["alpha_mlp"] = float(self.alpha_mlp.item())
+
+#         m = self.norm3(m)
+#         m = self.act(m)
+#         m = self.drop(m)
+
+#         x_before = x
+#         x = x + m
+
+#         if collect_stats:
+#             with torch.no_grad():
+#                 stats["mlp_update"] = (x - x_before).abs().mean().item()
+
+#         if collect_stats:
+#             return x, stats
+#         else:
+#             return x
+
+
 class FFNOBlock3d(nn.Module):
     """
-    Hybrid FFNO block:
-      - global spectral mixing in (H, W)
-      - pointwise local channel mixing
-      - strong vertical physics stack along D
-      - pointwise MLP refinement
-
-    Input/Output: [B, C, D, H, W]
+    STABLE hybrid FFNO block:
+      - bounded gates
+      - normalized branches
+      - residual scaling
+      - no runaway amplification
     """
+
     def __init__(
         self,
         width,
@@ -298,8 +496,11 @@ class FFNOBlock3d(nn.Module):
     ):
         super().__init__()
 
+        # -----------------------------------
+        # Operators
+        # -----------------------------------
         self.spec_hw = SpectralConv2dFull(width, width)
-        self.pw_hw = nn.Conv3d(width, width, kernel_size=1)
+        self.pw_hw   = nn.Conv3d(width, width, kernel_size=1)
 
         self.vertical = VerticalPhysicsStack(
             channels=width,
@@ -313,98 +514,123 @@ class FFNOBlock3d(nn.Module):
             dropout=dropout,
         )
 
-        self.norm1 = _gn(width)
-        self.norm2 = _gn(width)
-        self.norm3 = _gn(width)
+        # -----------------------------------
+        # Branch normalization (CRITICAL)
+        # -----------------------------------
+        self.norm_spec = _gn(width)
+        self.norm_pw   = _gn(width)
+        self.norm_vert = _gn(width)
+        self.norm_mlp  = _gn(width)
+
+        # -----------------------------------
+        # Residual post-norm
+        # -----------------------------------
+        self.post_norm1 = _gn(width)
+        self.post_norm2 = _gn(width)
+        self.post_norm3 = _gn(width)
 
         self.act = nn.GELU()
         self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
+        # -----------------------------------
+        # Bounded gates (no explosion)
+        # -----------------------------------
         self.use_gating = use_gating
 
         if use_gating:
-            self.alpha_spec = nn.Parameter(torch.ones(1) * 3)
-            self.alpha_pw   = nn.Parameter(torch.ones(1))
-            self.alpha_vert = nn.Parameter(torch.ones(1))
-            self.alpha_mlp  = nn.Parameter(torch.ones(1))
+            self.logit_spec = nn.Parameter(torch.ones(1) * 0.0)
+            self.logit_pw   = nn.Parameter(torch.ones(1) * 0.0)
+            self.logit_vert = nn.Parameter(torch.ones(1) * -0.5)
+            self.logit_mlp  = nn.Parameter(torch.ones(1) * -0.5)
         else:
-            self.register_buffer("alpha_spec", torch.ones(1) * 3)
-            self.register_buffer("alpha_pw",   torch.ones(1))
-            self.register_buffer("alpha_vert", torch.ones(1))
-            self.register_buffer("alpha_mlp",  torch.ones(1))
+            self.register_buffer("logit_spec", torch.ones(1) * 0.0)
+            self.register_buffer("logit_pw",   torch.ones(1) * 0.0)
+            self.register_buffer("logit_vert", torch.ones(1) * 0.0)
+            self.register_buffer("logit_mlp",  torch.ones(1) * 0.0)
+
+        # -----------------------------------
+        # Residual scaling (VERY IMPORTANT)
+        # -----------------------------------
+        self.res_h = nn.Parameter(torch.ones(1) * 0.5)
+        self.res_v = nn.Parameter(torch.ones(1) * 0.5)
+        self.res_m = nn.Parameter(torch.ones(1) * 0.5)
+
+    def _get_alphas(self):
+        # bounded in (0, 2)
+        alpha_spec = 2.0 * torch.sigmoid(self.logit_spec)
+        alpha_pw   = 2.0 * torch.sigmoid(self.logit_pw)
+        alpha_vert = 2.0 * torch.sigmoid(self.logit_vert)
+        alpha_mlp  = 2.0 * torch.sigmoid(self.logit_mlp)
+
+        return alpha_spec, alpha_pw, alpha_vert, alpha_mlp
 
     def forward(self, x, dx, dy, collect_stats=False):
         stats = {} if collect_stats else None
 
-        # -------------------------------
-        # Horizontal operator
-        # -------------------------------
-        spec = self.spec_hw(x, dx=dx, dy=dy)
-        pw   = self.pw_hw(x)
+        alpha_spec, alpha_pw, alpha_vert, alpha_mlp = self._get_alphas()
 
-        y = self.alpha_spec * spec + self.alpha_pw * pw
+        # ============================================================
+        # 1. Horizontal mixing
+        # ============================================================
+        spec = self.norm_spec(self.spec_hw(x, dx=dx, dy=dy))
+        pw   = self.norm_pw(self.pw_hw(x))
+
+        y = alpha_spec * spec + alpha_pw * pw
+        y = self.act(y)
+        y = self.drop(y)
+
+        x_before = x
+        x = x + self.res_h * y
 
         if collect_stats:
             with torch.no_grad():
                 stats["spec_norm"] = spec.abs().mean().item()
                 stats["pw_norm"]   = pw.abs().mean().item()
-                stats["alpha_spec"] = float(self.alpha_spec.item())
-                stats["alpha_pw"]   = float(self.alpha_pw.item())
-
-        y = self.norm1(y)
-        y = self.act(y)
-        y = self.drop(y)
-
-        x_before = x
-        x = x + y
-
-        if collect_stats:
-            with torch.no_grad():
+                stats["alpha_spec"] = float(alpha_spec.item())
+                stats["alpha_pw"]   = float(alpha_pw.item())
                 stats["horizontal_update"] = (x - x_before).abs().mean().item()
 
-        # -------------------------------
-        # Vertical physics
-        # -------------------------------
-        vert = self.vertical(x)
-        z = self.alpha_vert * vert
+        x = self.post_norm1(x)
 
-        if collect_stats:
-            with torch.no_grad():
-                stats["vertical_norm"] = vert.abs().mean().item()
-                stats["alpha_vert"]    = float(self.alpha_vert.item())
+        # ============================================================
+        # 2. Vertical physics
+        # ============================================================
+        vert = self.norm_vert(self.vertical(x))
+        z = alpha_vert * vert
 
-        z = self.norm2(z)
         z = self.act(z)
         z = self.drop(z)
 
         x_before = x
-        x = x + z
+        x = x + self.res_v * z
 
         if collect_stats:
             with torch.no_grad():
+                stats["vertical_norm"] = vert.abs().mean().item()
+                stats["alpha_vert"]    = float(alpha_vert.item())
                 stats["vertical_update"] = (x - x_before).abs().mean().item()
 
-        # -------------------------------
-        # MLP refinement
-        # -------------------------------
-        mlp_out = self.mlp(x)
-        m = self.alpha_mlp * mlp_out
+        x = self.post_norm2(x)
 
-        if collect_stats:
-            with torch.no_grad():
-                stats["mlp_norm"] = mlp_out.abs().mean().item()
-                stats["alpha_mlp"] = float(self.alpha_mlp.item())
+        # ============================================================
+        # 3. MLP refinement
+        # ============================================================
+        mlp_out = self.norm_mlp(self.mlp(x))
+        m = alpha_mlp * mlp_out
 
-        m = self.norm3(m)
         m = self.act(m)
         m = self.drop(m)
 
         x_before = x
-        x = x + m
+        x = x + self.res_m * m
 
         if collect_stats:
             with torch.no_grad():
+                stats["mlp_norm"] = mlp_out.abs().mean().item()
+                stats["alpha_mlp"] = float(alpha_mlp.item())
                 stats["mlp_update"] = (x - x_before).abs().mean().item()
+
+        x = self.post_norm3(x)
 
         if collect_stats:
             return x, stats
