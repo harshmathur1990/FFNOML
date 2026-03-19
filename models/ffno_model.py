@@ -135,36 +135,31 @@ class VerticalPhysicsStack(nn.Module):
         # x: [B, C, D, H, W]
         B, C, D, H, W = x.shape
 
-        # -> [B, H, W, C, D]
-        x = x.permute(0, 3, 4, 1, 2)   # NO contiguous
+        # [B, H, W, C, D]
+        x = x.permute(0, 3, 4, 1, 2)
 
-        # flatten spatial only (safe, view-like)
-        x = x.reshape(B, H * W, C, D)  # [B, HW, C, D]
+        # [B, HW, C, D]
+        x = x.reshape(B, H * W, C, D)
 
         chunk = 32
+        out_chunks = []
 
         for i in range(0, H * W, chunk):
-            # take chunk across ALL batch
-            xi = x[:, i:i+chunk]              # [B, chunk, C, D]
+            xi = x[:, i:i+chunk]          # [B, chunk, C, D]
+            ncols = xi.shape[1]
 
-            # merge batch + chunk
-            xi = xi.reshape(-1, C, D)         # [B*chunk, C, D]
+            xi = xi.reshape(B * ncols, C, D)   # [B*ncols, C, D]
 
             yi = self.in_proj(xi)
             yi = self.vertical_net(yi)
             yi = self.out_proj(yi)
 
-            # restore shape
-            yi = yi.reshape(B, -1, C, D)      # [B, chunk, C, D]
+            yi = yi.reshape(B, ncols, C, D)    # [B, chunk, C, D]
+            out_chunks.append(yi)
 
-            # write back
-            x[:, i:i+chunk] = yi
-
-        # restore spatial
+        x = torch.cat(out_chunks, dim=1)       # [B, HW, C, D]
         x = x.reshape(B, H, W, C, D)
-
-        # back to original layout
-        x = x.permute(0, 3, 4, 1, 2)   # NO contiguous
+        x = x.permute(0, 3, 4, 1, 2)
 
         return x
 
