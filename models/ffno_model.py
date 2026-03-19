@@ -202,6 +202,9 @@ class SpectralConv2dFull(nn.Module):
             nn.Linear(hidden, 2),
         )
 
+        nn.init.zeros_(self.freq_mlp[-1].weight)
+        nn.init.ones_(self.freq_mlp[-1].bias)
+
     def forward(self, x, dx, dy):
         # x: [B, Cin, D, H, W]
         B, Cin, D, H, W = x.shape
@@ -463,31 +466,40 @@ class FFNO3D(nn.Module):
 
     def _run_block(self, blk, x, dx, dy, collect_stats=False):
         if self.checkpoint_blocks and self.training and not collect_stats:
-            # checkpoint ONLY vertical (most expensive)
-            def fn(t):
-                spec = blk.spec_hw(t, dx=dx, dy=dy)
-                pw   = blk.pw_hw(t)
+            # horizontal branch normally
+            spec = blk.spec_hw(x, dx=dx, dy=dy)
+            pw   = blk.pw_hw(x)
 
-                y = blk.alpha_spec * spec + blk.alpha_pw * pw
-                y = blk.norm1(y)
-                y = blk.act(y)
-                y = blk.drop(y)
+            y = blk.alpha_spec * spec + blk.alpha_pw * pw
+            y = blk.norm1(y)
+            y = blk.act(y)
+            y = blk.drop(y)
 
-                t = t + y
+            x = x + y
 
-                # ONLY checkpoint vertical
-                t = t + checkpoint(
-                    lambda z: blk.alpha_vert * blk.vertical(z),
-                    t,
-                    use_reentrant=False,
-                )
+            # checkpoint only the vertical core, then apply the same post-processing
+            vert = checkpoint(
+                lambda z: blk.vertical(z),
+                x,
+                use_reentrant=False,
+            )
+            z = blk.alpha_vert * vert
+            z = blk.norm2(z)
+            z = blk.act(z)
+            z = blk.drop(z)
 
-                mlp_out = blk.mlp(t)
-                t = t + blk.alpha_mlp * mlp_out
+            x = x + z
 
-                return t
+            # mlp branch exactly as in forward
+            mlp_out = blk.mlp(x)
+            m = blk.alpha_mlp * mlp_out
+            m = blk.norm3(m)
+            m = blk.act(m)
+            m = blk.drop(m)
 
-            return fn(x)
+            x = x + m
+            return x
+
         else:
             return blk(x, dx=dx, dy=dy, collect_stats=collect_stats)
 
