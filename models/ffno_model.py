@@ -30,7 +30,7 @@ def _gn(channels, max_groups=8):
     g = min(max_groups, channels)
     while g > 1 and channels % g != 0:
         g -= 1
-    return return nn.GroupNorm(g, channels)
+    return nn.GroupNorm(g, channels)
 
 
 # def _gn(channels, max_groups=8):
