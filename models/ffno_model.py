@@ -26,15 +26,11 @@ def _to_spacing_value(spacing, x):
     raise TypeError(f"Unsupported spacing type: {type(spacing)}")
 
 
-def _gn(channels, max_groups=8):
-    g = min(max_groups, channels)
-    while g > 1 and channels % g != 0:
-        g -= 1
+def _norm3d(channels):
     return nn.InstanceNorm3d(channels, affine=True)
 
-
-# def _gn(channels, max_groups=8):
-    # return nn.Identity()
+def _norm1d(channels):
+    return nn.InstanceNorm1d(channels, affine=True)
 
 
 # ============================================================
@@ -70,9 +66,9 @@ class Residual1DBlock(nn.Module):
         super().__init__()
         p = k // 2
         self.conv1 = nn.Conv1d(ch, ch, kernel_size=k, padding=p, bias=False)
-        self.gn1 = _gn(ch)
+        self.gn1 = _norm1d(ch)
         self.conv2 = nn.Conv1d(ch, ch, kernel_size=k, padding=p, bias=False)
-        self.gn2 = _gn(ch)
+        self.gn2 = _norm1d(ch)
         self.act = nn.GELU()
 
     def forward(self, x):
@@ -91,7 +87,7 @@ class MultiScaleVertical(nn.Module):
         self.k3 = nn.Conv1d(ch, ch, kernel_size=3, padding=1, bias=False)
         self.k5 = nn.Conv1d(ch, ch, kernel_size=5, padding=2, bias=False)
         self.k9 = nn.Conv1d(ch, ch, kernel_size=9, padding=4, bias=False)
-        self.gn = _gn(ch)
+        self.gn = _norm1d(ch)
         self.act = nn.GELU()
 
     def forward(self, x):
@@ -119,7 +115,7 @@ class VerticalPhysicsStack(nn.Module):
 
         self.in_proj = nn.Sequential(
             nn.Conv1d(channels, hidden, kernel_size=1, bias=False),
-            _gn(hidden),
+            _norm1d(hidden),
             nn.GELU(),
         )
 
@@ -313,9 +309,9 @@ class FFNOBlock3d(nn.Module):
             dropout=dropout,
         )
 
-        self.norm1 = _gn(width)
-        self.norm2 = _gn(width)
-        self.norm3 = _gn(width)
+        self.norm1 = _norm3d(width)
+        self.norm2 = _norm3d(width)
+        self.norm3 = _norm3d(width)
 
         self.act = nn.GELU()
         self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
