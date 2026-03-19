@@ -526,8 +526,8 @@ def train(
                         f"[Epoch {epoch:03d}] "
                         f"train={train_loss:.6e} "
                         f"val={val_loss:.6e} (saved best) "
-                        f"L1={train_comp.get('data', 0):.3e} "
-                        f"L2={train_comp.get('source', 0):.3e}"
+                        f"L1={val_comp.get('data', 0):.3e} "
+                        f"L2={val_comp.get('source', 0):.3e}"
                     )
                     print(msg)
 
@@ -539,8 +539,8 @@ def train(
                         f"[Epoch {epoch:03d}] "
                         f"train={train_loss:.6e} "
                         f"val={val_loss:.6e} "
-                        f"L1={train_comp.get('data', 0):.3e} "
-                        f"L2={train_comp.get('source', 0):.3e}"
+                        f"L1={val_comp.get('data', 0):.3e} "
+                        f"L2={val_comp.get('source', 0):.3e}"
                     )
                     print(msg)
 

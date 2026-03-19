@@ -26,15 +26,15 @@ def _to_spacing_value(spacing, x):
     raise TypeError(f"Unsupported spacing type: {type(spacing)}")
 
 
-# def _gn(channels, max_groups=8):
-#     g = min(max_groups, channels)
-#     while g > 1 and channels % g != 0:
-#         g -= 1
-#     return nn.GroupNorm(g, channels)
-
-
 def _gn(channels, max_groups=8):
-    return nn.Identity()
+    g = min(max_groups, channels)
+    while g > 1 and channels % g != 0:
+        g -= 1
+    return nn.InstanceNorm3d(channels, affine=True)
+
+
+# def _gn(channels, max_groups=8):
+    # return nn.Identity()
 
 
 # ============================================================
@@ -189,7 +189,7 @@ class SpectralConv2dFull(nn.Module):
         self.in_channels = in_channels
         self.out_channels = out_channels
 
-        scale = 1.0 / max(1, in_channels * out_channels)
+        scale = 1.0 / math.sqrt(in_channels)
 
         self.weight_real = nn.Parameter(
             scale * torch.randn(in_channels, out_channels, dtype=torch.float32)
@@ -323,12 +323,12 @@ class FFNOBlock3d(nn.Module):
         self.use_gating = use_gating
 
         if use_gating:
-            self.alpha_spec = nn.Parameter(torch.ones(1))
+            self.alpha_spec = nn.Parameter(torch.ones(1)) * 3
             self.alpha_pw   = nn.Parameter(torch.ones(1))
             self.alpha_vert = nn.Parameter(torch.ones(1))
             self.alpha_mlp  = nn.Parameter(torch.ones(1))
         else:
-            self.register_buffer("alpha_spec", torch.ones(1))
+            self.register_buffer("alpha_spec", torch.ones(1)) * 3
             self.register_buffer("alpha_pw",   torch.ones(1))
             self.register_buffer("alpha_vert", torch.ones(1))
             self.register_buffer("alpha_mlp",  torch.ones(1))
