@@ -141,7 +141,7 @@ class VerticalPhysicsStack(nn.Module):
         # flatten spatial only (safe, view-like)
         x = x.reshape(B, H * W, C, D)  # [B, HW, C, D]
 
-        chunk = 128
+        chunk = 32
 
         for i in range(0, H * W, chunk):
             # take chunk across ALL batch
@@ -463,11 +463,31 @@ class FFNO3D(nn.Module):
 
     def _run_block(self, blk, x, dx, dy, collect_stats=False):
         if self.checkpoint_blocks and self.training and not collect_stats:
-            return checkpoint(
-                lambda t: blk(t, dx=dx, dy=dy, collect_stats=False),
-                x,
-                use_reentrant=False,
-            )
+            # checkpoint ONLY vertical (most expensive)
+            def fn(t):
+                spec = blk.spec_hw(t, dx=dx, dy=dy)
+                pw   = blk.pw_hw(t)
+
+                y = blk.alpha_spec * spec + blk.alpha_pw * pw
+                y = blk.norm1(y)
+                y = blk.act(y)
+                y = blk.drop(y)
+
+                t = t + y
+
+                # ONLY checkpoint vertical
+                t = t + checkpoint(
+                    lambda z: blk.alpha_vert * blk.vertical(z),
+                    t,
+                    use_reentrant=False,
+                )
+
+                mlp_out = blk.mlp(t)
+                t = t + blk.alpha_mlp * mlp_out
+
+                return t
+
+            return fn(x)
         else:
             return blk(x, dx=dx, dy=dy, collect_stats=collect_stats)
 
