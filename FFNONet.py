@@ -665,7 +665,7 @@ def ffno_train_model(
 
     Cin, Cout = _read_io_channels(train_h5)
 
-    _, _, mean_Y, std_Y = read_normalization(train_h5)
+    mean_X, std_X, mean_Y, std_Y = read_normalization(train_h5)
 
     model_config = dict(model_config)
     model_config["in_channels"] = Cin
@@ -685,6 +685,8 @@ def ffno_train_model(
         amp=amp,
         multi_gpu=multi_gpu,
         debug_loss=debug_loss,
+        mean_X=mean_X,
+        std_X=std_X,
         mean_Y=mean_Y,
         std_Y=std_Y
     )
@@ -936,7 +938,11 @@ def ffno_predict_populations(
         weight_decay=0.0,
         amp=amp,
         multi_gpu=False,
-        debug_loss=False
+        debug_loss=False,
+        mean_X=mean_X,
+        std_X=std_X,
+        mean_Y=mean_Y,
+        std_Y=std_Y
     )
 
     model, optimizer, loss_fn, scaler = builder.build()
