@@ -397,15 +397,15 @@ def _validate_physics_inputs(T, logb, stage="input", strict=False):
 
 def extract_temperature(X, mean_X, std_X):
     """
-    X: (B, C, Nz, H, W)  [normalized]
+    X: (B, C, Nz)  [normalized]
     mean_X, std_X: [C]
 
     returns:
-        T: (B, Nz, H, W)
+        T: (B, Nz)
     """
 
     # get normalized logT
-    logT_norm = X[:, 0]   # (B, Nz, H, W)
+    logT_norm = X[:, 0]   # (B, Nz)
 
     # de-normalize ONLY temperature channel
     mean_T = mean_X[0]
@@ -508,7 +508,7 @@ class NLTECompositeLoss(nn.Module):
         std_x = self.std_X.to(X.dtype)
         mean_x = self.mean_X.to(X.dtype)
         
-        T = extract_temperature(X, std_x, mean_x)
+        T = extract_temperature(X, mean_x, std_x)
 
         if logb_pred.shape[1] != int(self.levels.sum()):
             raise ValueError(
