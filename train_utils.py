@@ -223,12 +223,10 @@ def train_one_epoch(
     amp=True,
     grad_clip=1.0,
 ):
-
     model.train()
     running = 0.0
     n_columns = 0
     comp_sums = {}
-
     running_comp = {}
 
     lr = optimizer.param_groups[0]["lr"]
@@ -275,7 +273,6 @@ def train_one_epoch(
             if scaler is not None:
                 scaler.unscale_(optimizer)
 
-            # FSDP-safe clipping
             if isinstance(model, FSDP):
                 model.clip_grad_norm_(grad_clip)
             else:
@@ -287,26 +284,27 @@ def train_one_epoch(
         else:
             optimizer.step()
 
-        running += loss.item() * pred.shape[0]   # number of columns
-        n_columns += pred.shape[0]
-
         weight_factor = pred.shape[0]
 
-        # global (for epoch summary)
-        _accumulate_components(comp_sums, components, weight_factor=weight_factor)
+        running += loss.item() * weight_factor
+        n_columns += weight_factor
 
-        # local running (for tqdm)
+        _accumulate_components(comp_sums, components, weight_factor=weight_factor)
         _accumulate_components(running_comp, components, weight_factor=weight_factor)
 
+        # all ranks must participate in collectives
+        global_running = reduce_sum_scalar(running, device)
+        global_n = reduce_sum_scalar(n_columns, device)
+
+        avg_so_far = global_running / max(1, global_n)
+
+        avg_comp = {}
+        for k, v in running_comp.items():
+            global_v = reduce_sum_scalar(v, device)
+            avg_comp[k] = global_v / max(1, global_n)
+
         if is_main_process():
-            avg_so_far = running / max(1, n_columns)
-
-            avg_comp = {}
-            for k, v in running_comp.items():
-                avg_comp[k] = v / max(1, n_columns)
-            
             postfix = _make_postfix(avg_so_far, lr, device, avg_comp)
-
             pbar.set_postfix(postfix)
 
     global_running = reduce_sum_scalar(running, device)
@@ -380,15 +378,18 @@ def validate(
 
             _accumulate_model_stats(model_stats_sums, stats, weight_factor=pred.shape[0])
 
+            global_running = reduce_sum_scalar(running, device)
+            global_n = reduce_sum_scalar(n_columns, device)
+
+            avg_so_far = global_running / max(1, global_n)
+
+            avg_comp = {}
+            for k, v in running_comp.items():
+                global_v = reduce_sum_scalar(v, device)
+                avg_comp[k] = global_v / max(1, global_n)
+
             if is_main_process():
-                avg_so_far = running / max(1, n_columns)
-
-                avg_comp = {}
-                for k, v in running_comp.items():
-                    avg_comp[k] = v / max(1, n_columns)
-
                 postfix = _make_postfix(avg_so_far, None, device, avg_comp)
-
                 pbar.set_postfix(postfix)
 
     global_running = reduce_sum_scalar(running, device)
