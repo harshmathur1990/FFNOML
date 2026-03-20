@@ -1,15 +1,15 @@
-# NLTE Radiative Transfer with Factorized Fourier Neural Operators (FFNO)
+# FFNOML — 3D NLTE Radiative Transfer with Fourier Neural Operators
 
-A machine learning framework for predicting **NLTE departure coefficients** in 3-D stellar atmospheres using **Factorized Fourier Neural Operators (FFNO)**.
+A machine learning framework for predicting NLTE departure coefficients in 3-D stellar atmospheres using 3D Fourier Neural Operators (FFNO).
 
 This repository provides an end-to-end pipeline to:
 
-- Load **MULTI3D / Bifrost simulation outputs**
-- Construct training datasets on a **column-mass grid**
-- Train a **3-D FFNO operator** mapping atmosphere → NLTE departure coefficients
+- Load MULTI3D / Bifrost simulation outputs
+- Construct training datasets on a column-mass grid
+- Train a 3-D operator network mapping atmosphere → NLTE departure coefficients
 - Predict NLTE populations on unseen simulations
 
-The model is designed for **large-scale solar atmosphere simulations** and integrates **physics-based losses** derived from radiative transfer source functions.
+The model is designed for large-scale solar atmosphere simulations and incorporates physics-informed loss functions derived from radiative transfer constraints.
 
 ---
 
@@ -17,34 +17,28 @@ The model is designed for **large-scale solar atmosphere simulations** and integ
 
 The network learns the operator
 
-```
 Atmospheric cube → NLTE departure coefficients
-```
 
 Input features per grid cell:
 
-```
 log10(T)
-vx / 100
-vy / 100
-vz / 100
+vx
+vy
+vz
 log10(ne)
 log10(rho)
-```
 
 Model output:
 
-```
-log10(n_nlte / n_lte)
-```
+log10(n_NLTE / n_LTE)
 
 for each atomic level.
 
 The architecture combines:
 
-- **Global spectral mixing (FNO) in x–y**
-- **Local vertical coupling (1-D convolution in z)**
-- **Physics-informed loss terms**
+- Global spectral mixing (FNO) in horizontal directions (x–y)
+- Local vertical coupling (1-D depth mixing in z)
+- Physics-informed loss terms
 
 ---
 
@@ -54,121 +48,107 @@ The architecture combines:
 
 Loss includes:
 
-- Weighted MSE on departure coefficients
+- Weighted MSE + L1 on departure coefficients
 - Source function consistency penalty
-- Multi-atom NLTE constraints
+- Multi-level NLTE constraints
 
 ---
 
 ## Operator learning
 
-Unlike CNN approaches predicting a single column, this model learns a **full 3-D operator**
+The model learns a 3-D operator:
 
-```
 [B, Cin, D, H, W] → [B, Cout, D, H, W]
-```
 
-which enables:
+This enables:
 
-- patch training
-- full cube inference
-- tiled prediction for large domains
+- patch-based training
+- full-domain inference
+- tiled prediction for large simulations
 
 ---
 
-## Multi-resolution training
+## Multi-scale supervision
 
-Training samples are generated using
+Training samples are generated across multiple spatial scales:
 
-```
 scales = (1, 2, 3, 4)
-```
 
-with anti-alias filtering to improve generalization across spatial resolutions.
+with anti-alias filtering to improve generalization.
+
+---
+
+## Distributed training
+
+Supports large-scale training using:
+
+- PyTorch FSDP (Fully Sharded Data Parallel)
+- multi-GPU training
+- sharded checkpointing
 
 ---
 
 # Repository Structure
 
-```
 .
 ├── config.py
-│   Global experiment configuration
-│
 ├── pipeline.py
-│   End-to-end pipeline:
-│   data generation → training → prediction
-│
-├── ffnonet.py
-│   Dataset construction and FFNO training utilities
-│
+├── FFNONet.py
 ├── model_builder.py
-│   Model + optimizer + loss builder
-│
 ├── train_utils.py
-│   Training loops and validation
-│
 ├── interp_utils.py
-│   Column-mass interpolation utilities
-│
+├── normalize_utils.py
 ├── data/
-│   ├── dataset.py
-│   └── dataloader_builder.py
-│
+│   └── dataset.py
 ├── models/
 │   └── ffno_model.py
-│
-└── loss/
-    ├── nlte_composite_loss.py
-    └── weighted_mse_loss.py
-```
+├── loss/
+│   ├── nlte_composite_loss.py
+│   └── weighted_mse_loss.py
+└── Forward.jl
 
 ---
 
 # Model Architecture
 
-The network is a **Factorized Fourier Neural Operator** adapted for radiative transfer.
+The network is a 3D Factorized Fourier Neural Operator adapted for radiative transfer.
 
-Main components:
+Main structure:
 
-```
-Lift layer
-   ↓
-FFNO Blocks (spectral mixing in x,y)
-   ↓
-Vertical mixer (1-D conv in z)
-   ↓
+Input lifting layer
+↓
+FFNO blocks (spectral mixing in x–y)
+↓
+Vertical mixer (depth-wise coupling in z)
+↓
 Pointwise MLP
-   ↓
+↓
 Projection to output channels
-```
 
-Each FFNO block contains:
+Each FFNO block includes:
 
-- spectral convolution
-- vertical depth mixing
+- spectral convolution (Fourier space)
+- vertical coupling layer
 - residual channel MLP
 
 ---
 
 # Dataset Generation
 
-Training data is created directly from **MULTI3D simulation outputs**.
+Training data is generated from MULTI3D simulation outputs.
 
-Steps:
+Pipeline:
 
-1. Load Bifrost atmosphere  
-2. Interpolate to column-mass grid  
-3. Compute departure coefficients  
-4. Extract spatial patches  
-5. Store in HDF5  
+1. Load Bifrost atmosphere
+2. Interpolate to column-mass grid
+3. Compute NLTE departure coefficients
+4. Extract spatial patches
+5. Store in HDF5 format
 
-Generated dataset:
+Dataset structure:
 
-```
 inputs  : [N, Cin, D, P, P]
 targets : [N, Cout, D, P, P]
-```
 
 ---
 
@@ -176,7 +156,6 @@ targets : [N, Cout, D, P, P]
 
 Recommended environment:
 
-```
 Python >= 3.10
 PyTorch >= 2.1
 NumPy
@@ -184,72 +163,57 @@ SciPy
 h5py
 matplotlib
 helita
-```
 
 Install dependencies:
 
-```bash
 pip install torch numpy scipy h5py matplotlib
-```
 
-For Bifrost / MULTI3D support:
+For MULTI3D / Bifrost I/O:
 
-```bash
 pip install helita
-```
 
 ---
 
 # Configuration
 
-All experiment parameters are defined in:
+All parameters are defined in:
 
-```
 config.py
-```
 
 Example model configuration:
 
-```python
 MODEL_CONFIG = dict(
     width=64,
-    modes_y=16,
     modes_x=16,
+    modes_y=16,
     n_layers=6,
     z_kernel=9,
     dropout=0.1,
     mlp_expansion=2
 )
-```
 
 Dataset parameters:
 
-```python
-PATCH = 96
-STRIDE = 48
+PATCH = 32
+STRIDE = 16
 NDEP = 400
-SCALES = (1,2,3,4)
-```
+SCALES = (1, 2, 3, 4)
 
 ---
 
 # Running the Pipeline
 
-The full workflow is executed via
+The full workflow is executed via:
 
-```bash
 python pipeline.py
-```
 
-Steps automatically executed:
+Stages:
 
-```
 1. Load MULTI3D simulations
 2. Build training dataset
 3. Build validation dataset
 4. Train FFNO model
 5. Predict departure coefficients
-```
 
 ---
 
@@ -258,80 +222,74 @@ Steps automatically executed:
 Training uses:
 
 - AdamW optimizer
-- mixed precision (AMP)
-- early stopping
+- optional mixed precision (AMP)
 - gradient clipping
+- validation-based checkpointing
 
 Example parameters:
 
-```python
 NUM_EPOCHS = 50
 BATCH_SIZE = 1
 LEARNING_RATE = 2e-4
-```
 
 ---
 
 # Prediction
 
-Prediction supports two modes.
+Supports two modes.
 
-## Full cube inference
+Full cube inference:
 
-```
 model(x, dx, dy)
-```
 
-## Tiled inference
+Tiled inference:
 
-Used for large grids.
-
-```
 tiled=True
-patch=96
-stride=48
-```
+patch=32
+stride=16
 
-Predictions are blended using a **Hann window** to avoid boundary artifacts.
+Predictions are blended using a window function to avoid edge artifacts.
 
 ---
 
 # Output
 
-Predictions are saved as
+Predictions are stored as:
 
-```
 departure_coefficients
-```
 
-with dimensions
+with dimensions:
 
-```
-[1, Nlevels, Ndep, Nx, Ny]
-```
+[nx, ny, Ndep, Nlevels]
 
-in files
-
-```
-output_*.hdf5
-```
+in HDF5 files.
 
 ---
 
 # Physics Loss
 
-The composite loss is
+The composite loss is:
 
-```
-L = L_data + λ L_source
-```
+L = L_data + λ L_phys
 
-where
+where:
 
-- `L_data` = weighted MSE on log departure coefficients
-- `L_source` = consistency loss on source functions
+- L_data = weighted MSE + L1
+- L_phys = source function consistency
 
-The source function is computed from atomic level populations and transition energies.
+---
+
+# Forward Synthesis
+
+Forward.jl provides:
+
+- LTE population computation
+- NLTE population reconstruction
+- spectral synthesis using Muspel
+
+Run:
+
+julia Forward.jl
 
 ---
 
@@ -339,20 +297,20 @@ The source function is computed from atomic level populations and transition ene
 
 This framework enables:
 
-- fast NLTE population synthesis
-- surrogate modeling for radiative transfer
-- ML acceleration of spectral synthesis
-- large-scale solar atmosphere modeling
+- fast NLTE population prediction
+- surrogate radiative transfer modeling
+- acceleration of spectral synthesis
+- large-scale solar atmosphere simulations
 
 ---
 
 # License
 
-MIT License
+MIT
 
 ---
 
 # Author
 
-Harsh Mathur  
+Harsh Mathur
 Computational Astrophysics / Radiative Transfer

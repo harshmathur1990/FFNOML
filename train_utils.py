@@ -89,10 +89,6 @@ def flatten_columns_logb(logb):
 
 
 def _accumulate_model_stats(stats_sums, stats_list, weight_factor=1.0):
-    """
-    stats_list: list of dicts, typically one dict per block/layer.
-    Accumulates numeric stats across validation batches.
-    """
     if stats_list is None:
         return
 
@@ -100,9 +96,13 @@ def _accumulate_model_stats(stats_sums, stats_list, weight_factor=1.0):
         if not isinstance(layer_stats, dict):
             continue
 
+        layer = layer_stats.get("layer", -1)
+
         for k, v in layer_stats.items():
             if k == "layer":
                 continue
+
+            key = f"layer{layer}.{k}"
 
             if isinstance(v, torch.Tensor):
                 v = v.detach()
@@ -117,13 +117,13 @@ def _accumulate_model_stats(stats_sums, stats_list, weight_factor=1.0):
 
             v = v * weight_factor
 
-            if k not in stats_sums:
+            if key not in stats_sums:
                 if isinstance(v, torch.Tensor):
-                    stats_sums[k] = v.clone()
+                    stats_sums[key] = v.clone()
                 else:
-                    stats_sums[k] = v
+                    stats_sums[key] = v
             else:
-                stats_sums[k] += v
+                stats_sums[key] += v
 
 
 def _accumulate_components(comp_sums, components, weight_factor=1.0):
@@ -159,6 +159,17 @@ def _accumulate_components(comp_sums, components, weight_factor=1.0):
                 comp_sums[k] = v
         else:
             comp_sums[k] += v
+
+
+def compute_mean_stats(layer_stats):
+    mean_stats = {}
+    for k in layer_stats:
+        base_key = k.split(".", 1)[1]  # remove layer prefix
+        if base_key not in mean_stats:
+            mean_stats[base_key] = []
+        mean_stats[base_key].append(layer_stats[k])
+
+    return {f"mean.{k}": sum(v)/len(v) for k, v in mean_stats.items()}
 
 
 def _make_postfix(loss, lr, device, components):
@@ -501,6 +512,9 @@ def train(
                 device=device,
                 amp=amp,
             )
+
+            mean_stats = compute_mean_stats(val_stats)
+            val_stats.update(mean_stats)
 
             improved = (best_val - val_loss) > min_delta
 
