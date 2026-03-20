@@ -818,13 +818,23 @@ def _predict_tiled(model, X, dx, dy, patch, stride, device="cuda", amp=True):
     # tiled inference
     # ------------------------------------------------
 
+    all_stats = []
+
     for i0 in xs:
         for j0 in ys:
 
             xt = X[:, :, :, i0:i0+patch, j0:j0+patch]
 
             with torch.amp.autocast("cuda", enabled=(amp and str(device).startswith("cuda"))):
-                yt = model(xt, dx, dy)
+
+                yt, stats = model(xt, dx, dy, collect_stats=True)
+
+                tile_weight = float(w2.sum().item())  # scalar weight
+
+                for s in stats:
+                    s = s.copy()
+                    s["_weight"] = tile_weight
+                    all_stats.append(s)
 
             if torch.isnan(yt).any() or torch.isinf(yt).any():
 
@@ -881,7 +891,7 @@ def _predict_tiled(model, X, dx, dy, patch, stride, device="cuda", amp=True):
     print("Output range:", out.min().item(), out.max().item())
     print("=== TILE PREDICTION END ===")
 
-    return out
+    return out, all_stats
 
 
 def ffno_predict_populations(
@@ -903,6 +913,38 @@ def ffno_predict_populations(
     patch=128,
     stride=64
 ):
+
+    def _aggregate_stats(all_stats):
+
+        layer_dict = {}
+
+        for s in all_stats:
+            layer = s["layer"]
+            w = s.get("_weight", 1.0)
+
+            if layer not in layer_dict:
+                layer_dict[layer] = {}
+
+            for k, v in s.items():
+                if k in ("layer", "_weight"):
+                    continue
+
+                if k not in layer_dict[layer]:
+                    layer_dict[layer][k] = {"sum": 0.0, "w": 0.0}
+
+                layer_dict[layer][k]["sum"] += v * w
+                layer_dict[layer][k]["w"] += w
+
+        # weighted mean
+        agg = {}
+        for layer, vals in layer_dict.items():
+            agg[layer] = {
+                k: vals[k]["sum"] / (vals[k]["w"] + 1e-12)
+                for k in vals
+            }
+
+        return agg
+
     amp = False
 
     """
@@ -992,9 +1034,9 @@ def ffno_predict_populations(
         dy = dy.to(device)
 
         with torch.no_grad(), torch.amp.autocast("cuda", enabled=(amp and str(device).startswith("cuda"))):
-            pred_log = model(X, dx, dy)
+            pred_log, all_stats = model(X, dx, dy, collect_stats=True)
     else:
-        pred_log = _predict_tiled(
+        pred_log, all_stats = _predict_tiled(
             model,
             X,
             dx,
@@ -1054,13 +1096,57 @@ def ffno_predict_populations(
 
     # Diagnostics
     if diagnostic_path is not None:
-        # simple summary stats
-        stats = dict(
-            dep_mean=float(np.mean(dep)),
-            dep_std=float(np.std(dep)),
-            dep_min=float(np.min(dep)),
-            dep_max=float(np.max(dep)),
+
+        agg_stats = _aggregate_stats(all_stats)
+
+        if len(agg_stats) == 0:
+            print("WARNING: No stats collected")
+            return save_path
+
+        summary = {}
+
+        first_layer = next(iter(agg_stats.values()))
+        for k in first_layer.keys():
+            vals = [agg_stats[layer][k] for layer in agg_stats]
+            summary[f"{k}_mean"] = float(np.mean(vals))
+            summary[f"{k}_std"]  = float(np.std(vals))
+
+        summary["spec_to_pw_ratio"] = float(
+            summary["spec_norm_mean"] / (summary["pw_norm_mean"] + 1e-12)
         )
-        np.savez(diagnostic_path, **stats)
+
+        summary["vertical_to_mlp_ratio"] = float(
+            summary["vertical_norm_mean"] / (summary["mlp_norm_mean"] + 1e-12)
+        )
+
+        summary["alpha_spec_mean"] = float(np.mean([
+            agg_stats[l]["alpha_spec"] for l in agg_stats
+        ]))
+        summary["alpha_pw_mean"] = float(np.mean([
+            agg_stats[l]["alpha_pw"] for l in agg_stats
+        ]))
+        summary["alpha_vert_mean"] = float(np.mean([
+            agg_stats[l]["alpha_vert"] for l in agg_stats
+        ]))
+        summary["alpha_mlp_mean"] = float(np.mean([
+            agg_stats[l]["alpha_mlp"] for l in agg_stats
+        ]))
+
+        summary["pred_log_mean"] = float(pred_log.mean().item())
+        summary["pred_log_std"]  = float(pred_log.std().item())
+
+        summary["dep_mean"] = float(dep.mean())
+        summary["dep_std"]  = float(dep.std())
+        summary["dep_min"]  = float(dep.min())
+        summary["dep_max"]  = float(dep.max())
+        stats_flat = {}
+
+        for layer, vals in agg_stats.items():
+            for k, v in vals.items():
+                stats_flat[f"layer{layer}_{k}"] = v
+
+        stats_flat.update(summary)
+
+        np.savez(diagnostic_path, **stats_flat)
 
     return save_path
