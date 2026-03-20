@@ -1,16 +1,6 @@
 # ============================================================
 # FFNO Utilities (full-volume / patch-to-patch operator training)
 #
-# Drop-in replacement for your window-based SunnyNet pipeline.
-#
-# What changes:
-#   - NO 7x7 -> center-column extraction
-#   - We train an operator: [Cin, D, Px, Py] -> [Cout, D, Px, Py]
-#   - You can generate many TRAINING patches via (patch, stride)
-#   - At inference, you can predict either:
-#       (A) full cube in one go (if GPU allows), or
-#       (B) tiled prediction with overlap + blending
-#
 # Public API (new):
 #   build_dataset_ffno
 #   build_solving_set_ffno
