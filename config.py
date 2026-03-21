@@ -120,20 +120,30 @@ levels = [ATOM_CONFIG[a]["levels"]   for a in ACTIVE_ATOMS]
 
 
 MULTI3D_PRED_DATA = [
+    # {
+    #     "MULTI3D_ATMOS": "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion/385/atm3d",
+    #     "MESH":  "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion/385/mesh",
+    #     "NAME": "en024048_hion_385"
+    # },
+    # {
+    #     "MULTI3D_ATMOS": "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion/386/atm3d",
+    #     "MESH":  "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion/386/mesh",
+    #     "NAME": "en024048_hion_386"
+    # },
+    # {
+    #     "MULTI3D_ATMOS": "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion/465/atm3d",
+    #     "MESH":  "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion/465/mesh",
+    #     "NAME": "en024048_hion_465"
+    # },
     {
-        "MULTI3D_ATMOS": "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion/385/atm3d",
-        "MESH":  "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion/385/mesh",
-        "NAME": "en024048_hion_385"
+        "MULTI3D_ATMOS": "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion_504/385/atm3d",
+        "MESH":  "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion_504/385/mesh",
+        "NAME": "en024048_hion_504_385"
     },
     {
-        "MULTI3D_ATMOS": "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion/386/atm3d",
-        "MESH":  "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion/386/mesh",
-        "NAME": "en024048_hion_386"
-    },
-    {
-        "MULTI3D_ATMOS": "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion/465/atm3d",
-        "MESH":  "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion/465/mesh",
-        "NAME": "en024048_hion_465"
+        "MULTI3D_ATMOS": "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion_504/465/atm3d",
+        "MESH":  "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion_504/465/mesh",
+        "NAME": "en024048_hion_504_465"
     }
 ]
 
@@ -161,7 +171,7 @@ MODEL_CONFIG = dict(
 IODIR = "IO/"
 TRAIN_FILE   = IODIR + f"3D_sim_train.hdf5"
 TEST_FILE   = IODIR + f"3D_sim_test.hdf5"
-MODEL_DIR  = f"training/"
+MODEL_DIR  = f"training_lam_0.1/"
 MODEL_FILE = MODEL_DIR + f"3D_sim_train_s123.pt"
 
 

@@ -40,16 +40,18 @@ default(show=false)
 model  = "FFNO3D"
 snap = 385
 
-train_dir = "training"
+train_dir = "training_lam_0.1"
+
+sim_name = "en024048_hion_504"
 
 pred_h5 = joinpath(
     train_dir,
-    "output_3D_sim_s5_en024048_hion_$(snap)_$(model).hdf5"
+    "output_3D_sim_s5_$(sim_name)_$(snap)_$(model).hdf5"
 )
 
 out_h5 = joinpath(
     train_dir,
-    "intensity_ml_en024048_hion_$(snap)_$(model).h5"
+    "intensity_ml_$(sim_name)_$(snap)_$(model).h5"
 )
 
 const CONFIG_ML = (
