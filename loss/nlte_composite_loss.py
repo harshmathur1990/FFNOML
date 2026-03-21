@@ -429,7 +429,7 @@ class NLTECompositeLoss(nn.Module):
         data_loss_func,
         atom_names=["H", "Ca"], 
         lam=1e-1,
-        lam_S=1e-1,
+        lam_S=0.05,
         min_stride=2,
         max_frac=0.25,
         delta=1e-1,
