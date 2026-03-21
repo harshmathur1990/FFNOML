@@ -20,7 +20,8 @@ from scipy.ndimage import gaussian_filter
 from model_builder import ModelBuilder
 from data_builder import DataLoaderBuilder
 from normalize_utils import *
-
+from tqdm import tqdm
+import itertools
 
 # ============================================================
 # ---------------- PREPROCESSING ------------------------------
@@ -810,45 +811,44 @@ def _predict_tiled(model, X, dx, dy, patch, stride, device="cuda", amp=True):
 
     all_stats = []
 
-    for i0 in xs:
-        for j0 in ys:
+    for i0, j0 in tqdm(itertools.product(xs, ys), total=len(xs)*len(ys), desc="Tiles"):
 
-            xt = X[:, :, :, i0:i0+patch, j0:j0+patch]
+        xt = X[:, :, :, i0:i0+patch, j0:j0+patch]
 
-            with torch.amp.autocast("cuda", enabled=(amp and str(device).startswith("cuda"))):
+        with torch.amp.autocast("cuda", enabled=(amp and str(device).startswith("cuda"))):
 
-                yt, stats = model(xt, dx, dy, collect_stats=True)
+            yt, stats = model(xt, dx, dy, collect_stats=True)
 
-                tile_weight = float(w2.sum().item())  # scalar weight
+            tile_weight = float(w2.sum().item())  # scalar weight
 
-                for s in stats:
-                    s = s.copy()
-                    s["_weight"] = tile_weight
-                    all_stats.append(s)
+            for s in stats:
+                s = s.copy()
+                s["_weight"] = tile_weight
+                all_stats.append(s)
 
-            if torch.isnan(yt).any() or torch.isinf(yt).any():
+        if torch.isnan(yt).any() or torch.isinf(yt).any():
 
-                print(f"NaN/Inf detected in tile ({i0},{j0})")
+            print(f"NaN/Inf detected in tile ({i0},{j0})")
 
-                finite = yt[torch.isfinite(yt)]
+            finite = yt[torch.isfinite(yt)]
 
-                if finite.numel() > 0:
-                    print(
-                        "Tile output range:",
-                        finite.min().item(),
-                        finite.max().item()
-                    )
-
-                # prevent contamination
-                yt = torch.nan_to_num(
-                    yt,
-                    nan=0.0,
-                    posinf=0.0,
-                    neginf=0.0
+            if finite.numel() > 0:
+                print(
+                    "Tile output range:",
+                    finite.min().item(),
+                    finite.max().item()
                 )
 
-            Y_acc[:, :, :, i0:i0+patch, j0:j0+patch] += yt * w2
-            W_acc[:, :, :, i0:i0+patch, j0:j0+patch] += w2
+            # prevent contamination
+            yt = torch.nan_to_num(
+                yt,
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0
+            )
+
+        Y_acc[:, :, :, i0:i0+patch, j0:j0+patch] += yt * w2
+        W_acc[:, :, :, i0:i0+patch, j0:j0+patch] += w2
 
     # ------------------------------------------------
     # check weight coverage
