@@ -120,21 +120,21 @@ levels = [ATOM_CONFIG[a]["levels"]   for a in ACTIVE_ATOMS]
 
 
 MULTI3D_PRED_DATA = [
-    # {
-    #     "MULTI3D_ATMOS": "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion/385/atm3d",
-    #     "MESH":  "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion/385/mesh",
-    #     "NAME": "en024048_hion_385"
-    # },
-    # {
-    #     "MULTI3D_ATMOS": "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion/386/atm3d",
-    #     "MESH":  "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion/386/mesh",
-    #     "NAME": "en024048_hion_386"
-    # },
-    # {
-    #     "MULTI3D_ATMOS": "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion/465/atm3d",
-    #     "MESH":  "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion/465/mesh",
-    #     "NAME": "en024048_hion_465"
-    # },
+    {
+        "MULTI3D_ATMOS": "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion/385/atm3d",
+        "MESH":  "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion/385/mesh",
+        "NAME": "en024048_hion_385"
+    },
+    {
+        "MULTI3D_ATMOS": "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion/386/atm3d",
+        "MESH":  "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion/386/mesh",
+        "NAME": "en024048_hion_386"
+    },
+    {
+        "MULTI3D_ATMOS": "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion/465/atm3d",
+        "MESH":  "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion/465/mesh",
+        "NAME": "en024048_hion_465"
+    },
     {
         "MULTI3D_ATMOS": "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion_504/385/atm3d",
         "MESH":  "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion_504/385/mesh",
