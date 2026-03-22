@@ -118,7 +118,7 @@ const CONFIG_BIFROST = (
         (
             name = "H",
             atom_file = "/mn/stornext/u3/harshm/Documents/WorkRepo/multi3d/input/atoms/atom.h6_tiago2.yaml",
-            pops_file = "/mn/stornext/d9/data/harshm/bifrost_data/$(sim_name)/385/H/out_pop",
+            pops_file = "/mn/stornext/d9/data/harshm/bifrost_data/$(sim_name)/$(snap)/H/out_pop",
             nlevels = 6,
             line_index = 5,
             lower_level = 2,
@@ -127,7 +127,7 @@ const CONFIG_BIFROST = (
         (
             name = "CA",
             atom_file = "/mn/stornext/u3/harshm/Documents/WorkRepo/multi3d/input/atoms/atom.ca2.yaml",
-            pops_file = "/mn/stornext/d9/data/harshm/bifrost_data/$(sim_name)/385/CA/out_pop",
+            pops_file = "/mn/stornext/d9/data/harshm/bifrost_data/$(sim_name)/$(snap)/CA/out_pop",
             nlevels = 6,
             line_index = 5,
             lower_level = 3,
@@ -135,10 +135,10 @@ const CONFIG_BIFROST = (
         )
     ],
 
-    mesh_file  = "/mn/stornext/d9/data/harshm/bifrost_data/$(sim_name)/385/mesh",
-    atmos_file = "/mn/stornext/d9/data/harshm/bifrost_data/$(sim_name)/385/atm3d",
+    mesh_file  = "/mn/stornext/d9/data/harshm/bifrost_data/$(sim_name)/$(snap)/mesh",
+    atmos_file = "/mn/stornext/d9/data/harshm/bifrost_data/$(sim_name)/$(snap)/atm3d",
 
-    out_h5     = "IO/intensity_bifrost.h5",
+    out_h5     = "IO/intensity_bifrost_$(sim_name)_$(snap).h5",
     out_prefix = "diag_bifrost",
 
     x_pick     = 33,
@@ -377,7 +377,7 @@ function load_pred_depcoeff(pred_h5::String, pred_key::String)
     h5open(pred_h5, "r") do f
         raw = read(f[pred_key])
 
-        dep_coeff = PermutedDimsArray(raw, (3, 4, 2, 1))
+        dep_coeff = PermutedDimsArray(raw, (4, 3, 2, 1))
         return dep_coeff
 
     end
