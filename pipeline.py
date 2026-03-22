@@ -155,6 +155,8 @@ def run_predictions():
                 tiled=TILED,
                 patch=PATCH,
                 stride=STRIDE,
+                dx_cutoff=DX_CUTOFF,
+                dy_cutoff=DY_CUTOFF
             )
 
 

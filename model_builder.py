@@ -31,7 +31,9 @@ class ModelBuilder:
         mean_X=0,
         std_X=1,
         mean_Y=0,
-        std_Y=1
+        std_Y=1,
+        kx_cutoff=None,
+        ky_cutoff=None
     ):
 
         if model == "FFNO3D":
@@ -68,6 +70,10 @@ class ModelBuilder:
 
         self.std_Y = std_Y
 
+        self.kx_cutoff = kx_cutoff
+
+        self.ky_cutoff = ky_cutoff
+
         if self.multi_gpu:
             self._init_distributed()
 
@@ -94,7 +100,16 @@ class ModelBuilder:
 
     def build_model(self):
 
-        model = self.model_cls(**self.model_config)
+        model_config = dict(self.model_config)
+
+        if self.kx_cutoff is not None:
+            if self.ky_cutoff is None:
+                raise ValueError("ky_cutoff is None when kx_cutoff is not None")
+
+            model_config["kx_cutoff"] = self.kx_cutoff
+            model_config["ky_cutoff"] = self.ky_cutoff
+
+        model = self.model_cls(**model_config)
 
         model = model.to(self.device)
 

@@ -22,6 +22,45 @@ from data_builder import DataLoaderBuilder
 from normalize_utils import *
 from tqdm import tqdm
 import itertools
+import math
+
+
+def compute_k_cutoff(dx, dy=None, k_scale=1e5, radial=True):
+    """
+    Compute training-band cutoff in the SAME scaled k-space
+    used by your layer.
+
+    Parameters
+    ----------
+    dx : float
+        Training grid spacing in x.
+    dy : float or None
+        Training grid spacing in y. If None, dy=dx.
+    k_scale : float
+        The same scaling factor used in the model.
+    radial : bool
+        If True, return radial cutoff based on k_mag.
+        If False, return per-axis cutoffs.
+
+    Returns
+    -------
+    radial=True:
+        k_cutoff : float
+
+    radial=False:
+        kx_cutoff, ky_cutoff : float, float
+    """
+    if dy is None:
+        dy = dx
+
+    kx_cutoff = math.pi / dx * k_scale
+    ky_cutoff = math.pi / dy * k_scale
+
+    if radial:
+        return math.sqrt(kx_cutoff**2 + ky_cutoff**2)
+    else:
+        return kx_cutoff, ky_cutoff
+
 
 # ============================================================
 # ---------------- PREPROCESSING ------------------------------
@@ -901,7 +940,9 @@ def ffno_predict_populations(
     cuda=True,
     tiled=True,
     patch=128,
-    stride=64
+    stride=64,
+    dx_cutoff=None,
+    dy_cutoff=None
 ):
 
     def _aggregate_stats(all_stats):
@@ -952,6 +993,7 @@ def ffno_predict_populations(
     Cin, Cout = _read_io_channels(train_h5)
 
     mean_X, std_X, mean_Y, std_Y = read_normalization(train_h5)
+    kx_cutoff, ky_cutoff = compute_k_cutoff(dx=dx_cutoff, dy=dy_cutoff, k_scale=1e5, radial=False)
 
     model_config = dict(model_config)
     model_config["in_channels"] = Cin
@@ -974,7 +1016,9 @@ def ffno_predict_populations(
         mean_X=mean_X,
         std_X=std_X,
         mean_Y=mean_Y,
-        std_Y=std_Y
+        std_Y=std_Y,
+        kx_cutoff=kx_cutoff,
+        ky_cutoff=ky_cutoff
     )
 
     model, optimizer, loss_fn, scaler = builder.build()

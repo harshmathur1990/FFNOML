@@ -176,7 +176,14 @@ class SpectralConv2dFull(nn.Module):
 
     Input/Output: [B, C, D, H, W]
     """
-    def __init__(self, in_channels, out_channels, hidden=32):
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        hidden=32,
+        kx_cutoff=None,
+        ky_cutoff=None
+    ):
         super().__init__()
 
         self.in_channels = in_channels
@@ -198,6 +205,10 @@ class SpectralConv2dFull(nn.Module):
             nn.GELU(),
             nn.Linear(hidden, 2),
         )
+
+        self.kx_cutoff = kx_cutoff
+        self.ky_cutoff = ky_cutoff
+
 
     def forward(self, x, dx, dy):
         # x: [B, Cin, D, H, W]
@@ -262,6 +273,11 @@ class SpectralConv2dFull(nn.Module):
                 + torch.einsum("b i d y x, i o y x -> b o d y x", xi, w_real)
             )
 
+            if self.kx_cutoff is not None:
+                mask = (kx_grid.abs() <= self.kx_cutoff) & (ky_grid.abs() <= self.ky_cutoff)[None, None, None, :, :]
+                out_ft_real = out_ft_real * mask
+                out_ft_imag = out_ft_imag * mask
+
             out_ft = torch.complex(out_ft_real, out_ft_imag)
             y = torch.fft.irfft2(out_ft, s=(H, W), dim=(-2, -1))
 
@@ -287,13 +303,20 @@ class FFNOBlock3d(nn.Module):
         mlp_expansion=2,
         vertical_hidden=256,
         use_gating=True,
+        kx_cutoff=None,
+        ky_cutoff=None
     ):
         super().__init__()
 
         # -----------------------------------
         # Operators
         # -----------------------------------
-        self.spec_hw = SpectralConv2dFull(width, width)
+        self.spec_hw = SpectralConv2dFull(
+            width,
+            width,
+            kx_cutoff=kx_cutoff,
+            ky_cutoff=ky_cutoff
+        )
         self.pw_hw   = nn.Conv3d(width, width, kernel_size=1)
 
         self.vertical = VerticalPhysicsStack(
@@ -460,6 +483,8 @@ class FFNO3D(nn.Module):
         padding=0,
         checkpoint_blocks=True,
         use_gating=True,
+        kx_cutoff=None,
+        ky_cutoff=None,
     ):
         super().__init__()
 
@@ -476,6 +501,8 @@ class FFNO3D(nn.Module):
                     mlp_expansion=mlp_expansion,
                     vertical_hidden=vertical_hidden,
                     use_gating=use_gating,
+                    kx_cutoff=kx_cutoff,
+                    ky_cutoff=ky_cutoff
                 )
                 for _ in range(n_layers)
             ]
