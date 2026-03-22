@@ -144,6 +144,11 @@ MULTI3D_PRED_DATA = [
         "MULTI3D_ATMOS": "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion_504/465/atm3d",
         "MESH":  "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion_504/465/mesh",
         "NAME": "en024048_hion_504_465"
+    },
+    {
+        "MULTI3D_ATMOS": "/mn/stornext/d9/data/harshm/bifrost_data/nw012023/1050/atm3d",
+        "MESH":  "/mn/stornext/d9/data/harshm/bifrost_data/nw012023/1050/mesh",
+        "NAME": "nw012023_1050"
     }
 ]
 
