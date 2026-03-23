@@ -721,7 +721,7 @@ def ffno_train_model(
         std_X=std_X,
         mean_Y=mean_Y,
         std_Y=std_Y,
-        num_epochs=NUM_EPOCHS,
+        num_epochs=num_epochs,
         use_cosine=use_cosine,
         lr_min=min_learning_rate
     )
