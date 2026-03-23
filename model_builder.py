@@ -154,12 +154,12 @@ class ModelBuilder:
         # -------------------------------
         scheduler = None
         if self.use_cosine:
-            if num_epochs is None:
+            if self.num_epochs is None:
                 raise ValueError("num_epochs required for cosine scheduler")
 
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                 optimizer,
-                T_max=num_epochs,
+                T_max=self.num_epochs,
                 eta_min=self.lr_min
             )
 
