@@ -687,7 +687,9 @@ def ffno_train_model(
     multi_gpu=False,
     debug_loss=False,
     patience=10,
-    min_delta=1e-5
+    min_delta=1e-5,
+    use_cosine=False,
+    min_learning_rate=1e-6
 ):
 
     if os.path.isfile(save_path):
@@ -718,10 +720,13 @@ def ffno_train_model(
         mean_X=mean_X,
         std_X=std_X,
         mean_Y=mean_Y,
-        std_Y=std_Y
+        std_Y=std_Y,
+        num_epochs=NUM_EPOCHS,
+        use_cosine=use_cosine,
+        lr_min=min_learning_rate
     )
 
-    model, optimizer, loss_fn, scaler = builder.build()
+    model, scheduler, optimizer, loss_fn, scaler = builder.build()
 
     data_builder = DataLoaderBuilder(
         dataset_type=dataset_type,
@@ -740,6 +745,7 @@ def ffno_train_model(
         model,
         train_loader,
         val_loader,
+        scheduler,
         optimizer,
         loss_fn,
         scaler,

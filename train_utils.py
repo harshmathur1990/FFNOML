@@ -454,6 +454,7 @@ def train(
     model,
     train_loader,
     val_loader,
+    scheduler,
     optimizer,
     loss_fn,
     scaler,
@@ -500,6 +501,9 @@ def train(
             amp=amp,
             grad_clip=grad_clip,
         )
+
+        if scheduler is not None:
+            scheduler.step()
 
         if val_loader is not None:
             if hasattr(val_loader, "sampler") and hasattr(val_loader.sampler, "set_epoch"):

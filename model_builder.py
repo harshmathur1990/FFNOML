@@ -33,7 +33,10 @@ class ModelBuilder:
         mean_Y=0,
         std_Y=1,
         kx_cutoff=None,
-        ky_cutoff=None
+        ky_cutoff=None,
+        num_epochs=None,
+        use_cosine=False,
+        lr_min=1e-6
     ):
 
         if model == "FFNO3D":
@@ -73,6 +76,12 @@ class ModelBuilder:
         self.kx_cutoff = kx_cutoff
 
         self.ky_cutoff = ky_cutoff
+
+        self.lr_min = lr_min
+
+        self.num_epochs = num_epochs
+
+        self.use_cosine = use_cosine
 
         if self.multi_gpu:
             self._init_distributed()
@@ -140,6 +149,20 @@ class ModelBuilder:
             weight_decay=self.weight_decay,
         )
 
+        # -------------------------------
+        # COSINE SCHEDULER
+        # -------------------------------
+        scheduler = None
+        if self.use_cosine:
+            if num_epochs is None:
+                raise ValueError("num_epochs required for cosine scheduler")
+
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=num_epochs,
+                eta_min=self.lr_min
+            )
+
         mse_loss = WeightedMSE_L1()
         mse_loss = mse_loss.to(self.device)
 
@@ -163,7 +186,7 @@ class ModelBuilder:
         if self.amp and self.device.startswith("cuda"):
             scaler = torch.amp.GradScaler("cuda")
 
-        return optimizer, loss_fn, scaler
+        return optimizer, scheduler, loss_fn, scaler
 
     # ------------------------------------------------
     # BUILD
@@ -173,8 +196,8 @@ class ModelBuilder:
 
         model = self.build_model()
 
-        optimizer, loss_fn, scaler = self.build_training_components(
+        optimizer, scheduler, loss_fn, scaler = self.build_training_components(
             model
         )
 
-        return model, optimizer, loss_fn, scaler
+        return model, scheduler, optimizer, loss_fn, scaler

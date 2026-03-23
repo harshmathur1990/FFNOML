@@ -102,6 +102,8 @@ def train_model():
         debug_loss=DEBUG_LOSS,
         patience=PATIENCE,
         min_delta=MIN_DELTA,
+        use_cosine=USE_COSINE,
+        min_learning_rate=MIN_LEARNING_RATE
     )
 
 
