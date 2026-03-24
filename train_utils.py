@@ -504,7 +504,7 @@ def train(
 
         if scheduler is not None:
             scheduler.step()
-            print(f"LR after step: {optimizer.param_groups[0]['lr']:.10f}")
+            # print(f"LR after step: {optimizer.param_groups[0]['lr']:.10f}")
 
         if val_loader is not None:
             if hasattr(val_loader, "sampler") and hasattr(val_loader.sampler, "set_epoch"):
