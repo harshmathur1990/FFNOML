@@ -740,6 +740,40 @@ def ffno_train_model(
         val_h5,
     )
 
+    print("\n===== TRAINING SETUP =====")
+
+    # Optimizer
+    print("\nOptimizer:")
+    print(f"  Type: {type(optimizer).__name__}")
+    for i, group in enumerate(optimizer.param_groups):
+        print(f"  Param group {i}:")
+        print(f"    lr: {group['lr']}")
+        print(f"    weight_decay: {group.get('weight_decay', None)}")
+
+    # Scheduler
+    print("\nScheduler:")
+    if scheduler is not None:
+        print(f"  Type: {type(scheduler).__name__}")
+        if hasattr(scheduler, 'T_max'):
+            print(f"  T_max: {scheduler.T_max}")
+        if hasattr(scheduler, 'eta_min'):
+            print(f"  eta_min: {scheduler.eta_min}")
+    else:
+        print("  None")
+
+    # Loss
+    print("\nLoss function:")
+    print(f"  Type: {type(loss_fn).__name__}")
+
+    # AMP scaler
+    print("\nGradScaler:")
+    if scaler is not None:
+        print(f"  Enabled: {scaler.is_enabled()}")
+    else:
+        print("  None")
+
+    print("\n==========================\n")
+
     # run training
     train(
         model,
