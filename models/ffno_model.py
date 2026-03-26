@@ -321,17 +321,27 @@ class VerticalPhysicsStack(nn.Module):
 #         return y.to(orig_dtype)
 
 
-class SpectralConv2dFull(nn.Module):
+class SpectralConv2d(nn.Module):
+    """
+    Resolution-invariant, input-conditioned spectral operator.
+
+    Key properties:
+      - depends on (kx, ky) → preserves operator structure
+      - depends on global input context → nonlinear operator
+      - low-rank → memory efficient
+    """
+
     def __init__(
         self,
         in_channels,
         out_channels,
         hidden=64,
         rank=16,
+        context_dim=64,
         kx_cutoff=None,
         ky_cutoff=None,
         k_scale=1e5,
-        use_bias=False,
+        use_bias=True,
         apply_mask=True,
     ):
         super().__init__()
@@ -346,6 +356,9 @@ class SpectralConv2dFull(nn.Module):
 
         scale = 1.0 / math.sqrt(in_channels)
 
+        # -----------------------------------
+        # Low-rank spectral basis
+        # -----------------------------------
         self.basis_real = nn.Parameter(
             scale * torch.randn(rank, in_channels, out_channels)
         )
@@ -353,8 +366,28 @@ class SpectralConv2dFull(nn.Module):
             scale * torch.randn(rank, in_channels, out_channels)
         )
 
-        self.freq_mlp = nn.Sequential(
+        # -----------------------------------
+        # Frequency embedding (k -> hidden)
+        # -----------------------------------
+        self.freq_net = nn.Sequential(
             nn.Linear(4, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, hidden),
+        )
+
+        # -----------------------------------
+        # Input context embedding
+        # -----------------------------------
+        self.context_net = nn.Sequential(
+            nn.Linear(in_channels, context_dim),
+            nn.GELU(),
+            nn.Linear(context_dim, hidden),
+        )
+
+        # -----------------------------------
+        # Joint frequency + context → coefficients
+        # -----------------------------------
+        self.joint_net = nn.Sequential(
             nn.GELU(),
             nn.Linear(hidden, hidden),
             nn.GELU(),
@@ -366,6 +399,9 @@ class SpectralConv2dFull(nn.Module):
         else:
             self.register_parameter("bias", None)
 
+    # ============================================================
+    # Frequency grid
+    # ============================================================
     def _build_k_grid(self, H, W, dx, dy, device):
         ky = torch.fft.fftfreq(H, d=dy, device=device)
         kx = torch.fft.rfftfreq(W, d=dx, device=device)
@@ -403,88 +439,104 @@ class SpectralConv2dFull(nn.Module):
         if self.kx_cutoff is None and self.ky_cutoff is None:
             return None
 
-        if self.kx_cutoff is None or self.ky_cutoff is None:
-            raise ValueError("Provide both kx_cutoff and ky_cutoff")
-
         return (
             (kx_grid.abs() <= self.kx_cutoff) &
             (ky_grid.abs() <= self.ky_cutoff)
         )
 
-    def forward(self, x, dx, dy, apply_mask=None):  # ⭐ NEW
+    # ============================================================
+    # Forward
+    # ============================================================
+    def forward(self, x, dx, dy):
         """
-        apply_mask:
-            None  -> use self.apply_mask (default behavior)
-            True  -> force masking
-            False -> disable masking (use ALL modes)
+        x: [B, Cin, D, H, W]
         """
-
-        if apply_mask is None:
-            apply_mask = self.apply_mask
-
         B, Cin, D, H, W = x.shape
+        device = x.device
 
         dx = _to_spacing_value(dx, x)
         dy = _to_spacing_value(dy, x)
 
-        orig_dtype = x.dtype
-        device = x.device
-
+        # -----------------------------------
+        # FFT
+        # -----------------------------------
         x_ft = torch.fft.rfft2(x, dim=(-2, -1))
-        xr = x_ft.real
-        xi = x_ft.imag
+        xr, xi = x_ft.real, x_ft.imag  # [B, Cin, D, H, Wf]
 
+        # -----------------------------------
+        # Frequency features
+        # -----------------------------------
         k_feat, kx_grid, ky_grid = self._build_k_grid(
             H, W, dx, dy, device
         )
-
         mask = self._build_mask(kx_grid, ky_grid)
 
-        coeffs = self.freq_mlp(k_feat)
-        coeffs = coeffs.view(H, x_ft.shape[-1], self.rank, 2)
+        # [H, Wf, hidden]
+        freq_emb = self.freq_net(k_feat)
+
+        # -----------------------------------
+        # Input context (resolution invariant)
+        # -----------------------------------
+        # global pooling across space + depth
+        context = x.mean(dim=(2, 3, 4))  # [B, Cin]
+        context_emb = self.context_net(context)  # [B, hidden]
+
+        # -----------------------------------
+        # Fuse frequency + context
+        # -----------------------------------
+        joint = freq_emb[None, :, :, :] + context_emb[:, None, None, :]
+        coeffs = self.joint_net(joint)  # [B, H, Wf, 2*rank]
+        coeffs = coeffs.view(B, H, x_ft.shape[-1], self.rank, 2)
 
         coef_real = coeffs[..., 0]
         coef_imag = coeffs[..., 1]
 
-        # =====================================================
-        # ⭐ OPTIONAL MASKING
-        # =====================================================
-        if apply_mask and (mask is not None):
-            mask_f = mask.to(coef_real.dtype)[..., None]
+        # -----------------------------------
+        # Optional spectral mask
+        # -----------------------------------
+        if self.apply_mask and (mask is not None):
+            mask_f = mask[None, :, :, None].to(coef_real.dtype)
             coef_real = coef_real * mask_f
             coef_imag = coef_imag * mask_f
 
-        # =====================================================
-
-        br = self.basis_real
-        bi = self.basis_imag
+        # -----------------------------------
+        # Build weights from low-rank basis
+        # -----------------------------------
+        br = self.basis_real[None, ...]  # [1, R, Cin, Cout]
+        bi = self.basis_imag[None, ...]
 
         w_real = (
-            torch.einsum("yxr, rio -> ioyx", coef_real, br)
-            - torch.einsum("yxr, rio -> ioyx", coef_imag, bi)
+            torch.einsum("byxr,brio->bioyx", coef_real, br)
+            - torch.einsum("byxr,brio->bioyx", coef_imag, bi)
         )
         w_imag = (
-            torch.einsum("yxr, rio -> ioyx", coef_real, bi)
-            + torch.einsum("yxr, rio -> ioyx", coef_imag, br)
+            torch.einsum("byxr,brio->bioyx", coef_real, bi)
+            + torch.einsum("byxr,brio->bioyx", coef_imag, br)
         )
 
+        # -----------------------------------
+        # Apply spectral operator
+        # -----------------------------------
         out_ft_real = (
-            torch.einsum("bidyx,ioyx->bodyx", xr, w_real)
-            - torch.einsum("bidyx,ioyx->bodyx", xi, w_imag)
+            torch.einsum("bidyx,bioyx->bodyx", xr, w_real)
+            - torch.einsum("bidyx,bioyx->bodyx", xi, w_imag)
         )
         out_ft_imag = (
-            torch.einsum("bidyx,ioyx->bodyx", xr, w_imag)
-            + torch.einsum("bidyx,ioyx->bodyx", xi, w_real)
+            torch.einsum("bidyx,bioyx->bodyx", xr, w_imag)
+            + torch.einsum("bidyx,bioyx->bodyx", xi, w_real)
         )
 
         out_ft = torch.complex(out_ft_real, out_ft_imag)
 
+        # -----------------------------------
+        # Inverse FFT
+        # -----------------------------------
         y = torch.fft.irfft2(out_ft, s=(H, W), dim=(-2, -1))
 
         if self.bias is not None:
             y = y + self.bias[None, :, None, None, None]
 
-        return y.to(orig_dtype)
+        return y
 
 
 # ============================================================
@@ -508,6 +560,7 @@ class FFNOBlock3d(nn.Module):
         use_gating=True,
         spectral_hidden=64,
         spectral_rank=16,
+        spectral_context=64,
         kx_cutoff=None,
         ky_cutoff=None,
         k_scale=1e5,
@@ -524,6 +577,7 @@ class FFNOBlock3d(nn.Module):
             out_channels=width,
             hidden=spectral_hidden,
             rank=spectral_rank,
+            context_dim=spectral_context,
             kx_cutoff=kx_cutoff,
             ky_cutoff=ky_cutoff,
             k_scale=k_scale,
@@ -699,6 +753,7 @@ class FFNO3D(nn.Module):
         use_gating=True,
         spectral_hidden=64,
         spectral_rank=16,
+        spectral_context=64,
         dx_cutoff=None,
         dy_cutoff=None,
         k_scale=1e5,
@@ -728,6 +783,7 @@ class FFNO3D(nn.Module):
                     use_gating=use_gating,
                     spectral_hidden=spectral_hidden,
                     spectral_rank=spectral_rank,
+                    spectral_context=spectral_context,
                     kx_cutoff=self.kx_cutoff,
                     ky_cutoff=self.ky_cutoff,
                     k_scale=k_scale,
