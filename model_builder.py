@@ -101,16 +101,7 @@ class ModelBuilder:
 
     def build_model(self):
 
-        model_config = dict(self.model_config)
-
-        if self.kx_cutoff is not None:
-            if self.ky_cutoff is None:
-                raise ValueError("ky_cutoff is None when kx_cutoff is not None")
-
-            model_config["kx_cutoff"] = self.kx_cutoff
-            model_config["ky_cutoff"] = self.ky_cutoff
-
-        model = self.model_cls(**model_config)
+        model = self.model_cls(**self.model_config)
 
         model = model.to(self.device)
 
