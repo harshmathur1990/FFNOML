@@ -152,8 +152,6 @@ MULTI3D_PRED_DATA = [
     }
 ]
 
-
-NDEP = 50
 MULTI_GPU = True
 
 MODEL = "FFNO3D"
