@@ -321,7 +321,7 @@ class VerticalPhysicsStack(nn.Module):
 #         return y.to(orig_dtype)
 
 
-class SpectralConv2d(nn.Module):
+class SpectralConv2dFull(nn.Module):
     """
     Resolution-invariant, input-conditioned spectral operator.
 
