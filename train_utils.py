@@ -227,11 +227,9 @@ def train_one_epoch(
     loader,
     optimizer,
     loss_fn,
-    scaler,
     device,
     epoch,
     num_epochs,
-    amp=True,
     grad_clip=1.0,
 ):
     model.train()
@@ -260,40 +258,30 @@ def train_one_epoch(
 
         optimizer.zero_grad(set_to_none=True)
 
-        with torch.amp.autocast("cuda", enabled=(amp and str(device).startswith("cuda"))):
-            pred = model(x, dx, dy)
+        pred = model(x, dx, dy)
 
-            pred = flatten_columns_logb(pred)
-            y = flatten_columns_logb(y)
-            x = flatten_columns_logb(x)
+        pred = flatten_columns_logb(pred)
+        y = flatten_columns_logb(y)
+        x = flatten_columns_logb(x)
 
-            loss, components = compute_loss(
-                pred=pred,
-                target=y,
-                weight=weight,
-                loss_fn=loss_fn,
-                x=x
-            )
+        loss, components = compute_loss(
+            pred=pred,
+            target=y,
+            weight=weight,
+            loss_fn=loss_fn,
+            x=x
+        )
 
-        if scaler is not None:
-            scaler.scale(loss).backward()
-        else:
-            loss.backward()
+        loss.backward()
 
         if grad_clip is not None and grad_clip > 0:
-            if scaler is not None:
-                scaler.unscale_(optimizer)
 
             if isinstance(model, FSDP):
                 model.clip_grad_norm_(grad_clip)
             else:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
 
-        if scaler is not None:
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            optimizer.step()
+        optimizer.step()
 
         weight_factor = pred.shape[0]
 
@@ -332,7 +320,6 @@ def validate(
     loader,
     loss_fn,
     device,
-    amp=True
 ):
     model.eval()
 
@@ -361,20 +348,19 @@ def validate(
             if weight is not None:
                 weight = weight.to(device, non_blocking=True)
 
-            with torch.amp.autocast("cuda", enabled=(amp and str(device).startswith("cuda"))):
-                pred, stats = model(x, dx, dy, collect_stats=True)
+            pred, stats = model(x, dx, dy, collect_stats=True)
 
-                pred = flatten_columns_logb(pred)
-                y = flatten_columns_logb(y)
-                x = flatten_columns_logb(x)
+            pred = flatten_columns_logb(pred)
+            y = flatten_columns_logb(y)
+            x = flatten_columns_logb(x)
 
-                loss, components = compute_loss(
-                    pred=pred,
-                    target=y,
-                    weight=weight,
-                    loss_fn=loss_fn,
-                    x=x
-                )
+            loss, components = compute_loss(
+                pred=pred,
+                target=y,
+                weight=weight,
+                loss_fn=loss_fn,
+                x=x
+            )
 
             running += loss.item() * pred.shape[0]   # number of columns
             n_columns += pred.shape[0]
@@ -457,12 +443,10 @@ def train(
     scheduler,
     optimizer,
     loss_fn,
-    scaler,
     save_path,
     *,
     num_epochs=50,
     device="cuda",
-    amp=True,
     grad_clip=1.0,
     early_stopping=None,
 ):
@@ -494,11 +478,9 @@ def train(
             loader=train_loader,
             optimizer=optimizer,
             loss_fn=loss_fn,
-            scaler=scaler,
             device=device,
             epoch=epoch,
             num_epochs=num_epochs,
-            amp=amp,
             grad_clip=grad_clip,
         )
 
@@ -515,7 +497,6 @@ def train(
                 loader=val_loader,
                 loss_fn=loss_fn,
                 device=device,
-                amp=amp,
             )
 
             mean_stats = compute_mean_stats(val_stats)

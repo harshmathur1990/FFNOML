@@ -25,15 +25,12 @@ class ModelBuilder:
         device="cuda",
         lr=2e-4,
         weight_decay=1e-4,
-        amp=True,
         multi_gpu=False,
         debug_loss=False,
         mean_X=0,
         std_X=1,
         mean_Y=0,
         std_Y=1,
-        kx_cutoff=None,
-        ky_cutoff=None,
         num_epochs=None,
         use_cosine=False,
         lr_min=1e-6
@@ -50,7 +47,6 @@ class ModelBuilder:
 
         self.lr = lr
         self.weight_decay = weight_decay
-        self.amp = amp
 
         self.chi = chi
         self.lines = lines
@@ -72,10 +68,6 @@ class ModelBuilder:
         self.mean_Y = mean_Y
 
         self.std_Y = std_Y
-
-        self.kx_cutoff = kx_cutoff
-
-        self.ky_cutoff = ky_cutoff
 
         self.lr_min = lr_min
 
@@ -182,11 +174,7 @@ class ModelBuilder:
 
         loss_fn = loss_fn.to(self.device)
 
-        scaler = None
-        if self.amp and self.device.startswith("cuda"):
-            scaler = torch.amp.GradScaler("cuda")
-
-        return optimizer, scheduler, loss_fn, scaler
+        return optimizer, scheduler, loss_fn
 
     # ------------------------------------------------
     # BUILD
@@ -196,8 +184,8 @@ class ModelBuilder:
 
         model = self.build_model()
 
-        optimizer, scheduler, loss_fn, scaler = self.build_training_components(
+        optimizer, scheduler, loss_fn = self.build_training_components(
             model
         )
 
-        return model, scheduler, optimizer, loss_fn, scaler
+        return model, scheduler, optimizer, loss_fn

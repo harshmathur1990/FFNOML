@@ -95,7 +95,6 @@ def train_model():
         weight_decay=WEIGHT_DECAY,
         num_workers=NUM_WORKERS,
         pin_memory=PIN_MEMORY,
-        amp=AMP,
         grad_clip=GRAD_CLIP,
         device=DEVICE,
         multi_gpu=MULTI_GPU,
@@ -156,9 +155,7 @@ def run_predictions():
                 cuda=CUDA,
                 tiled=TILED,
                 patch=PATCH,
-                stride=STRIDE,
-                dx_cutoff=DX_CUTOFF,
-                dy_cutoff=DY_CUTOFF
+                stride=STRIDE
             )
 
 

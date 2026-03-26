@@ -159,17 +159,21 @@ MULTI_GPU = True
 MODEL = "FFNO3D"
 
 MODEL_CONFIG = dict(
-
     width=64,
-
     n_layers=6,
-
     dropout=0.1,
     mlp_expansion=2,
     vertical_hidden=64,
     padding=0,
     checkpoint_blocks=True,
-    use_gating=True
+    use_gating=True,
+    spectral_hidden=64,
+    spectral_rank=16,
+    dx_cutoff=96000,
+    dy_cutoff=96000,
+    k_scale=1e5,
+    spectral_use_bias=True,
+    spectral_apply_mask=True
 )
 
 
@@ -197,7 +201,6 @@ MIN_LEARNING_RATE = 1e-6
 WEIGHT_DECAY = 1e-4
 NUM_WORKERS = 8
 PIN_MEMORY = True
-AMP = False
 GRAD_CLIP = 1.0
 DEVICE = "cuda"
 PATIENCE = 400
@@ -208,8 +211,5 @@ USE_COSINE = True
 # Prediction params
 CUDA = DEVICE == "cuda"
 TILED = True
-
-DX_CUTOFF = None
-DY_CUTOFF = None
 
 TENSOR_SCALE = 1.0

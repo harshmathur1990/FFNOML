@@ -25,43 +25,6 @@ import itertools
 import math
 
 
-def compute_k_cutoff(dx, dy=None, k_scale=1e5, radial=True):
-    """
-    Compute training-band cutoff in the SAME scaled k-space
-    used by your layer.
-
-    Parameters
-    ----------
-    dx : float
-        Training grid spacing in x.
-    dy : float or None
-        Training grid spacing in y. If None, dy=dx.
-    k_scale : float
-        The same scaling factor used in the model.
-    radial : bool
-        If True, return radial cutoff based on k_mag.
-        If False, return per-axis cutoffs.
-
-    Returns
-    -------
-    radial=True:
-        k_cutoff : float
-
-    radial=False:
-        kx_cutoff, ky_cutoff : float, float
-    """
-    if dy is None:
-        dy = dx
-
-    kx_cutoff = math.pi / dx * k_scale
-    ky_cutoff = math.pi / dy * k_scale
-
-    if radial:
-        return math.sqrt(kx_cutoff**2 + ky_cutoff**2)
-    else:
-        return kx_cutoff, ky_cutoff
-
-
 # ============================================================
 # ---------------- PREPROCESSING ------------------------------
 # ============================================================
@@ -681,7 +644,6 @@ def ffno_train_model(
     weight_decay=1e-4,
     num_workers=8,
     pin_memory=True,
-    amp=True,
     grad_clip=1.0,
     device="cuda",
     multi_gpu=False,
@@ -714,7 +676,6 @@ def ffno_train_model(
         device=device,
         lr=lr,
         weight_decay=weight_decay,
-        amp=amp,
         multi_gpu=multi_gpu,
         debug_loss=debug_loss,
         mean_X=mean_X,
@@ -726,7 +687,7 @@ def ffno_train_model(
         lr_min=min_learning_rate
     )
 
-    model, scheduler, optimizer, loss_fn, scaler = builder.build()
+    model, scheduler, optimizer, loss_fn = builder.build()
 
     data_builder = DataLoaderBuilder(
         dataset_type=dataset_type,
@@ -765,13 +726,6 @@ def ffno_train_model(
     print("\nLoss function:")
     print(f"  Type: {type(loss_fn).__name__}")
 
-    # AMP scaler
-    print("\nGradScaler:")
-    if scaler is not None:
-        print(f"  Enabled: {scaler.is_enabled()}")
-    else:
-        print("  None")
-
     print("\n==========================\n")
 
     # run training
@@ -782,11 +736,9 @@ def ffno_train_model(
         scheduler,
         optimizer,
         loss_fn,
-        scaler,
         save_path,
         num_epochs=num_epochs,
         device=builder.device,
-        amp=amp,
         grad_clip=grad_clip,
         early_stopping=dict(
             enabled=True,
@@ -818,7 +770,7 @@ def _tile_positions(n, patch, stride):
 
 
 @torch.no_grad()
-def _predict_tiled(model, X, dx, dy, patch, stride, device="cuda", amp=True):
+def _predict_tiled(model, X, dx, dy, patch, stride, device="cuda"):
 
     model.eval()
 
@@ -848,8 +800,7 @@ def _predict_tiled(model, X, dx, dy, patch, stride, device="cuda", amp=True):
 
     x0 = X[:, :, :, 0:patch, 0:patch]
 
-    with torch.amp.autocast("cuda", enabled=(amp and str(device).startswith("cuda"))):
-        y0 = model(x0, dx, dy)
+    y0 = model(x0, dx, dy)
 
     if torch.isnan(y0).any():
         print("WARNING: NaN detected in FIRST tile output")
@@ -894,16 +845,14 @@ def _predict_tiled(model, X, dx, dy, patch, stride, device="cuda", amp=True):
 
         xt = X[:, :, :, i0:i0+patch, j0:j0+patch]
 
-        with torch.amp.autocast("cuda", enabled=(amp and str(device).startswith("cuda"))):
+        yt, stats = model(xt, dx, dy, collect_stats=True)
 
-            yt, stats = model(xt, dx, dy, collect_stats=True)
+        tile_weight = float(w2.sum().item())  # scalar weight
 
-            tile_weight = float(w2.sum().item())  # scalar weight
-
-            for s in stats:
-                s = s.copy()
-                s["_weight"] = tile_weight
-                all_stats.append(s)
+        for s in stats:
+            s = s.copy()
+            s["_weight"] = tile_weight
+            all_stats.append(s)
 
         if torch.isnan(yt).any() or torch.isinf(yt).any():
 
@@ -980,9 +929,7 @@ def ffno_predict_populations(
     cuda=True,
     tiled=True,
     patch=128,
-    stride=64,
-    dx_cutoff=None,
-    dy_cutoff=None
+    stride=64
 ):
 
     def _aggregate_stats(all_stats):
@@ -1016,8 +963,6 @@ def ffno_predict_populations(
 
         return agg
 
-    amp = False
-
     """
     Predict log-departure coeffs -> convert to departure coeffs -> (optional) to populations downstream.
 
@@ -1033,7 +978,6 @@ def ffno_predict_populations(
     Cin, Cout = _read_io_channels(train_h5)
 
     mean_X, std_X, mean_Y, std_Y = read_normalization(train_h5)
-    kx_cutoff, ky_cutoff = compute_k_cutoff(dx=dx_cutoff, dy=dy_cutoff, k_scale=1e5, radial=False)
 
     model_config = dict(model_config)
     model_config["in_channels"] = Cin
@@ -1050,18 +994,15 @@ def ffno_predict_populations(
         device=device,
         lr=0.0,
         weight_decay=0.0,
-        amp=amp,
         multi_gpu=False,
         debug_loss=False,
         mean_X=mean_X,
         std_X=std_X,
         mean_Y=mean_Y,
-        std_Y=std_Y,
-        kx_cutoff=kx_cutoff,
-        ky_cutoff=ky_cutoff
+        std_Y=std_Y
     )
 
-    model, optimizer, loss_fn, scaler = builder.build()
+    model, optimizer, loss_fn = builder.build()
 
     ckpt = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(ckpt["model_state"])
@@ -1107,8 +1048,7 @@ def ffno_predict_populations(
         dx = dx.to(device)
         dy = dy.to(device)
 
-        with torch.no_grad(), torch.amp.autocast("cuda", enabled=(amp and str(device).startswith("cuda"))):
-            pred_log, all_stats = model(X, dx, dy, collect_stats=True)
+        pred_log, all_stats = model(X, dx, dy, collect_stats=True)
     else:
         pred_log, all_stats = _predict_tiled(
             model,
@@ -1118,7 +1058,6 @@ def ffno_predict_populations(
             patch=patch,
             stride=stride,
             device=device,
-            amp=amp
         )
 
     if torch.isnan(pred_log).any():

@@ -26,6 +26,43 @@ def _to_spacing_value(spacing, x):
     raise TypeError(f"Unsupported spacing type: {type(spacing)}")
 
 
+def compute_k_cutoff(dx, dy=None, k_scale=1e5, radial=True):
+    """
+    Compute training-band cutoff in the SAME scaled k-space
+    used by your layer.
+
+    Parameters
+    ----------
+    dx : float
+        Training grid spacing in x.
+    dy : float or None
+        Training grid spacing in y. If None, dy=dx.
+    k_scale : float
+        The same scaling factor used in the model.
+    radial : bool
+        If True, return radial cutoff based on k_mag.
+        If False, return per-axis cutoffs.
+
+    Returns
+    -------
+    radial=True:
+        k_cutoff : float
+
+    radial=False:
+        kx_cutoff, ky_cutoff : float, float
+    """
+    if dy is None:
+        dy = dx
+
+    kx_cutoff = math.pi / dx * k_scale
+    ky_cutoff = math.pi / dy * k_scale
+
+    if radial:
+        return math.sqrt(kx_cutoff**2 + ky_cutoff**2)
+    else:
+        return kx_cutoff, ky_cutoff
+
+
 def _gn(channels, max_groups=8):
     g = min(max_groups, channels)
     while g > 1 and channels % g != 0:
@@ -169,33 +206,151 @@ class VerticalPhysicsStack(nn.Module):
 # ============================================================
 # Spectral conv in horizontal plane
 # ============================================================
-class SpectralConv2dFull(nn.Module):
-    """
-    Full-spectrum metric-aware spectral convolution over (H, W),
-    applied independently at each depth plane.
+# class SpectralConv2dFull(nn.Module):
+#     """
+#     Full-spectrum metric-aware spectral convolution over (H, W),
+#     applied independently at each depth plane.
 
-    Input/Output: [B, C, D, H, W]
-    """
+#     Input/Output: [B, C, D, H, W]
+#     """
+#     def __init__(
+#         self,
+#         in_channels,
+#         out_channels,
+#         hidden=32,
+#         kx_cutoff=None,
+#         ky_cutoff=None
+#     ):
+#         super().__init__()
+
+#         self.in_channels = in_channels
+#         self.out_channels = out_channels
+
+#         scale = 1.0 / math.sqrt(in_channels)
+
+#         self.weight_real = nn.Parameter(
+#             scale * torch.randn(in_channels, out_channels, dtype=torch.float32)
+#         )
+#         self.weight_imag = nn.Parameter(
+#             scale * torch.randn(in_channels, out_channels, dtype=torch.float32)
+#         )
+
+#         self.freq_mlp = nn.Sequential(
+#             nn.Linear(4, hidden),
+#             nn.GELU(),
+#             nn.Linear(hidden, hidden),
+#             nn.GELU(),
+#             nn.Linear(hidden, 2),
+#         )
+
+#         self.kx_cutoff = kx_cutoff
+#         self.ky_cutoff = ky_cutoff
+
+
+#     def forward(self, x, dx, dy):
+#         # x: [B, Cin, D, H, W]
+#         B, Cin, D, H, W = x.shape
+
+#         dx = _to_spacing_value(dx, x)
+#         dy = _to_spacing_value(dy, x)
+
+#         orig_dtype = x.dtype
+
+#         with torch.amp.autocast("cuda", enabled=False):
+#             x32 = x.float()
+
+#             # FFT only on horizontal plane
+#             x_ft = torch.fft.rfft2(x32, dim=(-2, -1))
+#             xr = x_ft.real
+#             xi = x_ft.imag
+
+#             ky = torch.fft.fftfreq(H, d=dy, device=x.device)
+#             kx = torch.fft.rfftfreq(W, d=dx, device=x.device)
+
+#             ky = 2.0 * math.pi * ky
+#             kx = 2.0 * math.pi * kx
+
+#             # rescale for stable MLP inputs
+#             k_scale = 1e5
+#             ky = ky * k_scale
+#             kx = kx * k_scale
+
+#             ky_grid, kx_grid = torch.meshgrid(ky, kx, indexing="ij")
+#             k_mag = torch.sqrt(kx_grid**2 + ky_grid**2 + 1e-12)
+
+#             k_feat = torch.stack(
+#                 [
+#                     kx_grid,
+#                     ky_grid,
+#                     k_mag,
+#                     torch.sign(ky_grid),
+#                 ],
+#                 dim=-1,
+#             )  # [H, Wf, 4]
+
+#             gate = self.freq_mlp(k_feat)  # [H, Wf, 2]
+#             gate_real = gate[..., 0]
+#             gate_imag = gate[..., 1]
+
+#             wr = self.weight_real[:, :, None, None]   # [Cin, Cout, 1, 1]
+#             wi = self.weight_imag[:, :, None, None]
+
+#             gr = gate_real[None, None, :, :]          # [1, 1, H, Wf]
+#             gi = gate_imag[None, None, :, :]
+
+#             w_real = wr * gr - wi * gi
+#             w_imag = wr * gi + wi * gr
+
+#             out_ft_real = (
+#                 torch.einsum("b i d y x, i o y x -> b o d y x", xr, w_real)
+#                 - torch.einsum("b i d y x, i o y x -> b o d y x", xi, w_imag)
+#             )
+#             out_ft_imag = (
+#                 torch.einsum("b i d y x, i o y x -> b o d y x", xr, w_imag)
+#                 + torch.einsum("b i d y x, i o y x -> b o d y x", xi, w_real)
+#             )
+
+#             if self.kx_cutoff is not None:
+#                 mask = (kx_grid.abs() <= self.kx_cutoff) & (ky_grid.abs() <= self.ky_cutoff)[None, None, None, :, :]
+#                 out_ft_real = out_ft_real * mask
+#                 out_ft_imag = out_ft_imag * mask
+
+#             out_ft = torch.complex(out_ft_real, out_ft_imag)
+#             y = torch.fft.irfft2(out_ft, s=(H, W), dim=(-2, -1))
+
+#         return y.to(orig_dtype)
+
+
+class SpectralConv2dFull(nn.Module):
     def __init__(
         self,
         in_channels,
         out_channels,
-        hidden=32,
+        hidden=64,
+        rank=16,
         kx_cutoff=None,
-        ky_cutoff=None
+        ky_cutoff=None,
+        k_scale=1e5,
+        use_bias=False,
+        apply_mask=True,
     ):
         super().__init__()
 
         self.in_channels = in_channels
         self.out_channels = out_channels
+        self.rank = rank
+        self.kx_cutoff = kx_cutoff
+        self.ky_cutoff = ky_cutoff
+        self.k_scale = k_scale
+        self.apply_mask = apply_mask
 
         scale = 1.0 / math.sqrt(in_channels)
 
-        self.weight_real = nn.Parameter(
-            scale * torch.randn(in_channels, out_channels, dtype=torch.float32)
+        self.basis_real = nn.Parameter(
+            scale * torch.randn(rank, in_channels, out_channels)
         )
-        self.weight_imag = nn.Parameter(
-            scale * torch.randn(in_channels, out_channels, dtype=torch.float32)
+        self.basis_imag = nn.Parameter(
+            scale * torch.randn(rank, in_channels, out_channels)
         )
 
         self.freq_mlp = nn.Sequential(
@@ -203,83 +358,131 @@ class SpectralConv2dFull(nn.Module):
             nn.GELU(),
             nn.Linear(hidden, hidden),
             nn.GELU(),
-            nn.Linear(hidden, 2),
+            nn.Linear(hidden, 2 * rank),
         )
 
-        self.kx_cutoff = kx_cutoff
-        self.ky_cutoff = ky_cutoff
+        if use_bias:
+            self.bias = nn.Parameter(torch.zeros(out_channels))
+        else:
+            self.register_parameter("bias", None)
 
+    def _build_k_grid(self, H, W, dx, dy, device):
+        ky = torch.fft.fftfreq(H, d=dy, device=device)
+        kx = torch.fft.rfftfreq(W, d=dx, device=device)
 
-    def forward(self, x, dx, dy):
-        # x: [B, Cin, D, H, W]
+        ky = 2.0 * math.pi * ky
+        kx = 2.0 * math.pi * kx
+
+        ky_scaled = ky * self.k_scale
+        kx_scaled = kx * self.k_scale
+
+        ky_grid_scaled, kx_grid_scaled = torch.meshgrid(
+            ky_scaled, kx_scaled, indexing="ij"
+        )
+        ky_grid_phys, kx_grid_phys = torch.meshgrid(
+            ky, kx, indexing="ij"
+        )
+
+        k_mag_scaled = torch.sqrt(
+            kx_grid_scaled**2 + ky_grid_scaled**2 + 1e-12
+        )
+
+        k_feat = torch.stack(
+            [
+                kx_grid_scaled,
+                ky_grid_scaled,
+                k_mag_scaled,
+                torch.sign(ky_grid_scaled),
+            ],
+            dim=-1,
+        )
+
+        return k_feat, kx_grid_phys, ky_grid_phys
+
+    def _build_mask(self, kx_grid, ky_grid):
+        if self.kx_cutoff is None and self.ky_cutoff is None:
+            return None
+
+        if self.kx_cutoff is None or self.ky_cutoff is None:
+            raise ValueError("Provide both kx_cutoff and ky_cutoff")
+
+        return (
+            (kx_grid.abs() <= self.kx_cutoff) &
+            (ky_grid.abs() <= self.ky_cutoff)
+        )
+
+    def forward(self, x, dx, dy, apply_mask=None):  # ⭐ NEW
+        """
+        apply_mask:
+            None  -> use self.apply_mask (default behavior)
+            True  -> force masking
+            False -> disable masking (use ALL modes)
+        """
+
+        if apply_mask is None:
+            apply_mask = self.apply_mask
+
         B, Cin, D, H, W = x.shape
 
         dx = _to_spacing_value(dx, x)
         dy = _to_spacing_value(dy, x)
 
         orig_dtype = x.dtype
+        device = x.device
 
-        with torch.amp.autocast("cuda", enabled=False):
-            x32 = x.float()
+        x_ft = torch.fft.rfft2(x, dim=(-2, -1))
+        xr = x_ft.real
+        xi = x_ft.imag
 
-            # FFT only on horizontal plane
-            x_ft = torch.fft.rfft2(x32, dim=(-2, -1))
-            xr = x_ft.real
-            xi = x_ft.imag
+        k_feat, kx_grid, ky_grid = self._build_k_grid(
+            H, W, dx, dy, device
+        )
 
-            ky = torch.fft.fftfreq(H, d=dy, device=x.device)
-            kx = torch.fft.rfftfreq(W, d=dx, device=x.device)
+        mask = self._build_mask(kx_grid, ky_grid)
 
-            ky = 2.0 * math.pi * ky
-            kx = 2.0 * math.pi * kx
+        coeffs = self.freq_mlp(k_feat)
+        coeffs = coeffs.view(H, x_ft.shape[-1], self.rank, 2)
 
-            # rescale for stable MLP inputs
-            k_scale = 1e5
-            ky = ky * k_scale
-            kx = kx * k_scale
+        coef_real = coeffs[..., 0]
+        coef_imag = coeffs[..., 1]
 
-            ky_grid, kx_grid = torch.meshgrid(ky, kx, indexing="ij")
-            k_mag = torch.sqrt(kx_grid**2 + ky_grid**2 + 1e-12)
+        # =====================================================
+        # ⭐ OPTIONAL MASKING
+        # =====================================================
+        if apply_mask and (mask is not None):
+            mask_f = mask.to(coef_real.dtype)[..., None]
+            coef_real = coef_real * mask_f
+            coef_imag = coef_imag * mask_f
 
-            k_feat = torch.stack(
-                [
-                    kx_grid,
-                    ky_grid,
-                    k_mag,
-                    torch.sign(ky_grid),
-                ],
-                dim=-1,
-            )  # [H, Wf, 4]
+        # =====================================================
 
-            gate = self.freq_mlp(k_feat)  # [H, Wf, 2]
-            gate_real = gate[..., 0]
-            gate_imag = gate[..., 1]
+        br = self.basis_real
+        bi = self.basis_imag
 
-            wr = self.weight_real[:, :, None, None]   # [Cin, Cout, 1, 1]
-            wi = self.weight_imag[:, :, None, None]
+        w_real = (
+            torch.einsum("yxr, rio -> ioyx", coef_real, br)
+            - torch.einsum("yxr, rio -> ioyx", coef_imag, bi)
+        )
+        w_imag = (
+            torch.einsum("yxr, rio -> ioyx", coef_real, bi)
+            + torch.einsum("yxr, rio -> ioyx", coef_imag, br)
+        )
 
-            gr = gate_real[None, None, :, :]          # [1, 1, H, Wf]
-            gi = gate_imag[None, None, :, :]
+        out_ft_real = (
+            torch.einsum("bidyx,ioyx->bodyx", xr, w_real)
+            - torch.einsum("bidyx,ioyx->bodyx", xi, w_imag)
+        )
+        out_ft_imag = (
+            torch.einsum("bidyx,ioyx->bodyx", xr, w_imag)
+            + torch.einsum("bidyx,ioyx->bodyx", xi, w_real)
+        )
 
-            w_real = wr * gr - wi * gi
-            w_imag = wr * gi + wi * gr
+        out_ft = torch.complex(out_ft_real, out_ft_imag)
 
-            out_ft_real = (
-                torch.einsum("b i d y x, i o y x -> b o d y x", xr, w_real)
-                - torch.einsum("b i d y x, i o y x -> b o d y x", xi, w_imag)
-            )
-            out_ft_imag = (
-                torch.einsum("b i d y x, i o y x -> b o d y x", xr, w_imag)
-                + torch.einsum("b i d y x, i o y x -> b o d y x", xi, w_real)
-            )
+        y = torch.fft.irfft2(out_ft, s=(H, W), dim=(-2, -1))
 
-            if self.kx_cutoff is not None:
-                mask = (kx_grid.abs() <= self.kx_cutoff) & (ky_grid.abs() <= self.ky_cutoff)[None, None, None, :, :]
-                out_ft_real = out_ft_real * mask
-                out_ft_imag = out_ft_imag * mask
-
-            out_ft = torch.complex(out_ft_real, out_ft_imag)
-            y = torch.fft.irfft2(out_ft, s=(H, W), dim=(-2, -1))
+        if self.bias is not None:
+            y = y + self.bias[None, :, None, None, None]
 
         return y.to(orig_dtype)
 
@@ -303,8 +506,13 @@ class FFNOBlock3d(nn.Module):
         mlp_expansion=2,
         vertical_hidden=256,
         use_gating=True,
+        spectral_hidden=64,
+        spectral_rank=16,
         kx_cutoff=None,
-        ky_cutoff=None
+        ky_cutoff=None,
+        k_scale=1e5,
+        spectral_use_bias=True,
+        spectral_apply_mask=True
     ):
         super().__init__()
 
@@ -312,11 +520,17 @@ class FFNOBlock3d(nn.Module):
         # Operators
         # -----------------------------------
         self.spec_hw = SpectralConv2dFull(
-            width,
-            width,
+            in_channels=width,
+            out_channels=width,
+            hidden=spectral_hidden,
+            rank=spectral_rank,
             kx_cutoff=kx_cutoff,
-            ky_cutoff=ky_cutoff
+            ky_cutoff=ky_cutoff,
+            k_scale=k_scale,
+            use_bias=spectral_use_bias,
+            apply_mask=spectral_apply_mask,
         )
+
         self.pw_hw   = nn.Conv3d(width, width, kernel_size=1)
 
         self.vertical = VerticalPhysicsStack(
@@ -483,8 +697,13 @@ class FFNO3D(nn.Module):
         padding=0,
         checkpoint_blocks=True,
         use_gating=True,
-        kx_cutoff=None,
-        ky_cutoff=None,
+        spectral_hidden=64,
+        spectral_rank=16,
+        dx_cutoff=None,
+        dy_cutoff=None,
+        k_scale=1e5,
+        spectral_use_bias=True,
+        spectral_apply_mask=True
     ):
         super().__init__()
 
@@ -493,16 +712,27 @@ class FFNO3D(nn.Module):
 
         self.lift = nn.Conv3d(in_channels, width, kernel_size=1)
 
+        kx_cutoff, ky_cutoff = compute_k_cutoff(dx=dx_cutoff, dy=dy_cutoff, radial=False)
+
+        self.kx_cutoff = kx_cutoff
+
+        self.ky_cutoff = ky_cutoff
+
         self.blocks = nn.ModuleList(
             [
                 FFNOBlock3d(
-                    width=width,
+                    width,
                     dropout=dropout,
                     mlp_expansion=mlp_expansion,
                     vertical_hidden=vertical_hidden,
                     use_gating=use_gating,
-                    kx_cutoff=kx_cutoff,
-                    ky_cutoff=ky_cutoff
+                    spectral_hidden=spectral_hidden,
+                    spectral_rank=spectral_rank,
+                    kx_cutoff=self.kx_cutoff,
+                    ky_cutoff=self.ky_cutoff,
+                    k_scale=k_scale,
+                    spectral_use_bias=spectral_use_bias,
+                    spectral_apply_mask=spectral_apply_mask
                 )
                 for _ in range(n_layers)
             ]
@@ -511,6 +741,7 @@ class FFNO3D(nn.Module):
         self.proj1 = nn.Conv3d(width, width * 2, kernel_size=1)
         self.proj2 = nn.Conv3d(width * 2, out_channels, kernel_size=1)
         self.act = nn.GELU()
+
 
     def _run_block(self, blk, x, dx, dy, collect_stats=False):
         if self.checkpoint_blocks and self.training and not collect_stats:
