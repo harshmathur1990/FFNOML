@@ -359,34 +359,38 @@ class SpectralConv2dFull(nn.Module):
             coef_imag *= mask_f
 
         # --------------------------------------------------------
-        # Low-rank weights
+        # Low-rank basis
         # --------------------------------------------------------
         br = self.basis_real   # [R, Cin, Cout]
         bi = self.basis_imag   # [R, Cin, Cout]
 
-        coef_r = coef_real
-        coef_i = coef_imag
-
-        w_real = (
-            torch.einsum("bdyxr,rio->bdioyx", coef_r, br)
-            - torch.einsum("bdyxr,rio->bdioyx", coef_i, bi)
-        )
-
-        w_imag = (
-            torch.einsum("bdyxr,rio->bdioyx", coef_r, bi)
-            + torch.einsum("bdyxr,rio->bdioyx", coef_i, br)
-        )
+        coef_r = coef_real     # [B, D, H, Wf, R]
+        coef_i = coef_imag     # [B, D, H, Wf, R]
 
         # --------------------------------------------------------
-        # Apply operator
+        # Project input into (out_channel, rank) space
+        # --------------------------------------------------------
+        xr_br = torch.einsum("bidyx,rio->bodyxr", xr, br)  # [B, Cout, D, H, Wf, R]
+        xi_br = torch.einsum("bidyx,rio->bodyxr", xi, br)
+
+        xr_bi = torch.einsum("bidyx,rio->bodyxr", xr, bi)
+        xi_bi = torch.einsum("bidyx,rio->bodyxr", xi, bi)
+
+        # --------------------------------------------------------
+        # Combine with coefficients
         # --------------------------------------------------------
         out_ft_real = (
-            torch.einsum("bidyx,bdioyx->bodyx", xr, w_real)
-            - torch.einsum("bidyx,bdioyx->bodyx", xi, w_imag)
+            torch.einsum("bdyxr,bodyxr->bodyx", coef_r, xr_br)
+            - torch.einsum("bdyxr,bodyxr->bodyx", coef_r, xi_bi)
+            - torch.einsum("bdyxr,bodyxr->bodyx", coef_i, xr_bi)
+            - torch.einsum("bdyxr,bodyxr->bodyx", coef_i, xi_br)
         )
+
         out_ft_imag = (
-            torch.einsum("bidyx,bdioyx->bodyx", xr, w_imag)
-            + torch.einsum("bidyx,bdioyx->bodyx", xi, w_real)
+            torch.einsum("bdyxr,bodyxr->bodyx", coef_r, xr_bi)
+            + torch.einsum("bdyxr,bodyxr->bodyx", coef_r, xi_br)
+            + torch.einsum("bdyxr,bodyxr->bodyx", coef_i, xr_br)
+            - torch.einsum("bdyxr,bodyxr->bodyx", coef_i, xi_bi)
         )
 
         out_ft = torch.complex(out_ft_real, out_ft_imag)
