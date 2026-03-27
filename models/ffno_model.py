@@ -203,123 +203,6 @@ class VerticalPhysicsStack(nn.Module):
 
         return x
 
-# ============================================================
-# Spectral conv in horizontal plane
-# ============================================================
-# class SpectralConv2dFull(nn.Module):
-#     """
-#     Full-spectrum metric-aware spectral convolution over (H, W),
-#     applied independently at each depth plane.
-
-#     Input/Output: [B, C, D, H, W]
-#     """
-#     def __init__(
-#         self,
-#         in_channels,
-#         out_channels,
-#         hidden=32,
-#         kx_cutoff=None,
-#         ky_cutoff=None
-#     ):
-#         super().__init__()
-
-#         self.in_channels = in_channels
-#         self.out_channels = out_channels
-
-#         scale = 1.0 / math.sqrt(in_channels)
-
-#         self.weight_real = nn.Parameter(
-#             scale * torch.randn(in_channels, out_channels, dtype=torch.float32)
-#         )
-#         self.weight_imag = nn.Parameter(
-#             scale * torch.randn(in_channels, out_channels, dtype=torch.float32)
-#         )
-
-#         self.freq_mlp = nn.Sequential(
-#             nn.Linear(4, hidden),
-#             nn.GELU(),
-#             nn.Linear(hidden, hidden),
-#             nn.GELU(),
-#             nn.Linear(hidden, 2),
-#         )
-
-#         self.kx_cutoff = kx_cutoff
-#         self.ky_cutoff = ky_cutoff
-
-
-#     def forward(self, x, dx, dy):
-#         # x: [B, Cin, D, H, W]
-#         B, Cin, D, H, W = x.shape
-
-#         dx = _to_spacing_value(dx, x)
-#         dy = _to_spacing_value(dy, x)
-
-#         orig_dtype = x.dtype
-
-#         with torch.amp.autocast("cuda", enabled=False):
-#             x32 = x.float()
-
-#             # FFT only on horizontal plane
-#             x_ft = torch.fft.rfft2(x32, dim=(-2, -1))
-#             xr = x_ft.real
-#             xi = x_ft.imag
-
-#             ky = torch.fft.fftfreq(H, d=dy, device=x.device)
-#             kx = torch.fft.rfftfreq(W, d=dx, device=x.device)
-
-#             ky = 2.0 * math.pi * ky
-#             kx = 2.0 * math.pi * kx
-
-#             # rescale for stable MLP inputs
-#             k_scale = 1e5
-#             ky = ky * k_scale
-#             kx = kx * k_scale
-
-#             ky_grid, kx_grid = torch.meshgrid(ky, kx, indexing="ij")
-#             k_mag = torch.sqrt(kx_grid**2 + ky_grid**2 + 1e-12)
-
-#             k_feat = torch.stack(
-#                 [
-#                     kx_grid,
-#                     ky_grid,
-#                     k_mag,
-#                     torch.sign(ky_grid),
-#                 ],
-#                 dim=-1,
-#             )  # [H, Wf, 4]
-
-#             gate = self.freq_mlp(k_feat)  # [H, Wf, 2]
-#             gate_real = gate[..., 0]
-#             gate_imag = gate[..., 1]
-
-#             wr = self.weight_real[:, :, None, None]   # [Cin, Cout, 1, 1]
-#             wi = self.weight_imag[:, :, None, None]
-
-#             gr = gate_real[None, None, :, :]          # [1, 1, H, Wf]
-#             gi = gate_imag[None, None, :, :]
-
-#             w_real = wr * gr - wi * gi
-#             w_imag = wr * gi + wi * gr
-
-#             out_ft_real = (
-#                 torch.einsum("b i d y x, i o y x -> b o d y x", xr, w_real)
-#                 - torch.einsum("b i d y x, i o y x -> b o d y x", xi, w_imag)
-#             )
-#             out_ft_imag = (
-#                 torch.einsum("b i d y x, i o y x -> b o d y x", xr, w_imag)
-#                 + torch.einsum("b i d y x, i o y x -> b o d y x", xi, w_real)
-#             )
-
-#             if self.kx_cutoff is not None:
-#                 mask = (kx_grid.abs() <= self.kx_cutoff) & (ky_grid.abs() <= self.ky_cutoff)[None, None, None, :, :]
-#                 out_ft_real = out_ft_real * mask
-#                 out_ft_imag = out_ft_imag * mask
-
-#             out_ft = torch.complex(out_ft_real, out_ft_imag)
-#             y = torch.fft.irfft2(out_ft, s=(H, W), dim=(-2, -1))
-
-#         return y.to(orig_dtype)
-
 
 class SpectralConv2dFull(nn.Module):
     """
@@ -427,8 +310,8 @@ class SpectralConv2dFull(nn.Module):
         B, Cin, D, H, W = x.shape
         device = x.device
 
-        dx = float(dx) if not torch.is_tensor(dx) else float(dx.item())
-        dy = float(dy) if not torch.is_tensor(dy) else float(dy.item())
+        dx = _to_spacing_value(dx, x)
+        dy = _to_spacing_value(dy, x)
 
         # --------------------------------------------------------
         # FFT
@@ -478,16 +361,20 @@ class SpectralConv2dFull(nn.Module):
         # --------------------------------------------------------
         # Low-rank weights
         # --------------------------------------------------------
-        br = self.basis_real[None, None, ...]  # [1,1,R,Cin,Cout]
-        bi = self.basis_imag[None, None, ...]
+        br = self.basis_real   # [R, Cin, Cout]
+        bi = self.basis_imag   # [R, Cin, Cout]
+
+        coef_r = coef_real
+        coef_i = coef_imag
 
         w_real = (
-            torch.einsum("bdyxr,brio->bdioyx", coef_real, br)
-            - torch.einsum("bdyxr,brio->bdioyx", coef_imag, bi)
+            torch.einsum("bdyxr,rio->bdioyx", coef_r, br)
+            - torch.einsum("bdyxr,rio->bdioyx", coef_i, bi)
         )
+
         w_imag = (
-            torch.einsum("bdyxr,brio->bdioyx", coef_real, bi)
-            + torch.einsum("bdyxr,brio->bdioyx", coef_imag, br)
+            torch.einsum("bdyxr,rio->bdioyx", coef_r, bi)
+            + torch.einsum("bdyxr,rio->bdioyx", coef_i, br)
         )
 
         # --------------------------------------------------------
