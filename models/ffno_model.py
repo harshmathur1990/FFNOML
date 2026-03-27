@@ -208,13 +208,10 @@ class SpectralConv2dFull(nn.Module):
     """
     Chunked fully input-conditioned spectral operator.
 
-    Properties
-    ----------
-    - uses full input (no reduction over D/H/W)
-    - resolution invariant
-    - nonlinear
-    - per-(k,d) independent
-    - chunked over H to reduce activation memory
+    ✔ full input conditioning (no reduction)
+    ✔ resolution invariant
+    ✔ nonlinear
+    ✔ memory safe (chunked over ky / H)
     """
 
     def __init__(
@@ -228,7 +225,7 @@ class SpectralConv2dFull(nn.Module):
         k_scale=1e5,
         use_bias=True,
         apply_mask=True,
-        chunk_h=4,          # tune: 4, 8, 16
+        chunk_h=4,
     ):
         super().__init__()
 
@@ -243,29 +240,22 @@ class SpectralConv2dFull(nn.Module):
 
         scale = 1.0 / math.sqrt(in_channels)
 
-        # Low-rank complex basis: [R, Cin, Cout]
-        self.basis_real = nn.Parameter(
-            scale * torch.randn(rank, in_channels, out_channels)
-        )
-        self.basis_imag = nn.Parameter(
-            scale * torch.randn(rank, in_channels, out_channels)
-        )
+        # [R, Cin, Cout]
+        self.basis_real = nn.Parameter(scale * torch.randn(rank, in_channels, out_channels))
+        self.basis_imag = nn.Parameter(scale * torch.randn(rank, in_channels, out_channels))
 
-        # Frequency embedding: k -> hidden
         self.freq_net = nn.Sequential(
             nn.Linear(4, hidden),
             nn.GELU(),
             nn.Linear(hidden, hidden),
         )
 
-        # Full input embedding per (d, ky, kx)
         self.input_net = nn.Sequential(
             nn.Linear(2 * in_channels, hidden),
             nn.GELU(),
             nn.Linear(hidden, hidden),
         )
 
-        # Joint embedding -> complex rank coefficients
         self.joint_net = nn.Sequential(
             nn.GELU(),
             nn.Linear(hidden, hidden),
@@ -278,9 +268,10 @@ class SpectralConv2dFull(nn.Module):
         else:
             self.register_parameter("bias", None)
 
-    def _build_k_grid(self, H, W, dx, dy, device, dtype=torch.float32):
-        ky = torch.fft.fftfreq(H, d=dy, device=device, dtype=dtype)
-        kx = torch.fft.rfftfreq(W, d=dx, device=device, dtype=dtype)
+    # ------------------------------------------------------------
+    def _build_k_grid(self, H, W, dx, dy, device):
+        ky = torch.fft.fftfreq(H, d=dy, device=device, dtype=torch.float32)
+        kx = torch.fft.rfftfreq(W, d=dx, device=device, dtype=torch.float32)
 
         ky = 2.0 * math.pi * ky
         kx = 2.0 * math.pi * kx
@@ -289,6 +280,7 @@ class SpectralConv2dFull(nn.Module):
         kx_scaled = kx * self.k_scale
 
         ky_grid, kx_grid = torch.meshgrid(ky_scaled, kx_scaled, indexing="ij")
+
         k_mag = torch.sqrt(kx_grid**2 + ky_grid**2 + 1e-12)
 
         k_feat = torch.stack(
@@ -302,19 +294,13 @@ class SpectralConv2dFull(nn.Module):
         if self.kx_cutoff is None and self.ky_cutoff is None:
             return None
 
-        if self.kx_cutoff is None or self.ky_cutoff is None:
-            raise ValueError("Provide both kx_cutoff and ky_cutoff, or neither.")
-
         return (
             (kx_grid.abs() <= self.kx_cutoff) &
             (ky_grid.abs() <= self.ky_cutoff)
         )
 
+    # ------------------------------------------------------------
     def forward(self, x, dx, dy):
-        """
-        x: [B, Cin, D, H, W]
-        returns: [B, Cout, D, H, W]
-        """
         B, Cin, D, H, W = x.shape
         device = x.device
         orig_dtype = x.dtype
@@ -323,81 +309,72 @@ class SpectralConv2dFull(nn.Module):
         dy = _to_spacing_value(dy, x)
 
         # --------------------------------------------------------
-        # Forward FFT
+        # FFT in float32 (AMP-safe)
         # --------------------------------------------------------
+
         x_ft = torch.fft.rfft2(x, dim=(-2, -1))
         xr = x_ft.real   # [B, Cin, D, H, Wf]
-        xi = x_ft.imag   # [B, Cin, D, H, Wf]
+        xi = x_ft.imag
+
         Wf = xr.shape[-1]
 
-        # --------------------------------------------------------
-        # Frequency embedding / mask (full grid, small tensors)
-        # --------------------------------------------------------
-        k_feat, kx_grid, ky_grid = self._build_k_grid(
-            H, W, dx, dy, device=device, dtype=x.dtype
-        )  # [H, Wf, 4], [H, Wf], [H, Wf]
-
+        # ----------------------------------------------------
+        # Frequency embedding
+        # ----------------------------------------------------
+        k_feat, kx_grid, ky_grid = self._build_k_grid(H, W, dx, dy, device)
         freq_emb = self.freq_net(k_feat)  # [H, Wf, hidden]
-        mask = self._build_mask(kx_grid, ky_grid)  # [H, Wf] or None
+        mask = self._build_mask(kx_grid, ky_grid)
 
-        br = self.basis_real.float()  # [R, Cin, Cout]
-        bi = self.basis_imag.float()  # [R, Cin, Cout]
+        br = self.basis_real.float()
+        bi = self.basis_imag.float()
 
         out_real_chunks = []
         out_imag_chunks = []
 
-        # --------------------------------------------------------
-        # Chunk over H / ky dimension
-        # --------------------------------------------------------
         chunk_h = max(1, min(self.chunk_h, H))
 
+        # ====================================================
+        # CHUNK LOOP
+        # ====================================================
         for y0 in range(0, H, chunk_h):
             y1 = min(y0 + chunk_h, H)
             hc = y1 - y0
 
-            # [B, Cin, D, hc, Wf]
             xr_s = xr[:, :, :, y0:y1, :]
             xi_s = xi[:, :, :, y0:y1, :]
 
-            # ----------------------------------------------------
-            # Full input embedding for this chunk only
-            # z: [B, 2Cin, D, hc, Wf] -> [B, D, hc, Wf, 2Cin]
-            # ----------------------------------------------------
+            # ------------------------------------------------
+            # Input embedding
+            # ------------------------------------------------
             z = torch.cat([xr_s, xi_s], dim=1).permute(0, 2, 3, 4, 1)
-            input_emb = self.input_net(z)  # [B, D, hc, Wf, hidden]
+            input_emb = self.input_net(z)
 
-            # ----------------------------------------------------
-            # Frequency embedding for this chunk
-            # ----------------------------------------------------
-            freq_s = freq_emb[y0:y1]  # [hc, Wf, hidden]
-            joint = input_emb + freq_s[None, None, :, :, :]  # [B,D,hc,Wf,hidden]
+            freq_s = freq_emb[y0:y1]
+            joint = input_emb + freq_s[None, None]
 
-            coeffs = self.joint_net(joint)  # [B, D, hc, Wf, 2R]
+            coeffs = self.joint_net(joint)
             coeffs = coeffs.view(B, D, hc, Wf, self.rank, 2)
 
-            coef_r = coeffs[..., 0]  # [B, D, hc, Wf, R]
-            coef_i = coeffs[..., 1]  # [B, D, hc, Wf, R]
+            coef_r = coeffs[..., 0]
+            coef_i = coeffs[..., 1]
 
             if self.apply_mask and (mask is not None):
-                mask_s = mask[y0:y1, :]  # [hc, Wf]
+                mask_s = mask[y0:y1]
                 mask_f = mask_s[None, None, :, :, None].to(coef_r.dtype)
                 coef_r = coef_r * mask_f
                 coef_i = coef_i * mask_f
 
-            # ----------------------------------------------------
-            # Project input into (out_channel, rank) space
-            # Shapes:
-            # xr_br: [B, Cout, D, hc, Wf, R]
-            # ----------------------------------------------------
+            # ------------------------------------------------
+            # Project input
+            # ------------------------------------------------
             xr_br = torch.einsum("bidyx,rio->bodyxr", xr_s, br)
             xi_br = torch.einsum("bidyx,rio->bodyxr", xi_s, br)
             xr_bi = torch.einsum("bidyx,rio->bodyxr", xr_s, bi)
             xi_bi = torch.einsum("bidyx,rio->bodyxr", xi_s, bi)
 
-            # ----------------------------------------------------
-            # Combine with complex coefficients
-            # output chunk: [B, Cout, D, hc, Wf]
-            # ----------------------------------------------------
+            # ------------------------------------------------
+            # Combine
+            # ------------------------------------------------
             out_ft_real_s = (
                 torch.einsum("bdyxr,bodyxr->bodyx", coef_r, xr_br)
                 - torch.einsum("bdyxr,bodyxr->bodyx", coef_r, xi_bi)
@@ -415,25 +392,18 @@ class SpectralConv2dFull(nn.Module):
             out_real_chunks.append(out_ft_real_s)
             out_imag_chunks.append(out_ft_imag_s)
 
-            # help peak memory a bit
-            del z, input_emb, joint, coeffs
-            del coef_r, coef_i
-            del xr_br, xi_br, xr_bi, xi_bi
-            del out_ft_real_s, out_ft_imag_s
+        # ====================================================
+        # CONCAT + IFFT (OUTSIDE LOOP)
+        # ====================================================
+        out_ft_real = torch.cat(out_real_chunks, dim=3)
+        out_ft_imag = torch.cat(out_imag_chunks, dim=3)
 
-            # [B, Cout, D, H, Wf]
-            out_ft_real = torch.cat(out_real_chunks, dim=3)
-            out_ft_imag = torch.cat(out_imag_chunks, dim=3)
+        out_ft = torch.complex(out_ft_real, out_ft_imag)
 
-            out_ft = torch.complex(out_ft_real, out_ft_imag)
+        y = torch.fft.irfft2(out_ft, s=(H, W), dim=(-2, -1))
 
-            # --------------------------------------------------------
-            # Inverse FFT
-            # --------------------------------------------------------
-            y = torch.fft.irfft2(out_ft, s=(H, W), dim=(-2, -1))
-
-            if self.bias is not None:
-                y = y + self.bias.float()[None, :, None, None, None]
+        if self.bias is not None:
+            y = y + self.bias.float()[None, :, None, None, None]
 
         return y
 
