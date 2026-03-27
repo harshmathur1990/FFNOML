@@ -334,7 +334,7 @@ class SpectralConv2dFull(nn.Module):
         # Frequency embedding / mask (full grid, small tensors)
         # --------------------------------------------------------
         k_feat, kx_grid, ky_grid = self._build_k_grid(
-            H, W, dx, dy, device=device, dtype=x32.dtype
+            H, W, dx, dy, device=device, dtype=x.dtype
         )  # [H, Wf, 4], [H, Wf], [H, Wf]
 
         freq_emb = self.freq_net(k_feat)  # [H, Wf, hidden]
