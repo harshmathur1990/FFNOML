@@ -167,7 +167,6 @@ MODEL_CONFIG = dict(
     use_gating=True,
     spectral_hidden=64,
     spectral_rank=64,
-    spectral_context=64,
     dx_cutoff=96000,
     dy_cutoff=96000,
     k_scale=1e5,
