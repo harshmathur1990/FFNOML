@@ -109,7 +109,7 @@ class ModelBuilder:
 
             auto_wrap_policy = partial(
                 transformer_auto_wrap_policy,
-                transformer_layer_cls={FFNOBlock3d},
+                transformer_layer_cls={FFNOBlock3dBalanced},
             )
 
             model = FSDP(

@@ -9,58 +9,13 @@ from torch.utils.checkpoint import checkpoint
 # Helpers
 # ============================================================
 def _to_spacing_value(spacing, x):
-    """
-    Convert spacing to scalar float usable by torch.fft.fftfreq.
-    Accepts python float/int or 0-d / 1-element tensor.
-    """
     if isinstance(spacing, (float, int)):
         return float(spacing)
-
     if torch.is_tensor(spacing):
         if spacing.numel() != 1:
-            raise ValueError(
-                "spacing must be scalar (float/int or tensor with one element)."
-            )
+            raise ValueError("spacing must be scalar.")
         return float(spacing.detach().item())
-
     raise TypeError(f"Unsupported spacing type: {type(spacing)}")
-
-
-def compute_k_cutoff(dx, dy=None, k_scale=1e5, radial=True):
-    """
-    Compute training-band cutoff in the SAME scaled k-space
-    used by your layer.
-
-    Parameters
-    ----------
-    dx : float
-        Training grid spacing in x.
-    dy : float or None
-        Training grid spacing in y. If None, dy=dx.
-    k_scale : float
-        The same scaling factor used in the model.
-    radial : bool
-        If True, return radial cutoff based on k_mag.
-        If False, return per-axis cutoffs.
-
-    Returns
-    -------
-    radial=True:
-        k_cutoff : float
-
-    radial=False:
-        kx_cutoff, ky_cutoff : float, float
-    """
-    if dy is None:
-        dy = dx
-
-    kx_cutoff = math.pi / dx * k_scale
-    ky_cutoff = math.pi / dy * k_scale
-
-    if radial:
-        return math.sqrt(kx_cutoff**2 + ky_cutoff**2)
-    else:
-        return kx_cutoff, ky_cutoff
 
 
 def _gn(channels, max_groups=8):
@@ -70,23 +25,17 @@ def _gn(channels, max_groups=8):
     return nn.GroupNorm(g, channels)
 
 
-# def _gn(channels, max_groups=8):
-    # return nn.Identity()
-
-
 # ============================================================
-# Basic blocks
+# Pointwise MLP (WEAK)
 # ============================================================
 class PointwiseMLP(nn.Module):
-    """
-    Channel MLP via 1x1x1 convs.
-    Input/Output: [B, C, D, H, W]
-    """
     def __init__(self, width, expansion=2, dropout=0.0):
         super().__init__()
         hidden = width * expansion
-        self.fc1 = nn.Conv3d(width, hidden, kernel_size=1)
-        self.fc2 = nn.Conv3d(hidden, width, kernel_size=1)
+
+        self.fc1 = nn.Conv3d(width, hidden, 1)
+        self.fc2 = nn.Conv3d(hidden, width, 1)
+
         self.act = nn.GELU()
         self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
@@ -98,607 +47,299 @@ class PointwiseMLP(nn.Module):
         return x
 
 
-class Residual1DBlock(nn.Module):
-    """
-    Residual block along depth only.
-    Input/Output: [Ncol, C, D]
-    """
-    def __init__(self, ch, k=5):
+# ============================================================
+# LIGHTWEIGHT VERTICAL STACK (~60k params)
+# ============================================================
+class DepthwiseSeparable1D(nn.Module):
+    def __init__(self, ch, k=5, dilation=1, dropout=0.0):
         super().__init__()
-        p = k // 2
-        self.conv1 = nn.Conv1d(ch, ch, kernel_size=k, padding=p, bias=False)
-        self.gn1 = _gn(ch)
-        self.conv2 = nn.Conv1d(ch, ch, kernel_size=k, padding=p, bias=False)
-        self.gn2 = _gn(ch)
-        self.act = nn.GELU()
 
-    def forward(self, x):
-        y = self.act(self.gn1(self.conv1(x)))
-        y = self.gn2(self.conv2(y))
-        return self.act(x + y)
+        pad = dilation * (k // 2)
 
+        self.dw = nn.Conv1d(
+            ch, ch,
+            kernel_size=k,
+            padding=pad,
+            dilation=dilation,
+            groups=ch,
+            bias=False,
+        )
 
-class MultiScaleVertical(nn.Module):
-    """
-    Parallel depth-only kernels for different vertical coupling scales.
-    Input/Output: [Ncol, C, D]
-    """
-    def __init__(self, ch):
-        super().__init__()
-        self.k3 = nn.Conv1d(ch, ch, kernel_size=3, padding=1, bias=False)
-        self.k5 = nn.Conv1d(ch, ch, kernel_size=5, padding=2, bias=False)
-        self.k9 = nn.Conv1d(ch, ch, kernel_size=9, padding=4, bias=False)
+        self.pw = nn.Conv1d(ch, ch, 1, bias=False)
+
         self.gn = _gn(ch)
         self.act = nn.GELU()
+        self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
     def forward(self, x):
-        y = self.k3(x)
-        y += self.k5(x)
-        y += self.k9(x)
-        return self.act(self.gn(y))
+        y = self.dw(x)
+        y = self.pw(y)
+        y = self.gn(y)
+        y = self.act(y)
+        y = self.drop(y)
+        return y
 
 
-class VerticalPhysicsStack(nn.Module):
+class LiteVerticalResidualBlock(nn.Module):
+    def __init__(self, ch, k=5, dilation=1, dropout=0.0):
+        super().__init__()
+
+        self.b1 = DepthwiseSeparable1D(ch, k, dilation, dropout)
+        self.b2 = DepthwiseSeparable1D(ch, k, 1, dropout)
+
+        self.out_gn = _gn(ch)
+        self.act = nn.GELU()
+
+    def forward(self, x):
+        y = self.b1(x)
+        y = self.b2(y)
+        return self.act(self.out_gn(x + y))
+
+
+class LiteMultiScaleVertical(nn.Module):
+    def __init__(self, ch, kernels=(3, 7, 15), dropout=0.0):
+        super().__init__()
+
+        self.branches = nn.ModuleList([
+            nn.Conv1d(
+                ch, ch,
+                kernel_size=k,
+                padding=k // 2,
+                groups=ch,
+                bias=False
+            )
+            for k in kernels
+        ])
+
+        self.mix = nn.Conv1d(ch, ch, 1, bias=False)
+
+        self.gn = _gn(ch)
+        self.act = nn.GELU()
+        self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+
+    def forward(self, x):
+        y = 0.0
+        for b in self.branches:
+            y = y + b(x)
+
+        y = self.mix(y)
+        y = self.gn(y)
+        y = self.act(y)
+        y = self.drop(y)
+        return y
+
+
+class BalancedVerticalPhysicsStack(nn.Module):
     """
-    Strong vertical mixer operating independently on each (y, x) column.
-
-    SAFE VERSION:
-      - no in-place writes
-      - autograd friendly
-      - chunked processing preserved
+    ~60k parameter vertical physics operator
     """
-    def __init__(self, channels, hidden=256, dropout=0.0):
+    def __init__(self, channels, hidden=80, dropout=0.0):
         super().__init__()
 
         self.in_proj = nn.Sequential(
-            nn.Conv1d(channels, hidden, kernel_size=1, bias=False),
+            nn.Conv1d(channels, hidden, 1, bias=False),
             _gn(hidden),
             nn.GELU(),
         )
 
-        self.vertical_net = nn.Sequential(
-            MultiScaleVertical(hidden),
-            Residual1DBlock(hidden, k=5),
-            Residual1DBlock(hidden, k=5),
-            MultiScaleVertical(hidden),
-            Residual1DBlock(hidden, k=5),
+        self.net = nn.Sequential(
+            LiteMultiScaleVertical(hidden, dropout=dropout),
+            LiteVerticalResidualBlock(hidden, dilation=1, dropout=dropout),
+            LiteVerticalResidualBlock(hidden, dilation=2, dropout=dropout),
+            LiteVerticalResidualBlock(hidden, dilation=4, dropout=dropout),
         )
 
-        self.out_proj = nn.Conv1d(hidden, channels, kernel_size=1)
-
-        self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+        self.out_proj = nn.Conv1d(hidden, channels, 1, bias=False)
+        self.out_gn = _gn(channels)
 
     def forward(self, x):
-        # x: [B, C, D, H, W]
         B, C, D, H, W = x.shape
 
-        # [B, H, W, C, D]
-        x = x.permute(0, 3, 4, 1, 2)
-
-        # [B, HW, C, D]
-        x = x.reshape(B, H * W, C, D)
+        x = x.permute(0, 3, 4, 1, 2).reshape(B, H * W, C, D)
 
         chunk = 128
-        outputs = []
+        outs = []
 
         for i in range(0, H * W, chunk):
-            xi = x[:, i:i+chunk]              # [B, chunk, C, D]
-            xi = xi.reshape(-1, C, D)         # [B*chunk, C, D]
+            xi = x[:, i:i+chunk].reshape(-1, C, D)
 
             yi = self.in_proj(xi)
-            yi = self.vertical_net(yi)
+            yi = self.net(yi)
             yi = self.out_proj(yi)
 
-            yi = yi.reshape(B, -1, C, D)      # [B, chunk, C, D]
-            outputs.append(yi)
+            yi = yi.reshape(B, -1, C, D)
+            outs.append(yi)
 
-        # concatenate instead of in-place write
-        x = torch.cat(outputs, dim=1)
+        y = torch.cat(outs, dim=1)
+        y = y.reshape(B, H, W, C, D).permute(0, 3, 4, 1, 2)
 
-        # [B, H, W, C, D]
-        x = x.reshape(B, H, W, C, D)
-
-        # back to [B, C, D, H, W]
-        x = x.permute(0, 3, 4, 1, 2)
-
-        return x
+        return self.out_gn(y)
 
 
+# ============================================================
+# SPECTRAL (DOMINANT)
+# ============================================================
 class SpectralConv2dFull(nn.Module):
-    """
-    Chunked fully input-conditioned spectral operator.
-
-    ✔ full input conditioning (no reduction)
-    ✔ resolution invariant
-    ✔ nonlinear
-    ✔ memory safe (chunked over ky / H)
-    """
-
-    def __init__(
-        self,
-        in_channels,
-        out_channels,
-        hidden=64,
-        rank=16,
-        kx_cutoff=None,
-        ky_cutoff=None,
-        k_scale=1e5,
-        use_bias=True,
-        apply_mask=True,
-        chunk_h=4,
-    ):
+    def __init__(self, in_channels, out_channels, hidden=96):
         super().__init__()
-
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.rank = rank
-        self.kx_cutoff = kx_cutoff
-        self.ky_cutoff = ky_cutoff
-        self.k_scale = k_scale
-        self.apply_mask = apply_mask
-        self.chunk_h = chunk_h
 
         scale = 1.0 / math.sqrt(in_channels)
 
-        # [R, Cin, Cout]
-        self.basis_real = nn.Parameter(scale * torch.randn(rank, in_channels, out_channels))
-        self.basis_imag = nn.Parameter(scale * torch.randn(rank, in_channels, out_channels))
+        self.weight_real = nn.Parameter(scale * torch.randn(in_channels, out_channels))
+        self.weight_imag = nn.Parameter(scale * torch.randn(in_channels, out_channels))
 
-        self.freq_net = nn.Sequential(
+        self.freq_mlp = nn.Sequential(
             nn.Linear(4, hidden),
             nn.GELU(),
             nn.Linear(hidden, hidden),
-        )
-
-        self.input_net = nn.Sequential(
-            nn.Linear(2 * in_channels, hidden),
             nn.GELU(),
-            nn.Linear(hidden, hidden),
+            nn.Linear(hidden, 2),
         )
 
-        self.joint_net = nn.Sequential(
-            nn.GELU(),
-            nn.Linear(hidden, hidden),
-            nn.GELU(),
-            nn.Linear(hidden, 2 * rank),
-        )
-
-        if use_bias:
-            self.bias = nn.Parameter(torch.zeros(out_channels))
-        else:
-            self.register_parameter("bias", None)
-
-    # ------------------------------------------------------------
-    def _build_k_grid(self, H, W, dx, dy, device):
-        ky = torch.fft.fftfreq(H, d=dy, device=device, dtype=torch.float32)
-        kx = torch.fft.rfftfreq(W, d=dx, device=device, dtype=torch.float32)
-
-        ky = 2.0 * math.pi * ky
-        kx = 2.0 * math.pi * kx
-
-        ky_scaled = ky * self.k_scale
-        kx_scaled = kx * self.k_scale
-
-        ky_grid, kx_grid = torch.meshgrid(ky_scaled, kx_scaled, indexing="ij")
-
-        k_mag = torch.sqrt(kx_grid**2 + ky_grid**2 + 1e-12)
-
-        k_feat = torch.stack(
-            [kx_grid, ky_grid, k_mag, torch.sign(ky_grid)],
-            dim=-1,
-        )  # [H, Wf, 4]
-
-        return k_feat, kx_grid, ky_grid
-
-    def _build_mask(self, kx_grid, ky_grid):
-        if self.kx_cutoff is None and self.ky_cutoff is None:
-            return None
-
-        return (
-            (kx_grid.abs() <= self.kx_cutoff) &
-            (ky_grid.abs() <= self.ky_cutoff)
-        )
-
-    # ------------------------------------------------------------
     def forward(self, x, dx, dy):
-        B, Cin, D, H, W = x.shape
-        device = x.device
-        orig_dtype = x.dtype
+        B, C, D, H, W = x.shape
 
         dx = _to_spacing_value(dx, x)
         dy = _to_spacing_value(dy, x)
 
-        # --------------------------------------------------------
-        # FFT in float32 (AMP-safe)
-        # --------------------------------------------------------
-
         x_ft = torch.fft.rfft2(x, dim=(-2, -1))
-        xr = x_ft.real   # [B, Cin, D, H, Wf]
-        xi = x_ft.imag
 
-        Wf = xr.shape[-1]
+        ky = torch.fft.fftfreq(H, d=dy, device=x.device)
+        kx = torch.fft.rfftfreq(W, d=dx, device=x.device)
 
-        # ----------------------------------------------------
-        # Frequency embedding
-        # ----------------------------------------------------
-        k_feat, kx_grid, ky_grid = self._build_k_grid(H, W, dx, dy, device)
-        freq_emb = self.freq_net(k_feat)  # [H, Wf, hidden]
-        mask = self._build_mask(kx_grid, ky_grid)
+        ky, kx = torch.meshgrid(ky, kx, indexing="ij")
 
-        br = self.basis_real.float()
-        bi = self.basis_imag.float()
+        k_feat = torch.stack([
+            kx, ky,
+            torch.sqrt(kx**2 + ky**2 + 1e-12),
+            torch.sign(ky),
+        ], dim=-1)
 
-        out_real_chunks = []
-        out_imag_chunks = []
+        gate = self.freq_mlp(k_feat)
 
-        chunk_h = max(1, min(self.chunk_h, H))
+        wr = self.weight_real[:, :, None, None]
+        wi = self.weight_imag[:, :, None, None]
 
-        # ====================================================
-        # CHUNK LOOP
-        # ====================================================
-        for y0 in range(0, H, chunk_h):
-            y1 = min(y0 + chunk_h, H)
-            hc = y1 - y0
+        gr = gate[..., 0][None, None]
+        gi = gate[..., 1][None, None]
 
-            xr_s = xr[:, :, :, y0:y1, :]
-            xi_s = xi[:, :, :, y0:y1, :]
+        w_real = wr * gr - wi * gi
+        w_imag = wr * gi + wi * gr
 
-            # ------------------------------------------------
-            # Input embedding
-            # ------------------------------------------------
-            z = torch.cat([xr_s, xi_s], dim=1).permute(0, 2, 3, 4, 1)
-            input_emb = self.input_net(z)
+        xr, xi = x_ft.real, x_ft.imag
 
-            freq_s = freq_emb[y0:y1]
-            joint = input_emb + freq_s[None, None]
+        out_r = torch.einsum("b i d y x, i o y x -> b o d y x", xr, w_real) - \
+                torch.einsum("b i d y x, i o y x -> b o d y x", xi, w_imag)
 
-            coeffs = self.joint_net(joint)
-            coeffs = coeffs.view(B, D, hc, Wf, self.rank, 2)
+        out_i = torch.einsum("b i d y x, i o y x -> b o d y x", xr, w_imag) + \
+                torch.einsum("b i d y x, i o y x -> b o d y x", xi, w_real)
 
-            coef_r = coeffs[..., 0]
-            coef_i = coeffs[..., 1]
+        out = torch.complex(out_r, out_i)
 
-            if self.apply_mask and (mask is not None):
-                mask_s = mask[y0:y1]
-                mask_f = mask_s[None, None, :, :, None].to(coef_r.dtype)
-                coef_r = coef_r * mask_f
-                coef_i = coef_i * mask_f
-
-            # ------------------------------------------------
-            # Project input
-            # ------------------------------------------------
-            xr_br = torch.einsum("bidyx,rio->bodyxr", xr_s, br)
-            xi_br = torch.einsum("bidyx,rio->bodyxr", xi_s, br)
-            xr_bi = torch.einsum("bidyx,rio->bodyxr", xr_s, bi)
-            xi_bi = torch.einsum("bidyx,rio->bodyxr", xi_s, bi)
-
-            # ------------------------------------------------
-            # Combine
-            # ------------------------------------------------
-            out_ft_real_s = (
-                torch.einsum("bdyxr,bodyxr->bodyx", coef_r, xr_br)
-                - torch.einsum("bdyxr,bodyxr->bodyx", coef_r, xi_bi)
-                - torch.einsum("bdyxr,bodyxr->bodyx", coef_i, xr_bi)
-                - torch.einsum("bdyxr,bodyxr->bodyx", coef_i, xi_br)
-            )
-
-            out_ft_imag_s = (
-                torch.einsum("bdyxr,bodyxr->bodyx", coef_r, xr_bi)
-                + torch.einsum("bdyxr,bodyxr->bodyx", coef_r, xi_br)
-                + torch.einsum("bdyxr,bodyxr->bodyx", coef_i, xr_br)
-                - torch.einsum("bdyxr,bodyxr->bodyx", coef_i, xi_bi)
-            )
-
-            out_real_chunks.append(out_ft_real_s)
-            out_imag_chunks.append(out_ft_imag_s)
-
-        # ====================================================
-        # CONCAT + IFFT (OUTSIDE LOOP)
-        # ====================================================
-        out_ft_real = torch.cat(out_real_chunks, dim=3)
-        out_ft_imag = torch.cat(out_imag_chunks, dim=3)
-
-        out_ft = torch.complex(out_ft_real, out_ft_imag)
-
-        y = torch.fft.irfft2(out_ft, s=(H, W), dim=(-2, -1))
-
-        if self.bias is not None:
-            y = y + self.bias.float()[None, :, None, None, None]
+        y = torch.fft.irfft2(out, s=(H, W), dim=(-2, -1))
 
         return y
 
 
 # ============================================================
-# FFNO block with strong vertical physics
+# BALANCED BLOCK
 # ============================================================
-class FFNOBlock3d(nn.Module):
-    """
-    STABLE hybrid FFNO block:
-      - bounded gates
-      - normalized branches
-      - residual scaling
-      - no runaway amplification
-    """
-
-    def __init__(
-        self,
-        width,
-        dropout=0.0,
-        mlp_expansion=2,
-        vertical_hidden=256,
-        use_gating=True,
-        spectral_hidden=64,
-        spectral_rank=16,
-        kx_cutoff=None,
-        ky_cutoff=None,
-        k_scale=1e5,
-        spectral_use_bias=True,
-        spectral_apply_mask=True
-    ):
+class FFNOBlock3dBalanced(nn.Module):
+    def __init__(self, width=128, dropout=0.05):
         super().__init__()
 
-        # -----------------------------------
-        # Operators
-        # -----------------------------------
-        self.spec_hw = SpectralConv2dFull(
-            in_channels=width,
-            out_channels=width,
-            hidden=spectral_hidden,
-            rank=spectral_rank,
-            kx_cutoff=kx_cutoff,
-            ky_cutoff=ky_cutoff,
-            k_scale=k_scale,
-            use_bias=spectral_use_bias,
-            apply_mask=spectral_apply_mask,
+        self.spec = SpectralConv2dFull(width, width)
+        self.vertical = BalancedVerticalPhysicsStack(width, dropout=dropout)
+
+        self.pw = nn.Sequential(
+            nn.Conv3d(width, width, 1, bias=False),
+            nn.Tanh(),   # bounded correction
         )
 
-        self.pw_hw   = nn.Conv3d(width, width, kernel_size=1)
+        self.mlp = PointwiseMLP(width, expansion=2, dropout=dropout)
 
-        self.vertical = VerticalPhysicsStack(
-            channels=width,
-            hidden=vertical_hidden,
-            dropout=dropout,
-        )
+        self.norm1 = _gn(width)
+        self.norm2 = _gn(width)
+        self.norm3 = _gn(width)
+        self.norm4 = _gn(width)
 
-        self.mlp = PointwiseMLP(
-            width,
-            expansion=mlp_expansion,
-            dropout=dropout,
-        )
-
-        # -----------------------------------
-        # Branch normalization (CRITICAL)
-        # -----------------------------------
-        self.norm_spec = _gn(width)
-        self.norm_pw   = _gn(width)
-        self.norm_vert = _gn(width)
-        self.norm_mlp  = _gn(width)
-
-        # -----------------------------------
-        # Residual post-norm
-        # -----------------------------------
-        self.post_norm1 = _gn(width)
-        self.post_norm2 = _gn(width)
-        self.post_norm3 = _gn(width)
+        self.res_h = nn.Parameter(torch.tensor([1.0]))
+        self.res_v = nn.Parameter(torch.tensor([1.0]))
+        self.res_m = nn.Parameter(torch.tensor([0.2]))
 
         self.act = nn.GELU()
-        self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+        self.drop = nn.Dropout(dropout)
 
-        # -----------------------------------
-        # Bounded gates (no explosion)
-        # -----------------------------------
-        self.use_gating = use_gating
+    def forward(self, x, dx, dy):
+        # -------- horizontal --------
+        spec = self.norm1(self.spec(x, dx, dy))
+        pw   = self.norm2(self.pw(x))
 
-        if use_gating:
-            self.logit_spec = nn.Parameter(torch.ones(1) * 0.0)
-            self.logit_pw   = nn.Parameter(torch.ones(1) * 0.0)
-            self.logit_vert = nn.Parameter(torch.ones(1) * -0.5)
-            self.logit_mlp  = nn.Parameter(torch.ones(1) * -0.5)
-        else:
-            self.register_buffer("logit_spec", torch.ones(1) * 0.0)
-            self.register_buffer("logit_pw",   torch.ones(1) * 0.0)
-            self.register_buffer("logit_vert", torch.ones(1) * 0.0)
-            self.register_buffer("logit_mlp",  torch.ones(1) * 0.0)
-
-        # -----------------------------------
-        # Residual scaling (VERY IMPORTANT)
-        # -----------------------------------
-        self.res_h = nn.Parameter(torch.ones(1) * 0.5)
-        self.res_v = nn.Parameter(torch.ones(1) * 0.5)
-        self.res_m = nn.Parameter(torch.ones(1) * 0.5)
-
-    def _get_alphas(self):
-        # bounded in (0, 2)
-        alpha_spec = 2.0 * torch.sigmoid(self.logit_spec)
-        alpha_pw   = 2.0 * torch.sigmoid(self.logit_pw)
-        alpha_vert = 2.0 * torch.sigmoid(self.logit_vert)
-        alpha_mlp  = 2.0 * torch.sigmoid(self.logit_mlp)
-
-        return alpha_spec, alpha_pw, alpha_vert, alpha_mlp
-
-    def forward(self, x, dx, dy, collect_stats=False):
-        stats = {} if collect_stats else None
-
-        alpha_spec, alpha_pw, alpha_vert, alpha_mlp = self._get_alphas()
-
-        # ============================================================
-        # 1. Horizontal mixing
-        # ============================================================
-        spec = self.norm_spec(self.spec_hw(x, dx=dx, dy=dy))
-        pw   = self.norm_pw(self.pw_hw(x))
-
-        y = alpha_spec * spec + alpha_pw * pw
+        y = spec + 0.3 * pw
         y = self.act(y)
         y = self.drop(y)
 
-        x_before = x
         x = x + self.res_h * y
 
-        if collect_stats:
-            with torch.no_grad():
-                stats["spec_norm"] = spec.abs().mean().item()
-                stats["pw_norm"]   = pw.abs().mean().item()
-                stats["alpha_spec"] = float(alpha_spec.item())
-                stats["alpha_pw"]   = float(alpha_pw.item())
-                stats["horizontal_update"] = (x - x_before).abs().mean().item()
-
-        x = self.post_norm1(x)
-
-        # ============================================================
-        # 2. Vertical physics
-        # ============================================================
-        vert = self.norm_vert(self.vertical(x))
-        z = alpha_vert * vert
-
-        z = self.act(z)
+        # -------- vertical --------
+        vert = self.norm3(self.vertical(x))
+        z = self.act(vert)
         z = self.drop(z)
 
-        x_before = x
         x = x + self.res_v * z
 
-        if collect_stats:
-            with torch.no_grad():
-                stats["vertical_norm"] = vert.abs().mean().item()
-                stats["alpha_vert"]    = float(alpha_vert.item())
-                stats["vertical_update"] = (x - x_before).abs().mean().item()
-
-        x = self.post_norm2(x)
-
-        # ============================================================
-        # 3. MLP refinement
-        # ============================================================
-        mlp_out = self.norm_mlp(self.mlp(x))
-        m = alpha_mlp * mlp_out
-
-        m = self.act(m)
-        m = self.drop(m)
-
-        x_before = x
+        # -------- correction --------
+        m = 0.2 * torch.tanh(self.norm4(self.mlp(x)))
         x = x + self.res_m * m
 
-        if collect_stats:
-            with torch.no_grad():
-                stats["mlp_norm"] = mlp_out.abs().mean().item()
-                stats["alpha_mlp"] = float(alpha_mlp.item())
-                stats["mlp_update"] = (x - x_before).abs().mean().item()
-
-        x = self.post_norm3(x)
-
-        if collect_stats:
-            return x, stats
-        else:
-            return x
+        return x
 
 
 # ============================================================
-# Full model
+# FULL MODEL
 # ============================================================
 class FFNO3D(nn.Module):
-    """
-    Updated hybrid FFNO for RT-like 3D volumes.
-
-    Input:  [B, Cin, D, H, W]
-    Output: [B, Cout, D, H, W]
-
-    Horizontal nonlocal coupling:
-        spectral operator over (H, W)
-
-    Vertical physics:
-        deep multi-scale residual column network over D
-    """
     def __init__(
         self,
-        in_channels,
-        out_channels,
-        width=64,
-        n_layers=6,
-        dropout=0.1,
-        mlp_expansion=2,
-        vertical_hidden=256,
-        padding=0,
+        in_channels=6,
+        out_channels=6,
+        width=128,
+        n_layers=4,
+        dropout=0.05,
         checkpoint_blocks=True,
-        use_gating=True,
-        spectral_hidden=64,
-        spectral_rank=16,
-        dx_cutoff=None,
-        dy_cutoff=None,
-        k_scale=1e5,
-        spectral_use_bias=True,
-        spectral_apply_mask=True
     ):
         super().__init__()
 
-        self.padding = padding
         self.checkpoint_blocks = checkpoint_blocks
 
-        self.lift = nn.Conv3d(in_channels, width, kernel_size=1)
+        self.lift = nn.Conv3d(in_channels, width, 1)
 
-        kx_cutoff, ky_cutoff = compute_k_cutoff(dx=dx_cutoff, dy=dy_cutoff, radial=False)
+        self.blocks = nn.ModuleList([
+            FFNOBlock3dBalanced(width=width, dropout=dropout)
+            for _ in range(n_layers)
+        ])
 
-        self.kx_cutoff = kx_cutoff
+        self.proj1 = nn.Conv3d(width, width * 2, 1)
+        self.proj2 = nn.Conv3d(width * 2, out_channels, 1)
 
-        self.ky_cutoff = ky_cutoff
-
-        self.blocks = nn.ModuleList(
-            [
-                FFNOBlock3d(
-                    width,
-                    dropout=dropout,
-                    mlp_expansion=mlp_expansion,
-                    vertical_hidden=vertical_hidden,
-                    use_gating=use_gating,
-                    spectral_hidden=spectral_hidden,
-                    spectral_rank=spectral_rank,
-                    kx_cutoff=self.kx_cutoff,
-                    ky_cutoff=self.ky_cutoff,
-                    k_scale=k_scale,
-                    spectral_use_bias=spectral_use_bias,
-                    spectral_apply_mask=spectral_apply_mask
-                )
-                for _ in range(n_layers)
-            ]
-        )
-
-        self.proj1 = nn.Conv3d(width, width * 2, kernel_size=1)
-        self.proj2 = nn.Conv3d(width * 2, out_channels, kernel_size=1)
         self.act = nn.GELU()
 
-
-    def _run_block(self, blk, x, dx, dy, collect_stats=False):
-        if self.checkpoint_blocks and self.training and not collect_stats:
+    def _run_block(self, blk, x, dx, dy):
+        if self.checkpoint_blocks and self.training:
             return checkpoint(
-                lambda t: blk(t, dx=dx, dy=dy, collect_stats=False),
+                lambda t: blk(t, dx, dy),
                 x,
-                use_reentrant=False,
+                use_reentrant=False
             )
-        else:
-            return blk(x, dx=dx, dy=dy, collect_stats=collect_stats)
+        return blk(x, dx, dy)
 
-    def forward(self, x, dx, dy, collect_stats=False):
-        all_stats = [] if collect_stats else None
-
-        if self.padding > 0:
-            p = self.padding
-            x = F.pad(x, (p, p, p, p, p, p), mode="replicate")
-
+    def forward(self, x, dx, dy):
         x = self.lift(x)
 
-        for i, blk in enumerate(self.blocks):
-            if collect_stats:
-                x, s = self._run_block(blk, x, dx, dy, collect_stats=True)
-                s["layer"] = i
-                all_stats.append(s)
-            else:
-                x = self._run_block(blk, x, dx, dy, collect_stats=False)
+        for blk in self.blocks:
+            x = self._run_block(blk, x, dx, dy)
 
         x = self.act(self.proj1(x))
-        y = self.proj2(x)
+        x = self.proj2(x)
 
-        if self.padding > 0:
-            p = self.padding
-            y = y[:, :, p:-p, p:-p, p:-p]
-
-        if collect_stats:
-            return y, all_stats
-        else:
-            return y
+        return x

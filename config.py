@@ -157,21 +157,11 @@ MULTI_GPU = True
 MODEL = "FFNO3D"
 
 MODEL_CONFIG = dict(
-    width=64,
-    n_layers=6,
-    dropout=0.1,
-    mlp_expansion=2,
-    vertical_hidden=64,
-    padding=0,
-    checkpoint_blocks=True,
-    use_gating=True,
-    spectral_hidden=32,
-    spectral_rank=32,
-    dx_cutoff=96000,
-    dy_cutoff=96000,
-    k_scale=1e5,
-    spectral_use_bias=True,
-    spectral_apply_mask=True
+    in_channels=6,
+    out_channels=6,
+    width=128,
+    n_layers=4,
+    dropout=0.05,
 )
 
 
