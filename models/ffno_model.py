@@ -26,38 +26,36 @@ def _gn(channels, max_groups=8):
 
 
 # ============================================================
-# Pointwise MLP (WEAK)
+# Pointwise MLP (small corrective branch)
 # ============================================================
 class PointwiseMLP(nn.Module):
-    def __init__(self, width, expansion=2, dropout=0.0):
+    def __init__(self, width, expansion=3, dropout=0.0):
         super().__init__()
         hidden = width * expansion
 
-        self.fc1 = nn.Conv3d(width, hidden, 1)
-        self.fc2 = nn.Conv3d(hidden, width, 1)
-
-        self.act = nn.GELU()
-        self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+        self.net = nn.Sequential(
+            nn.Conv3d(width, hidden, 1, bias=False),
+            nn.GELU(),
+            nn.Dropout(dropout) if dropout > 0 else nn.Identity(),
+            nn.Conv3d(hidden, width, 1, bias=False),
+        )
 
     def forward(self, x):
-        x = self.fc1(x)
-        x = self.act(x)
-        x = self.drop(x)
-        x = self.fc2(x)
-        return x
+        return self.net(x)
 
 
 # ============================================================
-# LIGHTWEIGHT VERTICAL STACK (~60k params)
+# Stronger Vertical Branch
 # ============================================================
 class DepthwiseSeparable1D(nn.Module):
-    def __init__(self, ch, k=5, dilation=1, dropout=0.0):
+    def __init__(self, ch, hidden_mult=2, k=5, dilation=1, dropout=0.0):
         super().__init__()
 
         pad = dilation * (k // 2)
 
         self.dw = nn.Conv1d(
-            ch, ch,
+            ch,
+            ch,
             kernel_size=k,
             padding=pad,
             dilation=dilation,
@@ -65,7 +63,12 @@ class DepthwiseSeparable1D(nn.Module):
             bias=False,
         )
 
-        self.pw = nn.Conv1d(ch, ch, 1, bias=False)
+        hidden = ch * hidden_mult
+        self.pw = nn.Sequential(
+            nn.Conv1d(ch, hidden, 1, bias=False),
+            nn.GELU(),
+            nn.Conv1d(hidden, ch, 1, bias=False),
+        )
 
         self.gn = _gn(ch)
         self.act = nn.GELU()
@@ -83,10 +86,12 @@ class DepthwiseSeparable1D(nn.Module):
 class LiteVerticalResidualBlock(nn.Module):
     def __init__(self, ch, k=5, dilation=1, dropout=0.0):
         super().__init__()
-
-        self.b1 = DepthwiseSeparable1D(ch, k, dilation, dropout)
-        self.b2 = DepthwiseSeparable1D(ch, k, 1, dropout)
-
+        self.b1 = DepthwiseSeparable1D(
+            ch, hidden_mult=2, k=k, dilation=dilation, dropout=dropout
+        )
+        self.b2 = DepthwiseSeparable1D(
+            ch, hidden_mult=2, k=k, dilation=1, dropout=dropout
+        )
         self.out_gn = _gn(ch)
         self.act = nn.GELU()
 
@@ -101,17 +106,25 @@ class LiteMultiScaleVertical(nn.Module):
         super().__init__()
 
         self.branches = nn.ModuleList([
-            nn.Conv1d(
-                ch, ch,
-                kernel_size=k,
-                padding=k // 2,
-                groups=ch,
-                bias=False
+            nn.Sequential(
+                nn.Conv1d(
+                    ch,
+                    ch,
+                    kernel_size=k,
+                    padding=k // 2,
+                    groups=ch,
+                    bias=False,
+                ),
+                nn.Conv1d(ch, ch, 1, bias=False),
             )
             for k in kernels
         ])
 
-        self.mix = nn.Conv1d(ch, ch, 1, bias=False)
+        self.mix = nn.Sequential(
+            nn.Conv1d(ch, 2 * ch, 1, bias=False),
+            nn.GELU(),
+            nn.Conv1d(2 * ch, ch, 1, bias=False),
+        )
 
         self.gn = _gn(ch)
         self.act = nn.GELU()
@@ -121,7 +134,6 @@ class LiteMultiScaleVertical(nn.Module):
         y = 0.0
         for b in self.branches:
             y = y + b(x)
-
         y = self.mix(y)
         y = self.gn(y)
         y = self.act(y)
@@ -131,10 +143,16 @@ class LiteMultiScaleVertical(nn.Module):
 
 class BalancedVerticalPhysicsStack(nn.Module):
     """
-    ~60k parameter vertical physics operator
+    Stronger vertical branch:
+      - multiscale depth processing
+      - residual dilated depth blocks
+      - channel mixing
+      - learned depth gate
     """
-    def __init__(self, channels, hidden=80, dropout=0.0):
+
+    def __init__(self, channels, hidden=128, dropout=0.0, chunk=128):
         super().__init__()
+        self.chunk = chunk
 
         self.in_proj = nn.Sequential(
             nn.Conv1d(channels, hidden, 1, bias=False),
@@ -143,50 +161,70 @@ class BalancedVerticalPhysicsStack(nn.Module):
         )
 
         self.net = nn.Sequential(
-            LiteMultiScaleVertical(hidden, dropout=dropout),
-            LiteVerticalResidualBlock(hidden, dilation=1, dropout=dropout),
-            LiteVerticalResidualBlock(hidden, dilation=2, dropout=dropout),
-            LiteVerticalResidualBlock(hidden, dilation=4, dropout=dropout),
+            LiteMultiScaleVertical(hidden, kernels=(3, 7, 15), dropout=dropout),
+            LiteVerticalResidualBlock(hidden, k=5, dilation=1, dropout=dropout),
+            LiteVerticalResidualBlock(hidden, k=5, dilation=2, dropout=dropout),
+            LiteVerticalResidualBlock(hidden, k=5, dilation=4, dropout=dropout),
+            LiteVerticalResidualBlock(hidden, k=7, dilation=1, dropout=dropout),
+        )
+
+        self.depth_gate = nn.Sequential(
+            nn.Conv1d(hidden, hidden, 1, bias=False),
+            nn.GELU(),
+            nn.Conv1d(hidden, hidden, 1, bias=False),
+            nn.Sigmoid(),
         )
 
         self.out_proj = nn.Conv1d(hidden, channels, 1, bias=False)
         self.out_gn = _gn(channels)
 
     def forward(self, x):
+        # x: [B, C, D, H, W]
         B, C, D, H, W = x.shape
 
+        # [B, H*W, C, D]
         x = x.permute(0, 3, 4, 1, 2).reshape(B, H * W, C, D)
 
-        chunk = 128
         outs = []
-
-        for i in range(0, H * W, chunk):
-            xi = x[:, i:i+chunk].reshape(-1, C, D)
+        for i in range(0, H * W, self.chunk):
+            xi = x[:, i:i + self.chunk].reshape(-1, C, D)  # [B*chunk, C, D]
 
             yi = self.in_proj(xi)
             yi = self.net(yi)
+            yi = yi * self.depth_gate(yi)
             yi = self.out_proj(yi)
 
             yi = yi.reshape(B, -1, C, D)
             outs.append(yi)
 
-        y = torch.cat(outs, dim=1)
-        y = y.reshape(B, H, W, C, D).permute(0, 3, 4, 1, 2)
+        y = torch.cat(outs, dim=1)  # [B, H*W, C, D]
+        y = y.reshape(B, H, W, C, D).permute(0, 3, 4, 1, 2)  # [B, C, D, H, W]
 
         return self.out_gn(y)
 
 
 # ============================================================
-# SPECTRAL (DOMINANT)
+# Stronger Spectral Branch
 # ============================================================
 class SpectralConv2dFull(nn.Module):
-    def __init__(self, in_channels, out_channels, hidden=96):
+    """
+    Full-spectrum metric-aware spectral convolution over (H, W),
+    applied independently at each depth plane.
+
+    Input/Output: [B, C, D, H, W]
+    """
+
+    def __init__(self, in_channels, out_channels, hidden=128, post_mix_expansion=2):
         super().__init__()
 
         scale = 1.0 / math.sqrt(in_channels)
 
-        self.weight_real = nn.Parameter(scale * torch.randn(in_channels, out_channels))
-        self.weight_imag = nn.Parameter(scale * torch.randn(in_channels, out_channels))
+        self.weight_real = nn.Parameter(
+            scale * torch.randn(in_channels, out_channels, dtype=torch.float32)
+        )
+        self.weight_imag = nn.Parameter(
+            scale * torch.randn(in_channels, out_channels, dtype=torch.float32)
+        )
 
         self.freq_mlp = nn.Sequential(
             nn.Linear(4, hidden),
@@ -196,107 +234,139 @@ class SpectralConv2dFull(nn.Module):
             nn.Linear(hidden, 2),
         )
 
+        post_hidden = out_channels * post_mix_expansion
+        self.post = nn.Sequential(
+            nn.Conv3d(out_channels, post_hidden, 1, bias=False),
+            nn.GELU(),
+            nn.Conv3d(post_hidden, out_channels, 1, bias=False),
+        )
+
     def forward(self, x, dx, dy):
         B, C, D, H, W = x.shape
 
         dx = _to_spacing_value(dx, x)
         dy = _to_spacing_value(dy, x)
 
+        # [B, C, D, H, Wf]
         x_ft = torch.fft.rfft2(x, dim=(-2, -1))
 
         ky = torch.fft.fftfreq(H, d=dy, device=x.device)
         kx = torch.fft.rfftfreq(W, d=dx, device=x.device)
-
         ky, kx = torch.meshgrid(ky, kx, indexing="ij")
 
-        k_feat = torch.stack([
-            kx, ky,
-            torch.sqrt(kx**2 + ky**2 + 1e-12),
-            torch.sign(ky),
-        ], dim=-1)
+        k_feat = torch.stack(
+            [
+                kx,
+                ky,
+                torch.sqrt(kx ** 2 + ky ** 2 + 1e-12),
+                torch.sign(ky),
+            ],
+            dim=-1,
+        )  # [H, Wf, 4]
 
-        gate = self.freq_mlp(k_feat)
+        gate = self.freq_mlp(k_feat)  # [H, Wf, 2]
 
-        wr = self.weight_real[:, :, None, None]
+        wr = self.weight_real[:, :, None, None]  # [Cin, Cout, 1, 1]
         wi = self.weight_imag[:, :, None, None]
 
-        gr = gate[..., 0][None, None]
+        gr = gate[..., 0][None, None]  # [1, 1, H, Wf]
         gi = gate[..., 1][None, None]
 
         w_real = wr * gr - wi * gi
         w_imag = wr * gi + wi * gr
 
-        xr, xi = x_ft.real, x_ft.imag
+        xr = x_ft.real
+        xi = x_ft.imag
 
-        out_r = torch.einsum("b i d y x, i o y x -> b o d y x", xr, w_real) - \
-                torch.einsum("b i d y x, i o y x -> b o d y x", xi, w_imag)
+        out_r = (
+            torch.einsum("b i d y x, i o y x -> b o d y x", xr, w_real)
+            - torch.einsum("b i d y x, i o y x -> b o d y x", xi, w_imag)
+        )
 
-        out_i = torch.einsum("b i d y x, i o y x -> b o d y x", xr, w_imag) + \
-                torch.einsum("b i d y x, i o y x -> b o d y x", xi, w_real)
+        out_i = (
+            torch.einsum("b i d y x, i o y x -> b o d y x", xr, w_imag)
+            + torch.einsum("b i d y x, i o y x -> b o d y x", xi, w_real)
+        )
 
         out = torch.complex(out_r, out_i)
-
         y = torch.fft.irfft2(out, s=(H, W), dim=(-2, -1))
-
+        y = self.post(y)
         return y
 
 
 # ============================================================
-# BALANCED BLOCK
+# Balanced Strong Block
 # ============================================================
 class FFNOBlock3dBalanced(nn.Module):
+    """
+    Spectral and vertical branches are both strengthened and kept balanced by:
+      - same input to both branches
+      - normalization on both outputs
+      - learned softmax branch weights
+      - small corrective pointwise/mlp path
+    """
+
     def __init__(self, width=128, dropout=0.05):
         super().__init__()
 
-        self.spec = SpectralConv2dFull(width, width)
-        self.vertical = BalancedVerticalPhysicsStack(width, dropout=dropout)
+        self.spec = SpectralConv2dFull(
+            width,
+            width,
+            hidden=128,
+            post_mix_expansion=2,
+        )
+
+        self.vertical = BalancedVerticalPhysicsStack(
+            width,
+            hidden=128,
+            dropout=dropout,
+            chunk=128,
+        )
 
         self.pw = nn.Sequential(
-            nn.Conv3d(width, width, 1, bias=False),
-            nn.Tanh(),   # bounded correction
+            nn.Conv3d(width, width * 2, 1, bias=False),
+            nn.GELU(),
+            nn.Conv3d(width * 2, width, 1, bias=False),
         )
 
         self.mlp = PointwiseMLP(width, expansion=2, dropout=dropout)
 
-        self.norm1 = _gn(width)
-        self.norm2 = _gn(width)
-        self.norm3 = _gn(width)
-        self.norm4 = _gn(width)
+        self.norm_spec = _gn(width)
+        self.norm_vert = _gn(width)
+        self.norm_pw = _gn(width)
+        self.norm_mlp = _gn(width)
 
-        self.res_h = nn.Parameter(torch.tensor([1.0]))
-        self.res_v = nn.Parameter(torch.tensor([1.0]))
-        self.res_m = nn.Parameter(torch.tensor([0.2]))
+        # Softmax keeps both on comparable footing
+        self.branch_logits = nn.Parameter(torch.tensor([0.0, 0.0]))  # [spec, vert]
+
+        self.res_fused = nn.Parameter(torch.tensor([1.0]))
+        self.res_pw = nn.Parameter(torch.tensor([0.15]))
+        self.res_mlp = nn.Parameter(torch.tensor([0.15]))
 
         self.act = nn.GELU()
-        self.drop = nn.Dropout(dropout)
+        self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
     def forward(self, x, dx, dy):
-        # -------- horizontal --------
-        spec = self.norm1(self.spec(x, dx, dy))
-        pw   = self.norm2(self.pw(x))
+        # both branches see same input
+        spec = self.drop(self.act(self.norm_spec(self.spec(x, dx, dy))))
+        vert = self.drop(self.act(self.norm_vert(self.vertical(x))))
 
-        y = spec + 0.3 * pw
-        y = self.act(y)
-        y = self.drop(y)
+        w = torch.softmax(self.branch_logits, dim=0)
+        fused = w[0] * spec + w[1] * vert
+        x = x + self.res_fused * fused
 
-        x = x + self.res_h * y
+        # small corrective paths only
+        pw = self.norm_pw(self.pw(x))
+        x = x + self.res_pw * pw
 
-        # -------- vertical --------
-        vert = self.norm3(self.vertical(x))
-        z = self.act(vert)
-        z = self.drop(z)
-
-        x = x + self.res_v * z
-
-        # -------- correction --------
-        m = 0.2 * torch.tanh(self.norm4(self.mlp(x)))
-        x = x + self.res_m * m
+        mlp = torch.tanh(self.norm_mlp(self.mlp(x)))
+        x = x + self.res_mlp * mlp
 
         return x
 
 
 # ============================================================
-# FULL MODEL
+# Full Model
 # ============================================================
 class FFNO3D(nn.Module):
     def __init__(
@@ -312,14 +382,18 @@ class FFNO3D(nn.Module):
 
         self.checkpoint_blocks = checkpoint_blocks
 
-        self.lift = nn.Conv3d(in_channels, width, 1)
+        self.lift = nn.Sequential(
+            nn.Conv3d(in_channels, width, 1, bias=False),
+            _gn(width),
+            nn.GELU(),
+        )
 
         self.blocks = nn.ModuleList([
             FFNOBlock3dBalanced(width=width, dropout=dropout)
             for _ in range(n_layers)
         ])
 
-        self.proj1 = nn.Conv3d(width, width * 2, 1)
+        self.proj1 = nn.Conv3d(width, width * 2, 1, bias=False)
         self.proj2 = nn.Conv3d(width * 2, out_channels, 1)
 
         self.act = nn.GELU()
@@ -329,7 +403,7 @@ class FFNO3D(nn.Module):
             return checkpoint(
                 lambda t: blk(t, dx, dy),
                 x,
-                use_reentrant=False
+                use_reentrant=False,
             )
         return blk(x, dx, dy)
 
@@ -341,5 +415,4 @@ class FFNO3D(nn.Module):
 
         x = self.act(self.proj1(x))
         x = self.proj2(x)
-
         return x

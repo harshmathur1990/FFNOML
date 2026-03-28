@@ -162,6 +162,7 @@ MODEL_CONFIG = dict(
     width=128,
     n_layers=4,
     dropout=0.05,
+    checkpoint_blocks=True,
 )
 
 
@@ -182,9 +183,9 @@ SCALES=(1,2,3,4,5,6,7,8)
 
 
 # Training Params
-NUM_EPOCHS = 50
+NUM_EPOCHS = 100
 BATCH_SIZE = 1
-LEARNING_RATE = 1e-4
+LEARNING_RATE = 1e-3
 MIN_LEARNING_RATE = 1e-6
 WEIGHT_DECAY = 1e-4
 NUM_WORKERS = 8
