@@ -1002,7 +1002,7 @@ def ffno_predict_populations(
         std_Y=std_Y
     )
 
-    model, optimizer, loss_fn = builder.build()
+    model, scheduler, optimizer, loss_fn = builder.build()
 
     ckpt = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(ckpt["model_state"])
