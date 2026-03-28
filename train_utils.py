@@ -329,7 +329,7 @@ def validate(
 
     running_comp = {}
 
-    model_stats_sums = {}
+    # model_stats_sums = {}
 
     pbar = tqdm(
         loader,
@@ -348,7 +348,8 @@ def validate(
             if weight is not None:
                 weight = weight.to(device, non_blocking=True)
 
-            pred, stats = model(x, dx, dy, collect_stats=True)
+            # pred, stats = model(x, dx, dy, collect_stats=True)
+            pred = model(x, dx, dy)
 
             pred = flatten_columns_logb(pred)
             y = flatten_columns_logb(y)
@@ -373,7 +374,7 @@ def validate(
             # local running (for tqdm)
             _accumulate_components(running_comp, components, weight_factor=weight_factor)
 
-            _accumulate_model_stats(model_stats_sums, stats, weight_factor=pred.shape[0])
+            # _accumulate_model_stats(model_stats_sums, stats, weight_factor=pred.shape[0])
 
             global_running = reduce_sum_scalar(running, device)
             global_n = reduce_sum_scalar(n_columns, device)
@@ -395,9 +396,9 @@ def validate(
     global_avg_loss = global_running / max(1, global_batches)
     global_comp = reduce_components(comp_sums, n_columns, device)
 
-    global_model_stats = reduce_components(model_stats_sums, n_columns, device)
+    # global_model_stats = reduce_components(model_stats_sums, n_columns, device)
 
-    return global_avg_loss, global_comp, global_model_stats
+    return global_avg_loss, global_comp  #, global_model_stats
 
 
 def save_checkpoint_fsdp(
@@ -492,19 +493,26 @@ def train(
             if hasattr(val_loader, "sampler") and hasattr(val_loader.sampler, "set_epoch"):
                 val_loader.sampler.set_epoch(epoch)
 
-            val_loss, val_comp, val_stats = validate(
+            # val_loss, val_comp, val_stats = validate(
+            #     model=model,
+            #     loader=val_loader,
+            #     loss_fn=loss_fn,
+            #     device=device,
+            # )
+
+            val_loss, val_comp = validate(
                 model=model,
                 loader=val_loader,
                 loss_fn=loss_fn,
                 device=device,
             )
 
-            mean_stats = compute_mean_stats(val_stats)
-            val_stats.update(mean_stats)
+            # mean_stats = compute_mean_stats(val_stats)
+            # val_stats.update(mean_stats)
 
             improved = (best_val - val_loss) > min_delta
 
-            save_epoch_stats(val_stats, epoch, save_dir=save_path + "_stats")
+            # save_epoch_stats(val_stats, epoch, save_dir=save_path + "_stats")
 
             if improved:
                 best_val = val_loss
