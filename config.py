@@ -161,7 +161,7 @@ MODEL_CONFIG = dict(
     out_channels=6,
     width=128,
     n_layers=4,
-    dropout=0.05,
+    dropout=0.0,
     checkpoint_blocks=False,
 )
 
