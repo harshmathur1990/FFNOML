@@ -839,20 +839,20 @@ def _predict_tiled(model, X, dx, dy, patch, stride, device="cuda"):
     # tiled inference
     # ------------------------------------------------
 
-    all_stats = []
+    # all_stats = []
 
     for i0, j0 in tqdm(itertools.product(xs, ys), total=len(xs)*len(ys), desc="Tiles"):
 
         xt = X[:, :, :, i0:i0+patch, j0:j0+patch]
 
-        yt, stats = model(xt, dx, dy, collect_stats=True)
+        yt = model(xt, dx, dy)
 
         tile_weight = float(w2.sum().item())  # scalar weight
 
-        for s in stats:
-            s = s.copy()
-            s["_weight"] = tile_weight
-            all_stats.append(s)
+        # for s in stats:
+        #     s = s.copy()
+        #     s["_weight"] = tile_weight
+        #     all_stats.append(s)
 
         if torch.isnan(yt).any() or torch.isinf(yt).any():
 
@@ -909,7 +909,7 @@ def _predict_tiled(model, X, dx, dy, patch, stride, device="cuda"):
     print("Output range:", out.min().item(), out.max().item())
     print("=== TILE PREDICTION END ===")
 
-    return out, all_stats
+    return out
 
 
 def ffno_predict_populations(
@@ -1048,9 +1048,9 @@ def ffno_predict_populations(
         dx = dx.to(device)
         dy = dy.to(device)
 
-        pred_log, all_stats = model(X, dx, dy, collect_stats=True)
+        pred_log = model(X, dx, dy)
     else:
-        pred_log, all_stats = _predict_tiled(
+        pred_log = _predict_tiled(
             model,
             X,
             dx,
@@ -1108,58 +1108,58 @@ def ffno_predict_populations(
         f.attrs["epoch"] = int(ckpt.get("epoch", -1))
 
     # Diagnostics
-    if diagnostic_path is not None:
+    # if diagnostic_path is not None:
 
-        agg_stats = _aggregate_stats(all_stats)
+    #     agg_stats = _aggregate_stats(all_stats)
 
-        if len(agg_stats) == 0:
-            print("WARNING: No stats collected")
-            return save_path
+    #     if len(agg_stats) == 0:
+    #         print("WARNING: No stats collected")
+    #         return save_path
 
-        summary = {}
+    #     summary = {}
 
-        first_layer = next(iter(agg_stats.values()))
-        for k in first_layer.keys():
-            vals = [agg_stats[layer][k] for layer in agg_stats]
-            summary[f"{k}_mean"] = float(np.mean(vals))
-            summary[f"{k}_std"]  = float(np.std(vals))
+    #     first_layer = next(iter(agg_stats.values()))
+    #     for k in first_layer.keys():
+    #         vals = [agg_stats[layer][k] for layer in agg_stats]
+    #         summary[f"{k}_mean"] = float(np.mean(vals))
+    #         summary[f"{k}_std"]  = float(np.std(vals))
 
-        summary["spec_to_pw_ratio"] = float(
-            summary["spec_norm_mean"] / (summary["pw_norm_mean"] + 1e-12)
-        )
+    #     summary["spec_to_pw_ratio"] = float(
+    #         summary["spec_norm_mean"] / (summary["pw_norm_mean"] + 1e-12)
+    #     )
 
-        summary["vertical_to_mlp_ratio"] = float(
-            summary["vertical_norm_mean"] / (summary["mlp_norm_mean"] + 1e-12)
-        )
+    #     summary["vertical_to_mlp_ratio"] = float(
+    #         summary["vertical_norm_mean"] / (summary["mlp_norm_mean"] + 1e-12)
+    #     )
 
-        summary["alpha_spec_mean"] = float(np.mean([
-            agg_stats[l]["alpha_spec"] for l in agg_stats
-        ]))
-        summary["alpha_pw_mean"] = float(np.mean([
-            agg_stats[l]["alpha_pw"] for l in agg_stats
-        ]))
-        summary["alpha_vert_mean"] = float(np.mean([
-            agg_stats[l]["alpha_vert"] for l in agg_stats
-        ]))
-        summary["alpha_mlp_mean"] = float(np.mean([
-            agg_stats[l]["alpha_mlp"] for l in agg_stats
-        ]))
+    #     summary["alpha_spec_mean"] = float(np.mean([
+    #         agg_stats[l]["alpha_spec"] for l in agg_stats
+    #     ]))
+    #     summary["alpha_pw_mean"] = float(np.mean([
+    #         agg_stats[l]["alpha_pw"] for l in agg_stats
+    #     ]))
+    #     summary["alpha_vert_mean"] = float(np.mean([
+    #         agg_stats[l]["alpha_vert"] for l in agg_stats
+    #     ]))
+    #     summary["alpha_mlp_mean"] = float(np.mean([
+    #         agg_stats[l]["alpha_mlp"] for l in agg_stats
+    #     ]))
 
-        summary["pred_log_mean"] = float(pred_log.mean().item())
-        summary["pred_log_std"]  = float(pred_log.std().item())
+    #     summary["pred_log_mean"] = float(pred_log.mean().item())
+    #     summary["pred_log_std"]  = float(pred_log.std().item())
 
-        summary["dep_mean"] = float(dep.mean())
-        summary["dep_std"]  = float(dep.std())
-        summary["dep_min"]  = float(dep.min())
-        summary["dep_max"]  = float(dep.max())
-        stats_flat = {}
+    #     summary["dep_mean"] = float(dep.mean())
+    #     summary["dep_std"]  = float(dep.std())
+    #     summary["dep_min"]  = float(dep.min())
+    #     summary["dep_max"]  = float(dep.max())
+    #     stats_flat = {}
 
-        for layer, vals in agg_stats.items():
-            for k, v in vals.items():
-                stats_flat[f"layer{layer}_{k}"] = v
+    #     for layer, vals in agg_stats.items():
+    #         for k, v in vals.items():
+    #             stats_flat[f"layer{layer}_{k}"] = v
 
-        stats_flat.update(summary)
+    #     stats_flat.update(summary)
 
-        np.savez(diagnostic_path, **stats_flat)
+    #     np.savez(diagnostic_path, **stats_flat)
 
     return save_path
