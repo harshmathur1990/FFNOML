@@ -329,7 +329,7 @@ class FFNOBlock3dBalanced(nn.Module):
 
         self.vertical = BalancedVerticalPhysicsStack(
             width,
-            hidden=48,
+            hidden=32,
             dropout=dropout,
             chunk=16,
         )
