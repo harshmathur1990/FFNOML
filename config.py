@@ -162,7 +162,7 @@ MODEL_CONFIG = dict(
     width=128,
     n_layers=4,
     dropout=0.05,
-    checkpoint_blocks=True,
+    checkpoint_blocks=False,
 )
 
 

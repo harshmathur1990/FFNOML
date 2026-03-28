@@ -150,7 +150,7 @@ class BalancedVerticalPhysicsStack(nn.Module):
       - learned depth gate
     """
 
-    def __init__(self, channels, hidden=128, dropout=0.0, chunk=128):
+    def __init__(self, channels, hidden=128, dropout=0.0, chunk=16):
         super().__init__()
         self.chunk = chunk
 
@@ -226,6 +226,13 @@ class SpectralConv2dFull(nn.Module):
             scale * torch.randn(in_channels, out_channels, dtype=torch.float32)
         )
 
+        self.input_gate = nn.Sequential(
+            nn.Conv3d(in_channels, in_channels, 1, bias=False),
+            nn.GELU(),
+            nn.Conv3d(in_channels, in_channels, 1, bias=False),
+            nn.Sigmoid(),
+        )
+
         self.freq_mlp = nn.Sequential(
             nn.Linear(4, hidden),
             nn.GELU(),
@@ -235,6 +242,7 @@ class SpectralConv2dFull(nn.Module):
         )
 
         post_hidden = out_channels * post_mix_expansion
+        
         self.post = nn.Sequential(
             nn.Conv3d(out_channels, post_hidden, 1, bias=False),
             nn.GELU(),
@@ -248,6 +256,9 @@ class SpectralConv2dFull(nn.Module):
         dy = _to_spacing_value(dy, x)
 
         # [B, C, D, H, Wf]
+
+        g = self.input_gate(x)
+        x = x * g
         x_ft = torch.fft.rfft2(x, dim=(-2, -1))
 
         ky = torch.fft.fftfreq(H, d=dy, device=x.device)
@@ -318,9 +329,9 @@ class FFNOBlock3dBalanced(nn.Module):
 
         self.vertical = BalancedVerticalPhysicsStack(
             width,
-            hidden=128,
+            hidden=48,
             dropout=dropout,
-            chunk=128,
+            chunk=16,
         )
 
         self.pw = nn.Sequential(
