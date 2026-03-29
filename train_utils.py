@@ -4,8 +4,45 @@ import torch.distributed as dist
 from tqdm import tqdm
 
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp import StateDictType, FullStateDictConfig
-from torch.distributed.checkpoint.state_dict import get_state_dict, set_state_dict
+from torch.distributed.checkpoint.state_dict import (
+    get_model_state_dict,
+    get_optimizer_state_dict,
+    StateDictOptions,
+)
+
+
+def save_checkpoint_fsdp(
+    model,
+    optimizer,
+    epoch,
+    train_loss,
+    val_loss,
+    train_comp,
+    val_comp,
+    save_path,
+):
+    options = StateDictOptions(
+        full_state_dict=True,
+        cpu_offload=True,
+    )
+
+    # all ranks call these
+    model_state = get_model_state_dict(model, options=options)
+    opt_state = get_optimizer_state_dict(model, optimizer, options=options)
+
+    if not is_main_process():
+        return
+
+    ckpt = {
+        "epoch": epoch,
+        "model_state": model_state,
+        "opt_state": opt_state,
+        "train_loss": train_loss,
+        "val_loss": val_loss,
+        "train_components": train_comp,
+        "val_components": val_comp,
+    }
+    torch.save(ckpt, save_path)
 
 
 def is_dist():
@@ -472,55 +509,6 @@ def validate(
     # global_model_stats = reduce_components(model_stats_sums, n_columns, device)
 
     return global_avg_loss, global_comp  #, global_model_stats
-
-
-def save_checkpoint_fsdp(
-    model,
-    optimizer,
-    epoch,
-    train_loss,
-    val_loss,
-    train_comp,
-    val_comp,
-    save_path,
-):
-    """
-    Save FULL state dict (rank0 gathers everything, offloaded to CPU).
-    Compatible with FSDP / DDP / single GPU.
-    """
-
-    # ---- NEW API ----
-    state_dict = get_state_dict(
-        model,
-        optimizers=optimizer,
-        options={
-            "full_state_dict": True,
-            "cpu_offload": True,
-            "rank0_only": True,
-        },
-    )
-
-    model_state = state_dict["model"]
-
-    opt_state = state_dict.get("optim", None)
-    if opt_state is None:
-        opt_state = state_dict.get("optimizers", None)
-
-    # Only rank 0 should save
-    if not is_main_process():
-        return
-
-    ckpt = dict(
-        epoch=epoch,
-        model_state=model_state,
-        opt_state=opt_state,
-        train_loss=train_loss,
-        val_loss=val_loss,
-        train_components=train_comp,
-        val_components=val_comp,
-    )
-
-    torch.save(ckpt, save_path)
 
 
 def train(
