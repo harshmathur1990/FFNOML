@@ -492,12 +492,19 @@ def save_checkpoint_fsdp(
     # ---- NEW API ----
     state_dict = get_state_dict(
         model,
+        optimizers=optimizer,
         options={
-            "full_state_dict": True,     # gather full model (like FULL_STATE_DICT)
-            "cpu_offload": True,         # move to CPU (like offload_to_cpu)
-            "rank0_only": True,          # only rank 0 gets full weights
+            "full_state_dict": True,
+            "cpu_offload": True,
+            "rank0_only": True,
         },
     )
+
+    model_state = state_dict["model"]
+
+    opt_state = state_dict.get("optim", None)
+    if opt_state is None:
+        opt_state = state_dict.get("optimizers", None)
 
     # Only rank 0 should save
     if not is_main_process():
@@ -505,8 +512,8 @@ def save_checkpoint_fsdp(
 
     ckpt = dict(
         epoch=epoch,
-        model_state=state_dict["model"],   # IMPORTANT: new API returns dict
-        opt_state=optimizer.state_dict(),
+        model_state=model_state,
+        opt_state=opt_state,
         train_loss=train_loss,
         val_loss=val_loss,
         train_components=train_comp,
