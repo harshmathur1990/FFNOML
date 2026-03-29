@@ -5,6 +5,7 @@ from tqdm import tqdm
 
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import StateDictType, FullStateDictConfig
+from torch.distributed.checkpoint.state_dict import get_state_dict, set_state_dict
 
 
 def is_dist():
@@ -205,6 +206,22 @@ def _make_postfix(loss, lr, device, components):
             for j, n in enumerate(names):
                 postfix[n] = f"{float(spa[j]):.2e}"
 
+    # --------------------------------------------
+    # diagnostics
+    # --------------------------------------------
+    if components is not None:
+        if "rmse" in components:
+            postfix["rmse"] = f"{float(components['rmse']):.2e}"
+
+        if "rel_rmse" in components:
+            postfix["rel%"] = f"{float(components['rel_rmse'])*100:.2f}"
+
+        if "std_ratio" in components:
+            postfix["std_r"] = f"{float(components['std_ratio']):.2f}"
+
+        if "max_err" in components:
+            postfix["max"] = f"{float(components['max_err']):.2e}"
+
     return postfix
 
 
@@ -272,6 +289,23 @@ def train_one_epoch(
             x=x
         )
 
+        # ============================================
+        # Extra diagnostics (VERY IMPORTANT)
+        # ============================================
+        with torch.no_grad():
+            err = pred - y
+
+            mse = (err ** 2).mean()
+            rmse = torch.sqrt(mse)
+
+            target_std = y.std()
+            pred_std = pred.std()
+
+            rel_rmse = rmse / (target_std + 1e-8)
+            std_ratio = pred_std / (target_std + 1e-8)
+
+            p95_err = err.abs().quantile(0.95)
+
         loss.backward()
 
         if grad_clip is not None and grad_clip > 0:
@@ -290,6 +324,17 @@ def train_one_epoch(
 
         _accumulate_components(comp_sums, components, weight_factor=weight_factor)
         _accumulate_components(running_comp, components, weight_factor=weight_factor)
+
+        # accumulate diagnostics
+        diag = {
+            "rmse": rmse,
+            "rel_rmse": rel_rmse,
+            "std_ratio": std_ratio,
+            "p95_err": p95_err,
+        }
+
+        _accumulate_components(running_comp, diag, weight_factor=weight_factor)
+        _accumulate_components(comp_sums, diag, weight_factor=weight_factor)
 
         # all ranks must participate in collectives
         global_running = reduce_sum_scalar(running, device)
@@ -363,6 +408,23 @@ def validate(
                 x=x
             )
 
+            # ============================================
+            # Extra diagnostics (VERY IMPORTANT)
+            # ============================================
+            with torch.no_grad():
+                err = pred - y
+
+                mse = (err ** 2).mean()
+                rmse = torch.sqrt(mse)
+
+                target_std = y.std()
+                pred_std = pred.std()
+
+                rel_rmse = rmse / (target_std + 1e-8)
+                std_ratio = pred_std / (target_std + 1e-8)
+
+                p95_err = err.abs().quantile(0.95)
+
             running += loss.item() * pred.shape[0]   # number of columns
             n_columns += pred.shape[0]
 
@@ -375,6 +437,17 @@ def validate(
             _accumulate_components(running_comp, components, weight_factor=weight_factor)
 
             # _accumulate_model_stats(model_stats_sums, stats, weight_factor=pred.shape[0])
+
+            # accumulate diagnostics
+            diag = {
+                "rmse": rmse,
+                "rel_rmse": rel_rmse,
+                "std_ratio": std_ratio,
+                "p95_err": p95_err,
+            }
+
+            _accumulate_components(running_comp, diag, weight_factor=weight_factor)
+            _accumulate_components(comp_sums, diag, weight_factor=weight_factor)
 
             global_running = reduce_sum_scalar(running, device)
             global_n = reduce_sum_scalar(n_columns, device)
@@ -412,28 +485,34 @@ def save_checkpoint_fsdp(
     save_path,
 ):
     """
-    Save a FULL state dict so inference can load it normally on one GPU / CPU.
-    Only rank 0 writes.
+    Save FULL state dict (rank0 gathers everything, offloaded to CPU).
+    Compatible with FSDP / DDP / single GPU.
     """
-    if isinstance(model, FSDP):
-        cfg = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
-        with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, cfg):
-            model_state = model.state_dict()
-    else:
-        model_state = model.state_dict()
 
+    # ---- NEW API ----
+    state_dict = get_state_dict(
+        model,
+        options={
+            "full_state_dict": True,     # gather full model (like FULL_STATE_DICT)
+            "cpu_offload": True,         # move to CPU (like offload_to_cpu)
+            "rank0_only": True,          # only rank 0 gets full weights
+        },
+    )
+
+    # Only rank 0 should save
     if not is_main_process():
         return
 
     ckpt = dict(
         epoch=epoch,
-        model_state=model_state,
+        model_state=state_dict["model"],   # IMPORTANT: new API returns dict
         opt_state=optimizer.state_dict(),
         train_loss=train_loss,
         val_loss=val_loss,
         train_components=train_comp,
         val_components=val_comp,
     )
+
     torch.save(ckpt, save_path)
 
 
