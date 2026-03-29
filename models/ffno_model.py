@@ -185,20 +185,25 @@ class BalancedVerticalPhysicsStack(nn.Module):
         # [B, H*W, C, D]
         x = x.permute(0, 3, 4, 1, 2).reshape(B, H * W, C, D)
 
-        outs = []
+        y = torch.empty(
+            B, H * W, C, D,
+            device=x.device,
+            dtype=x.dtype,
+        )
+
         for i in range(0, H * W, self.chunk):
-            xi = x[:, i:i + self.chunk].reshape(-1, C, D)  # [B*chunk, C, D]
+            j = min(i + self.chunk, H * W)
+            xi = x[:, i:j].reshape(-1, C, D)   # [B*(j-i), C, D]
 
             yi = self.in_proj(xi)
             yi = self.net(yi)
             yi = yi * self.depth_gate(yi)
             yi = self.out_proj(yi)
 
-            yi = yi.reshape(B, -1, C, D)
-            outs.append(yi)
+            yi = yi.reshape(B, j - i, C, D)
+            y[:, i:j].copy_(yi)
 
-        y = torch.cat(outs, dim=1)  # [B, H*W, C, D]
-        y = y.reshape(B, H, W, C, D).permute(0, 3, 4, 1, 2)  # [B, C, D, H, W]
+        y = y.reshape(B, H, W, C, D).permute(0, 3, 4, 1, 2).contiguous()
 
         return self.out_gn(y)
 
@@ -363,8 +368,15 @@ class FFNOBlock3dBalanced(nn.Module):
         vert = self.drop(self.act(self.norm_vert(self.vertical(x))))
 
         w = torch.softmax(self.branch_logits, dim=0)
-        fused = w[0] * spec + w[1] * vert
+
+        fused = spec.mul(w[0])
+        del spec
+
+        fused.add_(vert, alpha=float(w[1]))
+        del vert
+
         x = x + self.res_fused * fused
+        del fused
 
         # small corrective paths only
         pw = self.norm_pw(self.pw(x))
