@@ -375,15 +375,15 @@ class FFNOBlock3dBalanced(nn.Module):
         fused.add_(vert, alpha=float(w[1]))
         del vert
 
-        x = x + self.res_fused * fused
+        x.add_(fused, alpha=float(self.res_fused))
         del fused
 
         # small corrective paths only
         pw = self.norm_pw(self.pw(x))
-        x = x + self.res_pw * pw
+        x.add_(pw, alpha=float(self.res_pw))
 
         mlp = torch.tanh(self.norm_mlp(self.mlp(x)))
-        x = x + self.res_mlp * mlp
+        x.add_(mlp, alpha=float(self.res_mlp))
 
         return x
 
