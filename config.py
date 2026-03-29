@@ -159,10 +159,10 @@ MODEL = "FFNO3D"
 MODEL_CONFIG = dict(
     in_channels=6,
     out_channels=6,
-    width=64,
+    width=48,
     n_layers=4,
     dropout=0.0,
-    checkpoint_blocks=False,
+    checkpoint_blocks=True,
 )
 
 
