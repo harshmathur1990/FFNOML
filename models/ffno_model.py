@@ -179,21 +179,13 @@ class BalancedVerticalPhysicsStack(nn.Module):
         self.out_gn = _gn(channels)
 
     def forward(self, x):
-        # x: [B, C, D, H, W]
         B, C, D, H, W = x.shape
-
-        # [B, H*W, C, D]
         x = x.permute(0, 3, 4, 1, 2).reshape(B, H * W, C, D)
 
-        y = torch.empty(
-            B, H * W, C, D,
-            device=x.device,
-            dtype=x.dtype,
-        )
-
+        chunks = []
         for i in range(0, H * W, self.chunk):
             j = min(i + self.chunk, H * W)
-            xi = x[:, i:j].reshape(-1, C, D)   # [B*(j-i), C, D]
+            xi = x[:, i:j].reshape(-1, C, D)
 
             yi = self.in_proj(xi)
             yi = self.net(yi)
@@ -201,10 +193,10 @@ class BalancedVerticalPhysicsStack(nn.Module):
             yi = self.out_proj(yi)
 
             yi = yi.reshape(B, j - i, C, D)
-            y[:, i:j].copy_(yi)
+            chunks.append(yi)
 
+        y = torch.cat(chunks, dim=1)
         y = y.reshape(B, H, W, C, D).permute(0, 3, 4, 1, 2).contiguous()
-
         return self.out_gn(y)
 
 
@@ -363,29 +355,23 @@ class FFNOBlock3dBalanced(nn.Module):
         self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
     def forward(self, x, dx, dy):
-        # both branches see same input
+        residual = x
+
         spec = self.drop(self.act(self.norm_spec(self.spec(x, dx, dy))))
         vert = self.drop(self.act(self.norm_vert(self.vertical(x))))
 
         w = torch.softmax(self.branch_logits, dim=0)
+        fused = w[0] * spec + w[1] * vert
 
-        fused = spec.mul(w[0])
-        del spec
+        x1 = residual + self.res_fused * fused
 
-        fused.add_(vert, alpha=float(w[1]))
-        del vert
+        pw = self.norm_pw(self.pw(x1))
+        x2 = x1 + self.res_pw * pw
 
-        x.add_(fused, alpha=float(self.res_fused))
-        del fused
+        mlp = torch.tanh(self.norm_mlp(self.mlp(x2)))
+        out = x2 + self.res_mlp * mlp
 
-        # small corrective paths only
-        pw = self.norm_pw(self.pw(x))
-        x.add_(pw, alpha=float(self.res_pw))
-
-        mlp = torch.tanh(self.norm_mlp(self.mlp(x)))
-        x.add_(mlp, alpha=float(self.res_mlp))
-
-        return x
+        return out
 
 
 # ============================================================
