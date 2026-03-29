@@ -219,8 +219,8 @@ def _make_postfix(loss, lr, device, components):
         if "std_ratio" in components:
             postfix["std_r"] = f"{float(components['std_ratio']):.2f}"
 
-        if "max_err" in components:
-            postfix["max"] = f"{float(components['max_err']):.2e}"
+        if "p95_err" in components:
+            postfix["p95"] = f"{float(components['p95_err']):.2e}"
 
     return postfix
 
