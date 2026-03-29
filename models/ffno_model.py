@@ -150,7 +150,7 @@ class BalancedVerticalPhysicsStack(nn.Module):
       - learned depth gate
     """
 
-    def __init__(self, channels, hidden=128, dropout=0.0, chunk=16):
+    def __init__(self, channels, hidden=128, dropout=0.0, chunk=4):
         super().__init__()
         self.chunk = chunk
 
@@ -336,7 +336,7 @@ class FFNOBlock3dBalanced(nn.Module):
             width,
             hidden=32,
             dropout=dropout,
-            chunk=16,
+            chunk=4,
         )
 
         self.pw = nn.Sequential(
