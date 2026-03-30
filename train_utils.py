@@ -92,6 +92,7 @@ def load_training_state(
     map_location="cpu",
 ):
     ckpt = torch.load(checkpoint_path, map_location=map_location)
+    result = dict(ckpt)
     options = StateDictOptions(
         full_state_dict=True,
         cpu_offload=True,
@@ -115,7 +116,9 @@ def load_training_state(
     if scheduler is not None and ckpt.get("scheduler_state") is not None:
         scheduler.load_state_dict(ckpt["scheduler_state"])
 
-    return ckpt
+    del ckpt
+
+    return result
 
 
 def is_dist():

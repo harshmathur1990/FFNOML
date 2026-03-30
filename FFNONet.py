@@ -734,7 +734,7 @@ def ffno_train_model(
             model,
             optimizer=optimizer if load_optimizer_state else None,
             scheduler=scheduler if load_optimizer_state else None,
-            map_location=builder.device,
+            map_location="cpu",
         )
 
         if not load_optimizer_state:
@@ -746,6 +746,9 @@ def ffno_train_model(
             if current_lr is not None:
                 for group in optimizer.param_groups:
                     group["lr"] = current_lr
+
+        if str(builder.device).startswith("cuda"):
+            torch.cuda.synchronize(builder.device)
 
     data_builder = DataLoaderBuilder(
         dataset_type=dataset_type,
