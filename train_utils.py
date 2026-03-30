@@ -8,6 +8,8 @@ from torch.distributed.checkpoint.state_dict import (
     get_model_state_dict,
     get_optimizer_state_dict,
     StateDictOptions,
+    set_model_state_dict,
+    set_optimizer_state_dict,
 )
 
 
@@ -43,6 +45,70 @@ def save_checkpoint_fsdp(
         "val_components": val_comp,
     }
     torch.save(ckpt, save_path)
+
+
+def get_resume_checkpoint_path(save_path):
+    root, ext = os.path.splitext(save_path)
+    if ext:
+        return f"{root}.resume{ext}"
+    return save_path + ".resume"
+
+
+def save_resume_checkpoint(
+    model,
+    optimizer,
+    scheduler,
+    epoch,
+    save_path,
+):
+    options = StateDictOptions(
+        full_state_dict=True,
+        cpu_offload=True,
+    )
+
+    model_state = get_model_state_dict(model, options=options)
+    opt_state = get_optimizer_state_dict(model, optimizer, options=options)
+
+    if not is_main_process():
+        return
+
+    ckpt = {
+        "epoch": epoch,
+        "completed_epochs": epoch,
+        "model_state": model_state,
+        "opt_state": opt_state,
+        "scheduler_state": scheduler.state_dict() if scheduler is not None else None,
+        "current_lr": optimizer.param_groups[0]["lr"],
+    }
+    torch.save(ckpt, save_path)
+
+
+def load_training_state(
+    checkpoint_path,
+    model,
+    optimizer=None,
+    scheduler=None,
+    *,
+    map_location="cpu",
+):
+    ckpt = torch.load(checkpoint_path, map_location=map_location)
+
+    if "model_state" in ckpt:
+        try:
+            set_model_state_dict(model, ckpt["model_state"])
+        except Exception:
+            model.load_state_dict(ckpt["model_state"])
+
+    if optimizer is not None and ckpt.get("opt_state") is not None:
+        try:
+            set_optimizer_state_dict(model, optimizer, ckpt["opt_state"])
+        except Exception:
+            optimizer.load_state_dict(ckpt["opt_state"])
+
+    if scheduler is not None and ckpt.get("scheduler_state") is not None:
+        scheduler.load_state_dict(ckpt["scheduler_state"])
+
+    return ckpt
 
 
 def is_dist():
@@ -524,7 +590,22 @@ def train(
     device="cuda",
     grad_clip=1.0,
     early_stopping=None,
+    resume_last_epoch=None,
+    resume_state=None,
+    resume_path=None,
 ):
+    latest_save_path = resume_path or get_resume_checkpoint_path(save_path)
+    resume_state = resume_state or {}
+
+    completed_epochs = resume_state.get("completed_epochs")
+    if completed_epochs is None:
+        completed_epochs = resume_state.get("epoch")
+    if completed_epochs is None:
+        completed_epochs = resume_last_epoch
+    if completed_epochs is None:
+        completed_epochs = 0
+
+    start_epoch = int(completed_epochs) + 1
 
     best_val = float("inf")
 
@@ -542,7 +623,7 @@ def train(
     if str(device).startswith("cuda"):
         torch.cuda.empty_cache()
 
-    for epoch in range(1, num_epochs + 1):
+    for epoch in range(start_epoch, num_epochs + 1):
 
         # Important when using DistributedSampler
         if hasattr(train_loader, "sampler") and hasattr(train_loader.sampler, "set_epoch"):
@@ -645,3 +726,11 @@ def train(
 
             if is_main_process():
                 print(f"[Epoch {epoch:03d}] train={train_loss:.6e} (saved)")
+
+        save_resume_checkpoint(
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            epoch=epoch,
+            save_path=latest_save_path,
+        )

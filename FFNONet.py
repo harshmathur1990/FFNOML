@@ -15,7 +15,7 @@ import numpy as np
 import h5py
 import torch
 from interp_utils import interpolate_everything
-from train_utils import train
+from train_utils import train, get_resume_checkpoint_path, load_training_state
 from scipy.ndimage import gaussian_filter
 from model_builder import ModelBuilder
 from data_builder import DataLoaderBuilder
@@ -641,6 +641,8 @@ def ffno_train_model(
     num_epochs=50,
     batch_size=1,
     lr=2e-4,
+    resume_last_epoch=None,
+    resume_last_lr=None,
     weight_decay=1e-4,
     num_workers=8,
     pin_memory=True,
@@ -651,11 +653,27 @@ def ffno_train_model(
     patience=10,
     min_delta=1e-5,
     use_cosine=False,
-    min_learning_rate=1e-6
+    min_learning_rate=1e-6,
+    resume=False,
+    bestpath=False,
 ):
+    resume_path = get_resume_checkpoint_path(save_path)
+    load_path = None
+    load_optimizer_state = False
 
-    if os.path.isfile(save_path):
-        raise IOError(f"Output exists: {save_path}")
+    if os.path.isfile(save_path) and not resume:
+        raise IOError(
+            f"Output exists: {save_path}. Use --resume with --train to continue training."
+        )
+
+    if resume:
+        if os.path.isfile(resume_path):
+            load_path = resume_path
+            load_optimizer_state = True
+        elif bestpath and os.path.isfile(save_path):
+            load_path = save_path
+        else:
+            raise IOError(f"Resume checkpoint not found: {resume_path}")
 
     Cin, Cout = _read_io_channels(train_h5)
 
@@ -664,6 +682,27 @@ def ffno_train_model(
     model_config = dict(model_config)
     model_config["in_channels"] = Cin
     model_config["out_channels"] = Cout
+
+    resume_state = {}
+
+    if load_path is not None:
+        resume_state = torch.load(load_path, map_location="cpu")
+        if not isinstance(resume_state, dict):
+            raise RuntimeError(f"Invalid checkpoint: {load_path}")
+
+        resumed_lr = resume_state.get("current_lr", resume_last_lr)
+        if resumed_lr is not None:
+            lr = resumed_lr
+
+        if load_path == resume_path:
+            print(f"Resuming training from {resume_path}")
+        else:
+            print(f"Resuming training from best checkpoint {save_path}")
+            if resume_last_epoch is not None:
+                resume_state["epoch"] = resume_last_epoch
+                resume_state["completed_epochs"] = resume_last_epoch
+            if resume_last_lr is not None:
+                resume_state["current_lr"] = resume_last_lr
 
     builder = ModelBuilder(
         model=model,
@@ -689,6 +728,25 @@ def ffno_train_model(
 
     model, scheduler, optimizer, loss_fn = builder.build()
 
+    if load_path is not None:
+        load_training_state(
+            load_path,
+            model,
+            optimizer=optimizer if load_optimizer_state else None,
+            scheduler=scheduler if load_optimizer_state else None,
+            map_location=builder.device,
+        )
+
+        if not load_optimizer_state:
+            if resume_last_lr is not None:
+                for group in optimizer.param_groups:
+                    group["lr"] = resume_last_lr
+        elif resume_state.get("opt_state") is None:
+            current_lr = resume_state.get("current_lr")
+            if current_lr is not None:
+                for group in optimizer.param_groups:
+                    group["lr"] = current_lr
+
     data_builder = DataLoaderBuilder(
         dataset_type=dataset_type,
         batch_size=batch_size,
@@ -700,33 +758,6 @@ def ffno_train_model(
         train_h5,
         val_h5,
     )
-
-    print("\n===== TRAINING SETUP =====")
-
-    # Optimizer
-    print("\nOptimizer:")
-    print(f"  Type: {type(optimizer).__name__}")
-    for i, group in enumerate(optimizer.param_groups):
-        print(f"  Param group {i}:")
-        print(f"    lr: {group['lr']}")
-        print(f"    weight_decay: {group.get('weight_decay', None)}")
-
-    # Scheduler
-    print("\nScheduler:")
-    if scheduler is not None:
-        print(f"  Type: {type(scheduler).__name__}")
-        if hasattr(scheduler, 'T_max'):
-            print(f"  T_max: {scheduler.T_max}")
-        if hasattr(scheduler, 'eta_min'):
-            print(f"  eta_min: {scheduler.eta_min}")
-    else:
-        print("  None")
-
-    # Loss
-    print("\nLoss function:")
-    print(f"  Type: {type(loss_fn).__name__}")
-
-    print("\n==========================\n")
 
     # run training
     train(
@@ -740,6 +771,9 @@ def ffno_train_model(
         num_epochs=num_epochs,
         device=builder.device,
         grad_clip=grad_clip,
+        resume_last_epoch=resume_last_epoch,
+        resume_state=resume_state,
+        resume_path=resume_path,
         early_stopping=dict(
             enabled=True,
             patience=patience,
@@ -1106,60 +1140,5 @@ def ffno_predict_populations(
         if "val_loss" in ckpt:
             f.attrs["val_loss"] = float(ckpt["val_loss"])
         f.attrs["epoch"] = int(ckpt.get("epoch", -1))
-
-    # Diagnostics
-    # if diagnostic_path is not None:
-
-    #     agg_stats = _aggregate_stats(all_stats)
-
-    #     if len(agg_stats) == 0:
-    #         print("WARNING: No stats collected")
-    #         return save_path
-
-    #     summary = {}
-
-    #     first_layer = next(iter(agg_stats.values()))
-    #     for k in first_layer.keys():
-    #         vals = [agg_stats[layer][k] for layer in agg_stats]
-    #         summary[f"{k}_mean"] = float(np.mean(vals))
-    #         summary[f"{k}_std"]  = float(np.std(vals))
-
-    #     summary["spec_to_pw_ratio"] = float(
-    #         summary["spec_norm_mean"] / (summary["pw_norm_mean"] + 1e-12)
-    #     )
-
-    #     summary["vertical_to_mlp_ratio"] = float(
-    #         summary["vertical_norm_mean"] / (summary["mlp_norm_mean"] + 1e-12)
-    #     )
-
-    #     summary["alpha_spec_mean"] = float(np.mean([
-    #         agg_stats[l]["alpha_spec"] for l in agg_stats
-    #     ]))
-    #     summary["alpha_pw_mean"] = float(np.mean([
-    #         agg_stats[l]["alpha_pw"] for l in agg_stats
-    #     ]))
-    #     summary["alpha_vert_mean"] = float(np.mean([
-    #         agg_stats[l]["alpha_vert"] for l in agg_stats
-    #     ]))
-    #     summary["alpha_mlp_mean"] = float(np.mean([
-    #         agg_stats[l]["alpha_mlp"] for l in agg_stats
-    #     ]))
-
-    #     summary["pred_log_mean"] = float(pred_log.mean().item())
-    #     summary["pred_log_std"]  = float(pred_log.std().item())
-
-    #     summary["dep_mean"] = float(dep.mean())
-    #     summary["dep_std"]  = float(dep.std())
-    #     summary["dep_min"]  = float(dep.min())
-    #     summary["dep_max"]  = float(dep.max())
-    #     stats_flat = {}
-
-    #     for layer, vals in agg_stats.items():
-    #         for k, v in vals.items():
-    #             stats_flat[f"layer{layer}_{k}"] = v
-
-    #     stats_flat.update(summary)
-
-    #     np.savez(diagnostic_path, **stats_flat)
 
     return save_path
