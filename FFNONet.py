@@ -656,6 +656,7 @@ def ffno_train_model(
     min_learning_rate=1e-6,
     resume=False,
     bestpath=False,
+    load_earlier_val=False
 ):
     resume_path = get_resume_checkpoint_path(save_path)
     load_path = None
@@ -713,6 +714,9 @@ def ffno_train_model(
 
         if best_val_init is None:
             best_val_init = resume_state.get("val_loss")
+
+    if load_earlier_val is False:
+        best_val_init = None
 
     builder = ModelBuilder(
         model=model,

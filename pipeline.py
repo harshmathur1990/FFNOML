@@ -115,6 +115,7 @@ def train_model(*, resume=False, bestpath=False):
         min_learning_rate=MIN_LEARNING_RATE,
         resume=resume,
         bestpath=bestpath,
+        load_earlier_val=LOAD_EARLIER_VAL
     )
 
 
