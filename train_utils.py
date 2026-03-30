@@ -92,18 +92,25 @@ def load_training_state(
     map_location="cpu",
 ):
     ckpt = torch.load(checkpoint_path, map_location=map_location)
+    options = StateDictOptions(
+        full_state_dict=True,
+        cpu_offload=True,
+    )
 
     if "model_state" in ckpt:
-        try:
-            set_model_state_dict(model, ckpt["model_state"])
-        except Exception:
-            model.load_state_dict(ckpt["model_state"])
+        set_model_state_dict(
+            model,
+            ckpt["model_state"],
+            options=options,
+        )
 
     if optimizer is not None and ckpt.get("opt_state") is not None:
-        try:
-            set_optimizer_state_dict(model, optimizer, ckpt["opt_state"])
-        except Exception:
-            optimizer.load_state_dict(ckpt["opt_state"])
+        set_optimizer_state_dict(
+            model,
+            optimizer,
+            ckpt["opt_state"],
+            options=options,
+        )
 
     if scheduler is not None and ckpt.get("scheduler_state") is not None:
         scheduler.load_state_dict(ckpt["scheduler_state"])
