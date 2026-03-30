@@ -1,6 +1,8 @@
 import warnings
+import torch
 
 warnings.filterwarnings("ignore", message=".*_get_pg_default_device.*")
+torch.autograd.graph.set_warn_on_accumulate_grad_stream_mismatch(False)
 
 import os
 import numpy as np
