@@ -1,3 +1,7 @@
+import warnings
+
+warnings.filterwarnings("ignore", message=".*_get_pg_default_device.*")
+
 import os
 import numpy as np
 import h5py
