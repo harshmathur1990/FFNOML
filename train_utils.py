@@ -182,8 +182,14 @@ def reduce_components(comp_sums, count, device):
     return out
 
 
-def compute_loss(pred, target, weight, loss_fn, x):
-    loss, components = loss_fn(x, pred, target)
+def compute_loss(pred, target, weight, loss_fn, x, pred_full=None, target_full=None):
+    loss, components = loss_fn(
+        x,
+        pred,
+        target,
+        logb_pred_full=pred_full,
+        logb_true_full=target_full,
+    )
 
     if weight is not None:
         loss = (loss * weight).sum() / (weight.sum() + 1e-12)
@@ -309,6 +315,12 @@ def _make_postfix(loss, lr, device, components):
         elif "source" in components:
             postfix["L2"] = f"{float(components['source']):.2e}"
 
+        if "gradient" in components and torch.is_tensor(components["gradient"]):
+            postfix["L3"] = f"{components['source'].item():.2e}"
+        elif "gradient" in components:
+            postfix["L3"] = f"{float(components['gradient']):.2e}"
+
+
         if "source_per_atom" in components and "atom_names" in components:
             spa = components["source_per_atom"]
             names = components["atom_names"]
@@ -390,8 +402,11 @@ def train_one_epoch(
 
         pred = model(x, dx, dy)
 
-        pred = flatten_columns_logb(pred)
-        y = flatten_columns_logb(y)
+        pred_full = pred
+        y_full = y
+
+        pred = flatten_columns_logb(pred_full)
+        y = flatten_columns_logb(y_full)
         x = flatten_columns_logb(x)
 
         loss, components = compute_loss(
@@ -399,7 +414,9 @@ def train_one_epoch(
             target=y,
             weight=weight,
             loss_fn=loss_fn,
-            x=x
+            x=x,
+            pred_full=pred_full,
+            target_full=y_full,
         )
 
         # ============================================
@@ -509,8 +526,11 @@ def validate(
             # pred, stats = model(x, dx, dy, collect_stats=True)
             pred = model(x, dx, dy)
 
-            pred = flatten_columns_logb(pred)
-            y = flatten_columns_logb(y)
+            pred_full = pred
+            y_full = y
+
+            pred = flatten_columns_logb(pred_full)
+            y = flatten_columns_logb(y_full)
             x = flatten_columns_logb(x)
 
             loss, components = compute_loss(
@@ -518,7 +538,9 @@ def validate(
                 target=y,
                 weight=weight,
                 loss_fn=loss_fn,
-                x=x
+                x=x,
+                pred_full=pred_full,
+                target_full=y_full,
             )
 
             # ============================================
@@ -603,6 +625,7 @@ def train(
     resume_last_epoch=None,
     resume_state=None,
     resume_path=None,
+    best_val_init=None,
 ):
     latest_save_path = resume_path or get_resume_checkpoint_path(save_path)
     resume_state = resume_state or {}
@@ -617,7 +640,10 @@ def train(
 
     start_epoch = int(completed_epochs) + 1
 
-    best_val = float("inf")
+    if best_val_init is None:
+        best_val = float("inf")
+    else:
+        best_val = float(best_val_init)
 
     if early_stopping is not None:
         es_enabled = early_stopping.get("enabled", False)

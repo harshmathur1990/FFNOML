@@ -4,6 +4,7 @@ import torch.distributed as dist
 
 from models.ffno_model import *
 from loss.nlte_composite_loss import NLTECompositeLoss
+from loss.gradient_loss import GradientLoss
 from loss.weighted_mse_loss import WeightedMSE_L1
 
 from functools import partial
@@ -149,12 +150,16 @@ class ModelBuilder:
         mse_loss = WeightedMSE_L1()
         mse_loss = mse_loss.to(self.device)
 
+        gradient_loss = GradientLoss()
+        gradient_loss = gradient_loss.to(self.device)
+
         loss_fn = NLTECompositeLoss(
             chi=self.chi,
             lines=self.lines,
             wave=self.wave,
             levels=self.levels,
             data_loss_func=mse_loss,
+            gradient_loss_func=gradient_loss,
             atom_names=self.atom_names,
             debug=self.debug_loss,
             mean_X=self.mean_X,

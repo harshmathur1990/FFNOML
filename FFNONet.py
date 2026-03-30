@@ -684,6 +684,7 @@ def ffno_train_model(
     model_config["out_channels"] = Cout
 
     resume_state = {}
+    best_val_init = None
 
     if load_path is not None:
         resume_state = torch.load(load_path, map_location="cpu")
@@ -703,6 +704,15 @@ def ffno_train_model(
                 resume_state["completed_epochs"] = resume_last_epoch
             if resume_last_lr is not None:
                 resume_state["current_lr"] = resume_last_lr
+
+        if os.path.isfile(save_path):
+            best_state = torch.load(save_path, map_location="cpu")
+            if not isinstance(best_state, dict):
+                raise RuntimeError(f"Invalid best checkpoint: {save_path}")
+            best_val_init = best_state.get("val_loss")
+
+        if best_val_init is None:
+            best_val_init = resume_state.get("val_loss")
 
     builder = ModelBuilder(
         model=model,
@@ -777,6 +787,7 @@ def ffno_train_model(
         resume_last_epoch=resume_last_epoch,
         resume_state=resume_state,
         resume_path=resume_path,
+        best_val_init=best_val_init,
         early_stopping=dict(
             enabled=True,
             patience=patience,

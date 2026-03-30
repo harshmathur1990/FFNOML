@@ -427,9 +427,11 @@ class NLTECompositeLoss(nn.Module):
         wave,
         levels,
         data_loss_func,
+        gradient_loss_func=None,
         atom_names=["H", "Ca"], 
         lam=1e-1,
-        lam_S=0.0,
+        lam_S=0.1,
+        lam_g=0.1,
         min_stride=2,
         max_frac=0.25,
         delta=1e-1,
@@ -443,6 +445,7 @@ class NLTECompositeLoss(nn.Module):
         super().__init__()
 
         self.data_loss = data_loss_func
+        self.gradient_loss = gradient_loss_func
 
         self.chi = nn.ParameterList(
             [nn.Parameter(torch.tensor(c, dtype=torch.float32), requires_grad=False) for c in chi]
@@ -471,6 +474,7 @@ class NLTECompositeLoss(nn.Module):
 
         self.lam = lam
         self.lam_S = lam_S
+        self.lam_g = lam_g
         self.min_stride = min_stride
         self.max_frac = max_frac
         self.delta = delta
@@ -503,6 +507,8 @@ class NLTECompositeLoss(nn.Module):
         X,
         logb_pred,
         logb_true,
+        logb_pred_full=None,
+        logb_true_full=None,
     ):
 
         std_x = self.std_X.to(X.dtype)
@@ -537,6 +543,13 @@ class NLTECompositeLoss(nn.Module):
 
         if self.debug and not self._debug_triggered:
             _nan_stats(L_data, "L_data")
+
+        if self.gradient_loss is not None:
+            grad_pred = logb_pred_full if logb_pred_full is not None else logb_pred
+            grad_true = logb_true_full if logb_true_full is not None else logb_true
+            L_gradient = self.gradient_loss(grad_pred, grad_true)
+        else:
+            L_gradient = torch.zeros((), device=logb_pred.device, dtype=logb_pred.dtype)
 
         # ------------------ PHYSICS ------------------ #
         per_atom_source_losses = []
@@ -625,8 +638,9 @@ class NLTECompositeLoss(nn.Module):
         if self.print_loss:
             _check_tensor(L_S_atoms, f"L_S_atoms {rank}", True)
             _check_tensor(L_S, f"L_S {rank}", True)
+            _check_tensor(L_gradient, f"L_gradient {rank}", True)
 
-        L_total = L_data + self.lam_S * L_S
+        L_total = L_data + self.lam_S * L_S + self.lam_g * L_gradient
 
         if self.print_loss:
             _check_tensor(L_total, f"L_total {rank}", True)
@@ -641,6 +655,7 @@ class NLTECompositeLoss(nn.Module):
             return L_total, {
                 "data": L_data.detach(),
                 "source": L_S.detach(),
+                "gradient": L_gradient.detach(),
                 "source_per_atom": L_S_atoms.detach(),
                 "atom_names": self.atom_names
             }
