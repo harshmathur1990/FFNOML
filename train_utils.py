@@ -4,7 +4,121 @@ import torch.distributed as dist
 from tqdm import tqdm
 
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp import StateDictType, FullStateDictConfig
+from torch.distributed.checkpoint.state_dict import (
+    get_model_state_dict,
+    get_optimizer_state_dict,
+    StateDictOptions,
+    set_model_state_dict,
+    set_optimizer_state_dict,
+)
+
+
+def save_checkpoint_fsdp(
+    model,
+    optimizer,
+    epoch,
+    train_loss,
+    val_loss,
+    train_comp,
+    val_comp,
+    save_path,
+):
+    options = StateDictOptions(
+        full_state_dict=True,
+        cpu_offload=True,
+    )
+
+    # all ranks call these
+    model_state = get_model_state_dict(model, options=options)
+    opt_state = get_optimizer_state_dict(model, optimizer, options=options)
+
+    if not is_main_process():
+        return
+
+    ckpt = {
+        "epoch": epoch,
+        "model_state": model_state,
+        "opt_state": opt_state,
+        "train_loss": train_loss,
+        "val_loss": val_loss,
+        "train_components": train_comp,
+        "val_components": val_comp,
+    }
+    torch.save(ckpt, save_path)
+
+
+def get_resume_checkpoint_path(save_path):
+    root, ext = os.path.splitext(save_path)
+    if ext:
+        return f"{root}.resume{ext}"
+    return save_path + ".resume"
+
+
+def save_resume_checkpoint(
+    model,
+    optimizer,
+    scheduler,
+    epoch,
+    save_path,
+):
+    options = StateDictOptions(
+        full_state_dict=True,
+        cpu_offload=True,
+    )
+
+    model_state = get_model_state_dict(model, options=options)
+    opt_state = get_optimizer_state_dict(model, optimizer, options=options)
+
+    if not is_main_process():
+        return
+
+    ckpt = {
+        "epoch": epoch,
+        "completed_epochs": epoch,
+        "model_state": model_state,
+        "opt_state": opt_state,
+        "scheduler_state": scheduler.state_dict() if scheduler is not None else None,
+        "current_lr": optimizer.param_groups[0]["lr"],
+    }
+    torch.save(ckpt, save_path)
+
+
+def load_training_state(
+    checkpoint_path,
+    model,
+    optimizer=None,
+    scheduler=None,
+    *,
+    map_location="cpu",
+):
+    ckpt = torch.load(checkpoint_path, map_location=map_location)
+    result = dict(ckpt)
+    options = StateDictOptions(
+        full_state_dict=True,
+        cpu_offload=True,
+    )
+
+    if "model_state" in ckpt:
+        set_model_state_dict(
+            model,
+            ckpt["model_state"],
+            options=options,
+        )
+
+    if optimizer is not None and ckpt.get("opt_state") is not None:
+        set_optimizer_state_dict(
+            model,
+            optimizer,
+            ckpt["opt_state"],
+            options=options,
+        )
+
+    if scheduler is not None and ckpt.get("scheduler_state") is not None:
+        scheduler.load_state_dict(ckpt["scheduler_state"])
+
+    del ckpt
+
+    return result
 
 
 def is_dist():
@@ -68,8 +182,14 @@ def reduce_components(comp_sums, count, device):
     return out
 
 
-def compute_loss(pred, target, weight, loss_fn, x):
-    loss, components = loss_fn(x, pred, target)
+def compute_loss(pred, target, weight, loss_fn, x, pred_full=None, target_full=None):
+    loss, components = loss_fn(
+        x,
+        pred,
+        target,
+        logb_pred_full=pred_full,
+        logb_true_full=target_full,
+    )
 
     if weight is not None:
         loss = (loss * weight).sum() / (weight.sum() + 1e-12)
@@ -195,6 +315,12 @@ def _make_postfix(loss, lr, device, components):
         elif "source" in components:
             postfix["L2"] = f"{float(components['source']):.2e}"
 
+        if "gradient" in components and torch.is_tensor(components["gradient"]):
+            postfix["L3"] = f"{components['source'].item():.2e}"
+        elif "gradient" in components:
+            postfix["L3"] = f"{float(components['gradient']):.2e}"
+
+
         if "source_per_atom" in components and "atom_names" in components:
             spa = components["source_per_atom"]
             names = components["atom_names"]
@@ -204,6 +330,22 @@ def _make_postfix(loss, lr, device, components):
 
             for j, n in enumerate(names):
                 postfix[n] = f"{float(spa[j]):.2e}"
+
+    # --------------------------------------------
+    # diagnostics
+    # --------------------------------------------
+    if components is not None:
+        if "rmse" in components:
+            postfix["rmse"] = f"{float(components['rmse']):.2e}"
+
+        if "rel_rmse" in components:
+            postfix["rel%"] = f"{float(components['rel_rmse'])*100:.2f}"
+
+        if "std_ratio" in components:
+            postfix["std_r"] = f"{float(components['std_ratio']):.2f}"
+
+        if "p95_err" in components:
+            postfix["p95"] = f"{float(components['p95_err']):.2e}"
 
     return postfix
 
@@ -227,11 +369,9 @@ def train_one_epoch(
     loader,
     optimizer,
     loss_fn,
-    scaler,
     device,
     epoch,
     num_epochs,
-    amp=True,
     grad_clip=1.0,
 ):
     model.train()
@@ -260,40 +400,52 @@ def train_one_epoch(
 
         optimizer.zero_grad(set_to_none=True)
 
-        with torch.amp.autocast("cuda", enabled=(amp and str(device).startswith("cuda"))):
-            pred = model(x, dx, dy)
+        pred = model(x, dx, dy)
 
-            pred = flatten_columns_logb(pred)
-            y = flatten_columns_logb(y)
-            x = flatten_columns_logb(x)
+        pred_full = pred
+        y_full = y
 
-            loss, components = compute_loss(
-                pred=pred,
-                target=y,
-                weight=weight,
-                loss_fn=loss_fn,
-                x=x
-            )
+        pred = flatten_columns_logb(pred_full)
+        y = flatten_columns_logb(y_full)
+        x = flatten_columns_logb(x)
 
-        if scaler is not None:
-            scaler.scale(loss).backward()
-        else:
-            loss.backward()
+        loss, components = compute_loss(
+            pred=pred,
+            target=y,
+            weight=weight,
+            loss_fn=loss_fn,
+            x=x,
+            pred_full=pred_full,
+            target_full=y_full,
+        )
+
+        # ============================================
+        # Extra diagnostics (VERY IMPORTANT)
+        # ============================================
+        with torch.no_grad():
+            err = pred - y
+
+            mse = (err ** 2).mean()
+            rmse = torch.sqrt(mse)
+
+            target_std = y.std()
+            pred_std = pred.std()
+
+            rel_rmse = rmse / (target_std + 1e-8)
+            std_ratio = pred_std / (target_std + 1e-8)
+
+            p95_err = err.abs().quantile(0.95)
+
+        loss.backward()
 
         if grad_clip is not None and grad_clip > 0:
-            if scaler is not None:
-                scaler.unscale_(optimizer)
 
             if isinstance(model, FSDP):
                 model.clip_grad_norm_(grad_clip)
             else:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
 
-        if scaler is not None:
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            optimizer.step()
+        optimizer.step()
 
         weight_factor = pred.shape[0]
 
@@ -302,6 +454,17 @@ def train_one_epoch(
 
         _accumulate_components(comp_sums, components, weight_factor=weight_factor)
         _accumulate_components(running_comp, components, weight_factor=weight_factor)
+
+        # accumulate diagnostics
+        diag = {
+            "rmse": rmse,
+            "rel_rmse": rel_rmse,
+            "std_ratio": std_ratio,
+            "p95_err": p95_err,
+        }
+
+        _accumulate_components(running_comp, diag, weight_factor=weight_factor)
+        _accumulate_components(comp_sums, diag, weight_factor=weight_factor)
 
         # all ranks must participate in collectives
         global_running = reduce_sum_scalar(running, device)
@@ -332,7 +495,6 @@ def validate(
     loader,
     loss_fn,
     device,
-    amp=True
 ):
     model.eval()
 
@@ -342,7 +504,7 @@ def validate(
 
     running_comp = {}
 
-    model_stats_sums = {}
+    # model_stats_sums = {}
 
     pbar = tqdm(
         loader,
@@ -361,20 +523,42 @@ def validate(
             if weight is not None:
                 weight = weight.to(device, non_blocking=True)
 
-            with torch.amp.autocast("cuda", enabled=(amp and str(device).startswith("cuda"))):
-                pred, stats = model(x, dx, dy, collect_stats=True)
+            # pred, stats = model(x, dx, dy, collect_stats=True)
+            pred = model(x, dx, dy)
 
-                pred = flatten_columns_logb(pred)
-                y = flatten_columns_logb(y)
-                x = flatten_columns_logb(x)
+            pred_full = pred
+            y_full = y
 
-                loss, components = compute_loss(
-                    pred=pred,
-                    target=y,
-                    weight=weight,
-                    loss_fn=loss_fn,
-                    x=x
-                )
+            pred = flatten_columns_logb(pred_full)
+            y = flatten_columns_logb(y_full)
+            x = flatten_columns_logb(x)
+
+            loss, components = compute_loss(
+                pred=pred,
+                target=y,
+                weight=weight,
+                loss_fn=loss_fn,
+                x=x,
+                pred_full=pred_full,
+                target_full=y_full,
+            )
+
+            # ============================================
+            # Extra diagnostics (VERY IMPORTANT)
+            # ============================================
+            with torch.no_grad():
+                err = pred - y
+
+                mse = (err ** 2).mean()
+                rmse = torch.sqrt(mse)
+
+                target_std = y.std()
+                pred_std = pred.std()
+
+                rel_rmse = rmse / (target_std + 1e-8)
+                std_ratio = pred_std / (target_std + 1e-8)
+
+                p95_err = err.abs().quantile(0.95)
 
             running += loss.item() * pred.shape[0]   # number of columns
             n_columns += pred.shape[0]
@@ -387,7 +571,18 @@ def validate(
             # local running (for tqdm)
             _accumulate_components(running_comp, components, weight_factor=weight_factor)
 
-            _accumulate_model_stats(model_stats_sums, stats, weight_factor=pred.shape[0])
+            # _accumulate_model_stats(model_stats_sums, stats, weight_factor=pred.shape[0])
+
+            # accumulate diagnostics
+            diag = {
+                "rmse": rmse,
+                "rel_rmse": rel_rmse,
+                "std_ratio": std_ratio,
+                "p95_err": p95_err,
+            }
+
+            _accumulate_components(running_comp, diag, weight_factor=weight_factor)
+            _accumulate_components(comp_sums, diag, weight_factor=weight_factor)
 
             global_running = reduce_sum_scalar(running, device)
             global_n = reduce_sum_scalar(n_columns, device)
@@ -409,45 +604,9 @@ def validate(
     global_avg_loss = global_running / max(1, global_batches)
     global_comp = reduce_components(comp_sums, n_columns, device)
 
-    global_model_stats = reduce_components(model_stats_sums, n_columns, device)
+    # global_model_stats = reduce_components(model_stats_sums, n_columns, device)
 
-    return global_avg_loss, global_comp, global_model_stats
-
-
-def save_checkpoint_fsdp(
-    model,
-    optimizer,
-    epoch,
-    train_loss,
-    val_loss,
-    train_comp,
-    val_comp,
-    save_path,
-):
-    """
-    Save a FULL state dict so inference can load it normally on one GPU / CPU.
-    Only rank 0 writes.
-    """
-    if isinstance(model, FSDP):
-        cfg = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
-        with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, cfg):
-            model_state = model.state_dict()
-    else:
-        model_state = model.state_dict()
-
-    if not is_main_process():
-        return
-
-    ckpt = dict(
-        epoch=epoch,
-        model_state=model_state,
-        opt_state=optimizer.state_dict(),
-        train_loss=train_loss,
-        val_loss=val_loss,
-        train_components=train_comp,
-        val_components=val_comp,
-    )
-    torch.save(ckpt, save_path)
+    return global_avg_loss, global_comp  #, global_model_stats
 
 
 def train(
@@ -457,17 +616,34 @@ def train(
     scheduler,
     optimizer,
     loss_fn,
-    scaler,
     save_path,
     *,
     num_epochs=50,
     device="cuda",
-    amp=True,
     grad_clip=1.0,
     early_stopping=None,
+    resume_last_epoch=None,
+    resume_state=None,
+    resume_path=None,
+    best_val_init=None,
 ):
+    latest_save_path = resume_path or get_resume_checkpoint_path(save_path)
+    resume_state = resume_state or {}
 
-    best_val = float("inf")
+    completed_epochs = resume_state.get("completed_epochs")
+    if completed_epochs is None:
+        completed_epochs = resume_state.get("epoch")
+    if completed_epochs is None:
+        completed_epochs = resume_last_epoch
+    if completed_epochs is None:
+        completed_epochs = 0
+
+    start_epoch = int(completed_epochs) + 1
+
+    if best_val_init is None:
+        best_val = float("inf")
+    else:
+        best_val = float(best_val_init)
 
     if early_stopping is not None:
         es_enabled = early_stopping.get("enabled", False)
@@ -483,7 +659,7 @@ def train(
     if str(device).startswith("cuda"):
         torch.cuda.empty_cache()
 
-    for epoch in range(1, num_epochs + 1):
+    for epoch in range(start_epoch, num_epochs + 1):
 
         # Important when using DistributedSampler
         if hasattr(train_loader, "sampler") and hasattr(train_loader.sampler, "set_epoch"):
@@ -494,11 +670,9 @@ def train(
             loader=train_loader,
             optimizer=optimizer,
             loss_fn=loss_fn,
-            scaler=scaler,
             device=device,
             epoch=epoch,
             num_epochs=num_epochs,
-            amp=amp,
             grad_clip=grad_clip,
         )
 
@@ -510,20 +684,26 @@ def train(
             if hasattr(val_loader, "sampler") and hasattr(val_loader.sampler, "set_epoch"):
                 val_loader.sampler.set_epoch(epoch)
 
-            val_loss, val_comp, val_stats = validate(
+            # val_loss, val_comp, val_stats = validate(
+            #     model=model,
+            #     loader=val_loader,
+            #     loss_fn=loss_fn,
+            #     device=device,
+            # )
+
+            val_loss, val_comp = validate(
                 model=model,
                 loader=val_loader,
                 loss_fn=loss_fn,
                 device=device,
-                amp=amp,
             )
 
-            mean_stats = compute_mean_stats(val_stats)
-            val_stats.update(mean_stats)
+            # mean_stats = compute_mean_stats(val_stats)
+            # val_stats.update(mean_stats)
 
             improved = (best_val - val_loss) > min_delta
 
-            save_epoch_stats(val_stats, epoch, save_dir=save_path + "_stats")
+            # save_epoch_stats(val_stats, epoch, save_dir=save_path + "_stats")
 
             if improved:
                 best_val = val_loss
@@ -582,3 +762,11 @@ def train(
 
             if is_main_process():
                 print(f"[Epoch {epoch:03d}] train={train_loss:.6e} (saved)")
+
+        save_resume_checkpoint(
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            epoch=epoch,
+            save_path=latest_save_path,
+        )

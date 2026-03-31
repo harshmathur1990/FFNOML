@@ -15,7 +15,7 @@ import numpy as np
 import h5py
 import torch
 from interp_utils import interpolate_everything
-from train_utils import train
+from train_utils import train, get_resume_checkpoint_path, load_training_state
 from scipy.ndimage import gaussian_filter
 from model_builder import ModelBuilder
 from data_builder import DataLoaderBuilder
@@ -23,43 +23,6 @@ from normalize_utils import *
 from tqdm import tqdm
 import itertools
 import math
-
-
-def compute_k_cutoff(dx, dy=None, k_scale=1e5, radial=True):
-    """
-    Compute training-band cutoff in the SAME scaled k-space
-    used by your layer.
-
-    Parameters
-    ----------
-    dx : float
-        Training grid spacing in x.
-    dy : float or None
-        Training grid spacing in y. If None, dy=dx.
-    k_scale : float
-        The same scaling factor used in the model.
-    radial : bool
-        If True, return radial cutoff based on k_mag.
-        If False, return per-axis cutoffs.
-
-    Returns
-    -------
-    radial=True:
-        k_cutoff : float
-
-    radial=False:
-        kx_cutoff, ky_cutoff : float, float
-    """
-    if dy is None:
-        dy = dx
-
-    kx_cutoff = math.pi / dx * k_scale
-    ky_cutoff = math.pi / dy * k_scale
-
-    if radial:
-        return math.sqrt(kx_cutoff**2 + ky_cutoff**2)
-    else:
-        return kx_cutoff, ky_cutoff
 
 
 # ============================================================
@@ -678,10 +641,11 @@ def ffno_train_model(
     num_epochs=50,
     batch_size=1,
     lr=2e-4,
+    resume_last_epoch=None,
+    resume_last_lr=None,
     weight_decay=1e-4,
     num_workers=8,
     pin_memory=True,
-    amp=True,
     grad_clip=1.0,
     device="cuda",
     multi_gpu=False,
@@ -689,11 +653,28 @@ def ffno_train_model(
     patience=10,
     min_delta=1e-5,
     use_cosine=False,
-    min_learning_rate=1e-6
+    min_learning_rate=1e-6,
+    resume=False,
+    bestpath=False,
+    load_earlier_val=False
 ):
+    resume_path = get_resume_checkpoint_path(save_path)
+    load_path = None
+    load_optimizer_state = False
 
-    if os.path.isfile(save_path):
-        raise IOError(f"Output exists: {save_path}")
+    if os.path.isfile(save_path) and not resume:
+        raise IOError(
+            f"Output exists: {save_path}. Use --resume with --train to continue training."
+        )
+
+    if resume:
+        if os.path.isfile(resume_path):
+            load_path = resume_path
+            load_optimizer_state = True
+        elif bestpath and os.path.isfile(save_path):
+            load_path = save_path
+        else:
+            raise IOError(f"Resume checkpoint not found: {resume_path}")
 
     Cin, Cout = _read_io_channels(train_h5)
 
@@ -702,6 +683,40 @@ def ffno_train_model(
     model_config = dict(model_config)
     model_config["in_channels"] = Cin
     model_config["out_channels"] = Cout
+
+    resume_state = {}
+    best_val_init = None
+
+    if load_path is not None:
+        resume_state = torch.load(load_path, map_location="cpu")
+        if not isinstance(resume_state, dict):
+            raise RuntimeError(f"Invalid checkpoint: {load_path}")
+
+        resumed_lr = resume_state.get("current_lr", resume_last_lr)
+        if resumed_lr is not None:
+            lr = resumed_lr
+
+        if load_path == resume_path:
+            print(f"Resuming training from {resume_path}")
+        else:
+            print(f"Resuming training from best checkpoint {save_path}")
+            if resume_last_epoch is not None:
+                resume_state["epoch"] = resume_last_epoch
+                resume_state["completed_epochs"] = resume_last_epoch
+            if resume_last_lr is not None:
+                resume_state["current_lr"] = resume_last_lr
+
+        if os.path.isfile(save_path):
+            best_state = torch.load(save_path, map_location="cpu")
+            if not isinstance(best_state, dict):
+                raise RuntimeError(f"Invalid best checkpoint: {save_path}")
+            best_val_init = best_state.get("val_loss")
+
+        if best_val_init is None:
+            best_val_init = resume_state.get("val_loss")
+
+    if load_earlier_val is False:
+        best_val_init = None
 
     builder = ModelBuilder(
         model=model,
@@ -714,7 +729,6 @@ def ffno_train_model(
         device=device,
         lr=lr,
         weight_decay=weight_decay,
-        amp=amp,
         multi_gpu=multi_gpu,
         debug_loss=debug_loss,
         mean_X=mean_X,
@@ -726,7 +740,29 @@ def ffno_train_model(
         lr_min=min_learning_rate
     )
 
-    model, scheduler, optimizer, loss_fn, scaler = builder.build()
+    model, scheduler, optimizer, loss_fn = builder.build()
+
+    if load_path is not None:
+        load_training_state(
+            load_path,
+            model,
+            optimizer=optimizer if load_optimizer_state else None,
+            scheduler=scheduler if load_optimizer_state else None,
+            map_location="cpu",
+        )
+
+        if not load_optimizer_state:
+            if resume_last_lr is not None:
+                for group in optimizer.param_groups:
+                    group["lr"] = resume_last_lr
+        elif resume_state.get("opt_state") is None:
+            current_lr = resume_state.get("current_lr")
+            if current_lr is not None:
+                for group in optimizer.param_groups:
+                    group["lr"] = current_lr
+
+        if str(builder.device).startswith("cuda"):
+            torch.cuda.synchronize(builder.device)
 
     data_builder = DataLoaderBuilder(
         dataset_type=dataset_type,
@@ -740,40 +776,6 @@ def ffno_train_model(
         val_h5,
     )
 
-    print("\n===== TRAINING SETUP =====")
-
-    # Optimizer
-    print("\nOptimizer:")
-    print(f"  Type: {type(optimizer).__name__}")
-    for i, group in enumerate(optimizer.param_groups):
-        print(f"  Param group {i}:")
-        print(f"    lr: {group['lr']}")
-        print(f"    weight_decay: {group.get('weight_decay', None)}")
-
-    # Scheduler
-    print("\nScheduler:")
-    if scheduler is not None:
-        print(f"  Type: {type(scheduler).__name__}")
-        if hasattr(scheduler, 'T_max'):
-            print(f"  T_max: {scheduler.T_max}")
-        if hasattr(scheduler, 'eta_min'):
-            print(f"  eta_min: {scheduler.eta_min}")
-    else:
-        print("  None")
-
-    # Loss
-    print("\nLoss function:")
-    print(f"  Type: {type(loss_fn).__name__}")
-
-    # AMP scaler
-    print("\nGradScaler:")
-    if scaler is not None:
-        print(f"  Enabled: {scaler.is_enabled()}")
-    else:
-        print("  None")
-
-    print("\n==========================\n")
-
     # run training
     train(
         model,
@@ -782,12 +784,14 @@ def ffno_train_model(
         scheduler,
         optimizer,
         loss_fn,
-        scaler,
         save_path,
         num_epochs=num_epochs,
         device=builder.device,
-        amp=amp,
         grad_clip=grad_clip,
+        resume_last_epoch=resume_last_epoch,
+        resume_state=resume_state,
+        resume_path=resume_path,
+        best_val_init=best_val_init,
         early_stopping=dict(
             enabled=True,
             patience=patience,
@@ -818,7 +822,7 @@ def _tile_positions(n, patch, stride):
 
 
 @torch.no_grad()
-def _predict_tiled(model, X, dx, dy, patch, stride, device="cuda", amp=True):
+def _predict_tiled(model, X, dx, dy, patch, stride, device="cuda"):
 
     model.eval()
 
@@ -848,8 +852,7 @@ def _predict_tiled(model, X, dx, dy, patch, stride, device="cuda", amp=True):
 
     x0 = X[:, :, :, 0:patch, 0:patch]
 
-    with torch.amp.autocast("cuda", enabled=(amp and str(device).startswith("cuda"))):
-        y0 = model(x0, dx, dy)
+    y0 = model(x0, dx, dy)
 
     if torch.isnan(y0).any():
         print("WARNING: NaN detected in FIRST tile output")
@@ -888,22 +891,20 @@ def _predict_tiled(model, X, dx, dy, patch, stride, device="cuda", amp=True):
     # tiled inference
     # ------------------------------------------------
 
-    all_stats = []
+    # all_stats = []
 
     for i0, j0 in tqdm(itertools.product(xs, ys), total=len(xs)*len(ys), desc="Tiles"):
 
         xt = X[:, :, :, i0:i0+patch, j0:j0+patch]
 
-        with torch.amp.autocast("cuda", enabled=(amp and str(device).startswith("cuda"))):
+        yt = model(xt, dx, dy)
 
-            yt, stats = model(xt, dx, dy, collect_stats=True)
+        tile_weight = float(w2.sum().item())  # scalar weight
 
-            tile_weight = float(w2.sum().item())  # scalar weight
-
-            for s in stats:
-                s = s.copy()
-                s["_weight"] = tile_weight
-                all_stats.append(s)
+        # for s in stats:
+        #     s = s.copy()
+        #     s["_weight"] = tile_weight
+        #     all_stats.append(s)
 
         if torch.isnan(yt).any() or torch.isinf(yt).any():
 
@@ -960,7 +961,7 @@ def _predict_tiled(model, X, dx, dy, patch, stride, device="cuda", amp=True):
     print("Output range:", out.min().item(), out.max().item())
     print("=== TILE PREDICTION END ===")
 
-    return out, all_stats
+    return out
 
 
 def ffno_predict_populations(
@@ -980,9 +981,7 @@ def ffno_predict_populations(
     cuda=True,
     tiled=True,
     patch=128,
-    stride=64,
-    dx_cutoff=None,
-    dy_cutoff=None
+    stride=64
 ):
 
     def _aggregate_stats(all_stats):
@@ -1016,8 +1015,6 @@ def ffno_predict_populations(
 
         return agg
 
-    amp = False
-
     """
     Predict log-departure coeffs -> convert to departure coeffs -> (optional) to populations downstream.
 
@@ -1033,7 +1030,6 @@ def ffno_predict_populations(
     Cin, Cout = _read_io_channels(train_h5)
 
     mean_X, std_X, mean_Y, std_Y = read_normalization(train_h5)
-    kx_cutoff, ky_cutoff = compute_k_cutoff(dx=dx_cutoff, dy=dy_cutoff, k_scale=1e5, radial=False)
 
     model_config = dict(model_config)
     model_config["in_channels"] = Cin
@@ -1050,18 +1046,15 @@ def ffno_predict_populations(
         device=device,
         lr=0.0,
         weight_decay=0.0,
-        amp=amp,
         multi_gpu=False,
         debug_loss=False,
         mean_X=mean_X,
         std_X=std_X,
         mean_Y=mean_Y,
-        std_Y=std_Y,
-        kx_cutoff=kx_cutoff,
-        ky_cutoff=ky_cutoff
+        std_Y=std_Y
     )
 
-    model, optimizer, loss_fn, scaler = builder.build()
+    model, scheduler, optimizer, loss_fn = builder.build()
 
     ckpt = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(ckpt["model_state"])
@@ -1107,10 +1100,9 @@ def ffno_predict_populations(
         dx = dx.to(device)
         dy = dy.to(device)
 
-        with torch.no_grad(), torch.amp.autocast("cuda", enabled=(amp and str(device).startswith("cuda"))):
-            pred_log, all_stats = model(X, dx, dy, collect_stats=True)
+        pred_log = model(X, dx, dy)
     else:
-        pred_log, all_stats = _predict_tiled(
+        pred_log = _predict_tiled(
             model,
             X,
             dx,
@@ -1118,7 +1110,6 @@ def ffno_predict_populations(
             patch=patch,
             stride=stride,
             device=device,
-            amp=amp
         )
 
     if torch.isnan(pred_log).any():
@@ -1167,60 +1158,5 @@ def ffno_predict_populations(
         if "val_loss" in ckpt:
             f.attrs["val_loss"] = float(ckpt["val_loss"])
         f.attrs["epoch"] = int(ckpt.get("epoch", -1))
-
-    # Diagnostics
-    if diagnostic_path is not None:
-
-        agg_stats = _aggregate_stats(all_stats)
-
-        if len(agg_stats) == 0:
-            print("WARNING: No stats collected")
-            return save_path
-
-        summary = {}
-
-        first_layer = next(iter(agg_stats.values()))
-        for k in first_layer.keys():
-            vals = [agg_stats[layer][k] for layer in agg_stats]
-            summary[f"{k}_mean"] = float(np.mean(vals))
-            summary[f"{k}_std"]  = float(np.std(vals))
-
-        summary["spec_to_pw_ratio"] = float(
-            summary["spec_norm_mean"] / (summary["pw_norm_mean"] + 1e-12)
-        )
-
-        summary["vertical_to_mlp_ratio"] = float(
-            summary["vertical_norm_mean"] / (summary["mlp_norm_mean"] + 1e-12)
-        )
-
-        summary["alpha_spec_mean"] = float(np.mean([
-            agg_stats[l]["alpha_spec"] for l in agg_stats
-        ]))
-        summary["alpha_pw_mean"] = float(np.mean([
-            agg_stats[l]["alpha_pw"] for l in agg_stats
-        ]))
-        summary["alpha_vert_mean"] = float(np.mean([
-            agg_stats[l]["alpha_vert"] for l in agg_stats
-        ]))
-        summary["alpha_mlp_mean"] = float(np.mean([
-            agg_stats[l]["alpha_mlp"] for l in agg_stats
-        ]))
-
-        summary["pred_log_mean"] = float(pred_log.mean().item())
-        summary["pred_log_std"]  = float(pred_log.std().item())
-
-        summary["dep_mean"] = float(dep.mean())
-        summary["dep_std"]  = float(dep.std())
-        summary["dep_min"]  = float(dep.min())
-        summary["dep_max"]  = float(dep.max())
-        stats_flat = {}
-
-        for layer, vals in agg_stats.items():
-            for k, v in vals.items():
-                stats_flat[f"layer{layer}_{k}"] = v
-
-        stats_flat.update(summary)
-
-        np.savez(diagnostic_path, **stats_flat)
 
     return save_path

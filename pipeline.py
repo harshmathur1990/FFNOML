@@ -1,3 +1,9 @@
+import warnings
+import torch
+
+warnings.filterwarnings("ignore", message=".*_get_pg_default_device.*")
+torch.autograd.graph.set_warn_on_accumulate_grad_stream_mismatch(False)
+
 import os
 import numpy as np
 import h5py
@@ -21,6 +27,8 @@ def parse_args():
     parser.add_argument("--build", action="store_true")
     parser.add_argument("--train", action="store_true")
     parser.add_argument("--predict", action="store_true")
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--bestpath", action="store_true")
     return parser.parse_args()
 
 
@@ -75,7 +83,7 @@ def build_datasets():
         )
 
 
-def train_model():
+def train_model(*, resume=False, bestpath=False):
 
     ffno_train_model(
         model=MODEL,
@@ -92,10 +100,11 @@ def train_model():
         num_epochs=NUM_EPOCHS,
         batch_size=BATCH_SIZE,
         lr=LEARNING_RATE,
+        resume_last_epoch=RESUME_LAST_EPOCH,
+        resume_last_lr=RESUME_LAST_LEARNING_RATE,
         weight_decay=WEIGHT_DECAY,
         num_workers=NUM_WORKERS,
         pin_memory=PIN_MEMORY,
-        amp=AMP,
         grad_clip=GRAD_CLIP,
         device=DEVICE,
         multi_gpu=MULTI_GPU,
@@ -103,7 +112,10 @@ def train_model():
         patience=PATIENCE,
         min_delta=MIN_DELTA,
         use_cosine=USE_COSINE,
-        min_learning_rate=MIN_LEARNING_RATE
+        min_learning_rate=MIN_LEARNING_RATE,
+        resume=resume,
+        bestpath=bestpath,
+        load_earlier_val=LOAD_EARLIER_VAL
     )
 
 
@@ -156,9 +168,7 @@ def run_predictions():
                 cuda=CUDA,
                 tiled=TILED,
                 patch=PATCH,
-                stride=STRIDE,
-                dx_cutoff=DX_CUTOFF,
-                dy_cutoff=DY_CUTOFF
+                stride=STRIDE
             )
 
 
@@ -348,11 +358,16 @@ if __name__ == "__main__":
 
     args = parse_args()
 
+    if args.resume and not args.train:
+        raise RuntimeError("--resume can only be used together with --train")
+    if args.bestpath and not args.train:
+        raise RuntimeError("--bestpath can only be used together with --train")
+
     if args.build:
         build_datasets()
 
     elif args.train:
-        train_model()
+        train_model(resume=args.resume, bestpath=args.bestpath)
 
     elif args.predict:
         run_predictions()

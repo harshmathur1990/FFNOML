@@ -4,6 +4,7 @@ import torch.distributed as dist
 
 from models.ffno_model import *
 from loss.nlte_composite_loss import NLTECompositeLoss
+from loss.gradient_loss import GradientLoss
 from loss.weighted_mse_loss import WeightedMSE_L1
 
 from functools import partial
@@ -25,15 +26,12 @@ class ModelBuilder:
         device="cuda",
         lr=2e-4,
         weight_decay=1e-4,
-        amp=True,
         multi_gpu=False,
         debug_loss=False,
         mean_X=0,
         std_X=1,
         mean_Y=0,
         std_Y=1,
-        kx_cutoff=None,
-        ky_cutoff=None,
         num_epochs=None,
         use_cosine=False,
         lr_min=1e-6
@@ -50,7 +48,6 @@ class ModelBuilder:
 
         self.lr = lr
         self.weight_decay = weight_decay
-        self.amp = amp
 
         self.chi = chi
         self.lines = lines
@@ -72,10 +69,6 @@ class ModelBuilder:
         self.mean_Y = mean_Y
 
         self.std_Y = std_Y
-
-        self.kx_cutoff = kx_cutoff
-
-        self.ky_cutoff = ky_cutoff
 
         self.lr_min = lr_min
 
@@ -109,16 +102,7 @@ class ModelBuilder:
 
     def build_model(self):
 
-        model_config = dict(self.model_config)
-
-        if self.kx_cutoff is not None:
-            if self.ky_cutoff is None:
-                raise ValueError("ky_cutoff is None when kx_cutoff is not None")
-
-            model_config["kx_cutoff"] = self.kx_cutoff
-            model_config["ky_cutoff"] = self.ky_cutoff
-
-        model = self.model_cls(**model_config)
+        model = self.model_cls(**self.model_config)
 
         model = model.to(self.device)
 
@@ -126,7 +110,7 @@ class ModelBuilder:
 
             auto_wrap_policy = partial(
                 transformer_auto_wrap_policy,
-                transformer_layer_cls={FFNOBlock3d},
+                transformer_layer_cls={FFNOBlock3dBalanced},
             )
 
             model = FSDP(
@@ -166,12 +150,16 @@ class ModelBuilder:
         mse_loss = WeightedMSE_L1()
         mse_loss = mse_loss.to(self.device)
 
+        gradient_loss = GradientLoss()
+        gradient_loss = gradient_loss.to(self.device)
+
         loss_fn = NLTECompositeLoss(
             chi=self.chi,
             lines=self.lines,
             wave=self.wave,
             levels=self.levels,
             data_loss_func=mse_loss,
+            gradient_loss_func=gradient_loss,
             atom_names=self.atom_names,
             debug=self.debug_loss,
             mean_X=self.mean_X,
@@ -182,11 +170,7 @@ class ModelBuilder:
 
         loss_fn = loss_fn.to(self.device)
 
-        scaler = None
-        if self.amp and self.device.startswith("cuda"):
-            scaler = torch.amp.GradScaler("cuda")
-
-        return optimizer, scheduler, loss_fn, scaler
+        return optimizer, scheduler, loss_fn
 
     # ------------------------------------------------
     # BUILD
@@ -196,8 +180,8 @@ class ModelBuilder:
 
         model = self.build_model()
 
-        optimizer, scheduler, loss_fn, scaler = self.build_training_components(
+        optimizer, scheduler, loss_fn = self.build_training_components(
             model
         )
 
-        return model, scheduler, optimizer, loss_fn, scaler
+        return model, scheduler, optimizer, loss_fn

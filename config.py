@@ -152,24 +152,17 @@ MULTI3D_PRED_DATA = [
     }
 ]
 
-
-NDEP = 400
 MULTI_GPU = True
 
 MODEL = "FFNO3D"
 
 MODEL_CONFIG = dict(
-
-    width=64,
-
-    n_layers=6,
-
-    dropout=0.1,
-    mlp_expansion=2,
-    vertical_hidden=64,
-    padding=0,
+    in_channels=6,
+    out_channels=6,
+    width=48,
+    n_layers=4,
+    dropout=0.0,
     checkpoint_blocks=True,
-    use_gating=True
 )
 
 
@@ -190,26 +183,25 @@ SCALES=(1,2,3,4,5,6,7,8)
 
 
 # Training Params
-NUM_EPOCHS = 400
+NUM_EPOCHS = 100
 BATCH_SIZE = 1
-LEARNING_RATE = 1e-4
+LEARNING_RATE = 1e-3
 MIN_LEARNING_RATE = 1e-6
+RESUME_LAST_EPOCH = 45
+RESUME_LAST_LEARNING_RATE = 5.8e-04
 WEIGHT_DECAY = 1e-4
 NUM_WORKERS = 8
 PIN_MEMORY = True
-AMP = False
 GRAD_CLIP = 1.0
 DEVICE = "cuda"
 PATIENCE = 400
 MIN_DELTA = 1e-5
 DATASET_TYPE = "patch"
 USE_COSINE = True
+LOAD_EARLIER_VAL = False
 
 # Prediction params
 CUDA = DEVICE == "cuda"
 TILED = True
-
-DX_CUTOFF = None
-DY_CUTOFF = None
 
 TENSOR_SCALE = 1.0

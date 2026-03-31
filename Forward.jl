@@ -40,9 +40,9 @@ default(show=false)
 model  = "FFNO3D"
 snap = 385
 
-train_dir = "training_lam_0.1"
+train_dir = "training"
 
-sim_name = "en024048_hion_504"
+sim_name = "en024048_hion"
 
 pred_h5 = joinpath(
     train_dir,
