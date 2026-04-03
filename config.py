@@ -169,7 +169,7 @@ MODEL_CONFIG = dict(
 IODIR = "IO/"
 TRAIN_FILE   = IODIR + f"3D_sim_train.hdf5"
 TEST_FILE   = IODIR + f"3D_sim_test.hdf5"
-MODEL_DIR  = f"training/"
+MODEL_DIR  = f"training_{MODEL}/"
 MODEL_FILE = MODEL_DIR + f"3D_sim_train_s123.pt"
 
 
