@@ -11,11 +11,18 @@
 
 import sys
 import os
+import json
 import numpy as np
 import h5py
 import torch
 from interp_utils import interpolate_everything
-from train_utils import train, get_resume_checkpoint_path, load_training_state
+from train_utils import (
+    train,
+    validate,
+    compute_mean_stats,
+    get_resume_checkpoint_path,
+    load_training_state,
+)
 from scipy.ndimage import gaussian_filter
 from model_builder import ModelBuilder
 from data_builder import DataLoaderBuilder
@@ -798,6 +805,173 @@ def ffno_train_model(
             min_delta=min_delta,
         )
     )
+
+
+# ============================================================
+# ---------------- VALIDATION TEST MODE -----------------------
+# ============================================================
+
+def _to_serializable(value):
+    if torch.is_tensor(value):
+        value = value.detach().cpu()
+        if value.ndim == 0:
+            return value.item()
+        return value.tolist()
+
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+
+    if isinstance(value, np.generic):
+        return value.item()
+
+    if isinstance(value, dict):
+        return {k: _to_serializable(v) for k, v in value.items()}
+
+    if isinstance(value, (list, tuple)):
+        return [_to_serializable(v) for v in value]
+
+    return value
+
+
+def ffno_test_model(
+    *,
+    model,
+    checkpoint_path,
+    train_h5,
+    val_h5,
+    diagnostic_path,
+    lines,
+    wave,
+    chi,
+    levels,
+    atom_names,
+    model_config,
+    dataset_type,
+    batch_size=1,
+    num_workers=8,
+    pin_memory=True,
+    device="cuda",
+):
+    if diagnostic_path is None:
+        raise ValueError("diagnostic_path is required for test mode")
+
+    os.makedirs(os.path.dirname(diagnostic_path) or ".", exist_ok=True)
+
+    Cin, Cout = _read_io_channels(train_h5)
+    mean_X, std_X, mean_Y, std_Y = read_normalization(train_h5)
+
+    model_config = dict(model_config)
+    model_config["in_channels"] = Cin
+    model_config["out_channels"] = Cout
+
+    builder = ModelBuilder(
+        model=model,
+        model_config=model_config,
+        chi=chi,
+        lines=lines,
+        wave=wave,
+        levels=levels,
+        atom_names=atom_names,
+        device=device,
+        lr=0.0,
+        weight_decay=0.0,
+        multi_gpu=False,
+        debug_loss=False,
+        mean_X=mean_X,
+        std_X=std_X,
+        mean_Y=mean_Y,
+        std_Y=std_Y,
+    )
+
+    model, _, optimizer, loss_fn = builder.build()
+    del optimizer
+
+    load_training_state(
+        checkpoint_path,
+        model,
+        optimizer=None,
+        scheduler=None,
+        map_location="cpu",
+    )
+    model.eval()
+
+    data_builder = DataLoaderBuilder(
+        dataset_type=dataset_type,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+    )
+
+    val_dataset = data_builder.build_dataset(val_h5)
+    val_loader, _ = data_builder.build_dataloader(val_dataset, shuffle=False)
+
+    baseline_loss, baseline_comp, baseline_stats = validate(
+        model=model,
+        loader=val_loader,
+        loss_fn=loss_fn,
+        device=builder.device,
+        collect_model_stats=True,
+    )
+
+    baseline_stats = dict(baseline_stats)
+    baseline_stats.update(compute_mean_stats(baseline_stats))
+
+    branch_masks = {
+        "full": {"spec": 1.0, "vertical": 1.0, "pw": 1.0, "mlp": 1.0},
+        "no_spec": {"spec": 0.0, "vertical": 1.0, "pw": 1.0, "mlp": 1.0},
+        "no_vertical": {"spec": 1.0, "vertical": 0.0, "pw": 1.0, "mlp": 1.0},
+        "no_pw": {"spec": 1.0, "vertical": 1.0, "pw": 0.0, "mlp": 1.0},
+        "no_mlp": {"spec": 1.0, "vertical": 1.0, "pw": 1.0, "mlp": 0.0},
+    }
+
+    ablations = {}
+    for name, mask in branch_masks.items():
+        if name == "full":
+            loss = baseline_loss
+            comp = baseline_comp
+            stats = baseline_stats
+        else:
+            loss, comp, stats = validate(
+                model=model,
+                loader=val_loader,
+                loss_fn=loss_fn,
+                device=builder.device,
+                collect_model_stats=True,
+                forward_kwargs={"branch_mask": mask},
+            )
+            stats = dict(stats)
+            stats.update(compute_mean_stats(stats))
+
+        ablations[name] = {
+            "branch_mask": mask,
+            "loss": float(loss),
+            "loss_delta_vs_full": float(loss - baseline_loss),
+            "components": _to_serializable(comp),
+            "stats": _to_serializable(stats),
+        }
+
+    branch_importance = {
+        name: vals["loss_delta_vs_full"]
+        for name, vals in ablations.items()
+        if name != "full"
+    }
+
+    summary = {
+        "checkpoint_path": checkpoint_path,
+        "val_h5": val_h5,
+        "baseline_loss": float(baseline_loss),
+        "baseline_components": _to_serializable(baseline_comp),
+        "baseline_stats": _to_serializable(baseline_stats),
+        "branch_importance": branch_importance,
+        "ablations": ablations,
+    }
+
+    with open(diagnostic_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+
+    print(f"Saved validation diagnostics to {diagnostic_path}")
+
+    return summary
 
 
 # ============================================================

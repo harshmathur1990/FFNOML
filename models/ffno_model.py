@@ -354,22 +354,74 @@ class FFNOBlock3dBalanced(nn.Module):
         self.act = nn.GELU()
         self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
-    def forward(self, x, dx, dy):
+    def forward(self, x, dx, dy, collect_stats=False, branch_mask=None):
+        if not collect_stats and branch_mask is None:
+            residual = x
+
+            spec = self.drop(self.act(self.norm_spec(self.spec(x, dx, dy))))
+            vert = self.drop(self.act(self.norm_vert(self.vertical(x))))
+
+            w = torch.softmax(self.branch_logits, dim=0)
+            fused = w[0] * spec + w[1] * vert
+
+            x1 = residual + self.res_fused * fused
+
+            pw = self.norm_pw(self.pw(x1))
+            x2 = x1 + self.res_pw * pw
+
+            mlp = torch.tanh(self.norm_mlp(self.mlp(x2)))
+            out = x2 + self.res_mlp * mlp
+
+            return out
+
         residual = x
+        stats = {} if collect_stats else None
+        branch_mask = branch_mask or {}
 
         spec = self.drop(self.act(self.norm_spec(self.spec(x, dx, dy))))
         vert = self.drop(self.act(self.norm_vert(self.vertical(x))))
 
         w = torch.softmax(self.branch_logits, dim=0)
-        fused = w[0] * spec + w[1] * vert
+        spec_mask = float(branch_mask.get("spec", 1.0))
+        vert_mask = float(branch_mask.get("vertical", 1.0))
+        pw_mask = float(branch_mask.get("pw", 1.0))
+        mlp_mask = float(branch_mask.get("mlp", 1.0))
+
+        spec_weight_eff = w[0] * spec_mask
+        vert_weight_eff = w[1] * vert_mask
+
+        fused = spec_weight_eff * spec + vert_weight_eff * vert
 
         x1 = residual + self.res_fused * fused
 
         pw = self.norm_pw(self.pw(x1))
-        x2 = x1 + self.res_pw * pw
+        x2 = x1 + (self.res_pw * pw_mask) * pw
 
         mlp = torch.tanh(self.norm_mlp(self.mlp(x2)))
-        out = x2 + self.res_mlp * mlp
+        out = x2 + (self.res_mlp * mlp_mask) * mlp
+
+        if collect_stats:
+            with torch.no_grad():
+                stats["spec_norm"] = spec.abs().mean().item()
+                stats["vertical_norm"] = vert.abs().mean().item()
+                stats["pw_norm"] = pw.abs().mean().item()
+                stats["mlp_norm"] = mlp.abs().mean().item()
+                stats["spec_weight"] = float(w[0].item())
+                stats["vertical_weight"] = float(w[1].item())
+                stats["spec_weight_effective"] = float(spec_weight_eff.item())
+                stats["vertical_weight_effective"] = float(vert_weight_eff.item())
+                stats["res_fused"] = float(self.res_fused.item())
+                stats["res_pw"] = float(self.res_pw.item())
+                stats["res_mlp"] = float(self.res_mlp.item())
+                stats["spec_contrib"] = (self.res_fused * spec_weight_eff * spec).abs().mean().item()
+                stats["vertical_contrib"] = (self.res_fused * vert_weight_eff * vert).abs().mean().item()
+                stats["pw_contrib"] = ((self.res_pw * pw_mask) * pw).abs().mean().item()
+                stats["mlp_contrib"] = ((self.res_mlp * mlp_mask) * mlp).abs().mean().item()
+                stats["fused_update"] = (x1 - residual).abs().mean().item()
+                stats["pw_update"] = (x2 - x1).abs().mean().item()
+                stats["mlp_update"] = (out - x2).abs().mean().item()
+
+            return out, stats
 
         return out
 
@@ -407,21 +459,43 @@ class FFNO3D(nn.Module):
 
         self.act = nn.GELU()
 
-    def _run_block(self, blk, x, dx, dy):
-        if self.checkpoint_blocks and self.training:
+    def _run_block(self, blk, x, dx, dy, collect_stats=False, branch_mask=None):
+        if self.checkpoint_blocks and self.training and not collect_stats:
             return checkpoint(
-                lambda t: blk(t, dx, dy),
+                lambda t: blk(t, dx, dy, collect_stats=False, branch_mask=None),
                 x,
                 use_reentrant=False,
             )
-        return blk(x, dx, dy)
+        return blk(x, dx, dy, collect_stats=collect_stats, branch_mask=branch_mask)
 
-    def forward(self, x, dx, dy):
+    def forward(self, x, dx, dy, collect_stats=False, branch_mask=None):
         x = self.lift(x)
+        all_stats = [] if collect_stats else None
 
-        for blk in self.blocks:
-            x = self._run_block(blk, x, dx, dy)
+        for i, blk in enumerate(self.blocks):
+            if collect_stats:
+                x, s = self._run_block(
+                    blk,
+                    x,
+                    dx,
+                    dy,
+                    collect_stats=True,
+                    branch_mask=branch_mask,
+                )
+                s["layer"] = i
+                all_stats.append(s)
+            else:
+                x = self._run_block(
+                    blk,
+                    x,
+                    dx,
+                    dy,
+                    collect_stats=False,
+                    branch_mask=branch_mask,
+                )
 
         x = self.act(self.proj1(x))
         x = self.proj2(x)
+        if collect_stats:
+            return x, all_stats
         return x

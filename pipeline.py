@@ -16,6 +16,7 @@ from FFNONet import (
     build_dataset_ffno,
     build_solving_set_ffno,
     ffno_train_model,
+    ffno_test_model,
     ffno_predict_populations
 )
 import torch.distributed as dist
@@ -26,6 +27,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--build", action="store_true")
     parser.add_argument("--train", action="store_true")
+    parser.add_argument("--test", action="store_true")
     parser.add_argument("--predict", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--bestpath", action="store_true")
@@ -116,6 +118,30 @@ def train_model(*, resume=False, bestpath=False):
         resume=resume,
         bestpath=bestpath,
         load_earlier_val=LOAD_EARLIER_VAL
+    )
+
+
+def test_model():
+
+    diagnostic_path = MODEL_DIR + f"val_diagnostics_{MODEL}.json"
+
+    ffno_test_model(
+        model=MODEL,
+        checkpoint_path=MODEL_FILE,
+        train_h5=TRAIN_FILE,
+        val_h5=TEST_FILE,
+        diagnostic_path=diagnostic_path,
+        lines=lines,
+        wave=wave,
+        chi=chi,
+        levels=levels,
+        atom_names=atom_names,
+        model_config=MODEL_CONFIG,
+        dataset_type=DATASET_TYPE,
+        batch_size=BATCH_SIZE,
+        num_workers=NUM_WORKERS,
+        pin_memory=PIN_MEMORY,
+        device=DEVICE,
     )
 
 
@@ -362,6 +388,8 @@ if __name__ == "__main__":
         raise RuntimeError("--resume can only be used together with --train")
     if args.bestpath and not args.train:
         raise RuntimeError("--bestpath can only be used together with --train")
+    if args.test and (args.resume or args.bestpath):
+        raise RuntimeError("--resume/--bestpath are only valid together with --train")
 
     if args.build:
         build_datasets()
@@ -369,8 +397,11 @@ if __name__ == "__main__":
     elif args.train:
         train_model(resume=args.resume, bestpath=args.bestpath)
 
+    elif args.test:
+        test_model()
+
     elif args.predict:
         run_predictions()
 
     else:
-        raise RuntimeError("Specify one of: --build, --train, --predict")
+        raise RuntimeError("Specify one of: --build, --train, --test, --predict")

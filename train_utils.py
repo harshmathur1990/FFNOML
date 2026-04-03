@@ -495,8 +495,11 @@ def validate(
     loader,
     loss_fn,
     device,
+    collect_model_stats=False,
+    forward_kwargs=None,
 ):
     model.eval()
+    forward_kwargs = forward_kwargs or {}
 
     running = 0.0
     n_columns = 0
@@ -504,7 +507,7 @@ def validate(
 
     running_comp = {}
 
-    # model_stats_sums = {}
+    model_stats_sums = {}
 
     pbar = tqdm(
         loader,
@@ -523,8 +526,17 @@ def validate(
             if weight is not None:
                 weight = weight.to(device, non_blocking=True)
 
-            # pred, stats = model(x, dx, dy, collect_stats=True)
-            pred = model(x, dx, dy)
+            if collect_model_stats:
+                pred, stats = model(
+                    x,
+                    dx,
+                    dy,
+                    collect_stats=True,
+                    **forward_kwargs,
+                )
+            else:
+                pred = model(x, dx, dy, **forward_kwargs)
+                stats = None
 
             pred_full = pred
             y_full = y
@@ -571,7 +583,7 @@ def validate(
             # local running (for tqdm)
             _accumulate_components(running_comp, components, weight_factor=weight_factor)
 
-            # _accumulate_model_stats(model_stats_sums, stats, weight_factor=pred.shape[0])
+            _accumulate_model_stats(model_stats_sums, stats, weight_factor=pred.shape[0])
 
             # accumulate diagnostics
             diag = {
@@ -604,9 +616,12 @@ def validate(
     global_avg_loss = global_running / max(1, global_batches)
     global_comp = reduce_components(comp_sums, n_columns, device)
 
-    # global_model_stats = reduce_components(model_stats_sums, n_columns, device)
+    global_model_stats = reduce_components(model_stats_sums, n_columns, device)
 
-    return global_avg_loss, global_comp  #, global_model_stats
+    if collect_model_stats:
+        return global_avg_loss, global_comp, global_model_stats
+
+    return global_avg_loss, global_comp
 
 
 def train(
