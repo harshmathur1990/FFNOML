@@ -100,11 +100,7 @@ class ModelBuilder:
     # MODEL
     # ------------------------------------------------
 
-    def build_model(self):
-
-        model = self.model_cls(**self.model_config)
-
-        model = model.to(self.device)
+    def wrap_model(self, model):
 
         if self.multi_gpu:
 
@@ -118,6 +114,17 @@ class ModelBuilder:
                 auto_wrap_policy=auto_wrap_policy,
                 device_id=torch.cuda.current_device(),
             )
+
+        return model
+
+    def build_model(self, wrap_fsdp=True):
+
+        model = self.model_cls(**self.model_config)
+
+        model = model.to(self.device)
+
+        if wrap_fsdp:
+            model = self.wrap_model(model)
 
         return model
 

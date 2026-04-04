@@ -133,12 +133,7 @@ def expand_model_from_checkpoint(
     if not isinstance(ckpt, dict) or "model_state" not in ckpt:
         raise RuntimeError(f"Invalid checkpoint: {checkpoint_path}")
 
-    options = StateDictOptions(
-        full_state_dict=True,
-        cpu_offload=True,
-    )
-
-    current_state = get_model_state_dict(model, options=options)
+    current_state = model.state_dict()
     source_state = ckpt["model_state"]
 
     merged_state = {}
@@ -181,11 +176,7 @@ def expand_model_from_checkpoint(
                 merged_state[key] = torch.zeros_like(tensor)
                 zeroed.append(key)
 
-    set_model_state_dict(
-        model,
-        merged_state,
-        options=options,
-    )
+    model.load_state_dict(merged_state, strict=True)
 
     return {
         "checkpoint_path": checkpoint_path,

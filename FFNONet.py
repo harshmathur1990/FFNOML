@@ -762,15 +762,18 @@ def ffno_train_model(
         lr_min=min_learning_rate
     )
 
-    model, scheduler, optimizer, loss_fn = builder.build()
-
     if expand_from_checkpoint is not None:
+        model = builder.build_model(wrap_fsdp=False)
+
         expand_info = expand_model_from_checkpoint(
             expand_from_checkpoint,
             model,
             map_location="cpu",
             zero_init_new_blocks=zero_init_new_blocks,
         )
+
+        model = builder.wrap_model(model)
+        optimizer, scheduler, loss_fn = builder.build_training_components(model)
 
         if dist.is_available() and dist.is_initialized():
             dist.barrier()
@@ -788,7 +791,10 @@ def ffno_train_model(
                 f"old_n_blocks={expand_info['old_n_blocks']}"
             )
 
-    elif load_path is not None:
+    else:
+        model, scheduler, optimizer, loss_fn = builder.build()
+
+    if expand_from_checkpoint is None and load_path is not None:
         load_training_state(
             load_path,
             model,
