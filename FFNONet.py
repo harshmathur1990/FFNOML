@@ -828,6 +828,11 @@ def ffno_train_model(
         val_h5,
     )
 
+    effective_resume_last_epoch = None if expand_from_checkpoint is not None else resume_last_epoch
+    effective_resume_state = {} if expand_from_checkpoint is not None else resume_state
+    effective_resume_path = None if expand_from_checkpoint is not None else resume_path
+    effective_best_val_init = None if expand_from_checkpoint is not None else best_val_init
+
     # run training
     train(
         model,
@@ -840,10 +845,10 @@ def ffno_train_model(
         num_epochs=num_epochs,
         device=builder.device,
         grad_clip=grad_clip,
-        resume_last_epoch=resume_last_epoch,
-        resume_state=resume_state,
-        resume_path=resume_path,
-        best_val_init=best_val_init,
+        resume_last_epoch=effective_resume_last_epoch,
+        resume_state=effective_resume_state,
+        resume_path=effective_resume_path,
+        best_val_init=effective_best_val_init,
         early_stopping=dict(
             enabled=True,
             patience=patience,
