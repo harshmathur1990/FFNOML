@@ -1,4 +1,5 @@
 import os
+import re
 import torch
 import torch.distributed as dist
 from tqdm import tqdm
@@ -119,6 +120,80 @@ def load_training_state(
     del ckpt
 
     return result
+
+
+def expand_model_from_checkpoint(
+    checkpoint_path,
+    model,
+    *,
+    map_location="cpu",
+    zero_init_new_blocks=True,
+):
+    ckpt = torch.load(checkpoint_path, map_location=map_location)
+    if not isinstance(ckpt, dict) or "model_state" not in ckpt:
+        raise RuntimeError(f"Invalid checkpoint: {checkpoint_path}")
+
+    options = StateDictOptions(
+        full_state_dict=True,
+        cpu_offload=True,
+    )
+
+    current_state = get_model_state_dict(model, options=options)
+    source_state = ckpt["model_state"]
+
+    merged_state = {}
+    copied = []
+    skipped = []
+
+    for key, current_tensor in current_state.items():
+        source_tensor = source_state.get(key)
+
+        if source_tensor is not None and tuple(source_tensor.shape) == tuple(current_tensor.shape):
+            merged_state[key] = source_tensor
+            copied.append(key)
+        else:
+            merged_state[key] = current_tensor
+            if source_tensor is not None:
+                skipped.append(key)
+
+    old_block_ids = set()
+    block_pattern = re.compile(r"blocks\.(\d+)\.")
+
+    for key in source_state.keys():
+        match = block_pattern.search(key)
+        if match:
+            old_block_ids.add(int(match.group(1)))
+
+    old_n_blocks = (max(old_block_ids) + 1) if old_block_ids else 0
+    zeroed = []
+
+    if zero_init_new_blocks:
+        for key, tensor in merged_state.items():
+            match = block_pattern.search(key)
+            if not match:
+                continue
+
+            block_idx = int(match.group(1))
+            if block_idx < old_n_blocks:
+                continue
+
+            if key.endswith(("res_fused", "res_pw", "res_mlp")):
+                merged_state[key] = torch.zeros_like(tensor)
+                zeroed.append(key)
+
+    set_model_state_dict(
+        model,
+        merged_state,
+        options=options,
+    )
+
+    return {
+        "checkpoint_path": checkpoint_path,
+        "copied_keys": copied,
+        "skipped_keys": skipped,
+        "old_n_blocks": old_n_blocks,
+        "zeroed_keys": zeroed,
+    }
 
 
 def is_dist():

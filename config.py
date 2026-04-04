@@ -160,7 +160,7 @@ MODEL_CONFIG = dict(
     in_channels=6,
     out_channels=6,
     width=48,
-    n_layers=4,
+    n_layers=6,
     dropout=0.0,
     checkpoint_blocks=True,
 )
@@ -171,6 +171,8 @@ TRAIN_FILE   = IODIR + f"3D_sim_train.hdf5"
 TEST_FILE   = IODIR + f"3D_sim_test.hdf5"
 MODEL_DIR  = f"training_{MODEL}/"
 MODEL_FILE = MODEL_DIR + f"3D_sim_train_s123.pt"
+EXPAND_FROM_CHECKPOINT = MODEL_FILE
+ZERO_INIT_NEW_BLOCKS = True
 
 
 DEBUG_LOSS = False

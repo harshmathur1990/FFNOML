@@ -6,6 +6,7 @@
 #   build_solving_set_ffno
 #   ffno_train_model
 #   ffno_predict_populations
+#   ffno_test_model
 #
 # ============================================================
 
@@ -20,6 +21,7 @@ from train_utils import (
     train,
     validate,
     compute_mean_stats,
+    expand_model_from_checkpoint,
     get_resume_checkpoint_path,
     load_training_state,
 )
@@ -663,11 +665,16 @@ def ffno_train_model(
     min_learning_rate=1e-6,
     resume=False,
     bestpath=False,
-    load_earlier_val=False
+    load_earlier_val=False,
+    expand_from_checkpoint=None,
+    zero_init_new_blocks=True,
 ):
     resume_path = get_resume_checkpoint_path(save_path)
     load_path = None
     load_optimizer_state = False
+
+    if expand_from_checkpoint is not None and resume:
+        raise ValueError("expand_from_checkpoint cannot be combined with resume")
 
     if os.path.isfile(save_path) and not resume:
         raise IOError(
@@ -749,7 +756,31 @@ def ffno_train_model(
 
     model, scheduler, optimizer, loss_fn = builder.build()
 
-    if load_path is not None:
+    if expand_from_checkpoint is not None:
+        expand_info = expand_model_from_checkpoint(
+            expand_from_checkpoint,
+            model,
+            map_location="cpu",
+            zero_init_new_blocks=zero_init_new_blocks,
+        )
+
+        if dist.is_available() and dist.is_initialized():
+            dist.barrier()
+
+        if (
+            not multi_gpu
+            or not dist.is_available()
+            or not dist.is_initialized()
+            or dist.get_rank() == 0
+        ):
+            print(
+                f"Expanded model from {expand_from_checkpoint}: "
+                f"copied {len(expand_info['copied_keys'])} tensors, "
+                f"zeroed {len(expand_info['zeroed_keys'])} residual tensors, "
+                f"old_n_blocks={expand_info['old_n_blocks']}"
+            )
+
+    elif load_path is not None:
         load_training_state(
             load_path,
             model,

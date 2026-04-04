@@ -31,6 +31,7 @@ def parse_args():
     parser.add_argument("--predict", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--bestpath", action="store_true")
+    parser.add_argument("--expand", action="store_true")
     return parser.parse_args()
 
 
@@ -85,7 +86,7 @@ def build_datasets():
         )
 
 
-def train_model(*, resume=False, bestpath=False):
+def train_model(*, resume=False, bestpath=False, expand=False):
 
     ffno_train_model(
         model=MODEL,
@@ -117,7 +118,9 @@ def train_model(*, resume=False, bestpath=False):
         min_learning_rate=MIN_LEARNING_RATE,
         resume=resume,
         bestpath=bestpath,
-        load_earlier_val=LOAD_EARLIER_VAL
+        load_earlier_val=LOAD_EARLIER_VAL,
+        expand_from_checkpoint=EXPAND_FROM_CHECKPOINT if expand else None,
+        zero_init_new_blocks=ZERO_INIT_NEW_BLOCKS,
     )
 
 
@@ -388,14 +391,20 @@ if __name__ == "__main__":
         raise RuntimeError("--resume can only be used together with --train")
     if args.bestpath and not args.train:
         raise RuntimeError("--bestpath can only be used together with --train")
+    if args.expand and not args.train:
+        raise RuntimeError("--expand can only be used together with --train")
     if args.test and (args.resume or args.bestpath):
         raise RuntimeError("--resume/--bestpath are only valid together with --train")
+    if args.expand and (args.resume or args.bestpath):
+        raise RuntimeError("--expand cannot be combined with --resume or --bestpath")
+    if args.expand and not EXPAND_FROM_CHECKPOINT:
+        raise RuntimeError("Set EXPAND_FROM_CHECKPOINT in config.py before using --expand")
 
     if args.build:
         build_datasets()
 
     elif args.train:
-        train_model(resume=args.resume, bestpath=args.bestpath)
+        train_model(resume=args.resume, bestpath=args.bestpath, expand=args.expand)
 
     elif args.test:
         test_model()
