@@ -169,9 +169,11 @@ MODEL_CONFIG = dict(
 IODIR = "IO/"
 TRAIN_FILE   = IODIR + f"3D_sim_train.hdf5"
 TEST_FILE   = IODIR + f"3D_sim_test.hdf5"
-MODEL_DIR  = f"training_{MODEL}/"
-MODEL_FILE = MODEL_DIR + f"3D_sim_train_s123.pt"
-EXPAND_FROM_CHECKPOINT = MODEL_FILE
+
+MODEL_DIR = "training_FFNO3D_expand/"
+MODEL_FILE = MODEL_DIR + "3D_sim_train_s123_expand.pt"
+
+EXPAND_FROM_CHECKPOINT = "training_FFNO3D/3D_sim_train_s123.pt"
 ZERO_INIT_NEW_BLOCKS = True
 
 
