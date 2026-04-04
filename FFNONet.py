@@ -16,6 +16,7 @@ import json
 import numpy as np
 import h5py
 import torch
+import torch.distributed as dist
 from interp_utils import interpolate_everything
 from train_utils import (
     train,
