@@ -677,6 +677,13 @@ def ffno_train_model(
         raise ValueError("expand_from_checkpoint cannot be combined with resume")
 
     if os.path.isfile(save_path) and not resume:
+        if expand_from_checkpoint is not None:
+            raise IOError(
+                f"Output exists: {save_path}. "
+                "For --expand, set MODEL_FILE / MODEL_DIR to a new checkpoint path "
+                "for the expanded model."
+            )
+
         raise IOError(
             f"Output exists: {save_path}. Use --resume with --train to continue training."
         )
