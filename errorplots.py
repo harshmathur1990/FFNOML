@@ -98,25 +98,22 @@ def plot_log_population_error_envelopes(
     ncols=2,
 ):
     """
-    Plot median + 68% + 95% envelopes for (log10(b_NN) - log10(b)) / log10(b)
-    vs log10(cmass).
+    Plot median + 68% + 95% envelopes for log10(b_NN / b) vs log10(cmass).
     """
 
     assert pred.shape == true.shape
     nlevels, ndepth, nx, ny = pred.shape
 
     eps = 1e-30
-    log_pred = np.log10(np.maximum(pred, eps))
-    log_true = np.log10(np.maximum(true, eps))
-    log_rel_err = (log_pred - log_true) / (log_true + eps)
-    log_rel_err[true <= 0] = np.nan
-    log_rel_err = log_rel_err.reshape(nlevels, ndepth, -1)
+    log_ratio = np.log10((pred + eps) / (true + eps))
+    log_ratio[true <= 0] = np.nan
+    log_ratio = log_ratio.reshape(nlevels, ndepth, -1)
 
-    p50 = np.nanmedian(log_rel_err, axis=-1)
-    p16 = np.nanpercentile(log_rel_err, 16, axis=-1)
-    p84 = np.nanpercentile(log_rel_err, 84, axis=-1)
-    p025 = np.nanpercentile(log_rel_err, 2.5, axis=-1)
-    p975 = np.nanpercentile(log_rel_err, 97.5, axis=-1)
+    p50 = np.nanmedian(log_ratio, axis=-1)
+    p16 = np.nanpercentile(log_ratio, 16, axis=-1)
+    p84 = np.nanpercentile(log_ratio, 84, axis=-1)
+    p025 = np.nanpercentile(log_ratio, 2.5, axis=-1)
+    p975 = np.nanpercentile(log_ratio, 97.5, axis=-1)
 
     log_cmass = np.log10(cmass)
 
@@ -146,7 +143,7 @@ def plot_log_population_error_envelopes(
         ax.set_xlabel(r"log cmass")
 
     for ax in axes[:, 0]:
-        ax.set_ylabel(r"($\log b_{NN}$ - $\log b$) / $\log b$")
+        ax.set_ylabel(r"$\log_{10}(b_{NN} / b)$")
 
     for j in range(nlevels, nrows * ncols):
         fig.delaxes(axes[j // ncols, j % ncols])
@@ -300,7 +297,7 @@ def make_snapshot_plot(dataset, output_dir, show=False):
         figsize=(12, 10),
         ncols=2,
     )
-    fig_log.suptitle(f"{dataset['NAME']} (log space)", fontsize=14)
+    fig_log.suptitle(f"{dataset['NAME']} (log ratio)", fontsize=14)
     fig_log.tight_layout(rect=[0, 0, 1, 0.97])
 
     outpath_log = os.path.join(
