@@ -89,6 +89,72 @@ def plot_population_error_envelopes(
     return fig, axes
 
 
+def plot_log_population_error_envelopes(
+    pred,
+    true,
+    cmass,
+    level_names=None,
+    figsize=(10, 10),
+    ncols=2,
+):
+    """
+    Plot median + 68% + 95% envelopes for (log10(b_NN) - log10(b)) / log10(b)
+    vs log10(cmass).
+    """
+
+    assert pred.shape == true.shape
+    nlevels, ndepth, nx, ny = pred.shape
+
+    eps = 1e-30
+    log_pred = np.log10(np.maximum(pred, eps))
+    log_true = np.log10(np.maximum(true, eps))
+    log_rel_err = (log_pred - log_true) / (log_true + eps)
+    log_rel_err[true <= 0] = np.nan
+    log_rel_err = log_rel_err.reshape(nlevels, ndepth, -1)
+
+    p50 = np.nanmedian(log_rel_err, axis=-1)
+    p16 = np.nanpercentile(log_rel_err, 16, axis=-1)
+    p84 = np.nanpercentile(log_rel_err, 84, axis=-1)
+    p025 = np.nanpercentile(log_rel_err, 2.5, axis=-1)
+    p975 = np.nanpercentile(log_rel_err, 97.5, axis=-1)
+
+    log_cmass = np.log10(cmass)
+
+    nrows = int(np.ceil(nlevels / ncols))
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=figsize,
+        sharex=True,
+        sharey=True,
+        squeeze=False,
+    )
+
+    for i in range(nlevels):
+        ax = axes[i // ncols, i % ncols]
+
+        ax.fill_between(log_cmass, p025[i], p975[i], color="#d9c2f0", alpha=0.8)
+        ax.fill_between(log_cmass, p16[i], p84[i], color="#7b8fc7", alpha=0.9)
+        ax.plot(log_cmass, p50[i], color="#243b6b", lw=1.5)
+
+        if level_names is not None:
+            ax.set_title(level_names[i], fontsize=12)
+
+        ax.axhline(0.0, color="k", lw=0.5, alpha=0.5)
+
+    for ax in axes[-1]:
+        ax.set_xlabel(r"log cmass")
+
+    for ax in axes[:, 0]:
+        ax.set_ylabel(r"($\log b_{NN}$ - $\log b$) / $\log b$")
+
+    for j in range(nlevels, nrows * ncols):
+        fig.delaxes(axes[j // ncols, j % ncols])
+
+    plt.tight_layout()
+    return fig, axes
+
+
 def load_true_multi3d_departures(dataset, active_atoms=None):
     """
     Load Multi3D truth for one snapshot and concatenate atoms in ACTIVE_ATOMS order.
@@ -226,10 +292,29 @@ def make_snapshot_plot(dataset, output_dir, show=False):
     fig.savefig(outpath, dpi=200, bbox_inches="tight")
     print(f"Saved {outpath}")
 
+    fig_log, _ = plot_log_population_error_envelopes(
+        pred_plot,
+        true_plot,
+        cmass_grid,
+        level_names=level_names,
+        figsize=(12, 10),
+        ncols=2,
+    )
+    fig_log.suptitle(f"{dataset['NAME']} (log space)", fontsize=14)
+    fig_log.tight_layout(rect=[0, 0, 1, 0.97])
+
+    outpath_log = os.path.join(
+        output_dir,
+        f"log_population_error_envelopes_{dataset['NAME']}.png",
+    )
+    fig_log.savefig(outpath_log, dpi=200, bbox_inches="tight")
+    print(f"Saved {outpath_log}")
+
     if show:
         plt.show()
     else:
         plt.close(fig)
+        plt.close(fig_log)
 
 
 def main():
