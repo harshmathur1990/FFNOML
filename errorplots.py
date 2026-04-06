@@ -35,14 +35,14 @@ def plot_population_error_envelopes(
     ncols=2,
 ):
     """
-    Plot median + 68% + 95% percent-error envelopes vs log10(cmass).
+    Plot median + 68% + 95% relative-error envelopes vs log10(cmass).
     """
 
     assert pred.shape == true.shape
     nlevels, ndepth, nx, ny = pred.shape
 
     eps = 1e-30
-    rel_err = 100.0 * (pred - true) / (true + eps)
+    rel_err = (pred - true) / (true + eps)
     rel_err[true <= 0] = np.nan
     rel_err = rel_err.reshape(nlevels, ndepth, -1)
 
@@ -80,7 +80,7 @@ def plot_population_error_envelopes(
         ax.set_xlabel(r"log cmass")
 
     for ax in axes[:, 0]:
-        ax.set_ylabel(r"Percent Error in $b$")
+        ax.set_ylabel(r"(b$_{NN}$ - b) / b")
 
     for j in range(nlevels, nrows * ncols):
         fig.delaxes(axes[j // ncols, j % ncols])
