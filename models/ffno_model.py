@@ -25,6 +25,14 @@ def _gn(channels, max_groups=8):
     return nn.GroupNorm(g, channels)
 
 
+def _resolve_layer_dropout(rate, layers, layer_idx):
+    if not layers:
+        return 0.0
+    if layer_idx in set(layers):
+        return float(rate)
+    return 0.0
+
+
 # ============================================================
 # Pointwise MLP (small corrective branch)
 # ============================================================
@@ -314,7 +322,13 @@ class FFNOBlock3dBalanced(nn.Module):
       - small corrective pointwise/mlp path
     """
 
-    def __init__(self, width=128, dropout=0.05):
+    def __init__(
+        self,
+        width=128,
+        dropout=0.05,
+        spec_dropout=0.0,
+        vertical_dropout=0.0,
+    ):
         super().__init__()
 
         self.spec = SpectralConv2dFull(
@@ -352,14 +366,17 @@ class FFNOBlock3dBalanced(nn.Module):
         self.res_mlp = nn.Parameter(torch.tensor([0.15]))
 
         self.act = nn.GELU()
-        self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+        self.spec_drop = nn.Dropout(spec_dropout) if spec_dropout > 0 else nn.Identity()
+        self.vert_drop = (
+            nn.Dropout(vertical_dropout) if vertical_dropout > 0 else nn.Identity()
+        )
 
     def forward(self, x, dx, dy, collect_stats=False, branch_mask=None):
         if not collect_stats and branch_mask is None:
             residual = x
 
-            spec = self.drop(self.act(self.norm_spec(self.spec(x, dx, dy))))
-            vert = self.drop(self.act(self.norm_vert(self.vertical(x))))
+            spec = self.spec_drop(self.act(self.norm_spec(self.spec(x, dx, dy))))
+            vert = self.vert_drop(self.act(self.norm_vert(self.vertical(x))))
 
             w = torch.softmax(self.branch_logits, dim=0)
             fused = w[0] * spec + w[1] * vert
@@ -378,8 +395,8 @@ class FFNOBlock3dBalanced(nn.Module):
         stats = {} if collect_stats else None
         branch_mask = branch_mask or {}
 
-        spec = self.drop(self.act(self.norm_spec(self.spec(x, dx, dy))))
-        vert = self.drop(self.act(self.norm_vert(self.vertical(x))))
+        spec = self.spec_drop(self.act(self.norm_spec(self.spec(x, dx, dy))))
+        vert = self.vert_drop(self.act(self.norm_vert(self.vertical(x))))
 
         w = torch.softmax(self.branch_logits, dim=0)
         spec_mask = float(branch_mask.get("spec", 1.0))
@@ -437,6 +454,10 @@ class FFNO3D(nn.Module):
         width=128,
         n_layers=4,
         dropout=0.05,
+        spec_dropout=0.0,
+        vertical_dropout=0.0,
+        spec_dropout_layers=None,
+        vertical_dropout_layers=None,
         checkpoint_blocks=True,
     ):
         super().__init__()
@@ -450,8 +471,17 @@ class FFNO3D(nn.Module):
         )
 
         self.blocks = nn.ModuleList([
-            FFNOBlock3dBalanced(width=width, dropout=dropout)
-            for _ in range(n_layers)
+            FFNOBlock3dBalanced(
+                width=width,
+                dropout=dropout,
+                spec_dropout=_resolve_layer_dropout(
+                    spec_dropout, spec_dropout_layers, layer_idx
+                ),
+                vertical_dropout=_resolve_layer_dropout(
+                    vertical_dropout, vertical_dropout_layers, layer_idx
+                ),
+            )
+            for layer_idx in range(n_layers)
         ])
 
         self.proj1 = nn.Conv3d(width, width * 2, 1, bias=False)

@@ -5,12 +5,12 @@ import os
 SIMULATIONS = {
     "en024048_hion": {
         "base_path": "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion",
-        "snaps": ["385", "386"],
+        "snaps": ["385", "386", "465"],
     }
 }
 
 TRAIN_SPLIT = {
-    "en024048_hion": ["385"],
+    "en024048_hion": ["385, 465"],
 }
 
 VAL_SPLIT = {
@@ -160,8 +160,12 @@ MODEL_CONFIG = dict(
     in_channels=6,
     out_channels=6,
     width=48,
-    n_layers=6,
+    n_layers=4,
     dropout=0.0,
+    spec_dropout=0.03,
+    vertical_dropout=0.03,
+    spec_dropout_layers=[1],
+    vertical_dropout_layers=[2],
     checkpoint_blocks=True,
 )
 
