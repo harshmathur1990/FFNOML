@@ -10,7 +10,7 @@ SIMULATIONS = {
 }
 
 TRAIN_SPLIT = {
-    "en024048_hion": ["385, 465"],
+    "en024048_hion": ["385", "465"],
 }
 
 VAL_SPLIT = {
