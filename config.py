@@ -190,7 +190,7 @@ IODIR = "IO/"
 MODEL_DIR = "training_FFNO3D_expand_fused/"
 MODEL_FILE = MODEL_DIR + "3D_sim_train_s123_expand.pt"
 
-EXPAND_FROM_CHECKPOINT = "training_FFNO3D_expand/3D_sim_train_s123.pt"
+EXPAND_FROM_CHECKPOINT = "training_FFNO3D_expand/3D_sim_train_s123_expand.pt"
 ZERO_INIT_NEW_BLOCKS = True
 
 
