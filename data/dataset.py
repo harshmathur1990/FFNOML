@@ -23,6 +23,7 @@ class H5PatchDataset(Dataset):
         self._dy = None
         self._scale = None
         self._weights = None
+        self._S = None
 
         with h5py.File(self.h5_path, "r") as f:
             self.N = int(f["inputs"].shape[0])
@@ -30,6 +31,7 @@ class H5PatchDataset(Dataset):
             # check optional datasets
             self.has_scale = "scale" in f
             self.has_weights = "weights" in f
+            self.has_source_targets = "source_targets" in f
 
     def _ensure_open(self):
 
@@ -48,6 +50,9 @@ class H5PatchDataset(Dataset):
 
             if self.has_weights:
                 self._weights = self._f["weights"]
+
+            if self.has_source_targets:
+                self._S = self._f["source_targets"]
 
     def __len__(self):
         return self.N
@@ -71,7 +76,11 @@ class H5PatchDataset(Dataset):
         if self.has_weights:
             weight = torch.tensor(self._weights[idx], dtype=torch.float32)
 
-        return x, y, dx, dy, scale, weight
+        source_target = torch.empty(0, dtype=torch.float32)
+        if self.has_source_targets:
+            source_target = torch.from_numpy(self._S[idx])
+
+        return x, y, dx, dy, scale, weight, source_target
 
 
 class H5CubeDataset(Dataset):
@@ -92,6 +101,7 @@ class H5CubeDataset(Dataset):
         self._dy = None
         self._weights = None
         self._scale = None
+        self._S = None
 
         with h5py.File(self.h5_path, "r") as f:
 
@@ -100,6 +110,7 @@ class H5CubeDataset(Dataset):
             self.has_targets = "targets" in f
             self.has_weights = "weights" in f
             self.has_scale = "scale" in f
+            self.has_source_targets = "source_targets" in f
 
     def _ensure_open(self):
 
@@ -120,6 +131,9 @@ class H5CubeDataset(Dataset):
 
             if self.has_scale:
                 self._scale = self._f["scale"]
+
+            if self.has_source_targets:
+                self._S = self._f["source_targets"]
 
     def __len__(self):
         return self.N
@@ -146,4 +160,8 @@ class H5CubeDataset(Dataset):
         if self.has_weights:
             weight = torch.tensor(self._weights[idx], dtype=torch.float32)
 
-        return x, y, dx, dy, scale, weight
+        source_target = torch.empty(0, dtype=torch.float32)
+        if self.has_source_targets:
+            source_target = torch.from_numpy(self._S[idx])
+
+        return x, y, dx, dy, scale, weight, source_target

@@ -248,13 +248,23 @@ def reduce_components(comp_sums, count, device):
     return out
 
 
-def compute_loss(pred, target, weight, loss_fn, x, pred_full=None, target_full=None):
+def compute_loss(
+    pred,
+    target,
+    weight,
+    loss_fn,
+    x,
+    pred_full=None,
+    target_full=None,
+    source_true=None,
+):
     loss, components = loss_fn(
         x,
         pred,
         target,
         logb_pred_full=pred_full,
         logb_true_full=target_full,
+        source_true=source_true,
     )
 
     if weight is not None:
@@ -455,7 +465,7 @@ def train_one_epoch(
         disable=not is_main_process(),
     )
 
-    for x, y, dx, dy, scale, weight in pbar:
+    for x, y, dx, dy, scale, weight, source_target in pbar:
         x = x.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True)
         dx = dx.to(device, non_blocking=True)
@@ -464,16 +474,25 @@ def train_one_epoch(
         if weight is not None:
             weight = weight.to(device, non_blocking=True)
 
+        if source_target is not None and source_target.numel() > 0:
+            source_target = source_target.to(device, non_blocking=True)
+        else:
+            source_target = None
+
         optimizer.zero_grad(set_to_none=True)
 
         pred = model(x, dx, dy)
 
         pred_full = pred
         y_full = y
+        source_true = None
 
         pred = flatten_columns_logb(pred_full)
         y = flatten_columns_logb(y_full)
         x = flatten_columns_logb(x)
+
+        if source_target is not None and source_target.numel() > 0:
+            source_true = flatten_columns_logb(source_target)
 
         loss, components = compute_loss(
             pred=pred,
@@ -483,24 +502,8 @@ def train_one_epoch(
             x=x,
             pred_full=pred_full,
             target_full=y_full,
+            source_true=source_true,
         )
-
-        # ============================================
-        # Extra diagnostics (VERY IMPORTANT)
-        # ============================================
-        with torch.no_grad():
-            err = pred - y
-
-            mse = (err ** 2).mean()
-            rmse = torch.sqrt(mse)
-
-            target_std = y.std()
-            pred_std = pred.std()
-
-            rel_rmse = rmse / (target_std + 1e-8)
-            std_ratio = pred_std / (target_std + 1e-8)
-
-            p95_err = err.abs().quantile(0.95)
 
         loss.backward()
 
@@ -521,29 +524,13 @@ def train_one_epoch(
         _accumulate_components(comp_sums, components, weight_factor=weight_factor)
         _accumulate_components(running_comp, components, weight_factor=weight_factor)
 
-        # accumulate diagnostics
-        diag = {
-            "rmse": rmse,
-            "rel_rmse": rel_rmse,
-            "std_ratio": std_ratio,
-            "p95_err": p95_err,
-        }
-
-        _accumulate_components(running_comp, diag, weight_factor=weight_factor)
-        _accumulate_components(comp_sums, diag, weight_factor=weight_factor)
-
-        # all ranks must participate in collectives
-        global_running = reduce_sum_scalar(running, device)
-        global_n = reduce_sum_scalar(n_columns, device)
-
-        avg_so_far = global_running / max(1, global_n)
-
-        avg_comp = {}
-        for k, v in running_comp.items():
-            global_v = reduce_sum_scalar(v, device)
-            avg_comp[k] = global_v / max(1, global_n)
-
         if is_main_process():
+            avg_so_far = running / max(1, n_columns)
+            avg_comp = {
+                k: float(v) / max(1, n_columns)
+                for k, v in running_comp.items()
+                if isinstance(v, (int, float))
+            }
             postfix = _make_postfix(avg_so_far, lr, device, avg_comp)
             pbar.set_postfix(postfix)
 
@@ -583,7 +570,7 @@ def validate(
     )
 
     with torch.no_grad():
-        for x, y, dx, dy, scale, weight in pbar:
+        for x, y, dx, dy, scale, weight, source_target in pbar:
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
             dx = dx.to(device, non_blocking=True)
@@ -591,6 +578,11 @@ def validate(
 
             if weight is not None:
                 weight = weight.to(device, non_blocking=True)
+
+            if source_target is not None and source_target.numel() > 0:
+                source_target = source_target.to(device, non_blocking=True)
+            else:
+                source_target = None
 
             if collect_model_stats:
                 pred, stats = model(
@@ -606,10 +598,14 @@ def validate(
 
             pred_full = pred
             y_full = y
+            source_true = None
 
             pred = flatten_columns_logb(pred_full)
             y = flatten_columns_logb(y_full)
             x = flatten_columns_logb(x)
+
+            if source_target is not None and source_target.numel() > 0:
+                source_true = flatten_columns_logb(source_target)
 
             loss, components = compute_loss(
                 pred=pred,
@@ -619,6 +615,7 @@ def validate(
                 x=x,
                 pred_full=pred_full,
                 target_full=y_full,
+                source_true=source_true,
             )
 
             # ============================================
@@ -662,17 +659,13 @@ def validate(
             _accumulate_components(running_comp, diag, weight_factor=weight_factor)
             _accumulate_components(comp_sums, diag, weight_factor=weight_factor)
 
-            global_running = reduce_sum_scalar(running, device)
-            global_n = reduce_sum_scalar(n_columns, device)
-
-            avg_so_far = global_running / max(1, global_n)
-
-            avg_comp = {}
-            for k, v in running_comp.items():
-                global_v = reduce_sum_scalar(v, device)
-                avg_comp[k] = global_v / max(1, global_n)
-
             if is_main_process():
+                avg_so_far = running / max(1, n_columns)
+                avg_comp = {
+                    k: float(v) / max(1, n_columns)
+                    for k, v in running_comp.items()
+                    if isinstance(v, (int, float))
+                }
                 postfix = _make_postfix(avg_so_far, None, device, avg_comp)
                 pbar.set_postfix(postfix)
 

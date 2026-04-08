@@ -33,6 +33,13 @@ from normalize_utils import *
 from tqdm import tqdm
 import itertools
 import math
+from loss.nlte_composite_loss import (
+    compute_Sv_all_lines_T_batched,
+    extract_temperature,
+    c_AHz,
+    h,
+    c,
+)
 
 
 # ============================================================
@@ -149,6 +156,32 @@ def _extract_patches_xy(X, Y, patch, stride):
     return Xp, Yp
 
 
+def _extract_patches_xy_with_source(X, Y, S, patch, stride):
+    """
+    X: [Cin, D, nx, ny]
+    Y: [Cout, D, nx, ny]
+    S: [Sout, D, nx, ny]
+    """
+    xs, ys, ss = [], [], []
+
+    for i in range(0, X.shape[2] - patch + 1, stride):
+        for j in range(0, X.shape[3] - patch + 1, stride):
+            xs.append(X[:, :, i:i+patch, j:j+patch])
+            ys.append(Y[:, :, i:i+patch, j:j+patch])
+            ss.append(S[:, :, i:i+patch, j:j+patch])
+
+    if len(xs) == 0:
+        raise ValueError(
+            f"Patch too large: patch={patch} for nx,ny={X.shape[2]},{X.shape[3]}"
+        )
+
+    Xp = np.stack(xs, axis=0).astype(np.float32, copy=False)
+    Yp = np.stack(ys, axis=0).astype(np.float32, copy=False)
+    Sp = np.stack(ss, axis=0).astype(np.float32, copy=False)
+
+    return Xp, Yp, Sp
+
+
 # ------------------------------------------------------------
 # Downsampling with anti-alias filter
 # ------------------------------------------------------------
@@ -175,6 +208,98 @@ def _downsample_xy(X, Y, scale):
     return Xs, Ys
 
 
+def _downsample_xy_with_source(X, Y, S, scale):
+    if scale == 1:
+        return X, Y, S
+
+    sigma = scale / 2
+
+    Xf = gaussian_filter(X, sigma=(0, 0, sigma, sigma))
+    Yf = gaussian_filter(Y, sigma=(0, 0, sigma, sigma))
+    Sf = gaussian_filter(S, sigma=(0, 0, sigma, sigma))
+
+    Xs = Xf[:, :, ::scale, ::scale]
+    Ys = Yf[:, :, ::scale, ::scale]
+    Ss = Sf[:, :, ::scale, ::scale]
+
+    return Xs, Ys, Ss
+
+
+def _flatten_columns_ch_first(x):
+    x_t = torch.from_numpy(x[None, ...])
+    return x_t.permute(0, 3, 4, 1, 2).reshape(-1, x.shape[0], x.shape[1])
+
+
+def _restore_columns_ch_first(cols, channels, depth, height, width):
+    return cols.reshape(1, height, width, channels, depth).permute(0, 3, 4, 1, 2)[0]
+
+
+def _precompute_source_targets(
+    X,
+    Y,
+    *,
+    chi,
+    lines,
+    wave,
+    levels,
+    mean_X,
+    std_X,
+    mean_Y,
+    std_Y,
+):
+    x_cols = _flatten_columns_ch_first(X)
+    y_cols = _flatten_columns_ch_first(Y)
+
+    mean_x_t = torch.as_tensor(mean_X, dtype=x_cols.dtype)
+    std_x_t = torch.as_tensor(std_X, dtype=x_cols.dtype)
+    mean_y_t = torch.as_tensor(mean_Y, dtype=y_cols.dtype)
+    std_y_t = torch.as_tensor(std_Y, dtype=y_cols.dtype)
+
+    T = extract_temperature(x_cols, mean_x_t, std_x_t)
+
+    level_offsets = np.concatenate(([0], np.cumsum(levels)))
+    source_parts = []
+
+    for atom_idx in range(len(levels)):
+        start = int(level_offsets[atom_idx])
+        end = int(level_offsets[atom_idx + 1])
+
+        std = std_y_t[start:end][None, :, None]
+        mean = mean_y_t[start:end][None, :, None]
+        logb_true_atom = y_cols[:, start:end, :] * std + mean
+
+        wave_arr = np.asarray(wave[atom_idx], dtype=np.float32)
+        nu = torch.tensor(c_AHz / wave_arr, dtype=y_cols.dtype)
+        pref = torch.tensor(
+            (2.0 * h * (c_AHz / wave_arr) / (c ** 2)) * (c_AHz / wave_arr) ** 2,
+            dtype=y_cols.dtype,
+        )
+
+        _, x_true = compute_Sv_all_lines_T_batched(
+            T=T,
+            logb=logb_true_atom,
+            chi=torch.tensor(chi[atom_idx], dtype=y_cols.dtype),
+            lines=torch.tensor(lines[atom_idx], dtype=torch.long),
+            nu=nu,
+            K_prefactor=pref,
+            debug=False,
+            return_x=True,
+        )
+
+        source_parts.append(x_true)
+
+    source_cols = torch.cat(source_parts, dim=1)
+    source = _restore_columns_ch_first(
+        source_cols,
+        channels=source_cols.shape[1],
+        depth=source_cols.shape[2],
+        height=X.shape[2],
+        width=X.shape[3],
+    )
+
+    return source.numpy().astype(np.float32, copy=False)
+
+
 # ============================================================
 # ---------------- HDF5 WRITERS -------------------------------
 # ============================================================
@@ -187,6 +312,7 @@ def _save_hdf5_patches(
     dys,
     cmass_grid,
     *,
+    source_targets=None,
     scales=None,
     weights=None,
     mean_X=None,
@@ -202,6 +328,7 @@ def _save_hdf5_patches(
     ----------
     Xp : [N, Cin, D, P, P]
     Yp : [N, Cout, D, P, P]
+    source_targets : [N, Sout, D, P, P] optional
 
     dxs : [N]
     dys : [N]
@@ -256,6 +383,15 @@ def _save_hdf5_patches(
             compression_opts=4,
             shuffle=True,
         )
+
+        if source_targets is not None:
+            f.create_dataset(
+                "source_targets",
+                data=source_targets,
+                compression="gzip",
+                compression_opts=4,
+                shuffle=True,
+            )
 
         f.create_dataset("dx", data=dxs.astype(np.float32))
         f.create_dataset("dy", data=dys.astype(np.float32))
@@ -380,6 +516,10 @@ def build_dataset_ffno(
     dy_list,
     *,
     save_path,
+    chi=None,
+    lines=None,
+    wave=None,
+    levels=None,
     ndep=400,
     patch=96,
     stride=48,
@@ -459,6 +599,7 @@ def build_dataset_ffno(
 
     X_all = []
     Y_all = []
+    S_all = []
 
     dx_all = []
     dy_all = []
@@ -497,26 +638,56 @@ def build_dataset_ffno(
         X = normalize_channels(X, mean_X, std_X)
         Y = normalize_channels(Y, mean_Y, std_Y)
 
-        for s in scales:
+        S = None
+        if chi is not None and lines is not None and wave is not None and levels is not None:
+            S = _precompute_source_targets(
+                X,
+                Y,
+                chi=chi,
+                lines=lines,
+                wave=wave,
+                levels=levels,
+                mean_X=mean_X,
+                std_X=std_X,
+                mean_Y=mean_Y,
+                std_Y=std_Y,
+            )
 
-            Xs, Ys = _downsample_xy(X, Y, s)
+        for s in scales:
+            if S is not None:
+                Xs, Ys, Ss = _downsample_xy_with_source(X, Y, S, s)
+            else:
+                Xs, Ys = _downsample_xy(X, Y, s)
+                Ss = None
 
             nx, ny = Xs.shape[2:]
 
             if nx < patch or ny < patch:
                 continue
 
-            Xp, Yp = _extract_patches_xy(
-                Xs,
-                Ys,
-                patch=patch,
-                stride=stride,
-            )
+            if Ss is not None:
+                Xp, Yp, Sp = _extract_patches_xy_with_source(
+                    Xs,
+                    Ys,
+                    Ss,
+                    patch=patch,
+                    stride=stride,
+                )
+            else:
+                Xp, Yp = _extract_patches_xy(
+                    Xs,
+                    Ys,
+                    patch=patch,
+                    stride=stride,
+                )
+                Sp = None
 
             n = Xp.shape[0]
 
             X_all.append(Xp)
             Y_all.append(Yp)
+            if Sp is not None:
+                S_all.append(Sp)
 
             dx_all.append(np.full(n, dx * s))
             dy_all.append(np.full(n, dy * s))
@@ -531,6 +702,7 @@ def build_dataset_ffno(
 
     X_all = np.concatenate(X_all)
     Y_all = np.concatenate(Y_all)
+    S_all = np.concatenate(S_all) if len(S_all) > 0 else None
 
     dx_all = np.concatenate(dx_all)
     dy_all = np.concatenate(dy_all)
@@ -568,6 +740,7 @@ def build_dataset_ffno(
         dx_all,
         dy_all,
         cmass_grid_ref,
+        source_targets=S_all,
         scales=scale_all,
         weights=weights,
         attrs=dict(
