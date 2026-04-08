@@ -315,10 +315,10 @@ class SpectralConv2dFull(nn.Module):
 # ============================================================
 class FFNOBlock3dBalanced(nn.Module):
     """
-    Spectral and vertical branches are both strengthened and kept balanced by:
+    Spectral and vertical branches are both strengthened and fused by:
       - same input to both branches
       - normalization on both outputs
-      - learned softmax branch weights
+      - learned channel-mixing fusion after concatenation
       - small corrective pointwise/mlp path
     """
 
@@ -355,11 +355,14 @@ class FFNOBlock3dBalanced(nn.Module):
 
         self.norm_spec = _gn(width)
         self.norm_vert = _gn(width)
+        self.fuse = nn.Sequential(
+            nn.Conv3d(2 * width, 2 * width, 1, bias=False),
+            nn.GELU(),
+            nn.Conv3d(2 * width, width, 1, bias=False),
+        )
+        self.norm_fuse = _gn(width)
         self.norm_pw = _gn(width)
         self.norm_mlp = _gn(width)
-
-        # Softmax keeps both on comparable footing
-        self.branch_logits = nn.Parameter(torch.tensor([0.0, 0.0]))  # [spec, vert]
 
         self.res_fused = nn.Parameter(torch.tensor([1.0]))
         self.res_pw = nn.Parameter(torch.tensor([0.15]))
@@ -377,9 +380,7 @@ class FFNOBlock3dBalanced(nn.Module):
 
             spec = self.spec_drop(self.act(self.norm_spec(self.spec(x, dx, dy))))
             vert = self.vert_drop(self.act(self.norm_vert(self.vertical(x))))
-
-            w = torch.softmax(self.branch_logits, dim=0)
-            fused = w[0] * spec + w[1] * vert
+            fused = self.act(self.norm_fuse(self.fuse(torch.cat([spec, vert], dim=1))))
 
             x1 = residual + self.res_fused * fused
 
@@ -398,16 +399,16 @@ class FFNOBlock3dBalanced(nn.Module):
         spec = self.spec_drop(self.act(self.norm_spec(self.spec(x, dx, dy))))
         vert = self.vert_drop(self.act(self.norm_vert(self.vertical(x))))
 
-        w = torch.softmax(self.branch_logits, dim=0)
         spec_mask = float(branch_mask.get("spec", 1.0))
         vert_mask = float(branch_mask.get("vertical", 1.0))
         pw_mask = float(branch_mask.get("pw", 1.0))
         mlp_mask = float(branch_mask.get("mlp", 1.0))
 
-        spec_weight_eff = w[0] * spec_mask
-        vert_weight_eff = w[1] * vert_mask
-
-        fused = spec_weight_eff * spec + vert_weight_eff * vert
+        spec_eff = spec_mask * spec
+        vert_eff = vert_mask * vert
+        fused = self.act(
+            self.norm_fuse(self.fuse(torch.cat([spec_eff, vert_eff], dim=1)))
+        )
 
         x1 = residual + self.res_fused * fused
 
@@ -421,17 +422,19 @@ class FFNOBlock3dBalanced(nn.Module):
             with torch.no_grad():
                 stats["spec_norm"] = spec.abs().mean().item()
                 stats["vertical_norm"] = vert.abs().mean().item()
+                stats["fuse_norm"] = fused.abs().mean().item()
                 stats["pw_norm"] = pw.abs().mean().item()
                 stats["mlp_norm"] = mlp.abs().mean().item()
-                stats["spec_weight"] = float(w[0].item())
-                stats["vertical_weight"] = float(w[1].item())
-                stats["spec_weight_effective"] = float(spec_weight_eff.item())
-                stats["vertical_weight_effective"] = float(vert_weight_eff.item())
+                stats["spec_weight"] = float(spec_mask)
+                stats["vertical_weight"] = float(vert_mask)
+                stats["spec_weight_effective"] = float(spec_mask)
+                stats["vertical_weight_effective"] = float(vert_mask)
                 stats["res_fused"] = float(self.res_fused.item())
                 stats["res_pw"] = float(self.res_pw.item())
                 stats["res_mlp"] = float(self.res_mlp.item())
-                stats["spec_contrib"] = (self.res_fused * spec_weight_eff * spec).abs().mean().item()
-                stats["vertical_contrib"] = (self.res_fused * vert_weight_eff * vert).abs().mean().item()
+                stats["spec_contrib"] = (self.res_fused * spec_eff).abs().mean().item()
+                stats["vertical_contrib"] = (self.res_fused * vert_eff).abs().mean().item()
+                stats["fuse_contrib"] = (self.res_fused * fused).abs().mean().item()
                 stats["pw_contrib"] = ((self.res_pw * pw_mask) * pw).abs().mean().item()
                 stats["mlp_contrib"] = ((self.res_mlp * mlp_mask) * mlp).abs().mean().item()
                 stats["fused_update"] = (x1 - residual).abs().mean().item()

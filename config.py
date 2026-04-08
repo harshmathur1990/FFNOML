@@ -174,10 +174,10 @@ IODIR = "IO/"
 TRAIN_FILE   = IODIR + f"3D_sim_train.hdf5"
 TEST_FILE   = IODIR + f"3D_sim_test.hdf5"
 
-MODEL_DIR = "training_FFNO3D_expand/"
+MODEL_DIR = "training_FFNO3D_expand_fused/"
 MODEL_FILE = MODEL_DIR + "3D_sim_train_s123_expand.pt"
 
-EXPAND_FROM_CHECKPOINT = "training_FFNO3D/3D_sim_train_s123.pt"
+EXPAND_FROM_CHECKPOINT = "training_FFNO3D_expand/3D_sim_train_s123.pt"
 ZERO_INIT_NEW_BLOCKS = True
 
 
@@ -193,8 +193,8 @@ SCALES=(1,2,3,4,5,6,7,8)
 # Training Params
 NUM_EPOCHS = 100
 BATCH_SIZE = 1
-LEARNING_RATE = 1e-6
-MIN_LEARNING_RATE = 1e-8
+LEARNING_RATE = 5e-6
+MIN_LEARNING_RATE = 1e-7
 RESUME_LAST_EPOCH = 0
 RESUME_LAST_LEARNING_RATE = 1e-7
 WEIGHT_DECAY = 1e-4
