@@ -35,6 +35,26 @@ def parse_args():
     return parser.parse_args()
 
 
+def ensure_built_datasets_exist():
+    missing = []
+
+    if not os.path.exists(TRAIN_FILE):
+        missing.append(("train", TRAIN_FILE))
+
+    if not os.path.exists(TEST_FILE):
+        missing.append(("test", TEST_FILE))
+
+    if missing:
+        missing_lines = "\n".join(
+            f"  - {label}: {path}" for label, path in missing
+        )
+        raise FileNotFoundError(
+            "With the current config, the required dataset files do not exist.\n"
+            f"{missing_lines}\n"
+            "Run pipeline.py --build first."
+        )
+
+
 def build_datasets():
 
     if not os.path.exists(TRAIN_FILE):
@@ -87,6 +107,7 @@ def build_datasets():
 
 
 def train_model(*, resume=False, bestpath=False, expand=False):
+    ensure_built_datasets_exist()
 
     ffno_train_model(
         model=MODEL,
@@ -125,6 +146,7 @@ def train_model(*, resume=False, bestpath=False, expand=False):
 
 
 def test_model():
+    ensure_built_datasets_exist()
 
     diagnostic_path = MODEL_DIR + f"val_diagnostics_{MODEL}.json"
 
@@ -149,6 +171,7 @@ def test_model():
 
 
 def run_predictions():
+    ensure_built_datasets_exist()
 
     for PRED_ATMOS in MULTI3D_PRED_DATA:
 

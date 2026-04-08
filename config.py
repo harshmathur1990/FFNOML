@@ -76,6 +76,21 @@ ACTIVE_SIMS  = ["en024048_hion"]
 ACTIVE_ATOMS = ["H"]
 
 
+def _build_split_tag(split_dict):
+    parts = []
+
+    for sim in sorted(split_dict):
+        snaps = "-".join(sorted(split_dict[sim], key=str))
+        parts.append(f"{sim}_{snaps}")
+
+    return "__".join(parts)
+
+
+def _dataset_filename(split_name, split_dict, patch, stride):
+    split_tag = _build_split_tag(split_dict)
+    return f"3D_sim_{split_name}_{split_tag}_patch{patch}_stride{stride}.hdf5"
+
+
 def build_multi3d_entries(split_dict):
 
     data = []
@@ -171,8 +186,6 @@ MODEL_CONFIG = dict(
 
 
 IODIR = "IO/"
-TRAIN_FILE   = IODIR + f"3D_sim_train.hdf5"
-TEST_FILE   = IODIR + f"3D_sim_test.hdf5"
 
 MODEL_DIR = "training_FFNO3D_expand_fused/"
 MODEL_FILE = MODEL_DIR + "3D_sim_train_s123_expand.pt"
@@ -188,6 +201,15 @@ NDEP=400
 PATCH=40
 STRIDE=20
 SCALES=(1,2,3,4,5,6,7,8)
+
+TRAIN_FILE = os.path.join(
+    IODIR,
+    _dataset_filename("train", TRAIN_SPLIT, PATCH, STRIDE),
+)
+TEST_FILE = os.path.join(
+    IODIR,
+    _dataset_filename("test", VAL_SPLIT, PATCH, STRIDE),
+)
 
 
 # Training Params
