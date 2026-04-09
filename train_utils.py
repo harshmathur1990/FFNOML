@@ -213,6 +213,18 @@ def reduce_sum_scalar(value, device):
     return t.item()
 
 
+def get_total_gpu_mem_used_gb(device):
+    """
+    Return the summed used GPU memory across all ranks/devices in GiB.
+
+    Uses device-level memory usage (total - free), which tracks tools like
+    nvtop more closely than PyTorch allocator stats alone.
+    """
+    free_bytes, total_bytes = torch.cuda.mem_get_info(device)
+    used_gb = (total_bytes - free_bytes) / 1024**3
+    return reduce_sum_scalar(used_gb, device)
+
+
 def reduce_components(comp_sums, count, device):
     """
     Reduce component sums across ranks, then divide by total batch count.
@@ -377,7 +389,7 @@ def _make_postfix(loss, lr, device, components):
         postfix["lr"] = f"{lr:.1e}"
 
     if isinstance(device, str) and device.startswith("cuda"):
-        mem = torch.cuda.memory_allocated(device) / 1024**3
+        mem = get_total_gpu_mem_used_gb(device)
         postfix["gpu_mem"] = f"{mem:.2f}G"
 
     if components is not None and isinstance(components, dict):
