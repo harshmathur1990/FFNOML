@@ -522,8 +522,23 @@ class FFNO3D(nn.Module):
             )
         return blk(x, dx, dy, collect_stats=collect_stats, branch_mask=branch_mask)
 
+    def _run_lift(self, x, collect_stats=False):
+        if self.checkpoint_blocks and self.training and not collect_stats:
+            return checkpoint(self.lift, x, use_reentrant=False)
+        return self.lift(x)
+
+    def _run_head(self, x, collect_stats=False):
+        if self.checkpoint_blocks and self.training and not collect_stats:
+            return checkpoint(
+                lambda t: self.proj2(self.act(self.proj1(t))),
+                x,
+                use_reentrant=False,
+            )
+        x = self.act(self.proj1(x))
+        return self.proj2(x)
+
     def forward(self, x, dx, dy, collect_stats=False, branch_mask=None):
-        x = self.lift(x)
+        x = self._run_lift(x, collect_stats=collect_stats)
         all_stats = [] if collect_stats else None
 
         for i, blk in enumerate(self.blocks):
@@ -548,8 +563,7 @@ class FFNO3D(nn.Module):
                     branch_mask=branch_mask,
                 )
 
-        x = self.act(self.proj1(x))
-        x = self.proj2(x)
+        x = self._run_head(x, collect_stats=collect_stats)
         if collect_stats:
             return x, all_stats
         return x
