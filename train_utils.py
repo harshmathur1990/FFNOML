@@ -215,14 +215,14 @@ def reduce_sum_scalar(value, device):
 
 def get_total_gpu_mem_used_gb(device):
     """
-    Return the summed used GPU memory across all ranks/devices in GiB.
+    Return the local device's used GPU memory in GiB.
 
-    Uses device-level memory usage (total - free), which tracks tools like
-    nvtop more closely than PyTorch allocator stats alone.
+    Important: this helper is used from the main-rank-only tqdm/logging path,
+    so it must not perform distributed collectives. Calling `all_reduce` here
+    would deadlock because non-main ranks do not enter the logging code.
     """
     free_bytes, total_bytes = torch.cuda.mem_get_info(device)
-    used_gb = (total_bytes - free_bytes) / 1024**3
-    return reduce_sum_scalar(used_gb, device)
+    return (total_bytes - free_bytes) / 1024**3
 
 
 def reduce_components(comp_sums, count, device):
@@ -404,7 +404,7 @@ def _make_postfix(loss, lr, device, components):
             postfix["L2"] = f"{float(components['source']):.2e}"
 
         if "gradient" in components and torch.is_tensor(components["gradient"]):
-            postfix["L3"] = f"{components['source'].item():.2e}"
+            postfix["L3"] = f"{components['gradient'].item():.2e}"
         elif "gradient" in components:
             postfix["L3"] = f"{float(components['gradient']):.2e}"
 
