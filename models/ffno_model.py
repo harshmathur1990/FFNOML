@@ -318,6 +318,7 @@ class FFNOBlock3dBalanced(nn.Module):
     Spectral and vertical branches are both strengthened and fused by:
       - same input to both branches
       - normalization on both outputs
+      - adaptive branch gating before learned fusion
       - learned channel-mixing fusion after concatenation
       - small corrective pointwise/mlp path
     """
@@ -355,6 +356,12 @@ class FFNOBlock3dBalanced(nn.Module):
 
         self.norm_spec = _gn(width)
         self.norm_vert = _gn(width)
+        self.branch_gate = nn.Sequential(
+            nn.Conv3d(3 * width, width, 1, bias=False),
+            nn.GELU(),
+            nn.Conv3d(width, 2 * width, 1, bias=True),
+            nn.Sigmoid(),
+        )
         self.fuse = nn.Sequential(
             nn.Conv3d(2 * width, 2 * width, 1, bias=False),
             nn.GELU(),
@@ -374,13 +381,25 @@ class FFNOBlock3dBalanced(nn.Module):
             nn.Dropout(vertical_dropout) if vertical_dropout > 0 else nn.Identity()
         )
 
+    def _fuse_branches(self, x, spec, vert):
+        gates = self.branch_gate(torch.cat([x, spec, vert], dim=1))
+        spec_gate, vert_gate = gates.chunk(2, dim=1)
+
+        spec_mix = spec * spec_gate
+        vert_mix = vert * vert_gate
+
+        fused = self.fuse(torch.cat([spec_mix, vert_mix], dim=1))
+        fused = fused + 0.5 * (spec_mix + vert_mix)
+        fused = self.act(self.norm_fuse(fused))
+        return fused, spec_mix, vert_mix, spec_gate, vert_gate
+
     def forward(self, x, dx, dy, collect_stats=False, branch_mask=None):
         if not collect_stats and branch_mask is None:
             residual = x
 
             spec = self.spec_drop(self.act(self.norm_spec(self.spec(x, dx, dy))))
             vert = self.vert_drop(self.act(self.norm_vert(self.vertical(x))))
-            fused = self.act(self.norm_fuse(self.fuse(torch.cat([spec, vert], dim=1))))
+            fused, _, _, _, _ = self._fuse_branches(x, spec, vert)
 
             x1 = residual + self.res_fused * fused
 
@@ -406,8 +425,8 @@ class FFNOBlock3dBalanced(nn.Module):
 
         spec_eff = spec_mask * spec
         vert_eff = vert_mask * vert
-        fused = self.act(
-            self.norm_fuse(self.fuse(torch.cat([spec_eff, vert_eff], dim=1)))
+        fused, spec_mix, vert_mix, spec_gate, vert_gate = self._fuse_branches(
+            x, spec_eff, vert_eff
         )
 
         x1 = residual + self.res_fused * fused
@@ -432,8 +451,10 @@ class FFNOBlock3dBalanced(nn.Module):
                 stats["res_fused"] = float(self.res_fused.item())
                 stats["res_pw"] = float(self.res_pw.item())
                 stats["res_mlp"] = float(self.res_mlp.item())
-                stats["spec_contrib"] = (self.res_fused * spec_eff).abs().mean().item()
-                stats["vertical_contrib"] = (self.res_fused * vert_eff).abs().mean().item()
+                stats["spec_gate_mean"] = spec_gate.mean().item()
+                stats["vertical_gate_mean"] = vert_gate.mean().item()
+                stats["spec_contrib"] = (self.res_fused * spec_mix).abs().mean().item()
+                stats["vertical_contrib"] = (self.res_fused * vert_mix).abs().mean().item()
                 stats["fuse_contrib"] = (self.res_fused * fused).abs().mean().item()
                 stats["pw_contrib"] = ((self.res_pw * pw_mask) * pw).abs().mean().item()
                 stats["mlp_contrib"] = ((self.res_mlp * mlp_mask) * mlp).abs().mean().item()
