@@ -222,7 +222,6 @@ Stages:
 Training uses:
 
 - AdamW optimizer
-- optional mixed precision (AMP)
 - gradient clipping
 - validation-based checkpointing
 
