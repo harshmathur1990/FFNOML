@@ -35,6 +35,26 @@ def parse_args():
     return parser.parse_args()
 
 
+def validate_runtime_device():
+    wants_cuda = str(DEVICE).startswith("cuda") or CUDA
+
+    if not wants_cuda:
+        return
+
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "config.py requests CUDA, but PyTorch could not find a CUDA-capable GPU. "
+            "Set DEVICE='cpu' if you want CPU execution."
+        )
+
+    gpu_count = torch.cuda.device_count()
+    gpu_names = [torch.cuda.get_device_name(i) for i in range(gpu_count)]
+
+    print("\n=== CUDA DEVICES ===")
+    for idx, name in enumerate(gpu_names):
+        print(f"GPU {idx}: {name}")
+
+
 def ensure_built_datasets_exist():
     missing = []
 
@@ -435,12 +455,15 @@ if __name__ == "__main__":
         build_datasets()
 
     elif args.train:
+        validate_runtime_device()
         train_model(resume=args.resume, bestpath=args.bestpath, expand=args.expand)
 
     elif args.test:
+        validate_runtime_device()
         test_model()
 
     elif args.predict:
+        validate_runtime_device()
         run_predictions()
 
     else:
