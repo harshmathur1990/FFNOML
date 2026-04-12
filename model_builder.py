@@ -1,3 +1,4 @@
+import os
 import sys
 import torch
 import torch.distributed as dist
@@ -58,6 +59,7 @@ class ModelBuilder:
         self.multi_gpu = multi_gpu
 
         self.rank = 0
+        self.local_rank = 0
         self.world_size = 1
 
         self.debug_loss = debug_loss
@@ -90,11 +92,12 @@ class ModelBuilder:
             dist.init_process_group("nccl")
 
         self.rank = dist.get_rank()
+        self.local_rank = int(os.environ.get("LOCAL_RANK", self.rank))
         self.world_size = dist.get_world_size()
 
-        torch.cuda.set_device(self.rank)
+        torch.cuda.set_device(self.local_rank)
 
-        self.device = f"cuda:{self.rank}"
+        self.device = f"cuda:{self.local_rank}"
 
     # ------------------------------------------------
     # MODEL
