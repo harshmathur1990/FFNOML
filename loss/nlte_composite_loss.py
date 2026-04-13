@@ -576,6 +576,7 @@ class NLTECompositeLoss(nn.Module):
             mean = self.mean_Y[start:end].to(logb_pred.dtype)[None, :, None]
 
             logb_pred_atom = logb_pred[:, start:end, :] * std + mean
+            logb_true_atom = logb_true[:, start:end, :] * std + mean
 
             chi_i   = self.chi[i]
             lines_i = self.lines[i]
@@ -599,9 +600,7 @@ class NLTECompositeLoss(nn.Module):
                 n_source_lines = int(self.lines[i].shape[0])
                 x_true = source_true[:, source_line_offset:source_line_offset + n_source_lines, :]
                 source_line_offset += n_source_lines
-                logb_true_atom = None
             else:
-                logb_true_atom = logb_true[:, start:end, :] * std + mean
                 _, x_true = compute_Sv_all_lines_T_batched(
                     T=T,
                     logb=logb_true_atom,
@@ -616,8 +615,7 @@ class NLTECompositeLoss(nn.Module):
             if self.print_once:
                 _check_tensor(T, f"T {rank}", True)
                 _check_tensor(logb_pred_atom, f"logb_pred_atom {rank}", True)
-                if logb_true_atom is not None:
-                    _check_tensor(logb_true_atom, f"logb_true_atom {rank}", True)
+                _check_tensor(logb_true_atom, f"logb_true_atom {rank}", True)
                 _check_tensor(x_pred, f"x_pred {rank}", True)
                 _check_tensor(x_true, f"x_true {rank}", True)
                 self.print_once = False
