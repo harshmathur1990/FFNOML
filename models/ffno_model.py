@@ -365,6 +365,15 @@ class FFNOBlock3dBalanced(nn.Module):
         self.fuse = nn.Sequential(
             nn.Conv3d(2 * width, 2 * width, 1, bias=False),
             nn.GELU(),
+            nn.Conv3d(
+                2 * width,
+                2 * width,
+                kernel_size=3,
+                padding=1,
+                groups=2 * width,
+                bias=False,
+            ),
+            nn.GELU(),
             nn.Conv3d(2 * width, width, 1, bias=False),
         )
         self.norm_fuse = _gn(width)
