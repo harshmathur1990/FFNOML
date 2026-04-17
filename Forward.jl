@@ -124,15 +124,15 @@ const CONFIG_BIFROST = (
             lower_level = 2,
             upper_level = 3
         ),
-        (
-            name = "CA",
-            atom_file = "/mn/stornext/u3/harshm/Documents/WorkRepo/multi3d/input/atoms/atom.ca2.yaml",
-            pops_file = "/mn/stornext/d9/data/harshm/bifrost_data/$(sim_name)/$(snap)/CA/out_pop",
-            nlevels = 6,
-            line_index = 5,
-            lower_level = 3,
-            upper_level = 5
-        )
+        # (
+        #     name = "CA",
+        #     atom_file = "/mn/stornext/u3/harshm/Documents/WorkRepo/multi3d/input/atoms/atom.ca2.yaml",
+        #     pops_file = "/mn/stornext/d9/data/harshm/bifrost_data/$(sim_name)/$(snap)/CA/out_pop",
+        #     nlevels = 6,
+        #     line_index = 5,
+        #     lower_level = 3,
+        #     upper_level = 5
+        # )
     ],
 
     mesh_file  = "/mn/stornext/d9/data/harshm/bifrost_data/$(sim_name)/$(snap)/mesh",
@@ -162,8 +162,8 @@ const CONFIG_BIFROST = (
 # USER CHOOSES WHICH ONE TO RUN
 # ============================================================
 
-const CFG = CONFIG_ML
-# const CFG = CONFIG_BIFROST
+# const CFG = CONFIG_ML
+const CFG = CONFIG_BIFROST
 
 # -----------------------------
 # Column-mass remapping helpers
@@ -172,7 +172,7 @@ const CFG = CONFIG_ML
 function cmass_from_rho(ρ::AbstractVector{T}, z::AbstractVector{T}) where {T<:Real}
     n = length(ρ)
     cm = similar(ρ)
-    cm[1] = zero(T)
+    cm[1] = T(1e-8)
     @inbounds for i in 2:n
         dz = -(z[i] - z[i-1])  # z increases upward
         cm[i] = cm[i-1] + 0.5*(ρ[i] + ρ[i-1]) * dz
