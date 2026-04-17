@@ -194,7 +194,7 @@ function interpolate_column(ρ, z, Y, cmass_new; logx::Bool=false, logy::Bool=fa
         ycol = view(Y, :, v)
         y    = logy ? log10.(ycol) : ycol
 
-        itp = LinearInterpolation(x, y, extrapolation_bc=Line())
+        itp = LinearInterpolation(x, y, extrapolation_bc=Throw())
         vals = itp.(xnew)
 
         out[:, v] .= logy ? 10 .^ vals : vals
