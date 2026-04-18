@@ -17,7 +17,6 @@ import numpy as np
 import h5py
 import torch
 import torch.distributed as dist
-from interp_utils import interpolate_everything
 from train_utils import (
     train,
     validate,
@@ -45,6 +44,27 @@ from loss.nlte_composite_loss import (
 # ============================================================
 # ---------------- PREPROCESSING ------------------------------
 # ============================================================
+
+def _expand_z_to_shape(z_scale, target_shape):
+    z_scale = np.asarray(z_scale, dtype=np.float32)
+
+    if z_scale.shape == target_shape:
+        return z_scale
+
+    if z_scale.ndim == 1 and z_scale.shape[0] == target_shape[-1]:
+        return np.broadcast_to(z_scale.reshape(1, 1, -1), target_shape).astype(
+            np.float32,
+            copy=False,
+        )
+
+    raise ValueError(
+        f"z_scale must have shape {target_shape} or ({target_shape[-1]},), got {z_scale.shape}"
+    )
+
+
+def _expand_z_to_match_rho(z_scale, rho):
+    return _expand_z_to_shape(z_scale, rho.shape)
+
 
 def _prepare_input_features(temp, vx, vy, vz, ne, rho):
     """
@@ -76,47 +96,28 @@ def invert_log_departure(pred_log):
     return torch.pow(10.0, pred_log)
 
 
-def _make_inputs_ch_first(
-    rho, z_scale,
-    temp, vx, vy, vz, ne,
-    *,
-    ndep
-):
+def _make_inputs_ch_first(rho, temp, vx, vy, vz, ne):
     """
-    returns inputs: [Cin, ndep, nx, ny]  (channel-first with depth first)
+    returns inputs: [Cin, nz, nx, ny]  (channel-first with depth first)
     """
-    cmass_grid = np.logspace(-6, 2, ndep)
-
-    features = _prepare_input_features(temp, vx, vy, vz, ne, rho)  # [nx,ny,nz,Cin]
-
-    features = interpolate_everything(
-        rho, z_scale, features, cmass_grid
-    )  # expected output: [nx,ny,ndep,Cin]
-
+    features = _prepare_input_features(
+        temp,
+        vx,
+        vy,
+        vz,
+        ne,
+        rho,
+    )  # [nx,ny,nz,Cin]
     features = np.transpose(features, (3, 2, 0, 1)).astype(np.float32, copy=False)
+    return features
 
-    return features, cmass_grid
 
-
-def _make_targets_ch_first(
-    rho, z_scale,
-    lte, nlte,
-    *,
-    ndep
-):
+def _make_targets_ch_first(lte, nlte):
     """
-    returns dep: [Cout, ndep, nx, ny]
+    returns dep: [Cout, nz, nx, ny]
     """
-    cmass_grid = np.logspace(-6, 2, ndep)
-
     dep = _compute_departure_coefficients(lte, nlte)  # [nx,ny,nz,Cout] (or nlev)
-
-    dep = interpolate_everything(
-        rho, z_scale, dep, cmass_grid
-    )  # [nx,ny,ndep,Cout]
-
     dep = np.transpose(dep, (3, 2, 0, 1)).astype(np.float32, copy=False)
-
     return dep
 
 
@@ -180,6 +181,27 @@ def _extract_patches_xy_with_source(X, Y, S, patch, stride):
     Sp = np.stack(ss, axis=0).astype(np.float32, copy=False)
 
     return Xp, Yp, Sp
+
+
+def _extract_z_patches_xy(Z, patch, stride):
+    """
+    Z: [D, nx, ny]
+
+    returns:
+        Zp [N, D, patch, patch]
+    """
+    zs = []
+
+    for i in range(0, Z.shape[1] - patch + 1, stride):
+        for j in range(0, Z.shape[2] - patch + 1, stride):
+            zs.append(Z[:, i:i+patch, j:j+patch])
+
+    if len(zs) == 0:
+        raise ValueError(
+            f"Patch too large: patch={patch} for nx,ny={Z.shape[1]},{Z.shape[2]}"
+        )
+
+    return np.stack(zs, axis=0).astype(np.float32, copy=False)
 
 
 # ------------------------------------------------------------
@@ -308,9 +330,9 @@ def _save_hdf5_patches(
     path,
     Xp,
     Yp,
+    zp,
     dxs,
     dys,
-    cmass_grid,
     *,
     source_targets=None,
     scales=None,
@@ -330,6 +352,7 @@ def _save_hdf5_patches(
     Yp : [N, Cout, D, P, P]
     source_targets : [N, Sout, D, P, P] optional
 
+    zp : [N, D, P, P]
     dxs : [N]
     dys : [N]
 
@@ -339,7 +362,6 @@ def _save_hdf5_patches(
     mean_X, std_X : [Cin]
     mean_Y, std_Y : [Cout]
 
-    cmass_grid : [D]
     """
 
     if os.path.isfile(path):
@@ -393,6 +415,13 @@ def _save_hdf5_patches(
                 shuffle=True,
             )
 
+        f.create_dataset(
+            "z_scale",
+            data=zp.astype(np.float32, copy=False),
+            compression="gzip",
+            compression_opts=4,
+            shuffle=True,
+        )
         f.create_dataset("dx", data=dxs.astype(np.float32))
         f.create_dataset("dy", data=dys.astype(np.float32))
 
@@ -405,11 +434,6 @@ def _save_hdf5_patches(
 
         if weights is not None:
             f.create_dataset("weights", data=weights.astype(np.float32))
-
-        f.create_dataset(
-            "cmass_grid",
-            data=cmass_grid.astype(np.float64),
-        )
 
         # ========================================================
         # NORMALIZATION STATS (NEW)
@@ -443,7 +467,7 @@ def _save_hdf5_patches(
         f.attrs["normalized"] = int(mean_X is not None)
 
 
-def _save_hdf5_cube(path, X, cmass_grid, dx, dy, attrs=None):
+def _save_hdf5_cube(path, X, z_scale, dx, dy, attrs=None):
     """
     Save inference cube.
 
@@ -470,9 +494,17 @@ def _save_hdf5_cube(path, X, cmass_grid, dx, dy, attrs=None):
         f.create_dataset("dx", data=np.array([dx], dtype=np.float32))
         f.create_dataset("dy", data=np.array([dy], dtype=np.float32))
 
+        z_native = _expand_z_to_shape(
+            z_scale,
+            (X.shape[3], X.shape[4], X.shape[2]),
+        )
+        z_native = np.transpose(z_native, (2, 0, 1)).astype(np.float32, copy=False)
         f.create_dataset(
-            "cmass_grid",
-            data=cmass_grid.astype(np.float64),
+            "z_scale",
+            data=z_native[None, ...],
+            compression="gzip",
+            compression_opts=4,
+            shuffle=True,
         )
 
         for k, v in attrs.items():
@@ -530,7 +562,7 @@ def build_dataset_ffno(
     if os.path.isfile(save_path):
         raise IOError(f"Output exists: {save_path}")
 
-    cmass_grid_ref = None
+    depth_ref = None
 
     if stat_file is None:
         # ============================================================
@@ -552,15 +584,9 @@ def build_dataset_ffno(
             z_list,
         ):
 
-            X, cmass_grid = _make_inputs_ch_first(
-                rho, z, temp, vx, vy, vz, ne,
-                ndep=ndep
-            )
+            X = _make_inputs_ch_first(rho, temp, vx, vy, vz, ne)
 
-            Y = _make_targets_ch_first(
-                rho, z, lte, nlte,
-                ndep=ndep
-            )
+            Y = _make_targets_ch_first(lte, nlte)
 
             mx, sx = compute_channel_stats(X)
             my, sy = compute_channel_stats(Y)
@@ -600,6 +626,7 @@ def build_dataset_ffno(
     X_all = []
     Y_all = []
     S_all = []
+    Z_all = []
 
     dx_all = []
     dy_all = []
@@ -619,20 +646,16 @@ def build_dataset_ffno(
         dy_list
     ):
 
-        X, cmass_grid = _make_inputs_ch_first(
-            rho, z, temp, vx, vy, vz, ne,
-            ndep=ndep
-        )
+        X = _make_inputs_ch_first(rho, temp, vx, vy, vz, ne)
 
-        Y = _make_targets_ch_first(
-            rho, z, lte, nlte,
-            ndep=ndep
-        )
+        Y = _make_targets_ch_first(lte, nlte)
 
-        if cmass_grid_ref is None:
-            cmass_grid_ref = cmass_grid
-        elif not np.allclose(cmass_grid_ref, cmass_grid):
-            raise ValueError("cmass_grid mismatch")
+        if depth_ref is None:
+            depth_ref = X.shape[1]
+        elif depth_ref != X.shape[1]:
+            raise ValueError(
+                f"Native depth mismatch across samples: expected Nz={depth_ref}, got Nz={X.shape[1]}"
+            )
 
         # ---------------- NORMALIZE HERE ----------------
         X = normalize_channels(X, mean_X, std_X)
@@ -660,6 +683,11 @@ def build_dataset_ffno(
                 Xs, Ys = _downsample_xy(X, Y, s)
                 Ss = None
 
+            z_native = _expand_z_to_match_rho(z, rho)
+            z_native = np.transpose(z_native, (2, 0, 1)).astype(np.float32, copy=False)
+            if s != 1:
+                z_native = z_native[:, ::s, ::s]
+
             nx, ny = Xs.shape[2:]
 
             if nx < patch or ny < patch:
@@ -682,10 +710,17 @@ def build_dataset_ffno(
                 )
                 Sp = None
 
+            Zp = _extract_z_patches_xy(
+                z_native,
+                patch=patch,
+                stride=stride,
+            )
+
             n = Xp.shape[0]
 
             X_all.append(Xp)
             Y_all.append(Yp)
+            Z_all.append(Zp)
             if Sp is not None:
                 S_all.append(Sp)
 
@@ -703,6 +738,7 @@ def build_dataset_ffno(
     X_all = np.concatenate(X_all)
     Y_all = np.concatenate(Y_all)
     S_all = np.concatenate(S_all) if len(S_all) > 0 else None
+    Z_all = np.concatenate(Z_all)
 
     dx_all = np.concatenate(dx_all)
     dy_all = np.concatenate(dy_all)
@@ -737,14 +773,14 @@ def build_dataset_ffno(
         save_path,
         X_all,
         Y_all,
+        Z_all,
         dx_all,
         dy_all,
-        cmass_grid_ref,
         source_targets=S_all,
         scales=scale_all,
         weights=weights,
         attrs=dict(
-            ndep=int(ndep),
+            native_depth=int(X_all.shape[2]),
             patch=int(patch),
             stride=int(stride),
             scales=np.array(scales),
@@ -783,24 +819,15 @@ def build_solving_set_ffno(
     if os.path.isfile(save_path):
         raise IOError(f"Output exists: {save_path}")
 
-    X, cmass_grid = _make_inputs_ch_first(
-        rho,
-        z_scale,
-        temp,
-        vx,
-        vy,
-        vz,
-        ne,
-        ndep=ndep
-    )  # [Cin, D, nx, ny]
+    X = _make_inputs_ch_first(rho, temp, vx, vy, vz, ne)  # [Cin, D, nx, ny]
 
     _save_hdf5_cube(
         save_path,
         X,
-        cmass_grid,
+        z_scale,
         dx,
         dy,
-        attrs=dict(ndep=int(ndep)),
+        attrs=dict(native_depth=int(X.shape[1])),
     )
 
 
@@ -1219,11 +1246,12 @@ def _tile_positions(n, patch, stride):
 
 
 @torch.no_grad()
-def _predict_tiled(model, X, dx, dy, patch, stride, device="cuda"):
+def _predict_tiled(model, X, z_scale, dx, dy, patch, stride, device="cuda"):
 
     model.eval()
 
     X = X.to(device)
+    z_scale = z_scale.to(device)
     dx = dx.to(device)
     dy = dy.to(device)
 
@@ -1248,8 +1276,9 @@ def _predict_tiled(model, X, dx, dy, patch, stride, device="cuda"):
     # ------------------------------------------------
 
     x0 = X[:, :, :, 0:patch, 0:patch]
+    z0 = z_scale[:, :, 0:patch, 0:patch]
 
-    y0 = model(x0, dx, dy)
+    y0 = model(x0, z0, dx, dy)
 
     if torch.isnan(y0).any():
         print("WARNING: NaN detected in FIRST tile output")
@@ -1293,8 +1322,9 @@ def _predict_tiled(model, X, dx, dy, patch, stride, device="cuda"):
     for i0, j0 in tqdm(itertools.product(xs, ys), total=len(xs)*len(ys), desc="Tiles"):
 
         xt = X[:, :, :, i0:i0+patch, j0:j0+patch]
+        zt = z_scale[:, :, i0:i0+patch, j0:j0+patch]
 
-        yt = model(xt, dx, dy)
+        yt = model(xt, zt, dx, dy)
 
         tile_weight = float(w2.sum().item())  # scalar weight
 
@@ -1417,7 +1447,7 @@ def ffno_predict_populations(
 
     This function writes:
       save_path: dataset "departure_coefficients" (linear, not log)
-                + attrs "cmass_scale"
+                + attrs "z_scale"
     """
     if os.path.isfile(save_path):
         raise IOError(f"Output exists: {save_path}")
@@ -1471,12 +1501,13 @@ def ffno_predict_populations(
 
     with h5py.File(solve_h5, "r") as f:
         X = f["inputs"][...]   # [1,Cin,D,nx,ny]
-        cmass_grid = f["cmass_grid"][...]
+        z_scale = f["z_scale"][...]
         # note: X stored float32 already
         dx = f["dx"][...]
         dy = f["dy"][...]
     
     X = torch.from_numpy(X).to(device)
+    z_scale = torch.from_numpy(np.transpose(z_scale, (0, 3, 1, 2))).to(device)
     dx = torch.from_numpy(dx).to(device)
     dy = torch.from_numpy(dy).to(device)
 
@@ -1497,11 +1528,12 @@ def ffno_predict_populations(
         dx = dx.to(device)
         dy = dy.to(device)
 
-        pred_log = model(X, dx, dy)
+        pred_log = model(X, z_scale, dx, dy)
     else:
         pred_log = _predict_tiled(
             model,
             X,
+            z_scale,
             dx,
             dy,
             patch=patch,
@@ -1551,7 +1583,8 @@ def ffno_predict_populations(
     # Save
     with h5py.File(save_path, "w") as f:
         d = f.create_dataset("departure_coefficients", data=dep, compression="gzip", compression_opts=4, shuffle=True)
-        d.attrs["cmass_scale"] = cmass_grid
+        d.attrs["z_scale"] = z_scale[0]
+        d.attrs["depth_scale_type"] = "z"
         if "val_loss" in ckpt:
             f.attrs["val_loss"] = float(ckpt["val_loss"])
         f.attrs["epoch"] = int(ckpt.get("epoch", -1))

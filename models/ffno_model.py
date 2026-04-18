@@ -162,6 +162,11 @@ class BalancedVerticalPhysicsStack(nn.Module):
         super().__init__()
         self.chunk = chunk
 
+        self.z_proj = nn.Sequential(
+            nn.Conv1d(1, hidden, 1, bias=False),
+            nn.GELU(),
+        )
+
         self.in_proj = nn.Sequential(
             nn.Conv1d(channels, hidden, 1, bias=False),
             _gn(hidden),
@@ -186,16 +191,24 @@ class BalancedVerticalPhysicsStack(nn.Module):
         self.out_proj = nn.Conv1d(hidden, channels, 1, bias=False)
         self.out_gn = _gn(channels)
 
-    def forward(self, x):
+    def forward(self, x, z_scale):
         B, C, D, H, W = x.shape
+        if z_scale.ndim == 4:
+            z_scale = z_scale.unsqueeze(1)
+        if z_scale.shape != (B, 1, D, H, W):
+            raise ValueError(
+                f"z_scale must be [B, D, H, W] or [B, 1, D, H, W], got {tuple(z_scale.shape)}"
+            )
         x = x.permute(0, 3, 4, 1, 2).reshape(B, H * W, C, D)
+        z_scale = z_scale.permute(0, 3, 4, 1, 2).reshape(B, H * W, 1, D)
 
         chunks = []
         for i in range(0, H * W, self.chunk):
             j = min(i + self.chunk, H * W)
             xi = x[:, i:j].reshape(-1, C, D)
+            zi = z_scale[:, i:j].reshape(-1, 1, D)
 
-            yi = self.in_proj(xi)
+            yi = self.in_proj(xi) + self.z_proj(zi)
             yi = self.net(yi)
             yi = yi * self.depth_gate(yi)
             yi = self.out_proj(yi)
@@ -402,12 +415,12 @@ class FFNOBlock3dBalanced(nn.Module):
         fused = self.act(self.norm_fuse(fused))
         return fused, spec_mix, vert_mix, spec_gate, vert_gate
 
-    def forward(self, x, dx, dy, collect_stats=False, branch_mask=None):
+    def forward(self, x, z_scale, dx, dy, collect_stats=False, branch_mask=None):
         if not collect_stats and branch_mask is None:
             residual = x
 
             spec = self.spec_drop(self.act(self.norm_spec(self.spec(x, dx, dy))))
-            vert = self.vert_drop(self.act(self.norm_vert(self.vertical(x))))
+            vert = self.vert_drop(self.act(self.norm_vert(self.vertical(x, z_scale))))
             fused, _, _, _, _ = self._fuse_branches(x, spec, vert)
 
             x1 = residual + self.res_fused * fused
@@ -425,7 +438,7 @@ class FFNOBlock3dBalanced(nn.Module):
         branch_mask = branch_mask or {}
 
         spec = self.spec_drop(self.act(self.norm_spec(self.spec(x, dx, dy))))
-        vert = self.vert_drop(self.act(self.norm_vert(self.vertical(x))))
+        vert = self.vert_drop(self.act(self.norm_vert(self.vertical(x, z_scale))))
 
         spec_mask = float(branch_mask.get("spec", 1.0))
         vert_mask = float(branch_mask.get("vertical", 1.0))
@@ -522,14 +535,25 @@ class FFNO3D(nn.Module):
 
         self.act = nn.GELU()
 
-    def _run_block(self, blk, x, dx, dy, collect_stats=False, branch_mask=None):
+    def _run_block(
+        self, blk, x, z_scale, dx, dy, collect_stats=False, branch_mask=None
+    ):
         if self.checkpoint_blocks and self.training and not collect_stats:
             return checkpoint(
-                lambda t: blk(t, dx, dy, collect_stats=False, branch_mask=None),
+                lambda t: blk(
+                    t, z_scale, dx, dy, collect_stats=False, branch_mask=None
+                ),
                 x,
                 use_reentrant=False,
             )
-        return blk(x, dx, dy, collect_stats=collect_stats, branch_mask=branch_mask)
+        return blk(
+            x,
+            z_scale,
+            dx,
+            dy,
+            collect_stats=collect_stats,
+            branch_mask=branch_mask,
+        )
 
     def _run_lift(self, x, collect_stats=False):
         if self.checkpoint_blocks and self.training and not collect_stats:
@@ -546,7 +570,7 @@ class FFNO3D(nn.Module):
         x = self.act(self.proj1(x))
         return self.proj2(x)
 
-    def forward(self, x, dx, dy, collect_stats=False, branch_mask=None):
+    def forward(self, x, z_scale, dx, dy, collect_stats=False, branch_mask=None):
         x = self._run_lift(x, collect_stats=collect_stats)
         all_stats = [] if collect_stats else None
 
@@ -555,6 +579,7 @@ class FFNO3D(nn.Module):
                 x, s = self._run_block(
                     blk,
                     x,
+                    z_scale,
                     dx,
                     dy,
                     collect_stats=True,
@@ -566,6 +591,7 @@ class FFNO3D(nn.Module):
                 x = self._run_block(
                     blk,
                     x,
+                    z_scale,
                     dx,
                     dy,
                     collect_stats=False,

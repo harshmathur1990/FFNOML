@@ -477,9 +477,10 @@ def train_one_epoch(
         disable=not is_main_process(),
     )
 
-    for x, y, dx, dy, scale, weight, source_target in pbar:
+    for x, y, z, dx, dy, scale, weight, source_target in pbar:
         x = x.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True)
+        z = z.to(device, non_blocking=True)
         dx = dx.to(device, non_blocking=True)
         dy = dy.to(device, non_blocking=True)
 
@@ -493,7 +494,7 @@ def train_one_epoch(
 
         optimizer.zero_grad(set_to_none=True)
 
-        pred = model(x, dx, dy)
+        pred = model(x, z, dx, dy)
 
         pred_full = pred
         y_full = y
@@ -582,9 +583,10 @@ def validate(
     )
 
     with torch.no_grad():
-        for x, y, dx, dy, scale, weight, source_target in pbar:
+        for x, y, z, dx, dy, scale, weight, source_target in pbar:
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
+            z = z.to(device, non_blocking=True)
             dx = dx.to(device, non_blocking=True)
             dy = dy.to(device, non_blocking=True)
 
@@ -599,13 +601,14 @@ def validate(
             if collect_model_stats:
                 pred, stats = model(
                     x,
+                    z,
                     dx,
                     dy,
                     collect_stats=True,
                     **forward_kwargs,
                 )
             else:
-                pred = model(x, dx, dy, **forward_kwargs)
+                pred = model(x, z, dx, dy, **forward_kwargs)
                 stats = None
 
             pred_full = pred

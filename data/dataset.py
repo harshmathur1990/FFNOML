@@ -19,6 +19,7 @@ class H5PatchDataset(Dataset):
         self._f = None
         self._X = None
         self._Y = None
+        self._Z = None
         self._dx = None
         self._dy = None
         self._scale = None
@@ -41,6 +42,7 @@ class H5PatchDataset(Dataset):
 
             self._X = self._f["inputs"]
             self._Y = self._f["targets"]
+            self._Z = self._f["z_scale"]
 
             self._dx = self._f["dx"]
             self._dy = self._f["dy"]
@@ -63,6 +65,7 @@ class H5PatchDataset(Dataset):
 
         x = torch.from_numpy(self._X[idx])   # [Cin,D,P,P]
         y = torch.from_numpy(self._Y[idx])   # [Cout,D,P,P]
+        z = torch.from_numpy(self._Z[idx])   # [D,P,P]
 
         dx = torch.tensor(self._dx[idx], dtype=torch.float32)
         dy = torch.tensor(self._dy[idx], dtype=torch.float32)
@@ -80,7 +83,7 @@ class H5PatchDataset(Dataset):
         if self.has_source_targets:
             source_target = torch.from_numpy(self._S[idx])
 
-        return x, y, dx, dy, scale, weight, source_target
+        return x, y, z, dx, dy, scale, weight, source_target
 
 
 class H5CubeDataset(Dataset):
@@ -97,6 +100,7 @@ class H5CubeDataset(Dataset):
         self._f = None
         self._X = None
         self._Y = None
+        self._Z = None
         self._dx = None
         self._dy = None
         self._weights = None
@@ -122,6 +126,7 @@ class H5CubeDataset(Dataset):
 
             if self.has_targets:
                 self._Y = self._f["targets"]
+            self._Z = self._f["z_scale"]
 
             self._dx = self._f["dx"]
             self._dy = self._f["dy"]
@@ -147,6 +152,7 @@ class H5CubeDataset(Dataset):
         y = None
         if self.has_targets:
             y = torch.from_numpy(self._Y[idx])
+        z = torch.from_numpy(self._Z[idx])   # [D,nx,ny]
 
         dx = torch.tensor(self._dx[idx], dtype=torch.float32)
         dy = torch.tensor(self._dy[idx], dtype=torch.float32)
@@ -164,4 +170,4 @@ class H5CubeDataset(Dataset):
         if self.has_source_targets:
             source_target = torch.from_numpy(self._S[idx])
 
-        return x, y, dx, dy, scale, weight, source_target
+        return x, y, z, dx, dy, scale, weight, source_target
