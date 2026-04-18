@@ -68,6 +68,10 @@ def _expand_z_to_match_rho(z_scale, rho):
     return _expand_z_to_shape(z_scale, rho.shape)
 
 
+def _normalize_z_scale(z_scale):
+    return np.asarray(z_scale, dtype=np.float32) / 1e6
+
+
 def _prepare_input_features(temp, vx, vy, vz, ne, rho):
     """
     temp: [nx, ny, nz]
@@ -597,7 +601,7 @@ def build_dataset_ffno(
         for s in scales:
             Xs, Ys = _downsample_xy(X, Y, s)
 
-            z_native = _expand_z_to_match_rho(z, rho)
+            z_native = _normalize_z_scale(_expand_z_to_match_rho(z, rho))
             z_native = np.transpose(z_native, (2, 0, 1)).astype(np.float32, copy=False)
             if s != 1:
                 z_native = z_native[:, ::s, ::s]
@@ -746,7 +750,7 @@ def build_solving_set_ffno(
     _save_hdf5_cube(
         save_path,
         X,
-        z_scale,
+        _normalize_z_scale(z_scale),
         dx,
         dy,
         attrs=dict(native_depth=int(X.shape[1])),
