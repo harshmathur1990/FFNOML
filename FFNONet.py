@@ -22,7 +22,9 @@ from train_utils import (
     validate,
     compute_mean_stats,
     expand_model_from_checkpoint,
+    get_checkpoint_io_metadata,
     get_resume_checkpoint_path,
+    get_checkpoint_normalization,
     load_training_state,
 )
 from scipy.ndimage import gaussian_filter
@@ -103,6 +105,54 @@ def _infer_patch_group_prefix(save_path):
     if "test" in base or "val" in base:
         return "test"
     return "dataset"
+
+
+def _normalization_stats_dict(mean_X, std_X, mean_Y, std_Y):
+    return {
+        "mean_X": np.asarray(mean_X, dtype=np.float32),
+        "std_X": np.asarray(std_X, dtype=np.float32),
+        "mean_Y": np.asarray(mean_Y, dtype=np.float32),
+        "std_Y": np.asarray(std_Y, dtype=np.float32),
+    }
+
+
+def _io_metadata_dict(Cin, Cout):
+    return {
+        "Cin": int(Cin),
+        "Cout": int(Cout),
+    }
+
+
+def _load_normalization_from_checkpoint_or_h5(checkpoint_path, h5_path):
+    ckpt = torch.load(checkpoint_path, map_location="cpu")
+    stats = get_checkpoint_normalization(ckpt)
+    if stats is not None:
+        return stats["mean_X"], stats["std_X"], stats["mean_Y"], stats["std_Y"]
+    return read_normalization(h5_path)
+
+
+def _load_inference_metadata_from_checkpoint(checkpoint_path):
+    ckpt = torch.load(checkpoint_path, map_location="cpu")
+    stats = get_checkpoint_normalization(ckpt)
+    io_meta = get_checkpoint_io_metadata(ckpt)
+
+    if stats is None:
+        raise RuntimeError(
+            f"Checkpoint missing normalization_stats: {checkpoint_path}"
+        )
+    if io_meta is None:
+        raise RuntimeError(
+            f"Checkpoint missing io_metadata (Cin/Cout): {checkpoint_path}"
+        )
+
+    return (
+        io_meta["Cin"],
+        io_meta["Cout"],
+        stats["mean_X"],
+        stats["std_X"],
+        stats["mean_Y"],
+        stats["std_Y"],
+    )
 
 
 def _make_inputs_ch_first(rho, temp, vx, vy, vz, ne):
@@ -925,6 +975,8 @@ def ffno_train_model(
     Cin, Cout = _read_io_channels(train_h5)
 
     mean_X, std_X, mean_Y, std_Y = read_normalization(train_h5)
+    normalization_stats = _normalization_stats_dict(mean_X, std_X, mean_Y, std_Y)
+    io_metadata = _io_metadata_dict(Cin, Cout)
 
     model_config = dict(model_config)
     model_config["in_channels"] = Cin
@@ -1073,6 +1125,8 @@ def ffno_train_model(
         resume_state=effective_resume_state,
         resume_path=effective_resume_path,
         best_val_init=effective_best_val_init,
+        normalization_stats=normalization_stats,
+        io_metadata=io_metadata,
         early_stopping=dict(
             enabled=True,
             patience=patience,
@@ -1132,7 +1186,10 @@ def ffno_test_model(
     os.makedirs(os.path.dirname(diagnostic_path) or ".", exist_ok=True)
 
     Cin, Cout = _read_io_channels(train_h5)
-    mean_X, std_X, mean_Y, std_Y = read_normalization(train_h5)
+    mean_X, std_X, mean_Y, std_Y = _load_normalization_from_checkpoint_or_h5(
+        checkpoint_path,
+        train_h5,
+    )
 
     model_config = dict(model_config)
     model_config["in_channels"] = Cin
@@ -1420,7 +1477,6 @@ def ffno_predict_populations(
     model,
     checkpoint_path,
     solve_h5,
-    train_h5,          # <-- add this
     save_path,
     model_config,
     lines,
@@ -1478,9 +1534,9 @@ def ffno_predict_populations(
 
     device = "cuda" if (cuda and torch.cuda.is_available()) else "cpu"
 
-    Cin, Cout = _read_io_channels(train_h5)
-
-    mean_X, std_X, mean_Y, std_Y = read_normalization(train_h5)
+    Cin, Cout, mean_X, std_X, mean_Y, std_Y = _load_inference_metadata_from_checkpoint(
+        checkpoint_path,
+    )
 
     model_config = dict(model_config)
     model_config["in_channels"] = Cin

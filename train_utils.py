@@ -23,6 +23,8 @@ def save_checkpoint_fsdp(
     train_comp,
     val_comp,
     save_path,
+    normalization_stats=None,
+    io_metadata=None,
 ):
     options = StateDictOptions(
         full_state_dict=True,
@@ -45,6 +47,10 @@ def save_checkpoint_fsdp(
         "train_components": train_comp,
         "val_components": val_comp,
     }
+    if normalization_stats is not None:
+        ckpt["normalization_stats"] = normalization_stats
+    if io_metadata is not None:
+        ckpt["io_metadata"] = io_metadata
     torch.save(ckpt, save_path)
 
 
@@ -61,6 +67,8 @@ def save_resume_checkpoint(
     scheduler,
     epoch,
     save_path,
+    normalization_stats=None,
+    io_metadata=None,
 ):
     options = StateDictOptions(
         full_state_dict=True,
@@ -81,7 +89,52 @@ def save_resume_checkpoint(
         "scheduler_state": scheduler.state_dict() if scheduler is not None else None,
         "current_lr": optimizer.param_groups[0]["lr"],
     }
+    if normalization_stats is not None:
+        ckpt["normalization_stats"] = normalization_stats
+    if io_metadata is not None:
+        ckpt["io_metadata"] = io_metadata
     torch.save(ckpt, save_path)
+
+
+def get_checkpoint_normalization(ckpt):
+    if not isinstance(ckpt, dict):
+        return None
+
+    stats = ckpt.get("normalization_stats")
+    if not isinstance(stats, dict):
+        return None
+
+    required = ("mean_X", "std_X", "mean_Y", "std_Y")
+    if not all(key in stats for key in required):
+        return None
+
+    out = {}
+    for key in required:
+        value = stats[key]
+        if torch.is_tensor(value):
+            value = value.detach().cpu().numpy()
+        else:
+            value = torch.as_tensor(value, dtype=torch.float32).cpu().numpy()
+        out[key] = value
+
+    return out
+
+
+def get_checkpoint_io_metadata(ckpt):
+    if not isinstance(ckpt, dict):
+        return None
+
+    meta = ckpt.get("io_metadata")
+    if not isinstance(meta, dict):
+        return None
+
+    if "Cin" not in meta or "Cout" not in meta:
+        return None
+
+    return {
+        "Cin": int(meta["Cin"]),
+        "Cout": int(meta["Cout"]),
+    }
 
 
 def load_training_state(
@@ -715,6 +768,8 @@ def train(
     resume_state=None,
     resume_path=None,
     best_val_init=None,
+    normalization_stats=None,
+    io_metadata=None,
 ):
     latest_save_path = resume_path or get_resume_checkpoint_path(save_path)
     resume_state = resume_state or {}
@@ -807,6 +862,8 @@ def train(
                     train_comp=train_comp,
                     val_comp=val_comp,
                     save_path=save_path,
+                    normalization_stats=normalization_stats,
+                    io_metadata=io_metadata,
                 )
 
                 if is_main_process():
@@ -847,6 +904,8 @@ def train(
                 train_comp=train_comp,
                 val_comp=None,
                 save_path=save_path,
+                normalization_stats=normalization_stats,
+                io_metadata=io_metadata,
             )
 
             if is_main_process():
@@ -858,4 +917,6 @@ def train(
             scheduler=scheduler,
             epoch=epoch,
             save_path=latest_save_path,
+            normalization_stats=normalization_stats,
+            io_metadata=io_metadata,
         )

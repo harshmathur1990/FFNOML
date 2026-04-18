@@ -233,7 +233,6 @@ def run_predictions():
                 model=MODEL,
                 checkpoint_path=MODEL_FILE,
                 solve_h5=PREDICT_FILE,
-                train_h5=TRAIN_FILE,
                 save_path=OUTPUT_FILE,
                 model_config=MODEL_CONFIG,
                 lines=lines,
