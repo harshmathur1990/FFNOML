@@ -494,6 +494,9 @@ def build_dataset_ffno(
     if os.path.isfile(save_path):
         raise IOError(f"Output exists: {save_path}")
 
+    num_samples = len(temp_list)
+    scale_list = tuple(scales)
+
     if stat_file is None:
         # ============================================================
         # -------- PASS 1: compute global normalization stats ---------
@@ -506,43 +509,54 @@ def build_dataset_ffno(
         x_count = 0
         y_count = 0
 
-        for temp, vx, vy, vz, ne, lte, nlte, rho, z in zip(
-            temp_list,
-            vx_list,
-            vy_list,
-            vz_list,
-            ne_list,
-            lte_list,
-            nlte_list,
-            rho_list,
-            z_list,
-        ):
+        with tqdm(
+            total=num_samples,
+            desc="build_dataset_ffno: normalization",
+            unit="sample",
+        ) as pbar:
+            for sample_idx, (temp, vx, vy, vz, ne, lte, nlte, rho, z) in enumerate(
+                zip(
+                    temp_list,
+                    vx_list,
+                    vy_list,
+                    vz_list,
+                    ne_list,
+                    lte_list,
+                    nlte_list,
+                    rho_list,
+                    z_list,
+                ),
+                start=1,
+            ):
 
-            X = _make_inputs_ch_first(rho, temp, vx, vy, vz, ne)
+                X = _make_inputs_ch_first(rho, temp, vx, vy, vz, ne)
 
-            Y = _make_targets_ch_first(lte, nlte)
+                Y = _make_targets_ch_first(lte, nlte)
 
-            X_flat = X.reshape(X.shape[0], -1).astype(np.float64, copy=False)
-            Y_flat = Y.reshape(Y.shape[0], -1).astype(np.float64, copy=False)
+                X_flat = X.reshape(X.shape[0], -1).astype(np.float64, copy=False)
+                Y_flat = Y.reshape(Y.shape[0], -1).astype(np.float64, copy=False)
 
-            x_sum_i = X_flat.sum(axis=1)
-            x_sq_sum_i = np.square(X_flat).sum(axis=1)
-            y_sum_i = Y_flat.sum(axis=1)
-            y_sq_sum_i = np.square(Y_flat).sum(axis=1)
+                x_sum_i = X_flat.sum(axis=1)
+                x_sq_sum_i = np.square(X_flat).sum(axis=1)
+                y_sum_i = Y_flat.sum(axis=1)
+                y_sq_sum_i = np.square(Y_flat).sum(axis=1)
 
-            if x_sum is None:
-                x_sum = x_sum_i
-                x_sq_sum = x_sq_sum_i
-                y_sum = y_sum_i
-                y_sq_sum = y_sq_sum_i
-            else:
-                x_sum += x_sum_i
-                x_sq_sum += x_sq_sum_i
-                y_sum += y_sum_i
-                y_sq_sum += y_sq_sum_i
+                if x_sum is None:
+                    x_sum = x_sum_i
+                    x_sq_sum = x_sq_sum_i
+                    y_sum = y_sum_i
+                    y_sq_sum = y_sq_sum_i
+                else:
+                    x_sum += x_sum_i
+                    x_sq_sum += x_sq_sum_i
+                    y_sum += y_sum_i
+                    y_sq_sum += y_sq_sum_i
 
-            x_count += X_flat.shape[1]
-            y_count += Y_flat.shape[1]
+                x_count += X_flat.shape[1]
+                y_count += Y_flat.shape[1]
+
+                pbar.set_postfix(sample=f"{sample_idx}/{num_samples}", refresh=False)
+                pbar.update(1)
 
         mean_X = (x_sum / max(1, x_count)).astype(np.float32)
         var_X = np.maximum(x_sq_sum / max(1, x_count) - np.square(mean_X, dtype=np.float64), 1e-12)
@@ -569,94 +583,120 @@ def build_dataset_ffno(
     all_scale_arrays = []
     group_prefix = _infer_patch_group_prefix(save_path)
 
-    for temp, vx, vy, vz, ne, lte, nlte, rho, z, dx, dy in zip(
-        temp_list,
-        vx_list,
-        vy_list,
-        vz_list,
-        ne_list,
-        lte_list,
-        nlte_list,
-        rho_list,
-        z_list,
-        dx_list,
-        dy_list
-    ):
+    total_build_steps = max(1, num_samples * max(1, len(scale_list)))
+    with tqdm(
+        total=total_build_steps,
+        desc="build_dataset_ffno: patches",
+        unit="scale",
+    ) as pbar:
+        for sample_idx, (temp, vx, vy, vz, ne, lte, nlte, rho, z, dx, dy) in enumerate(
+            zip(
+                temp_list,
+                vx_list,
+                vy_list,
+                vz_list,
+                ne_list,
+                lte_list,
+                nlte_list,
+                rho_list,
+                z_list,
+                dx_list,
+                dy_list,
+            ),
+            start=1,
+        ):
 
-        X = _make_inputs_ch_first(rho, temp, vx, vy, vz, ne)
+            X = _make_inputs_ch_first(rho, temp, vx, vy, vz, ne)
 
-        Y = _make_targets_ch_first(lte, nlte)
+            Y = _make_targets_ch_first(lte, nlte)
 
-        # ---------------- NORMALIZE HERE ----------------
-        X = normalize_channels(X, mean_X, std_X)
-        Y = normalize_channels(Y, mean_Y, std_Y)
+            # ---------------- NORMALIZE HERE ----------------
+            X = normalize_channels(X, mean_X, std_X)
+            Y = normalize_channels(Y, mean_Y, std_Y)
 
-        group_inputs = []
-        group_targets = []
-        group_z = []
-        group_dx = []
-        group_dy = []
-        group_scale = []
+            group_inputs = []
+            group_targets = []
+            group_z = []
+            group_dx = []
+            group_dy = []
+            group_scale = []
+            z_native_full = _normalize_z_scale(_expand_z_to_match_rho(z, rho))
+            z_native_full = np.transpose(z_native_full, (2, 0, 1)).astype(
+                np.float32, copy=False
+            )
 
-        for s in scales:
-            Xs, Ys = _downsample_xy(X, Y, s)
+            for s in scale_list:
+                Xs, Ys = _downsample_xy(X, Y, s)
 
-            z_native = _normalize_z_scale(_expand_z_to_match_rho(z, rho))
-            z_native = np.transpose(z_native, (2, 0, 1)).astype(np.float32, copy=False)
-            if s != 1:
-                z_native = z_native[:, ::s, ::s]
+                z_native = z_native_full if s == 1 else z_native_full[:, ::s, ::s]
 
-            nx, ny = Xs.shape[2:]
+                nx, ny = Xs.shape[2:]
 
-            if nx < patch or ny < patch:
+                if nx >= patch and ny >= patch:
+                    Xp, Yp = _extract_patches_xy(
+                        Xs,
+                        Ys,
+                        patch=patch,
+                        stride=stride,
+                    )
+
+                    Zp = _extract_z_patches_xy(
+                        z_native,
+                        patch=patch,
+                        stride=stride,
+                    )
+
+                    n = Xp.shape[0]
+
+                    group_inputs.append(Xp)
+                    group_targets.append(Yp)
+                    group_z.append(Zp)
+
+                    group_dx.append(np.full(n, dx * s, dtype=np.float32))
+                    group_dy.append(np.full(n, dy * s, dtype=np.float32))
+                    group_scale.append(np.full(n, s, dtype=np.int32))
+
+                    pbar.set_postfix(
+                        sample=f"{sample_idx}/{num_samples}",
+                        scale=s,
+                        patches=n,
+                        groups=len(patch_groups),
+                        refresh=False,
+                    )
+                else:
+                    pbar.set_postfix(
+                        sample=f"{sample_idx}/{num_samples}",
+                        scale=s,
+                        status="skip-small",
+                        groups=len(patch_groups),
+                        refresh=False,
+                    )
+
+                pbar.update(1)
+
+            if len(group_inputs) == 0:
                 continue
 
-            Xp, Yp = _extract_patches_xy(
-                Xs,
-                Ys,
-                patch=patch,
-                stride=stride,
+            group_inputs = np.concatenate(group_inputs)
+            group_targets = np.concatenate(group_targets)
+            group_z = np.concatenate(group_z)
+            group_dx = np.concatenate(group_dx)
+            group_dy = np.concatenate(group_dy)
+            group_scale = np.concatenate(group_scale)
+
+            patch_groups.append(
+                dict(
+                    name=f"{group_prefix}_{len(patch_groups) + 1}",
+                    inputs=group_inputs,
+                    targets=group_targets,
+                    z_scale=group_z,
+                    dx=group_dx,
+                    dy=group_dy,
+                    scale=group_scale,
+                    attrs=dict(native_depth=int(group_inputs.shape[2])),
+                )
             )
-
-            Zp = _extract_z_patches_xy(
-                z_native,
-                patch=patch,
-                stride=stride,
-            )
-
-            n = Xp.shape[0]
-
-            group_inputs.append(Xp)
-            group_targets.append(Yp)
-            group_z.append(Zp)
-
-            group_dx.append(np.full(n, dx * s, dtype=np.float32))
-            group_dy.append(np.full(n, dy * s, dtype=np.float32))
-            group_scale.append(np.full(n, s, dtype=np.int32))
-
-        if len(group_inputs) == 0:
-            continue
-
-        group_inputs = np.concatenate(group_inputs)
-        group_targets = np.concatenate(group_targets)
-        group_z = np.concatenate(group_z)
-        group_dx = np.concatenate(group_dx)
-        group_dy = np.concatenate(group_dy)
-        group_scale = np.concatenate(group_scale)
-
-        patch_groups.append(
-            dict(
-                name=f"{group_prefix}_{len(patch_groups) + 1}",
-                inputs=group_inputs,
-                targets=group_targets,
-                z_scale=group_z,
-                dx=group_dx,
-                dy=group_dy,
-                scale=group_scale,
-                attrs=dict(native_depth=int(group_inputs.shape[2])),
-            )
-        )
-        all_scale_arrays.append(group_scale)
+            all_scale_arrays.append(group_scale)
 
     if len(patch_groups) == 0:
         raise RuntimeError("No patches generated. Check patch size and scales.")
@@ -664,59 +704,70 @@ def build_dataset_ffno(
     scale_all = np.concatenate(all_scale_arrays)
     scale_weights = np.zeros_like(scale_all, dtype=np.float32)
 
-    for s in np.unique(scale_all):
-        mask = scale_all == s
-        scale_weights[mask] = 1.0 / mask.sum()
+    with tqdm(
+        total=len(np.unique(scale_all)) + len(patch_groups) + 1,
+        desc="build_dataset_ffno: finalize",
+        unit="step",
+    ) as pbar:
+        for s in np.unique(scale_all):
+            mask = scale_all == s
+            scale_weights[mask] = 1.0 / mask.sum()
+            pbar.set_postfix(step="scale-weights", scale=int(s), refresh=False)
+            pbar.update(1)
 
-    scale_weights *= len(scale_weights)
-    scale_weights /= scale_weights.mean()
+        scale_weights *= len(scale_weights)
+        scale_weights /= scale_weights.mean()
 
-    offset = 0
-    x_sum = 0.0
-    x_sq_sum = 0.0
-    y_sum = 0.0
-    y_sq_sum = 0.0
-    x_count = 0
-    y_count = 0
+        offset = 0
+        x_sum = 0.0
+        x_sq_sum = 0.0
+        y_sum = 0.0
+        y_sq_sum = 0.0
+        x_count = 0
+        y_count = 0
 
-    for group in patch_groups:
-        n = group["inputs"].shape[0]
-        group["weights"] = scale_weights[offset:offset + n]
-        offset += n
+        for group in patch_groups:
+            n = group["inputs"].shape[0]
+            group["weights"] = scale_weights[offset:offset + n]
+            offset += n
 
-        x_sum += float(group["inputs"].sum(dtype=np.float64))
-        x_sq_sum += float(np.square(group["inputs"], dtype=np.float64).sum(dtype=np.float64))
-        y_sum += float(group["targets"].sum(dtype=np.float64))
-        y_sq_sum += float(np.square(group["targets"], dtype=np.float64).sum(dtype=np.float64))
-        x_count += int(group["inputs"].size)
-        y_count += int(group["targets"].size)
+            x_sum += float(group["inputs"].sum(dtype=np.float64))
+            x_sq_sum += float(np.square(group["inputs"], dtype=np.float64).sum(dtype=np.float64))
+            y_sum += float(group["targets"].sum(dtype=np.float64))
+            y_sq_sum += float(np.square(group["targets"], dtype=np.float64).sum(dtype=np.float64))
+            x_count += int(group["inputs"].size)
+            y_count += int(group["targets"].size)
+            pbar.set_postfix(step="group-stats", group=group["name"], refresh=False)
+            pbar.update(1)
 
-    x_mean = x_sum / max(1, x_count)
-    y_mean = y_sum / max(1, y_count)
-    x_std = math.sqrt(max(0.0, x_sq_sum / max(1, x_count) - x_mean ** 2))
-    y_std = math.sqrt(max(0.0, y_sq_sum / max(1, y_count) - y_mean ** 2))
+        x_mean = x_sum / max(1, x_count)
+        y_mean = y_sum / max(1, y_count)
+        x_std = math.sqrt(max(0.0, x_sq_sum / max(1, x_count) - x_mean ** 2))
+        y_std = math.sqrt(max(0.0, y_sq_sum / max(1, y_count) - y_mean ** 2))
 
-    print("==== DATA CHECK ====")
-    print("X mean:", x_mean, "std:", x_std)
-    print("Y mean:", y_mean, "std:", y_std)
+        print("==== DATA CHECK ====")
+        print("X mean:", x_mean, "std:", x_std)
+        print("Y mean:", y_mean, "std:", y_std)
 
-    # ============================================================
-    # save dataset
-    # ============================================================
+        # ============================================================
+        # save dataset
+        # ============================================================
 
-    _save_hdf5_patches(
-        save_path,
-        patch_groups,
-        attrs=dict(
-            patch=int(patch),
-            stride=int(stride),
-            scales=np.array(scales),
-        ),
-        mean_X=mean_X,
-        std_X=std_X,
-        mean_Y=mean_Y,
-        std_Y=std_Y,
-    )
+        _save_hdf5_patches(
+            save_path,
+            patch_groups,
+            attrs=dict(
+                patch=int(patch),
+                stride=int(stride),
+                scales=np.array(scale_list),
+            ),
+            mean_X=mean_X,
+            std_X=std_X,
+            mean_Y=mean_Y,
+            std_Y=std_Y,
+        )
+        pbar.set_postfix(step="write-hdf5", path=os.path.basename(save_path), refresh=False)
+        pbar.update(1)
 
 
 # ============================================================
