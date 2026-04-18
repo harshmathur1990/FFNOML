@@ -50,6 +50,11 @@ class DataLoaderBuilder:
     # ------------------------------------------------
 
     def build_dataloader(self, dataset, shuffle):
+        if getattr(dataset, "variable_depth", False) and self.batch_size != 1:
+            raise ValueError(
+                "Variable native-depth datasets require batch_size=1. "
+                "Set BATCH_SIZE = 1 for grouped FFNO training data."
+            )
 
         sampler = None
 

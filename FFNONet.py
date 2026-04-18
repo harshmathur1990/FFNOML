@@ -96,6 +96,15 @@ def invert_log_departure(pred_log):
     return torch.pow(10.0, pred_log)
 
 
+def _infer_patch_group_prefix(save_path):
+    base = os.path.basename(save_path).lower()
+    if "train" in base:
+        return "train"
+    if "test" in base or "val" in base:
+        return "test"
+    return "dataset"
+
+
 def _make_inputs_ch_first(rho, temp, vx, vy, vz, ne):
     """
     returns inputs: [Cin, nz, nx, ny]  (channel-first with depth first)
@@ -328,15 +337,8 @@ def _precompute_source_targets(
 
 def _save_hdf5_patches(
     path,
-    Xp,
-    Yp,
-    zp,
-    dxs,
-    dys,
+    patch_groups,
     *,
-    source_targets=None,
-    scales=None,
-    weights=None,
     mean_X=None,
     std_X=None,
     mean_Y=None,
@@ -348,16 +350,7 @@ def _save_hdf5_patches(
 
     Parameters
     ----------
-    Xp : [N, Cin, D, P, P]
-    Yp : [N, Cout, D, P, P]
-    source_targets : [N, Sout, D, P, P] optional
-
-    zp : [N, D, P, P]
-    dxs : [N]
-    dys : [N]
-
-    scales : [N] optional
-    weights : [N] optional
+    patch_groups : list of dicts with per-group patch tensors/metadata
 
     mean_X, std_X : [Cin]
     mean_Y, std_Y : [Cout]
@@ -369,9 +362,14 @@ def _save_hdf5_patches(
 
     attrs = attrs or {}
 
-    N = Xp.shape[0]
-    Cin = Xp.shape[1]
-    Cout = Yp.shape[1]
+    if len(patch_groups) == 0:
+        raise ValueError("patch_groups must not be empty")
+
+    sample_group = patch_groups[0]
+    Cin = sample_group["inputs"].shape[1]
+    Cout = sample_group["targets"].shape[1]
+    total_patches = int(sum(group["inputs"].shape[0] for group in patch_groups))
+    group_names = [group["name"] for group in patch_groups]
 
     # ------------------------------------------------------------
     # sanity checks (VERY IMPORTANT)
@@ -385,55 +383,54 @@ def _save_hdf5_patches(
         assert std_Y.shape[0] == Cout, "std_Y shape mismatch"
 
     with h5py.File(path, "w") as f:
+        for group in patch_groups:
+            g = f.create_group(group["name"])
 
-        # ========================================================
-        # main datasets
-        # ========================================================
-
-        f.create_dataset(
-            "inputs",
-            data=Xp,
-            compression="gzip",
-            compression_opts=4,
-            shuffle=True,
-        )
-
-        f.create_dataset(
-            "targets",
-            data=Yp,
-            compression="gzip",
-            compression_opts=4,
-            shuffle=True,
-        )
-
-        if source_targets is not None:
-            f.create_dataset(
-                "source_targets",
-                data=source_targets,
+            g.create_dataset(
+                "inputs",
+                data=group["inputs"],
                 compression="gzip",
                 compression_opts=4,
                 shuffle=True,
             )
 
-        f.create_dataset(
-            "z_scale",
-            data=zp.astype(np.float32, copy=False),
-            compression="gzip",
-            compression_opts=4,
-            shuffle=True,
-        )
-        f.create_dataset("dx", data=dxs.astype(np.float32))
-        f.create_dataset("dy", data=dys.astype(np.float32))
+            g.create_dataset(
+                "targets",
+                data=group["targets"],
+                compression="gzip",
+                compression_opts=4,
+                shuffle=True,
+            )
 
-        # ========================================================
-        # optional metadata datasets
-        # ========================================================
+            if group.get("source_targets") is not None:
+                g.create_dataset(
+                    "source_targets",
+                    data=group["source_targets"],
+                    compression="gzip",
+                    compression_opts=4,
+                    shuffle=True,
+                )
 
-        if scales is not None:
-            f.create_dataset("scale", data=scales.astype(np.int32))
+            g.create_dataset(
+                "z_scale",
+                data=group["z_scale"].astype(np.float32, copy=False),
+                compression="gzip",
+                compression_opts=4,
+                shuffle=True,
+            )
+            g.create_dataset("dx", data=group["dx"].astype(np.float32))
+            g.create_dataset("dy", data=group["dy"].astype(np.float32))
+            g.create_dataset("scale", data=group["scale"].astype(np.int32))
+            g.create_dataset("weights", data=group["weights"].astype(np.float32))
 
-        if weights is not None:
-            f.create_dataset("weights", data=weights.astype(np.float32))
+            for k, v in group.get("attrs", {}).items():
+                g.attrs[k] = v
+
+            g.attrs["N"] = int(group["inputs"].shape[0])
+            g.attrs["Cin"] = int(group["inputs"].shape[1])
+            g.attrs["Cout"] = int(group["targets"].shape[1])
+            g.attrs["D"] = int(group["inputs"].shape[2])
+            g.attrs["P"] = int(group["inputs"].shape[3])
 
         # ========================================================
         # NORMALIZATION STATS (NEW)
@@ -454,17 +451,17 @@ def _save_hdf5_patches(
         for k, v in attrs.items():
             f.attrs[k] = v
 
-        f.attrs["N"] = N
+        f.attrs["N"] = total_patches
         f.attrs["Cin"] = Cin
         f.attrs["Cout"] = Cout
-        f.attrs["D"] = Xp.shape[2]
-        f.attrs["P"] = Xp.shape[3]
-
-        if scales is not None:
-            f.attrs["n_scales"] = int(len(np.unique(scales)))
+        f.attrs["n_patch_datasets"] = len(patch_groups)
 
         # flag for downstream safety
         f.attrs["normalized"] = int(mean_X is not None)
+        f.create_dataset(
+            "patch_dataset_names",
+            data=np.asarray(group_names, dtype=h5py.string_dtype(encoding="utf-8")),
+        )
 
 
 def _save_hdf5_cube(path, X, z_scale, dx, dy, attrs=None):
@@ -552,7 +549,6 @@ def build_dataset_ffno(
     lines=None,
     wave=None,
     levels=None,
-    ndep=400,
     patch=96,
     stride=48,
     scales=(1,2,3,4),
@@ -562,15 +558,17 @@ def build_dataset_ffno(
     if os.path.isfile(save_path):
         raise IOError(f"Output exists: {save_path}")
 
-    depth_ref = None
-
     if stat_file is None:
         # ============================================================
         # -------- PASS 1: compute global normalization stats ---------
         # ============================================================
 
-        X_stats_list = []
-        Y_stats_list = []
+        x_sum = None
+        x_sq_sum = None
+        y_sum = None
+        y_sq_sum = None
+        x_count = 0
+        y_count = 0
 
         for temp, vx, vy, vz, ne, lte, nlte, rho, z in zip(
             temp_list,
@@ -588,27 +586,35 @@ def build_dataset_ffno(
 
             Y = _make_targets_ch_first(lte, nlte)
 
-            mx, sx = compute_channel_stats(X)
-            my, sy = compute_channel_stats(Y)
+            X_flat = X.reshape(X.shape[0], -1).astype(np.float64, copy=False)
+            Y_flat = Y.reshape(Y.shape[0], -1).astype(np.float64, copy=False)
 
-            X_stats_list.append((mx, sx))
-            Y_stats_list.append((my, sy))
+            x_sum_i = X_flat.sum(axis=1)
+            x_sq_sum_i = np.square(X_flat).sum(axis=1)
+            y_sum_i = Y_flat.sum(axis=1)
+            y_sq_sum_i = np.square(Y_flat).sum(axis=1)
 
-        # ------------------------------------------------------------
-        # GLOBAL stats (across simulations)
-        # ------------------------------------------------------------
+            if x_sum is None:
+                x_sum = x_sum_i
+                x_sq_sum = x_sq_sum_i
+                y_sum = y_sum_i
+                y_sq_sum = y_sq_sum_i
+            else:
+                x_sum += x_sum_i
+                x_sq_sum += x_sq_sum_i
+                y_sum += y_sum_i
+                y_sq_sum += y_sq_sum_i
 
-        means_X = np.stack([m for m, s in X_stats_list])
-        stds_X  = np.stack([s for m, s in X_stats_list])
+            x_count += X_flat.shape[1]
+            y_count += Y_flat.shape[1]
 
-        means_Y = np.stack([m for m, s in Y_stats_list])
-        stds_Y  = np.stack([s for m, s in Y_stats_list])
+        mean_X = (x_sum / max(1, x_count)).astype(np.float32)
+        var_X = np.maximum(x_sq_sum / max(1, x_count) - np.square(mean_X, dtype=np.float64), 1e-12)
+        std_X = np.sqrt(var_X).astype(np.float32)
 
-        mean_X = means_X.mean(axis=0)
-        std_X  = stds_X.mean(axis=0)
-
-        mean_Y = means_Y.mean(axis=0)
-        std_Y  = stds_Y.mean(axis=0)
+        mean_Y = (y_sum / max(1, y_count)).astype(np.float32)
+        var_Y = np.maximum(y_sq_sum / max(1, y_count) - np.square(mean_Y, dtype=np.float64), 1e-12)
+        std_Y = np.sqrt(var_Y).astype(np.float32)
 
     else:
         mean_X, std_X, mean_Y, std_Y = read_normalization(stat_file)
@@ -623,14 +629,9 @@ def build_dataset_ffno(
     # -------- PASS 2: build dataset (with normalization) ---------
     # ============================================================
 
-    X_all = []
-    Y_all = []
-    S_all = []
-    Z_all = []
-
-    dx_all = []
-    dy_all = []
-    scale_all = []
+    patch_groups = []
+    all_scale_arrays = []
+    group_prefix = _infer_patch_group_prefix(save_path)
 
     for temp, vx, vy, vz, ne, lte, nlte, rho, z, dx, dy in zip(
         temp_list,
@@ -650,13 +651,6 @@ def build_dataset_ffno(
 
         Y = _make_targets_ch_first(lte, nlte)
 
-        if depth_ref is None:
-            depth_ref = X.shape[1]
-        elif depth_ref != X.shape[1]:
-            raise ValueError(
-                f"Native depth mismatch across samples: expected Nz={depth_ref}, got Nz={X.shape[1]}"
-            )
-
         # ---------------- NORMALIZE HERE ----------------
         X = normalize_channels(X, mean_X, std_X)
         Y = normalize_channels(Y, mean_Y, std_Y)
@@ -675,6 +669,14 @@ def build_dataset_ffno(
                 mean_Y=mean_Y,
                 std_Y=std_Y,
             )
+
+        group_inputs = []
+        group_targets = []
+        group_sources = []
+        group_z = []
+        group_dx = []
+        group_dy = []
+        group_scale = []
 
         for s in scales:
             if S is not None:
@@ -718,52 +720,83 @@ def build_dataset_ffno(
 
             n = Xp.shape[0]
 
-            X_all.append(Xp)
-            Y_all.append(Yp)
-            Z_all.append(Zp)
+            group_inputs.append(Xp)
+            group_targets.append(Yp)
+            group_z.append(Zp)
             if Sp is not None:
-                S_all.append(Sp)
+                group_sources.append(Sp)
 
-            dx_all.append(np.full(n, dx * s))
-            dy_all.append(np.full(n, dy * s))
-            scale_all.append(np.full(n, s))
+            group_dx.append(np.full(n, dx * s, dtype=np.float32))
+            group_dy.append(np.full(n, dy * s, dtype=np.float32))
+            group_scale.append(np.full(n, s, dtype=np.int32))
 
-    # ------------------------------------------------------------
-    # concatenate
-    # ------------------------------------------------------------
+        if len(group_inputs) == 0:
+            continue
 
-    if len(X_all) == 0:
+        group_inputs = np.concatenate(group_inputs)
+        group_targets = np.concatenate(group_targets)
+        group_z = np.concatenate(group_z)
+        group_sources = np.concatenate(group_sources) if len(group_sources) > 0 else None
+        group_dx = np.concatenate(group_dx)
+        group_dy = np.concatenate(group_dy)
+        group_scale = np.concatenate(group_scale)
+
+        patch_groups.append(
+            dict(
+                name=f"{group_prefix}_{len(patch_groups) + 1}",
+                inputs=group_inputs,
+                targets=group_targets,
+                source_targets=group_sources,
+                z_scale=group_z,
+                dx=group_dx,
+                dy=group_dy,
+                scale=group_scale,
+                attrs=dict(native_depth=int(group_inputs.shape[2])),
+            )
+        )
+        all_scale_arrays.append(group_scale)
+
+    if len(patch_groups) == 0:
         raise RuntimeError("No patches generated. Check patch size and scales.")
 
-    X_all = np.concatenate(X_all)
-    Y_all = np.concatenate(Y_all)
-    S_all = np.concatenate(S_all) if len(S_all) > 0 else None
-    Z_all = np.concatenate(Z_all)
-
-    dx_all = np.concatenate(dx_all)
-    dy_all = np.concatenate(dy_all)
-    scale_all = np.concatenate(scale_all)
-
-    # ------------------------------------------------------------
-    # weights (per scale balancing)
-    # ------------------------------------------------------------
-
-    weights = np.zeros_like(scale_all, dtype=np.float32)
+    scale_all = np.concatenate(all_scale_arrays)
+    scale_weights = np.zeros_like(scale_all, dtype=np.float32)
 
     for s in np.unique(scale_all):
         mask = scale_all == s
-        weights[mask] = 1.0 / mask.sum()
+        scale_weights[mask] = 1.0 / mask.sum()
 
-    weights *= len(weights)
-    weights /= weights.mean()
+    scale_weights *= len(scale_weights)
+    scale_weights /= scale_weights.mean()
 
-    # ------------------------------------------------------------
-    # sanity check
-    # ------------------------------------------------------------
+    offset = 0
+    x_sum = 0.0
+    x_sq_sum = 0.0
+    y_sum = 0.0
+    y_sq_sum = 0.0
+    x_count = 0
+    y_count = 0
+
+    for group in patch_groups:
+        n = group["inputs"].shape[0]
+        group["weights"] = scale_weights[offset:offset + n]
+        offset += n
+
+        x_sum += float(group["inputs"].sum(dtype=np.float64))
+        x_sq_sum += float(np.square(group["inputs"], dtype=np.float64).sum(dtype=np.float64))
+        y_sum += float(group["targets"].sum(dtype=np.float64))
+        y_sq_sum += float(np.square(group["targets"], dtype=np.float64).sum(dtype=np.float64))
+        x_count += int(group["inputs"].size)
+        y_count += int(group["targets"].size)
+
+    x_mean = x_sum / max(1, x_count)
+    y_mean = y_sum / max(1, y_count)
+    x_std = math.sqrt(max(0.0, x_sq_sum / max(1, x_count) - x_mean ** 2))
+    y_std = math.sqrt(max(0.0, y_sq_sum / max(1, y_count) - y_mean ** 2))
 
     print("==== DATA CHECK ====")
-    print("X mean:", X_all.mean(), "std:", X_all.std())
-    print("Y mean:", Y_all.mean(), "std:", Y_all.std())
+    print("X mean:", x_mean, "std:", x_std)
+    print("Y mean:", y_mean, "std:", y_std)
 
     # ============================================================
     # save dataset
@@ -771,16 +804,8 @@ def build_dataset_ffno(
 
     _save_hdf5_patches(
         save_path,
-        X_all,
-        Y_all,
-        Z_all,
-        dx_all,
-        dy_all,
-        source_targets=S_all,
-        scales=scale_all,
-        weights=weights,
+        patch_groups,
         attrs=dict(
-            native_depth=int(X_all.shape[2]),
             patch=int(patch),
             stride=int(stride),
             scales=np.array(scales),
@@ -808,7 +833,6 @@ def build_solving_set_ffno(
     dx,
     dy,
     save_path,
-    ndep=400
 ):
     """
     Build dataset for prediction (no targets).

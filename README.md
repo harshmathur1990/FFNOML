@@ -196,7 +196,6 @@ Dataset parameters:
 
 PATCH = 32
 STRIDE = 16
-NDEP = 400
 SCALES = (1, 2, 3, 4)
 
 ---

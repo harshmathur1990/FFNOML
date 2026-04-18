@@ -98,7 +98,6 @@ def build_datasets():
             lines=lines,
             wave=wave,
             levels=levels,
-            ndep=NDEP,
             patch=PATCH,
             stride=STRIDE,
             scales=SCALES,
@@ -126,7 +125,6 @@ def build_datasets():
             lines=lines,
             wave=wave,
             levels=levels,
-            ndep=NDEP,
             patch=PATCH,
             stride=STRIDE,
             scales=SCALES,
@@ -229,7 +227,6 @@ def run_predictions():
                     dx=dx,
                     dy=dy,
                     save_path=PREDICT_FILE,
-                    ndep=NDEP,
                 )
 
             ffno_predict_populations(
