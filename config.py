@@ -6,15 +6,21 @@ SIMULATIONS = {
     "en024048_hion": {
         "base_path": "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion",
         "snaps": ["385", "386", "465"],
+    },
+    "nw012023": {
+        "base_path": "/mn/stornext/d9/data/harshm/bifrost_data/nw012023",
+        "snaps": ["1050", "1120", "915"],
     }
 }
 
 TRAIN_SPLIT = {
     "en024048_hion": ["385", "465"],
+    "nw012023": ["1050", "1120"]
 }
 
 VAL_SPLIT = {
     "en024048_hion": ["386"],
+    "nw012023": ["915"]
 }
 
 
