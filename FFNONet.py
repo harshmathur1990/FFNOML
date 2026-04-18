@@ -216,32 +216,6 @@ def _extract_patches_xy(X, Y, patch, stride):
     return Xp, Yp
 
 
-def _extract_patches_xy_with_source(X, Y, S, patch, stride):
-    """
-    X: [Cin, D, nx, ny]
-    Y: [Cout, D, nx, ny]
-    S: [Sout, D, nx, ny]
-    """
-    xs, ys, ss = [], [], []
-
-    for i in range(0, X.shape[2] - patch + 1, stride):
-        for j in range(0, X.shape[3] - patch + 1, stride):
-            xs.append(X[:, :, i:i+patch, j:j+patch])
-            ys.append(Y[:, :, i:i+patch, j:j+patch])
-            ss.append(S[:, :, i:i+patch, j:j+patch])
-
-    if len(xs) == 0:
-        raise ValueError(
-            f"Patch too large: patch={patch} for nx,ny={X.shape[2]},{X.shape[3]}"
-        )
-
-    Xp = np.stack(xs, axis=0).astype(np.float32, copy=False)
-    Yp = np.stack(ys, axis=0).astype(np.float32, copy=False)
-    Sp = np.stack(ss, axis=0).astype(np.float32, copy=False)
-
-    return Xp, Yp, Sp
-
-
 def _extract_z_patches_xy(Z, patch, stride):
     """
     Z: [D, nx, ny]
@@ -289,23 +263,6 @@ def _downsample_xy(X, Y, scale):
     return Xs, Ys
 
 
-def _downsample_xy_with_source(X, Y, S, scale):
-    if scale == 1:
-        return X, Y, S
-
-    sigma = scale / 2
-
-    Xf = gaussian_filter(X, sigma=(0, 0, sigma, sigma))
-    Yf = gaussian_filter(Y, sigma=(0, 0, sigma, sigma))
-    Sf = gaussian_filter(S, sigma=(0, 0, sigma, sigma))
-
-    Xs = Xf[:, :, ::scale, ::scale]
-    Ys = Yf[:, :, ::scale, ::scale]
-    Ss = Sf[:, :, ::scale, ::scale]
-
-    return Xs, Ys, Ss
-
-
 def _flatten_columns_ch_first(x):
     x_t = torch.from_numpy(x[None, ...])
     return x_t.permute(0, 3, 4, 1, 2).reshape(-1, x.shape[0], x.shape[1])
@@ -313,72 +270,6 @@ def _flatten_columns_ch_first(x):
 
 def _restore_columns_ch_first(cols, channels, depth, height, width):
     return cols.reshape(1, height, width, channels, depth).permute(0, 3, 4, 1, 2)[0]
-
-
-def _precompute_source_targets(
-    X,
-    Y,
-    *,
-    chi,
-    lines,
-    wave,
-    levels,
-    mean_X,
-    std_X,
-    mean_Y,
-    std_Y,
-):
-    x_cols = _flatten_columns_ch_first(X)
-    y_cols = _flatten_columns_ch_first(Y)
-
-    mean_x_t = torch.as_tensor(mean_X, dtype=x_cols.dtype)
-    std_x_t = torch.as_tensor(std_X, dtype=x_cols.dtype)
-    mean_y_t = torch.as_tensor(mean_Y, dtype=y_cols.dtype)
-    std_y_t = torch.as_tensor(std_Y, dtype=y_cols.dtype)
-
-    T = extract_temperature(x_cols, mean_x_t, std_x_t)
-
-    level_offsets = np.concatenate(([0], np.cumsum(levels)))
-    source_parts = []
-
-    for atom_idx in range(len(levels)):
-        start = int(level_offsets[atom_idx])
-        end = int(level_offsets[atom_idx + 1])
-
-        std = std_y_t[start:end][None, :, None]
-        mean = mean_y_t[start:end][None, :, None]
-        logb_true_atom = y_cols[:, start:end, :] * std + mean
-
-        wave_arr = np.asarray(wave[atom_idx], dtype=np.float32)
-        nu = torch.tensor(c_AHz / wave_arr, dtype=y_cols.dtype)
-        pref = torch.tensor(
-            (2.0 * h * (c_AHz / wave_arr) / (c ** 2)) * (c_AHz / wave_arr) ** 2,
-            dtype=y_cols.dtype,
-        )
-
-        _, x_true = compute_Sv_all_lines_T_batched(
-            T=T,
-            logb=logb_true_atom,
-            chi=torch.tensor(chi[atom_idx], dtype=y_cols.dtype),
-            lines=torch.tensor(lines[atom_idx], dtype=torch.long),
-            nu=nu,
-            K_prefactor=pref,
-            debug=False,
-            return_x=True,
-        )
-
-        source_parts.append(x_true)
-
-    source_cols = torch.cat(source_parts, dim=1)
-    source = _restore_columns_ch_first(
-        source_cols,
-        channels=source_cols.shape[1],
-        depth=source_cols.shape[2],
-        height=X.shape[2],
-        width=X.shape[3],
-    )
-
-    return source.numpy().astype(np.float32, copy=False)
 
 
 # ============================================================
@@ -451,15 +342,6 @@ def _save_hdf5_patches(
                 compression_opts=4,
                 shuffle=True,
             )
-
-            if group.get("source_targets") is not None:
-                g.create_dataset(
-                    "source_targets",
-                    data=group["source_targets"],
-                    compression="gzip",
-                    compression_opts=4,
-                    shuffle=True,
-                )
 
             g.create_dataset(
                 "z_scale",
@@ -705,35 +587,15 @@ def build_dataset_ffno(
         X = normalize_channels(X, mean_X, std_X)
         Y = normalize_channels(Y, mean_Y, std_Y)
 
-        S = None
-        if chi is not None and lines is not None and wave is not None and levels is not None:
-            S = _precompute_source_targets(
-                X,
-                Y,
-                chi=chi,
-                lines=lines,
-                wave=wave,
-                levels=levels,
-                mean_X=mean_X,
-                std_X=std_X,
-                mean_Y=mean_Y,
-                std_Y=std_Y,
-            )
-
         group_inputs = []
         group_targets = []
-        group_sources = []
         group_z = []
         group_dx = []
         group_dy = []
         group_scale = []
 
         for s in scales:
-            if S is not None:
-                Xs, Ys, Ss = _downsample_xy_with_source(X, Y, S, s)
-            else:
-                Xs, Ys = _downsample_xy(X, Y, s)
-                Ss = None
+            Xs, Ys = _downsample_xy(X, Y, s)
 
             z_native = _expand_z_to_match_rho(z, rho)
             z_native = np.transpose(z_native, (2, 0, 1)).astype(np.float32, copy=False)
@@ -745,22 +607,12 @@ def build_dataset_ffno(
             if nx < patch or ny < patch:
                 continue
 
-            if Ss is not None:
-                Xp, Yp, Sp = _extract_patches_xy_with_source(
-                    Xs,
-                    Ys,
-                    Ss,
-                    patch=patch,
-                    stride=stride,
-                )
-            else:
-                Xp, Yp = _extract_patches_xy(
-                    Xs,
-                    Ys,
-                    patch=patch,
-                    stride=stride,
-                )
-                Sp = None
+            Xp, Yp = _extract_patches_xy(
+                Xs,
+                Ys,
+                patch=patch,
+                stride=stride,
+            )
 
             Zp = _extract_z_patches_xy(
                 z_native,
@@ -773,8 +625,6 @@ def build_dataset_ffno(
             group_inputs.append(Xp)
             group_targets.append(Yp)
             group_z.append(Zp)
-            if Sp is not None:
-                group_sources.append(Sp)
 
             group_dx.append(np.full(n, dx * s, dtype=np.float32))
             group_dy.append(np.full(n, dy * s, dtype=np.float32))
@@ -786,7 +636,6 @@ def build_dataset_ffno(
         group_inputs = np.concatenate(group_inputs)
         group_targets = np.concatenate(group_targets)
         group_z = np.concatenate(group_z)
-        group_sources = np.concatenate(group_sources) if len(group_sources) > 0 else None
         group_dx = np.concatenate(group_dx)
         group_dy = np.concatenate(group_dy)
         group_scale = np.concatenate(group_scale)
@@ -796,7 +645,6 @@ def build_dataset_ffno(
                 name=f"{group_prefix}_{len(patch_groups) + 1}",
                 inputs=group_inputs,
                 targets=group_targets,
-                source_targets=group_sources,
                 z_scale=group_z,
                 dx=group_dx,
                 dy=group_dy,
