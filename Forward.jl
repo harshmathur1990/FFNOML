@@ -165,149 +165,6 @@ const CONFIG_BIFROST = (
 # const CFG = CONFIG_ML
 const CFG = CONFIG_BIFROST
 
-# -----------------------------
-# Column-mass remapping helpers
-# (directly from your notebook, with minor cleanup)
-# -----------------------------
-function cmass_from_rho(ρ::AbstractVector{T}, z::AbstractVector{T}) where {T<:Real}
-    n = length(ρ)
-    cm = similar(ρ)
-    cm[1] = T(1e-8)
-    @inbounds for i in 2:n
-        dz = -(z[i] - z[i-1])  # z increases upward
-        cm[i] = cm[i-1] + 0.5*(ρ[i] + ρ[i-1]) * dz
-    end
-    return cm
-end
-
-function interpolate_column(ρ, z, Y, cmass_new; logx::Bool=false, logy::Bool=false)
-    cm = cmass_from_rho(ρ, z)
-
-    x    = logx ? log10.(cm)        : cm
-    xnew = logx ? log10.(cmass_new) : cmass_new
-
-    m     = length(cmass_new)
-    nvars = size(Y, 2)
-    out   = Matrix{eltype(Y)}(undef, m, nvars)
-
-    @inbounds for v in 1:nvars
-        ycol = view(Y, :, v)
-        y    = logy ? log10.(ycol) : ycol
-
-        itp = LinearInterpolation(x, y, extrapolation_bc=Throw())
-        vals = itp.(xnew)
-
-        out[:, v] .= logy ? 10 .^ vals : vals
-    end
-
-    return out
-end
-
-"""
-ρ_super   :: (nx, ny, nz)
-pops4d    :: (nx, ny, nz, nvars)
-cmass_new :: (m)
-
-returns   :: (nx, ny, m, nvars)
-"""
-function interpolate_everything(ρ_super, z, pops4d, cmass_new; logx::Bool=false, logy::Bool=false)
-    nx, ny, nz = size(ρ_super)
-    @assert size(pops4d,1) == nx
-    @assert size(pops4d,2) == ny
-    @assert size(pops4d,3) == nz
-
-    nvars = size(pops4d, 4)
-    m     = length(cmass_new)
-    out   = Array{eltype(pops4d)}(undef, nx, ny, m, nvars)
-
-    @threads for ix in 1:nx
-        for iy in 1:ny
-            ρ = view(ρ_super, ix, iy, :)
-            Y = reshape(view(pops4d, ix, iy, :, :), nz, nvars)  # force (nz, nvars)
-            col = interpolate_column(ρ, z, Y, cmass_new; logx=logx, logy=logy)  # (m, nvars)
-            @inbounds out[ix, iy, :, :] .= col
-        end
-    end
-
-    return out
-end
-
-function compute_ztop(rho3d, z, mtop)
-    nx, ny, nz = size(rho3d)
-    ztop = Array{eltype(rho3d)}(undef, nx, ny)
-    for ix in 1:nx, iy in 1:ny
-        ρ  = view(rho3d, ix, iy, :)
-        cm = cmass_from_rho(ρ, z)
-        itp = LinearInterpolation(cm, z, extrapolation_bc=Line())
-        ztop[ix,iy] = itp(mtop)
-    end
-    return ztop
-end
-
-function invert_cmass(cmass, rho, ztop)
-    N = length(cmass)
-    z = similar(cmass)
-    z[1] = ztop
-    @inbounds for i = 2:N
-        dm = cmass[i] - cmass[i-1]
-        z[i] = z[i-1] - dm / rho[i-1]
-    end
-    return z
-end
-
-function compute_z_from_cmass_3d(rho_new, cmass_new, ztop)
-    nx, ny, nz = size(rho_new)
-    znew = Array{eltype(rho_new)}(undef, nx, ny, nz)
-    for ix in 1:nx, iy in 1:ny
-        znew[ix,iy,:] = invert_cmass(cmass_new, view(rho_new, ix, iy, :), ztop[ix,iy])
-    end
-    return znew
-end
-
-function remap_atmosphere_cmass(atmos::Atmosphere3D, new_cmass_scale)
-    nx, ny, nz = atmos.nx, atmos.ny, atmos.nz
-
-    # (nz,nx,ny) → (nx,ny,nz)
-    temp = permutedims(atmos.temperature,       (2,3,1))
-    vx   = permutedims(atmos.velocity_x,        (2,3,1))
-    vy   = permutedims(atmos.velocity_y,        (2,3,1))
-    vz   = permutedims(atmos.velocity_z,        (2,3,1))
-    ne   = permutedims(atmos.electron_density,  (2,3,1))
-    nh   = permutedims(atmos.hydrogen1_density, (2,3,1))
-    np   = permutedims(atmos.proton_density,    (2,3,1))
-    rho  = permutedims(atmos.plasma_density,    (2,3,1))
-
-    ztop = compute_ztop(rho, atmos.z, new_cmass_scale[1])
-
-    f4(A) = reshape(A, nx, ny, nz, 1)
-    temp4, vx4, vy4, vz4 = f4(temp), f4(vx), f4(vy), f4(vz)
-    ne4, nh4, np4, rho4  = f4(ne),   f4(nh), f4(np), f4(rho)
-
-    temp_new = dropdims(interpolate_everything(rho, atmos.z, temp4, new_cmass_scale; logx=true, logy=false), dims=4)
-    vx_new   = dropdims(interpolate_everything(rho, atmos.z, vx4,   new_cmass_scale; logx=true, logy=false), dims=4)
-    vy_new   = dropdims(interpolate_everything(rho, atmos.z, vy4,   new_cmass_scale; logx=true, logy=false), dims=4)
-    vz_new   = dropdims(interpolate_everything(rho, atmos.z, vz4,   new_cmass_scale; logx=true, logy=false), dims=4)
-    ne_new   = dropdims(interpolate_everything(rho, atmos.z, ne4,   new_cmass_scale; logx=true, logy=true),  dims=4)
-    nh_new   = dropdims(interpolate_everything(rho, atmos.z, nh4,   new_cmass_scale; logx=true, logy=true),  dims=4)
-    np_new   = dropdims(interpolate_everything(rho, atmos.z, np4,   new_cmass_scale; logx=true, logy=true),  dims=4)
-    rho_new  = dropdims(interpolate_everything(rho, atmos.z, rho4,  new_cmass_scale; logx=true, logy=true),  dims=4)
-
-    z_new = compute_z_from_cmass_3d(rho_new, new_cmass_scale, ztop)
-
-    # back to Atmosphere3D layout (nz,nx,ny)
-    g(A) = permutedims(A, (3,1,2))
-
-    return Atmosphere3D(
-        nx, ny, length(z_new),
-        atmos.x, atmos.y,
-        g(z_new),
-        g(temp_new),
-        g(vx_new), g(vy_new), g(vz_new),
-        g(ne_new), g(nh_new), g(np_new),
-        g(rho_new)
-    )
-end
-
 
 function split_atoms(dep_coeff, atoms)
 
@@ -366,8 +223,8 @@ function lte_pops_saha(atom, atmos::Atmosphere3D)
     pops_s = SVector{atom.nlevels,Float32}.(pops)
     reint  = reshape(reinterpret(Float32, pops_s), atom.nlevels, size(pops_s)...)
 
-    # → (nx, ny, nz, nlevels)
-    pops4d = permutedims(reint, (3,4,2,1))
+    # → (nz, nx, ny, nlevels)
+    pops4d = permutedims(reint, (2,3,4,1))
 
     return pops4d
 end
@@ -377,7 +234,7 @@ function load_pred_depcoeff(pred_h5::String, pred_key::String)
     h5open(pred_h5, "r") do f
         raw = read(f[pred_key])
 
-        dep_coeff = PermutedDimsArray(raw, (3, 4, 2, 1))
+        dep_coeff = PermutedDimsArray(raw, (3, 2, 1, 4))
         return dep_coeff
 
     end
@@ -388,30 +245,6 @@ function load_multi3d_pops(pops_file::String, atmos::Atmosphere3D, nlevels::Int)
     return pops_out_nlte, pops_out_lte
 end
 
-function remap_pops_to_cmass(atmos::Atmosphere3D, pops4d_nxnyznv, new_cmass_scale; logx=true, logy=true)
-    # expects pops in (nx,ny,nz,nvars) OR a PermutedDimsArray that behaves like that
-    rho_nxnyz = PermutedDimsArray(atmos.plasma_density, (2, 3, 1))  # (nx,ny,nz)
-    pops_new  = interpolate_everything(rho_nxnyz, atmos.z, pops4d_nxnyznv, new_cmass_scale; logx=logx, logy=logy)
-    return pops_new
-end
-
-# Source function at line center (same algebra you used)
-function line_source_function(atom, λ0_m, nltepops, l, u)
-
-    h = 6.62607015e-34
-    c = 2.99792458e8
-    ν = c / λ0_m
-
-    n_l = nltepops[:, :, :, l]
-    n_u = nltepops[:, :, :, u]
-
-    g_l = atom.g[l]
-    g_u = atom.g[u]
-
-    prefactor = 2*h * ν^3 / c^2
-
-    return prefactor ./ ((g_u .* n_l) ./ (g_l .* n_u) .- 1)
-end
 
 # -----------------------------
 # Synthesis
@@ -452,7 +285,7 @@ function synthesize_intensity_3d(
         for j in 1:atms.ny
             calc_line_prep!(my_line, buf, atms[:, j, i], σ_itp)
             calc_line_1D!(my_line, buf, my_line.λ, atms[:, j, i],
-                          n_u[:, i, j], n_l[:, i, j], voigt_itp)
+                          n_u[:, j, i], n_l[:, j, i], voigt_itp)
             intensity[:, j, i] = buf.intensity
         end
         next!(p)
@@ -471,27 +304,6 @@ function save_intensity_h5(out_h5::String, intensity, wave)
     close(f)
 end
 
-function plot_diag_depcoeff(out_png::String, cmass_new, pred_dep::AbstractVector, orig_dep::Union{Nothing,AbstractVector})
-    x = log10.(cmass_new)
-    plt = plot(x, log10.(pred_dep), label="pred dep coeff", color=:black)
-    if orig_dep !== nothing
-        plot!(plt, x, log10.(orig_dep), label="orig dep coeff", color=:red)
-    end
-    xlabel!(plt, "log10(cmass)")
-    ylabel!(plt, "log10(dep coeff)")
-    savefig(plt, out_png)
-end
-
-function plot_diag_Snu(out_png::String, cmass_new, S_pred::AbstractVector, S_orig::Union{Nothing,AbstractVector})
-    x = log10.(cmass_new)
-    plt = plot(x, log10.(S_pred), label="pred Sν", color=:black)
-    if S_orig !== nothing
-        plot!(plt, x, log10.(S_orig), label="orig Sν", color=:red)
-    end
-    xlabel!(plt, "log10(cmass)")
-    ylabel!(plt, "log10(Sν)  [SI units]")
-    savefig(plt, out_png)
-end
 
 # -----------------------------
 # Main pipeline
@@ -542,7 +354,7 @@ function main()
 
             nlte_pop = dep .* lte_atoms[a.name]
 
-            nlte_atoms[a.name] = permutedims(nlte_pop, (3,1,2,4))
+            nlte_atoms[a.name] = nlte_pop
 
         end
 

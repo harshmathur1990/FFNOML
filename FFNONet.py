@@ -1574,7 +1574,7 @@ def ffno_predict_populations(
 
     # Save
     with h5py.File(save_path, "w") as f:
-        d = f.create_dataset("departure_coefficients", data=dep, compression="gzip", compression_opts=4, shuffle=True)
+        d = f.create_dataset("departure_coefficients", data=np.asfortranarray(dep), compression="gzip", compression_opts=4, shuffle=True)
         d.attrs["depth_scale_type"] = "z"
         f.create_dataset("z_scale", data=z_scale_attr, compression="gzip", compression_opts=4, shuffle=True)
         if "val_loss" in ckpt:
