@@ -406,6 +406,7 @@ def _save_hdf5_cube(path, X, z_scale, dx, dy, attrs=None):
     Save inference cube.
 
     X : [Cin, D, nx, ny]
+    z_scale : [D, nx, ny], [nx, ny, D], or [D]
     """
 
     if os.path.isfile(path):
@@ -428,11 +429,15 @@ def _save_hdf5_cube(path, X, z_scale, dx, dy, attrs=None):
         f.create_dataset("dx", data=np.array([dx], dtype=np.float32))
         f.create_dataset("dy", data=np.array([dy], dtype=np.float32))
 
-        z_native = _expand_z_to_shape(
-            z_scale,
-            (X.shape[3], X.shape[4], X.shape[2]),
-        )
-        z_native = np.transpose(z_native, (2, 0, 1)).astype(np.float32, copy=False)
+        z_scale = np.asarray(z_scale, dtype=np.float32)
+        if z_scale.shape == (X.shape[2], X.shape[3], X.shape[4]):
+            z_native = z_scale
+        else:
+            z_native = _expand_z_to_shape(
+                z_scale,
+                (X.shape[3], X.shape[4], X.shape[2]),
+            )
+            z_native = np.transpose(z_native, (2, 0, 1)).astype(np.float32, copy=False)
         f.create_dataset(
             "z_scale",
             data=z_native[None, ...],
@@ -798,11 +803,13 @@ def build_solving_set_ffno(
         raise IOError(f"Output exists: {save_path}")
 
     X = _make_inputs_ch_first(rho, temp, vx, vy, vz, ne)  # [Cin, D, nx, ny]
+    z_native = _normalize_z_scale(_expand_z_to_match_rho(z_scale, rho))
+    z_native = np.transpose(z_native, (2, 0, 1)).astype(np.float32, copy=False)
 
     _save_hdf5_cube(
         save_path,
         X,
-        _normalize_z_scale(z_scale),
+        z_native,
         dx,
         dy,
         attrs=dict(native_depth=int(X.shape[1])),
@@ -1491,7 +1498,7 @@ def ffno_predict_populations(
         dy = f["dy"][...]
     
     X = torch.from_numpy(X).to(device)
-    z_scale = torch.from_numpy(np.transpose(z_scale, (0, 3, 1, 2))).to(device)
+    z_scale = torch.from_numpy(z_scale.astype(np.float32, copy=False)).to(device)
     dx = torch.from_numpy(dx).to(device)
     dy = torch.from_numpy(dy).to(device)
 
