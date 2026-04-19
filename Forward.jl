@@ -506,19 +506,16 @@ function main()
     println("Reading atmosphere...")
     atmos = read_atmos_multi3d(cfg.mesh_file, cfg.atmos_file)
 
-    new_cmass_scale = Float32.(10 .^ range(cfg.cmass_logmin, cfg.cmass_logmax, length=cfg.cmass_n))
-
     println("Computing LTE pops...")
     lte_atoms = Dict{String,Any}()
 
     for a in cfg.atoms
         atom = Muspel.read_atom(a.atom_file)
         pops = lte_pops_saha(atom, atmos)
-        lte_atoms[a.name] = remap_pops_to_cmass(atmos, pops, new_cmass_scale; logx=true, logy=true)
+        lte_atoms[a.name] = permutedims(pops, (2, 3, 1))
     end
 
-    println("Remapping atmosphere...")
-    remapped_atmos = remap_atmosphere_cmass(atmos, new_cmass_scale)
+    remapped_atmos = atmos
 
     # ============================================================
     # ML MODE
@@ -565,96 +562,11 @@ function main()
             pops_out_nlte, pops_out_lte =
                 read_pops_multi3d(a.pops_file, atmos.nx, atmos.ny, atmos.nz, atom.nlevels)
 
-            pops_new = permutedims(
-                remap_pops_to_cmass(
-                    atmos,
-                    PermutedDimsArray(pops_out_nlte, (2,3,1,4)),
-                    new_cmass_scale;
-                    logx=true, logy=true
-                ),
-                (3,1,2,4)
-            )
-
-            nlte_atoms[a.name] = pops_new
+            nlte_atoms[a.name] = pops_out_nlte
         end
 
     else
         error("Unknown mode")
-    end
-
-    # ---------------------------------------------------------
-    # Diagnostics: compare ML vs true NLTE if pops_file exists
-    # ---------------------------------------------------------
-    if cfg.mode == :ml && cfg.plot_diagnostics
-
-        println("Running diagnostics...")
-
-        for a in cfg.atoms
-
-            atom = Muspel.read_atom(a.atom_file)
-
-            # -------------------------
-            # TRUE NLTE pops
-            # -------------------------
-            pops_out_nlte, pops_out_lte =
-                read_pops_multi3d(a.pops_file, atmos.nx, atmos.ny, atmos.nz, atom.nlevels)
-
-            pops_true = permutedims(
-                remap_pops_to_cmass(
-                    atmos,
-                    PermutedDimsArray(pops_out_nlte, (2,3,1,4)),
-                    new_cmass_scale;
-                    logx=true, logy=true
-                ),
-                (3,1,2,4)
-            )
-
-            # -------------------------
-            # ML NLTE pops
-            # -------------------------
-            pops_ml = nlte_atoms[a.name]
-
-            # -------------------------
-            # LTE pops
-            # -------------------------
-            pops_lte = permutedims(
-                lte_atoms[a.name],
-                (3,1,2,4)
-            )
-
-            x = cfg.x_pick
-            y = cfg.y_pick
-
-            # -------------------------
-            # Departure coefficient diagnostic
-            # -------------------------
-            l = a.lower_level
-
-            dep_ml   = pops_ml[:,x,y,l] ./ pops_lte[:,x,y,l]
-            dep_true = pops_true[:,x,y,l] ./ pops_lte[:,x,y,l]
-
-            plot_diag_depcoeff(
-                "$(cfg.out_prefix)_$(a.name)_dep.png",
-                new_cmass_scale,
-                dep_ml,
-                dep_true
-            )
-
-            # -------------------------
-            # Source function diagnostic
-            # -------------------------
-            λ0 = atom.lines[a.line_index].λ0
-
-            S_ml   = line_source_function(atom, λ0, pops_ml, a.lower_level, a.upper_level)[:,x,y]
-            S_true = line_source_function(atom, λ0, pops_true, a.lower_level, a.upper_level)[:,x,y]
-
-            plot_diag_Snu(
-                "$(cfg.out_prefix)_$(a.name)_Snu.png",
-                new_cmass_scale,
-                S_ml,
-                S_true
-            )
-        end
     end
 
     for (k,v) in nlte_atoms
