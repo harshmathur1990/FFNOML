@@ -1,5 +1,7 @@
 import os
 import re
+import inspect
+import warnings
 import torch
 import torch.distributed as dist
 from tqdm import tqdm
@@ -12,6 +14,80 @@ from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     set_optimizer_state_dict,
 )
+
+
+def load_checkpoint(checkpoint_path, *, map_location="cpu"):
+    """
+    Compatibility wrapper for `torch.load` across PyTorch versions.
+
+    PyTorch 2.6 changed the default `weights_only` value from False to True, which
+    can fail for checkpoints containing NumPy arrays/dtypes unless those globals
+    are allowlisted. We first attempt a safe weights-only load and fall back to a
+    full unpickle only if needed.
+    """
+    supports_weights_only = False
+    try:
+        supports_weights_only = "weights_only" in inspect.signature(torch.load).parameters
+    except (TypeError, ValueError):
+        supports_weights_only = False
+
+    if not supports_weights_only:
+        return torch.load(checkpoint_path, map_location=map_location)
+
+    try:
+        return torch.load(
+            checkpoint_path,
+            map_location=map_location,
+            weights_only=True,
+        )
+    except Exception as e:
+        msg = str(e)
+        if "Weights only load failed" not in msg and "WeightsUnpickler" not in msg:
+            raise
+
+    # Retry with a small NumPy allowlist (common in our checkpoints for stats).
+    try:
+        import numpy as np
+
+        reconstruct = getattr(np.core.multiarray, "_reconstruct", None)
+        scalar = getattr(np.core.multiarray, "scalar", None)
+        allowed = [x for x in (reconstruct, scalar, np.ndarray, np.dtype) if x is not None]
+
+        try:
+            from torch.serialization import safe_globals
+        except Exception:
+            safe_globals = None
+
+        if safe_globals is not None:
+            with safe_globals(allowed):
+                return torch.load(
+                    checkpoint_path,
+                    map_location=map_location,
+                    weights_only=True,
+                )
+
+        # Older torch: persistently add allowlist if context manager isn't available.
+        if hasattr(torch.serialization, "add_safe_globals"):
+            torch.serialization.add_safe_globals(allowed)
+            return torch.load(
+                checkpoint_path,
+                map_location=map_location,
+                weights_only=True,
+            )
+    except Exception:
+        pass
+
+    # Last resort: old behavior (unsafe; only do this for trusted checkpoints).
+    warnings.warn(
+        "Falling back to torch.load(weights_only=False). "
+        "Only use trusted checkpoint files.",
+        RuntimeWarning,
+    )
+    return torch.load(
+        checkpoint_path,
+        map_location=map_location,
+        weights_only=False,
+    )
 
 
 def save_checkpoint_fsdp(
@@ -145,7 +221,7 @@ def load_training_state(
     *,
     map_location="cpu",
 ):
-    ckpt = torch.load(checkpoint_path, map_location=map_location)
+    ckpt = load_checkpoint(checkpoint_path, map_location=map_location)
     result = dict(ckpt)
     options = StateDictOptions(
         full_state_dict=True,
@@ -182,7 +258,7 @@ def expand_model_from_checkpoint(
     map_location="cpu",
     zero_init_new_blocks=True,
 ):
-    ckpt = torch.load(checkpoint_path, map_location=map_location)
+    ckpt = load_checkpoint(checkpoint_path, map_location=map_location)
     if not isinstance(ckpt, dict) or "model_state" not in ckpt:
         raise RuntimeError(f"Invalid checkpoint: {checkpoint_path}")
 

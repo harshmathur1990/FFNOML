@@ -26,6 +26,7 @@ from train_utils import (
     get_resume_checkpoint_path,
     get_checkpoint_normalization,
     load_training_state,
+    load_checkpoint,
 )
 from scipy.ndimage import gaussian_filter
 from model_builder import ModelBuilder
@@ -128,7 +129,7 @@ def _io_metadata_dict(Cin, Cout):
 
 
 def _load_normalization_from_checkpoint_or_h5(checkpoint_path, h5_path):
-    ckpt = torch.load(checkpoint_path, map_location="cpu")
+    ckpt = load_checkpoint(checkpoint_path, map_location="cpu")
     stats = get_checkpoint_normalization(ckpt)
     if stats is not None:
         return stats["mean_X"], stats["std_X"], stats["mean_Y"], stats["std_Y"]
@@ -136,7 +137,7 @@ def _load_normalization_from_checkpoint_or_h5(checkpoint_path, h5_path):
 
 
 def _load_inference_metadata_from_checkpoint(checkpoint_path):
-    ckpt = torch.load(checkpoint_path, map_location="cpu")
+    ckpt = load_checkpoint(checkpoint_path, map_location="cpu")
     stats = get_checkpoint_normalization(ckpt)
     io_meta = get_checkpoint_io_metadata(ckpt)
 
@@ -889,7 +890,7 @@ def ffno_train_model(
     best_val_init = None
 
     if load_path is not None:
-        resume_state = torch.load(load_path, map_location="cpu")
+        resume_state = load_checkpoint(load_path, map_location="cpu")
         if not isinstance(resume_state, dict):
             raise RuntimeError(f"Invalid checkpoint: {load_path}")
 
@@ -908,7 +909,7 @@ def ffno_train_model(
                 resume_state["current_lr"] = resume_last_lr
 
         if os.path.isfile(save_path):
-            best_state = torch.load(save_path, map_location="cpu")
+            best_state = load_checkpoint(save_path, map_location="cpu")
             if not isinstance(best_state, dict):
                 raise RuntimeError(f"Invalid best checkpoint: {save_path}")
             best_val_init = best_state.get("val_loss")
@@ -1466,7 +1467,7 @@ def ffno_predict_populations(
 
     model, scheduler, optimizer, loss_fn = builder.build()
 
-    ckpt = torch.load(checkpoint_path, map_location=device)
+    ckpt = load_checkpoint(checkpoint_path, map_location=device)
     model.load_state_dict(ckpt["model_state"])
 
     for name, p in model.named_parameters():
