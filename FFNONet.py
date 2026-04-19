@@ -1570,11 +1570,12 @@ def ffno_predict_populations(
     dep = np.transpose(dep, (0, 3, 4, 2, 1)).astype(np.float32, copy=False)
 
     dep = dep[0]
+    z_scale_attr = z_scale[0].detach().cpu().numpy().astype(np.float32, copy=False)
 
     # Save
     with h5py.File(save_path, "w") as f:
         d = f.create_dataset("departure_coefficients", data=dep, compression="gzip", compression_opts=4, shuffle=True)
-        d.attrs["z_scale"] = z_scale[0]
+        d.attrs["z_scale"] = z_scale_attr
         d.attrs["depth_scale_type"] = "z"
         if "val_loss" in ckpt:
             f.attrs["val_loss"] = float(ckpt["val_loss"])
