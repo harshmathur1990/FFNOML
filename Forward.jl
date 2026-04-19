@@ -512,7 +512,7 @@ function main()
     for a in cfg.atoms
         atom = Muspel.read_atom(a.atom_file)
         pops = lte_pops_saha(atom, atmos)
-        lte_atoms[a.name] = permutedims(pops, (2, 3, 1))
+        lte_atoms[a.name] = pops
     end
 
     remapped_atmos = atmos
