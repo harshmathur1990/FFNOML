@@ -478,9 +478,9 @@ function main()
         error("Unknown mode")
     end
 
-    for (k,v) in nlte_atoms
-        println(k, " NLTE shape = ", size(v))
-    end
+    # for (k,v) in nlte_atoms
+    #     println(k, " NLTE shape = ", size(v))
+    # end
 
     println("Synthesizing line profiles...")
     results = Dict{String,Any}()
