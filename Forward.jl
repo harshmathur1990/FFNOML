@@ -158,12 +158,60 @@ const CONFIG_BIFROST = (
     )
 )
 
+const CONFIG_TIAGO = (
+    mode = :tiago,
+
+    atoms = [
+        (
+            name = "H",
+            atom_file = "/mn/stornext/u3/harshm/Documents/WorkRepo/multi3d/input/atoms/atom.h6_tiago2.yaml",
+            pops_file = "/mn/stornext/d9/data/harshm/bifrost_data/$(sim_name)/$(snap)/H/out_pop",
+            nlevels = 6,
+            line_index = 5,
+            lower_level = 2,
+            upper_level = 3
+        ),
+        # (
+        #     name = "CA",
+        #     atom_file = "/mn/stornext/u3/harshm/Documents/WorkRepo/multi3d/input/atoms/atom.ca2.yaml",
+        #     pops_file = "/mn/stornext/d9/data/harshm/bifrost_data/$(sim_name)/$(snap)/CA/out_pop",
+        #     nlevels = 6,
+        #     line_index = 5,
+        #     lower_level = 3,
+        #     upper_level = 5
+        # )
+    ],
+
+    mesh_file  = "/mn/stornext/d9/data/harshm/bifrost_data/$(sim_name)/$(snap)/mesh",
+    atmos_file = "/mn/stornext/d9/data/harshm/bifrost_data/$(sim_name)/$(snap)/atm3d",
+
+    out_h5     = "IO/intensity_bifrost_TIAGO_MODE_$(sim_name)_$(snap).h5",
+    out_prefix = "diag_bifrost",
+
+    x_pick     = 33,
+    y_pick     = 21,
+
+    cmass_n      = 400,
+    cmass_logmin = -6.0,
+    cmass_logmax =  2.0,
+
+    voigt = (
+        a_min = 1f-4,
+        a_max = 1f1,
+        a_n   = 20000,
+        v_min = 0f0,
+        v_max = 5f2,
+        v_n   = 2500
+    )
+)
+
 # ============================================================
 # USER CHOOSES WHICH ONE TO RUN
 # ============================================================
 
 # const CFG = CONFIG_ML
-const CFG = CONFIG_BIFROST
+# const CFG = CONFIG_BIFROST
+const CFG = CONFIG_TIAGO
 
 
 function split_atoms(dep_coeff, atoms)
@@ -305,6 +353,55 @@ function save_intensity_h5(out_h5::String, intensity, wave)
 end
 
 
+function calc_multi3d_hα(mesh_file, atmos_file, pops_file, atom_file)
+    h_atom = read_atom(atom_file)
+    my_line = h_atom.lines[5]  #  index 5 for Halpha
+
+    atmos, h_pops = read_atmos_hpops_multi3d(mesh_file, atmos_file, pops_file)
+    n_u = h_pops[:, :, :, 3]
+    n_l = h_pops[:, :, :, 2]
+
+    # Continuum opacity structures
+    bckgr_atoms = [
+        "Al.yaml",
+        "C.yaml",
+        "Ca.yaml",
+        "Fe.yaml",
+        "H_6.yaml",
+        "He.yaml",
+        "KI.yaml",
+        "Mg.yaml",
+        "N.yaml",
+        "Na.yaml",
+        "NiI.yaml",
+        "O.yaml",
+        "S.yaml",
+        "Si.yaml",
+    ]
+    atom_files = [joinpath(AtomicData.get_atom_dir(), a) for a in bckgr_atoms]
+    σ_itp = get_σ_itp(atmos, my_line.λ0, atom_files)
+
+    a = LinRange(1f-4, 1.5f1, 20000)
+    v = LinRange(0f2, 5f2, 2500)
+    voigt_itp = create_voigt_itp(a, v)
+
+    intensity = Array{Float32, 3}(undef, my_line.nλ, atmos.ny, atmos.nx)
+    p = ProgressMeter.Progress(atmos.nx)
+
+    Threads.@threads for i in 1:atmos.nx
+        buf = RTBuffer(atmos.nz, my_line.nλ, Float32)  # allocate inside for local scope
+        for j in 1:atmos.ny
+            calc_line_prep!(my_line, buf, atmos[:, j, i], σ_itp)
+            calc_line_1D!(my_line, buf, my_line.λ, atmos[:, j, i], n_u[:, j, i], n_l[:, j, i], voigt_itp)
+            intensity[:, j, i] = buf.intensity
+        end
+        ProgressMeter.next!(p)
+    end
+
+    return intensity
+end
+
+
 # -----------------------------
 # Main pipeline
 # -----------------------------
@@ -318,21 +415,19 @@ function main()
     println("Reading atmosphere...")
     atmos = read_atmos_multi3d(cfg.mesh_file, cfg.atmos_file)
 
-    println("Computing LTE pops...")
-    lte_atoms = Dict{String,Any}()
-
-    for a in cfg.atoms
-        atom = Muspel.read_atom(a.atom_file)
-        pops = lte_pops_saha(atom, atmos)
-        lte_atoms[a.name] = pops
-    end
-
-    remapped_atmos = atmos
-
     # ============================================================
     # ML MODE
     # ============================================================
     if cfg.mode == :ml
+
+        println("Computing LTE pops...")
+        lte_atoms = Dict{String,Any}()
+
+        for a in cfg.atoms
+            atom = Muspel.read_atom(a.atom_file)
+            pops = lte_pops_saha(atom, atmos)
+            lte_atoms[a.name] = pops
+        end
 
         dep_coeff_full = load_pred_depcoeff(cfg.pred_h5, cfg.pred_key)
 
@@ -377,6 +472,8 @@ function main()
             nlte_atoms[a.name] = pops_out_nlte
         end
 
+    elseif cfg.mode == :tiago
+        println("tiago mode")
     else
         error("Unknown mode")
     end
@@ -392,19 +489,22 @@ function main()
 
         println("Synthesizing atom: ", a.name)
 
-        h_atom = Muspel.read_atom(a.atom_file)
+        if cfg.mode == :tiago
+            results[a.name] = calc_multi3d_hα(cfg.mesh_file, cfg.atmos_file, a.pops_file, a.atom_file)
+        else
+            h_atom = Muspel.read_atom(a.atom_file)
 
-        syn = synthesize_intensity_3d(
-            remapped_atmos,
-            h_atom,
-            a.line_index,
-            nlte_atoms[a.name],
-            a.lower_level,
-            a.upper_level;
-            voigt_cfg = cfg.voigt
-        )
+            syn = synthesize_intensity_3d(
+                atmos,
+                h_atom,
+                a.line_index,
+                nlte_atoms[a.name],
+                a.lower_level,
+                a.upper_level;
+                voigt_cfg = cfg.voigt
+            )
 
-        results[a.name] = syn
+            results[a.name] = syn
     end
 
     println("Saving output...")
