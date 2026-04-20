@@ -185,7 +185,7 @@ const CONFIG_TIAGO = (
     mesh_file  = "/mn/stornext/d9/data/harshm/bifrost_data/$(sim_name)/$(snap)/mesh",
     atmos_file = "/mn/stornext/d9/data/harshm/bifrost_data/$(sim_name)/$(snap)/atm3d",
 
-    out_h5     = "  /intensity_bifrost_TIAGO_MODE_$(sim_name)_$(snap).h5",
+    out_h5     = "IO/intensity_bifrost_TIAGO_MODE_$(sim_name)_$(snap).h5",
     out_prefix = "diag_bifrost",
 
     x_pick     = 33,
