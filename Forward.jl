@@ -282,7 +282,7 @@ function load_pred_depcoeff(pred_h5::String, pred_key::String)
     h5open(pred_h5, "r") do f
         raw = read(f[pred_key])
 
-        dep_coeff = PermutedDimsArray(raw, (3, 2, 1, 4))
+        dep_coeff = PermutedDimsArray(raw, (3, 2, 4, 1))
         return dep_coeff
 
     end
