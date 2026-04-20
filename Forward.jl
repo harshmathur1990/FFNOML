@@ -398,7 +398,7 @@ function calc_multi3d_hα(mesh_file, atmos_file, pops_file, atom_file)
         ProgressMeter.next!(p)
     end
 
-    return intensity
+    return (intensity=intensity, wave=my_line.λ, line=my_line)
 end
 
 
