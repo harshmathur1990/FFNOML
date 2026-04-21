@@ -87,8 +87,7 @@ end
 function stats(label, a, b)
     diff = Array(a .- b)
     absdiff = abs.(diff)
-    denom = max.(abs.(Array(b)), Float32(1f-30))
-    reldiff = absdiff ./ denom
+    reldiff = ifelse.(b .== 0, absdiff, absdiff ./ abs.(b))
 
     println(label)
     println("  size(a)      = ", size(a))
