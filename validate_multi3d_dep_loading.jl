@@ -4,6 +4,7 @@ using Muspel
 using StaticArrays
 using HDF5
 using Statistics
+using Plots
 
 sim_name = "en024048_hion"
 snap = 385
@@ -49,7 +50,7 @@ function load_pred_depcoeff_current(pred_h5::String, pred_key::String)
 end
 
 
-function load_pred_depcoeff_fixed(pred_h5::String, pred_key::String)
+function load_pred_depcoeff_alternate(pred_h5::String, pred_key::String)
     h5open(pred_h5, "r") do f
         raw = read(f[pred_key])
         return PermutedDimsArray(raw, (2, 4, 3, 1))
@@ -96,6 +97,21 @@ function stats(label, a, b)
     println("  mean abs diff = ", mean(absdiff))
     println("  max rel diff = ", maximum(reldiff))
     println("  mean rel diff = ", mean(reldiff))
+
+    safe_label = replace(strip(lowercase(label)), r"[^a-z0-9]+" => "_")
+    hist_path = joinpath(@__DIR__, "$(safe_label)_hist.png")
+    weights = fill(1.0 / length(reldiff), length(reldiff))
+    p = histogram(
+        vec(reldiff),
+        bins=1000,
+        weights=weights,
+        xlabel="rel_diff",
+        ylabel="fraction of pixels",
+        title=strip(label),
+        legend=false,
+    )
+    savefig(p, hist_path)
+    println("  rel diff hist = ", hist_path)
 end
 
 
@@ -105,6 +121,8 @@ atmos = read_atmos_multi3d(mesh_file, atmos_file)
 println("Reading Multi3D pops...")
 orig_nlte_atoms = Dict{String,Any}()
 orig_lte_atoms = Dict{String,Any}()
+orig_dep_atoms = Dict{String,Any}()
+
 
 for a in atom_cfgs
     atom = Muspel.read_atom(a.atom_file)
@@ -113,7 +131,7 @@ for a in atom_cfgs
 
     orig_nlte_atoms[a.name] = pops_out_nlte
     orig_lte_atoms[a.name] = pops_out_lte
-
+    orig_dep_atoms[a.name] = pops_out_nlte ./ pops_out_lte
     println("Atom ", a.name, " direct Multi3D NLTE shape = ", size(pops_out_nlte))
     println("Atom ", a.name, " direct Multi3D LTE shape  = ", size(pops_out_lte))
 end
@@ -129,29 +147,31 @@ for a in atom_cfgs
 end
 
 dep_coeff_current = load_pred_depcoeff_current(pred_h5, pred_key)
-dep_coeff_fixed = load_pred_depcoeff_fixed(pred_h5, pred_key)
+dep_coeff_alternate = load_pred_depcoeff_alternate(pred_h5, pred_key)
 
 println("dep_coeff_current shape = ", size(dep_coeff_current))
-println("dep_coeff_fixed shape   = ", size(dep_coeff_fixed))
+println("dep_coeff_alternate shape   = ", size(dep_coeff_alternate))
 
 dep_current_per_atom = split_atoms(dep_coeff_current, atom_cfgs)
-dep_fixed_per_atom = split_atoms(dep_coeff_fixed, atom_cfgs)
+dep_alternate_per_atom = split_atoms(dep_coeff_alternate, atom_cfgs)
 
 println("Comparing reconstructed NLTE populations...")
 
 for a in atom_cfgs
     atom = Muspel.read_atom(a.atom_file)
 
-    @assert size(dep_fixed_per_atom[a.name], 4) == atom.nlevels
+    @assert size(dep_alternate_per_atom[a.name], 4) == atom.nlevels
 
     nlte_from_current_vs_saha = dep_current_per_atom[a.name] .* lte_atoms[a.name]
-    nlte_from_fixed_vs_saha = dep_fixed_per_atom[a.name] .* lte_atoms[a.name]
-    nlte_from_fixed_vs_directlte = dep_fixed_per_atom[a.name] .* orig_lte_atoms[a.name]
+    nlte_from_alternate_vs_saha = dep_alternate_per_atom[a.name] .* lte_atoms[a.name]
+    nlte_from_alternate_vs_directlte = dep_alternate_per_atom[a.name] .* orig_lte_atoms[a.name]
 
     println()
     println("Atom ", a.name)
     stats("  current loader vs direct Multi3D NLTE", nlte_from_current_vs_saha, orig_nlte_atoms[a.name])
-    stats("  fixed loader with Saha LTE vs direct Multi3D NLTE", nlte_from_fixed_vs_saha, orig_nlte_atoms[a.name])
-    stats("  fixed loader with direct Multi3D LTE vs direct Multi3D NLTE", nlte_from_fixed_vs_directlte, orig_nlte_atoms[a.name])
+    stats("  alternate loader with Saha LTE vs direct Multi3D NLTE", nlte_from_alternate_vs_saha, orig_nlte_atoms[a.name])
+    stats("  alternate loader with direct Multi3D LTE vs direct Multi3D NLTE", nlte_from_alternate_vs_directlte, orig_nlte_atoms[a.name])
     stats("  Saha LTE vs direct Multi3D LTE", lte_atoms[a.name], orig_lte_atoms[a.name])
+    stats("  Dep Current HDF5 vs DEP Multi3D", dep_current_per_atom[a.name], orig_dep_atoms[a.name])
+    stats("  Dep New HDF5 vs DEP Multi3D", dep_alternate_per_atom[a.name], orig_dep_atoms[a.name])
 end
