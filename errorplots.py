@@ -7,7 +7,6 @@ import numpy as np
 from helita.sim.multi3d import Multi3dAtmos, Multi3dOut
 
 from config import ACTIVE_ATOMS, MODEL, MODEL_DIR, MULTI3D_PRED_DATA
-from interp_utils import interpolate_everything
 from pipeline import compute_dx_dy
 
 
@@ -29,13 +28,13 @@ def parse_args():
 def plot_population_error_envelopes(
     pred,
     true,
-    cmass,
+    z_scale,
     level_names=None,
     figsize=(10, 10),
     ncols=2,
 ):
     """
-    Plot median + 68% + 95% relative-error envelopes vs log10(cmass).
+    Plot median + 68% + 95% relative-error envelopes vs z_scale.
     """
 
     assert pred.shape == true.shape
@@ -52,7 +51,9 @@ def plot_population_error_envelopes(
     p025 = np.nanpercentile(rel_err, 2.5, axis=-1)
     p975 = np.nanpercentile(rel_err, 97.5, axis=-1)
 
-    log_cmass = np.log10(cmass)
+    z_axis = np.asarray(z_scale)
+    if z_axis.ndim != 1:
+        raise ValueError(f"Expected 1D z_scale for plotting, got shape {z_axis.shape}")
 
     nrows = int(np.ceil(nlevels / ncols))
     fig, axes = plt.subplots(
@@ -67,9 +68,9 @@ def plot_population_error_envelopes(
     for i in range(nlevels):
         ax = axes[i // ncols, i % ncols]
 
-        ax.fill_between(log_cmass, p025[i], p975[i], color="#e6b98c", alpha=0.8)
-        ax.fill_between(log_cmass, p16[i], p84[i], color="#6f8fa6", alpha=0.9)
-        ax.plot(log_cmass, p50[i], color="#1f77b4", lw=1.5)
+        ax.fill_between(z_axis, p025[i], p975[i], color="#e6b98c", alpha=0.8)
+        ax.fill_between(z_axis, p16[i], p84[i], color="#6f8fa6", alpha=0.9)
+        ax.plot(z_axis, p50[i], color="#1f77b4", lw=1.5)
 
         if level_names is not None:
             ax.set_title(level_names[i], fontsize=12)
@@ -77,7 +78,7 @@ def plot_population_error_envelopes(
         ax.axhline(0.0, color="k", lw=0.5, alpha=0.5)
 
     for ax in axes[-1]:
-        ax.set_xlabel(r"log cmass")
+        ax.set_xlabel(r"z [Mm]")
 
     for ax in axes[:, 0]:
         ax.set_ylabel(r"(b$_{NN}$ - b) / b")
@@ -92,13 +93,13 @@ def plot_population_error_envelopes(
 def plot_log_population_error_envelopes(
     pred,
     true,
-    cmass,
+    z_scale,
     level_names=None,
     figsize=(10, 10),
     ncols=2,
 ):
     """
-    Plot median + 68% + 95% envelopes for log10(b_NN / b) vs log10(cmass).
+    Plot median + 68% + 95% envelopes for log10(b_NN / b) vs z_scale.
     """
 
     assert pred.shape == true.shape
@@ -115,7 +116,9 @@ def plot_log_population_error_envelopes(
     p025 = np.nanpercentile(log_ratio, 2.5, axis=-1)
     p975 = np.nanpercentile(log_ratio, 97.5, axis=-1)
 
-    log_cmass = np.log10(cmass)
+    z_axis = np.asarray(z_scale)
+    if z_axis.ndim != 1:
+        raise ValueError(f"Expected 1D z_scale for plotting, got shape {z_axis.shape}")
 
     nrows = int(np.ceil(nlevels / ncols))
     fig, axes = plt.subplots(
@@ -130,9 +133,9 @@ def plot_log_population_error_envelopes(
     for i in range(nlevels):
         ax = axes[i // ncols, i % ncols]
 
-        ax.fill_between(log_cmass, p025[i], p975[i], color="#d9c2f0", alpha=0.8)
-        ax.fill_between(log_cmass, p16[i], p84[i], color="#7b8fc7", alpha=0.9)
-        ax.plot(log_cmass, p50[i], color="#243b6b", lw=1.5)
+        ax.fill_between(z_axis, p025[i], p975[i], color="#d9c2f0", alpha=0.8)
+        ax.fill_between(z_axis, p16[i], p84[i], color="#7b8fc7", alpha=0.9)
+        ax.plot(z_axis, p50[i], color="#243b6b", lw=1.5)
 
         if level_names is not None:
             ax.set_title(level_names[i], fontsize=12)
@@ -140,7 +143,7 @@ def plot_log_population_error_envelopes(
         ax.axhline(0.0, color="k", lw=0.5, alpha=0.5)
 
     for ax in axes[-1]:
-        ax.set_xlabel(r"log cmass")
+        ax.set_xlabel(r"z [Mm]")
 
     for ax in axes[:, 0]:
         ax.set_ylabel(r"$\log_{10}(b_{NN} / b)$")
@@ -234,22 +237,34 @@ def build_plot_jobs():
 def load_prediction_file(pred_file):
     with h5py.File(pred_file, "r") as f:
         dep = f["departure_coefficients"][...]
-        cmass_grid = f["departure_coefficients"].attrs["cmass_scale"]
+        z_scale = f["z_scale"][...]
 
-    return dep, np.asarray(cmass_grid)
+    return dep, np.asarray(z_scale)
 
 
-def interpolate_true_departures(rho, z_scale, lte, nlte, cmass_grid):
-    """
-    Recreate the training/prediction target:
-    interpolate log10(departure coefficient) to cmass grid, then invert to linear.
-    """
-
+def compute_true_departures(lte, nlte):
     eps = 1e-30
-    log_dep = np.log10((nlte + eps) / (lte + eps))
-    true_log_dep = interpolate_everything(rho, z_scale, log_dep, cmass_grid)
-    true_dep = np.power(10.0, true_log_dep, dtype=np.float64)
+    true_dep = (nlte + eps) / (lte + eps)
     return true_dep.astype(np.float32, copy=False)
+
+
+def extract_plot_z_axis(z_scale, *, scale_to_mm=False):
+    z_axis = np.asarray(z_scale, dtype=np.float32)
+
+    if z_axis.ndim == 3:
+        ref = z_axis[:, 0, 0][:, None, None]
+        if not np.allclose(z_axis, ref):
+            raise ValueError(
+                "Expected z_scale to be identical across x/y columns for plotting."
+            )
+        z_axis = z_axis[:, 0, 0]
+    elif z_axis.ndim != 1:
+        raise ValueError(f"Expected 1D or 3D z_scale, got shape {z_axis.shape}")
+
+    if scale_to_mm:
+        z_axis = z_axis / 1e6
+
+    return z_axis
 
 
 def prepare_plot_arrays(pred_dep, true_dep):
@@ -268,15 +283,28 @@ def prepare_plot_arrays(pred_dep, true_dep):
 
 
 def make_snapshot_plot(dataset, output_dir, show=False):
-    pred_dep, cmass_grid = load_prediction_file(dataset["PRED_FILE"])
-    rho, z_scale, lte, nlte, level_names = load_true_multi3d_departures(dataset)
-    true_dep = interpolate_true_departures(rho, z_scale, lte, nlte, cmass_grid)
+    pred_dep, pred_z_scale = load_prediction_file(dataset["PRED_FILE"])
+    _, true_z_scale, lte, nlte, level_names = load_true_multi3d_departures(dataset)
+    true_dep = compute_true_departures(lte, nlte)
+
+    pred_z_axis = extract_plot_z_axis(pred_z_scale)
+    true_z_axis = extract_plot_z_axis(true_z_scale, scale_to_mm=True)
+
+    if pred_dep.shape != true_dep.shape:
+        raise ValueError(
+            f"Prediction/true shape mismatch: {pred_dep.shape} vs {true_dep.shape}"
+        )
+    if pred_z_axis.shape != true_z_axis.shape or not np.allclose(pred_z_axis, true_z_axis):
+        raise ValueError(
+            f"Prediction/true z_scale mismatch: {pred_z_axis.shape} vs {true_z_axis.shape}"
+        )
+
     pred_plot, true_plot = prepare_plot_arrays(pred_dep, true_dep)
 
     fig, _ = plot_population_error_envelopes(
         pred_plot,
         true_plot,
-        cmass_grid,
+        pred_z_axis,
         level_names=level_names,
         figsize=(12, 10),
         ncols=2,
@@ -292,7 +320,7 @@ def make_snapshot_plot(dataset, output_dir, show=False):
     fig_log, _ = plot_log_population_error_envelopes(
         pred_plot,
         true_plot,
-        cmass_grid,
+        pred_z_axis,
         level_names=level_names,
         figsize=(12, 10),
         ncols=2,
