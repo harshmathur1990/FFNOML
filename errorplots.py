@@ -86,6 +86,10 @@ def plot_population_error_envelopes(
     for j in range(nlevels, nrows * ncols):
         fig.delaxes(axes[j // ncols, j % ncols])
 
+    for ax in axes.flat:
+        if ax in fig.axes:
+            ax.set_ylim(-0.4, 0.4)
+
     plt.tight_layout()
     return fig, axes
 
