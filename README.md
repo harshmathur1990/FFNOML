@@ -1,314 +1,426 @@
-# FFNOML — 3D NLTE Radiative Transfer with Fourier Neural Operators
+# FFNOML
 
-A machine learning framework for predicting NLTE departure coefficients in 3-D stellar atmospheres using 3D Fourier Neural Operators (FFNO).
+FFNOML is a training and inference pipeline for predicting NLTE departure coefficients from 3D MULTI3D/Bifrost atmospheres with Fourier Neural Operators.
 
-This repository provides an end-to-end pipeline to:
+The codebase currently supports four main workflows through `pipeline.py`:
 
-- Load MULTI3D / Bifrost simulation outputs
-- Construct training datasets on a column-mass grid
-- Train a 3-D operator network mapping atmosphere → NLTE departure coefficients
-- Predict NLTE populations on unseen simulations
+- `--build`: build HDF5 training and validation datasets from MULTI3D outputs
+- `--train`: train a model checkpoint from the built HDF5 datasets
+- `--test`: run validation diagnostics and branch-ablation analysis on the validation set
+- `--predict`: build inference inputs for configured atmospheres and write predicted departure coefficients
 
-The model is designed for large-scale solar atmosphere simulations and incorporates physics-informed loss functions derived from radiative transfer constraints.
+This README describes the code as it exists now. The current pipeline is `z_scale`-based, not column-mass-based.
 
----
+## What The Model Learns
 
-# Overview
+The model maps atmospheric state variables to NLTE departure coefficients:
 
-The network learns the operator
+`[B, Cin, D, H, W] -> [B, Cout, D, H, W]`
 
-Atmospheric cube → NLTE departure coefficients
+Input channels are constructed in `FFNONet.py` from:
 
-Input features per grid cell:
+- `log10(temp)`
+- `vx`
+- `vy`
+- `vz`
+- `log10(ne)`
+- `log10(rho)`
 
-log10(T)
-vx
-vy
-vz
-log10(ne)
-log10(rho)
+Targets are:
 
-Model output:
+- `log10(n_NLTE / n_LTE)`
 
-log10(n_NLTE / n_LTE)
+Prediction outputs are written back in linear space as:
 
-for each atomic level.
+- `departure_coefficients = n_NLTE / n_LTE`
 
-The architecture combines:
+## Main Files
 
-- Global spectral mixing (FNO) in horizontal directions (x–y)
-- Local vertical coupling (1-D depth mixing in z)
-- Physics-informed loss terms
+- `pipeline.py`: CLI entrypoint for dataset building, training, validation testing, and prediction
+- `config.py`: dataset splits, active atoms, model hyperparameters, file paths, and runtime flags
+- `FFNONet.py`: dataset builders, HDF5 writers, training loop entrypoints, validation diagnostics, and inference
+- `model_builder.py`: model/loss/optimizer construction and optional FSDP wrapping
+- `data_builder.py`: selects patch or cube datasets and builds PyTorch dataloaders
+- `data/dataset.py`: lazy HDF5 dataset implementations
+- `train_utils.py`: checkpoint save/load, resume handling, validation helpers, and model expansion utilities
+- `Forward.jl`: downstream Julia-side forward synthesis utilities
+- `errorplots.py`: compares saved predictions against MULTI3D truth and plots error envelopes on `z_scale`
 
----
+## Data And Configuration
 
-# Key Features
+All project-specific configuration lives in `config.py`.
 
-## Physics-aware training
+Important sections:
 
-Loss includes:
+- `SIMULATIONS`: available simulation roots and snapshots
+- `TRAIN_SPLIT` / `VAL_SPLIT`: snapshots used for dataset building
+- `ACTIVE_ATOMS`: atoms to concatenate into one target tensor
+- `MULTI3D_PRED_DATA`: atmospheres used by `--predict`
+- `MODEL`, `MODEL_CONFIG`: architecture choice and hyperparameters
+- `PATCH`, `STRIDE`, `SCALES`: patch extraction and multiscale dataset settings
+- `TRAIN_FILE`, `TEST_FILE`: HDF5 dataset paths derived from the active split and patch config
+- `MODEL_DIR`, `MODEL_FILE`: checkpoint and diagnostics output location
+- `MULTI_GPU`, `DEVICE`, `CUDA`, `TILED`: runtime behavior
+- `EXPAND_FROM_CHECKPOINT`, `ZERO_INIT_NEW_BLOCKS`: model expansion settings for `--train --expand`
 
-- Weighted MSE + L1 on departure coefficients
-- Source function consistency penalty
-- Multi-level NLTE constraints
+The currently implemented model names are:
 
----
+- `FFNO3D`
+- `FFNO3DZ1D`
 
-## Operator learning
+## Installation
 
-The model learns a 3-D operator:
+At minimum you need:
 
-[B, Cin, D, H, W] → [B, Cout, D, H, W]
+- Python 3.10+
+- PyTorch
+- NumPy
+- SciPy
+- h5py
+- matplotlib
+- `helita`
 
-This enables:
+Example:
 
-- patch-based training
-- full-domain inference
-- tiled prediction for large simulations
+```bash
+pip install torch numpy scipy h5py matplotlib helita
+```
 
----
+If you use multi-GPU training, your PyTorch install must support distributed CUDA/FSDP execution.
 
-## Multi-scale supervision
+## Input Data Assumptions
 
-Training samples are generated across multiple spatial scales:
+The Python pipeline expects MULTI3D/Bifrost-style files:
 
-scales = (1, 2, 3, 4)
+- atmosphere file: `atm3d`
+- mesh file: `mesh`
+- one MULTI3D output directory per active atom
 
-with anti-alias filtering to improve generalization.
+For training/build mode, each dataset entry must provide:
 
----
+- `MULTI3D_ATMOS`
+- `MESH`
+- `MULTI3D_PATHS`
 
-## Distributed training
+For prediction mode, each entry in `MULTI3D_PRED_DATA` must provide:
 
-Supports large-scale training using:
+- `MULTI3D_ATMOS`
+- `MESH`
+- `NAME`
 
-- PyTorch FSDP (Fully Sharded Data Parallel)
-- multi-GPU training
-- sharded checkpointing
+Unit conversions currently applied by the pipeline:
 
----
+- `rho`: `g/cm^3 -> kg/m^3`
+- `ne`: `cm^-3 -> m^-3`
+- `z` from mesh or geometry: `cm -> m`
 
-# Repository Structure
+`dx` and `dy` are computed from the mesh and converted to meters.
 
-.
-├── config.py
-├── pipeline.py
-├── FFNONet.py
-├── model_builder.py
-├── train_utils.py
-├── interp_utils.py
-├── normalize_utils.py
-├── data/
-│   └── dataset.py
-├── models/
-│   └── ffno_model.py
-├── loss/
-│   ├── nlte_composite_loss.py
-│   └── weighted_mse_loss.py
-└── Forward.jl
-
----
-
-# Model Architecture
-
-The network is a 3D Factorized Fourier Neural Operator adapted for radiative transfer.
-
-Main structure:
-
-Input lifting layer
-↓
-FFNO blocks (spectral mixing in x–y)
-↓
-Vertical mixer (depth-wise coupling in z)
-↓
-Pointwise MLP
-↓
-Projection to output channels
-
-Each FFNO block includes:
-
-- spectral convolution (Fourier space)
-- vertical coupling layer
-- residual channel MLP
-
----
-
-# Dataset Generation
-
-Training data is generated from MULTI3D simulation outputs.
-
-Pipeline:
-
-1. Load Bifrost atmosphere
-2. Interpolate to column-mass grid
-3. Compute NLTE departure coefficients
-4. Extract spatial patches
-5. Store in HDF5 format
-
-Dataset structure:
-
-inputs  : [N, Cin, D, P, P]
-targets : [N, Cout, D, P, P]
-
----
-
-# Installation
-
-Recommended environment:
-
-Python >= 3.10
-PyTorch >= 2.1
-NumPy
-SciPy
-h5py
-matplotlib
-helita
-
-Install dependencies:
-
-pip install torch numpy scipy h5py matplotlib
-
-For MULTI3D / Bifrost I/O:
-
-pip install helita
-
----
-
-# Configuration
-
-All parameters are defined in:
-
-config.py
-
-Example model configuration:
-
-MODEL_CONFIG = dict(
-    width=64,
-    modes_x=16,
-    modes_y=16,
-    n_layers=6,
-    z_kernel=9,
-    dropout=0.1,
-    mlp_expansion=2
-)
-
-Dataset parameters:
-
-PATCH = 32
-STRIDE = 16
-SCALES = (1, 2, 3, 4)
-
----
-
-# Running the Pipeline
-
-The full workflow is executed via:
-
-python pipeline.py
-
-Stages:
-
-1. Load MULTI3D simulations
-2. Build training dataset
-3. Build validation dataset
-4. Train FFNO model
-5. Predict departure coefficients
-
----
-
-# Training
-
-Training uses:
-
-- AdamW optimizer
-- gradient clipping
-- validation-based checkpointing
-
-Example parameters:
-
-NUM_EPOCHS = 50
-BATCH_SIZE = 1
-LEARNING_RATE = 2e-4
-
----
-
-# Prediction
-
-Supports two modes.
-
-Full cube inference:
-
-model(x, dx, dy)
-
-Tiled inference:
-
-tiled=True
-patch=32
-stride=16
-
-Predictions are blended using a window function to avoid edge artifacts.
-
----
-
-# Output
-
-Predictions are stored as:
-
-departure_coefficients
-
-with dimensions:
-
-[nx, ny, Ndep, Nlevels]
-
-in HDF5 files.
-
----
-
-# Physics Loss
-
-The composite loss is:
-
-L = L_data + λ L_phys
-
-where:
-
-- L_data = weighted MSE + L1
-- L_phys = source function consistency
-
----
-
-# Forward Synthesis
-
-Forward.jl provides:
-
-- LTE population computation
-- NLTE population reconstruction
-- spectral synthesis using Muspel
+## Dataset Build Mode
 
 Run:
 
-julia Forward.jl
+```bash
+python pipeline.py --build
+```
 
----
+What it does:
 
-# Applications
+1. Reads all configured training snapshots from `MULTI3D_TRAIN_DATA`
+2. Reads all configured validation snapshots from `MULTI3D_VAL_DATA`
+3. Loads LTE and NLTE populations from each atom directory
+4. Concatenates active atoms along the output-channel dimension
+5. Builds input features and target departure coefficients
+6. Normalizes channels using global statistics from the training set
+7. Extracts multiscale XY patches using `PATCH`, `STRIDE`, and `SCALES`
+8. Writes grouped HDF5 patch datasets to `TRAIN_FILE` and `TEST_FILE`
 
-This framework enables:
+Important behavior:
 
-- fast NLTE population prediction
-- surrogate radiative transfer modeling
-- acceleration of spectral synthesis
-- large-scale solar atmosphere simulations
+- The train file computes normalization statistics itself
+- The validation file reuses normalization statistics from `TRAIN_FILE`
+- Existing output files are not overwritten
+- Grouped patch datasets preserve native depth per simulation
 
----
+### Training/Validation HDF5 Layout
 
-# License
+Patch datasets are stored as grouped HDF5 files. Each group contains:
 
-MIT
+- `inputs`: `[N, Cin, D, P, P]`
+- `targets`: `[N, Cout, D, P, P]`
+- `z_scale`: `[N, D, P, P]`
+- `dx`: `[N]`
+- `dy`: `[N]`
+- `scale`: `[N]`
+- `weights`: `[N]`
 
----
+Root-level metadata includes:
 
-# Author
+- `mean_X`, `std_X`
+- `mean_Y`, `std_Y`
+- `patch_dataset_names`
+- attributes such as `Cin`, `Cout`, `N`, `n_patch_datasets`, `normalized`
+
+## Train Mode
+
+Run:
+
+```bash
+python pipeline.py --train
+```
+
+Train mode requires that `TRAIN_FILE` and `TEST_FILE` already exist. If they do not, run `--build` first.
+
+What it does:
+
+1. Loads input/output channel counts from `TRAIN_FILE`
+2. Loads normalization stats from `TRAIN_FILE`
+3. Builds the configured model from `MODEL` and `MODEL_CONFIG`
+4. Builds patch or cube dataloaders according to `DATASET_TYPE`
+5. Trains with the composite NLTE loss
+6. Saves the best checkpoint to `MODEL_FILE`
+7. Saves a resumable checkpoint to `MODEL_FILE` with `.resume` inserted before the extension
+
+Current training details from the code:
+
+- optimizer: `AdamW`
+- optional scheduler: cosine annealing when `USE_COSINE=True`
+- early stopping controlled by `PATIENCE` and `MIN_DELTA`
+- gradient clipping controlled by `GRAD_CLIP`
+- grouped native-depth datasets require `BATCH_SIZE = 1`
+
+### Resume Options
+
+`pipeline.py` supports these train-only flags:
+
+- `--resume`: resume from the `.resume` checkpoint
+- `--bestpath`: when used with `--resume`, load the best checkpoint at `MODEL_FILE` instead of the `.resume` file
+- `--expand`: initialize a larger model from `EXPAND_FROM_CHECKPOINT`
+
+Rules enforced by the CLI:
+
+- `--resume` only works with `--train`
+- `--bestpath` only works with `--train`
+- `--expand` only works with `--train`
+- `--expand` cannot be combined with `--resume` or `--bestpath`
+- `EXPAND_FROM_CHECKPOINT` must be set in `config.py` before using `--expand`
+
+Behavior notes:
+
+- `--train` refuses to overwrite an existing `MODEL_FILE` unless `--resume` is used
+- `--train --expand` should point `MODEL_FILE` at a new output checkpoint path
+- `ZERO_INIT_NEW_BLOCKS` controls whether newly added residual tensors are zero-initialized during expansion
+
+## Test Mode
+
+Run:
+
+```bash
+python pipeline.py --test
+```
+
+Test mode requires:
+
+- `TEST_FILE`
+- `MODEL_FILE`
+
+What it does:
+
+1. Builds the validation dataset loader from `TEST_FILE`
+2. Restores channel metadata and normalization stats directly from `MODEL_FILE`
+3. Loads the trained checkpoint from `MODEL_FILE`
+4. Evaluates validation loss/components
+5. Runs branch ablations for spectral, vertical, pointwise, and MLP branches
+6. Writes a JSON diagnostic summary
+
+Current output path:
+
+- `MODEL_DIR + "val_diagnostics_<MODEL>.json"`
+
+The JSON summary includes:
+
+- baseline loss
+- baseline component breakdown
+- baseline model statistics
+- ablation results
+- branch importance scores
+
+## Predict Mode
+
+Run:
+
+```bash
+python pipeline.py --predict
+```
+
+Predict mode uses `MULTI3D_PRED_DATA` from `config.py`.
+
+What it does for each configured atmosphere:
+
+1. Loads `atm3d` and `mesh`
+2. Computes `dx`, `dy`, and `z_scale`
+3. Builds a solving-set HDF5 if it does not already exist
+4. Loads normalization stats and channel metadata from `MODEL_FILE`
+5. Runs full-cube or tiled inference
+6. Writes predicted departure coefficients in linear space
+
+Important current behavior:
+
+- `--predict` does not require `TRAIN_FILE` or `TEST_FILE`
+- it does require a trained checkpoint at `MODEL_FILE`
+- it skips rebuilding outputs if the final prediction file already exists
+- tiling is controlled by `TILED`, `PATCH`, and `STRIDE`
+
+### Solving-Set HDF5 Layout
+
+The intermediate solving input written by `build_solving_set_ffno` contains:
+
+- `inputs`: `[1, Cin, D, nx, ny]`
+- `z_scale`: `[1, D, nx, ny]`
+- `dx`: `[1]`
+- `dy`: `[1]`
+
+### Prediction Output Layout
+
+Prediction outputs are written to:
+
+- `MODEL_DIR + "output_3D_sim_s5_<NAME>_<MODEL>.hdf5"`
+
+The file contains:
+
+- `departure_coefficients`: `[nx, ny, D, Cout]`
+- `z_scale`: `[D, nx, ny]`
+
+Current attributes include:
+
+- `departure_coefficients.attrs["depth_scale_type"] = "z"`
+- file attribute `epoch`
+- file attribute `val_loss` when available in the checkpoint
+
+Prediction also writes a diagnostics path per atmosphere:
+
+- `MODEL_DIR + "diagnostics_3D_sim_s5_<NAME>_<MODEL>.npz"`
+
+Note: the diagnostics path is passed into inference, but the current `ffno_predict_populations()` implementation only writes the HDF5 prediction output.
+
+## Runtime Device Behavior
+
+Before `--train`, `--test`, or `--predict`, `pipeline.py` calls `validate_runtime_device()`.
+
+If `DEVICE` or `CUDA` requests GPU execution:
+
+- PyTorch CUDA availability is checked
+- visible GPU names are printed
+
+If CUDA is requested but unavailable, the script raises an error and suggests setting `DEVICE="cpu"`.
+
+## Multi-GPU Training
+
+The code supports FSDP-wrapped multi-GPU training when `MULTI_GPU=True`.
+
+Implementation notes:
+
+- distributed initialization is done in `ModelBuilder._init_distributed()`
+- it uses `torch.distributed.init_process_group("nccl")`
+- FSDP auto-wrap targets the FFNO block class
+- dataloaders switch to `DistributedSampler` automatically when distributed is initialized
+
+In practice, multi-GPU training should be launched with `torchrun`, for example:
+
+```bash
+torchrun --nproc_per_node=4 pipeline.py --train
+```
+
+Single-GPU or CPU execution can still use plain `python`.
+
+## Checkpoints
+
+Best-checkpoint save path:
+
+- `MODEL_FILE`
+
+Resume-checkpoint save path:
+
+- same path as `MODEL_FILE`, but with `.resume` inserted before the file extension
+
+Checkpoints may store:
+
+- `model_state`
+- `opt_state`
+- `scheduler_state`
+- `epoch`
+- `completed_epochs`
+- `current_lr`
+- `train_loss`, `val_loss`
+- train/validation loss components
+- `normalization_stats`
+- `io_metadata`
+
+Inference and test mode both rely on checkpoint-carried normalization and I/O metadata.
+
+## Dataset Types
+
+`DATASET_TYPE` in `config.py` can be:
+
+- `patch`
+- `cube`
+
+The current build pipeline writes grouped patch datasets, and the default config uses:
+
+- `DATASET_TYPE = "patch"`
+
+For grouped native-depth patch datasets, `batch_size` must remain `1`.
+
+## Current End-To-End Workflow
+
+Typical usage is:
+
+```bash
+python pipeline.py --build
+python pipeline.py --train
+python pipeline.py --test
+python pipeline.py --predict
+```
+
+For continuing an interrupted run:
+
+```bash
+python pipeline.py --train --resume
+```
+
+For resuming from the best checkpoint while resetting optimizer/scheduler state using the configured fallback epoch/LR:
+
+```bash
+python pipeline.py --train --resume --bestpath
+```
+
+For initializing a larger model from an earlier checkpoint:
+
+```bash
+python pipeline.py --train --expand
+```
+
+## Plotting And Analysis
+
+`errorplots.py` loads prediction outputs and MULTI3D truth, computes:
+
+- relative population error envelopes
+- log-ratio error envelopes
+
+It now compares on shared `z_scale` directly and does not interpolate to column mass.
+
+## Forward Synthesis
+
+`Forward.jl` is the Julia-side consumer for predicted departure coefficients and related atmospheric inputs. Use it for downstream synthesis after Python-side prediction has produced the HDF5 outputs.
+
+## Caveats
+
+- The code does not overwrite existing dataset, solving-set, prediction, or checkpoint outputs by default
+- `--predict` assumes `MODEL_FILE` already contains normalization and I/O metadata
+- grouped patch datasets can have variable native depth across samples
+- some configured output names still contain historical strings such as `s5`; these are just file naming conventions
+- config values are the source of truth for splits, active atoms, paths, and model dimensions
+
+## Author
 
 Harsh Mathur
-Computational Astrophysics / Radiative Transfer

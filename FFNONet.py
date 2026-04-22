@@ -1076,7 +1076,6 @@ def ffno_test_model(
     *,
     model,
     checkpoint_path,
-    train_h5,
     val_h5,
     diagnostic_path,
     lines,
@@ -1096,10 +1095,8 @@ def ffno_test_model(
 
     os.makedirs(os.path.dirname(diagnostic_path) or ".", exist_ok=True)
 
-    Cin, Cout = _read_io_channels(train_h5)
-    mean_X, std_X, mean_Y, std_Y = _load_normalization_from_checkpoint_or_h5(
+    Cin, Cout, mean_X, std_X, mean_Y, std_Y = _load_inference_metadata_from_checkpoint(
         checkpoint_path,
-        train_h5,
     )
 
     model_config = dict(model_config)

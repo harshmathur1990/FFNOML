@@ -74,6 +74,24 @@ def ensure_built_datasets_exist():
         )
 
 
+def ensure_validation_dataset_exists():
+    if not os.path.exists(TEST_FILE):
+        raise FileNotFoundError(
+            "With the current config, the required validation dataset file does not exist.\n"
+            f"  - test: {TEST_FILE}\n"
+            "Run pipeline.py --build first."
+        )
+
+
+def ensure_checkpoint_exists():
+    if not os.path.exists(MODEL_FILE):
+        raise FileNotFoundError(
+            "With the current config, the required model checkpoint does not exist.\n"
+            f"  - checkpoint: {MODEL_FILE}\n"
+            "Run pipeline.py --train first."
+        )
+
+
 def build_datasets():
 
     if not os.path.exists(TRAIN_FILE):
@@ -171,14 +189,14 @@ def train_model(*, resume=False, bestpath=False, expand=False):
 
 
 def test_model():
-    ensure_built_datasets_exist()
+    ensure_validation_dataset_exists()
+    ensure_checkpoint_exists()
 
     diagnostic_path = MODEL_DIR + f"val_diagnostics_{MODEL}.json"
 
     ffno_test_model(
         model=MODEL,
         checkpoint_path=MODEL_FILE,
-        train_h5=TRAIN_FILE,
         val_h5=TEST_FILE,
         diagnostic_path=diagnostic_path,
         lines=lines,
@@ -196,6 +214,8 @@ def test_model():
 
 
 def run_predictions():
+    ensure_checkpoint_exists()
+
     for PRED_ATMOS in MULTI3D_PRED_DATA:
 
         PREDICT_FILE = MODEL_DIR + f"3D_sim_predict_{PRED_ATMOS['NAME']}.hdf5"
