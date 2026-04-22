@@ -5,16 +5,29 @@ import os
 SIMULATIONS = {
     "en024048_hion": {
         "base_path": "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion",
-        "snaps": ["385", "386"],
+        "snaps": ["385", "386", "465", "700"],
+    },
+    "nw012023": {
+        "base_path": "/mn/stornext/d9/data/harshm/bifrost_data/nw012023",
+        "snaps": ["1050", "1120", "915", "940"],
+    },
+    "ch012012_hion": {
+        "base_path": "/mn/stornext/d9/data/harshm/bifrost_data/ch012012_hion",
+        "snaps": ["759", "834", "910", "984"]
+
     }
 }
 
 TRAIN_SPLIT = {
-    "en024048_hion": ["385"],
+    "en024048_hion": ["385", "465"],
+    "nw012023": ["1050", "1120"],
+    "ch012012_hion": ["759", "910"]
 }
 
 VAL_SPLIT = {
-    "en024048_hion": ["386"],
+    "en024048_hion": ["700"],
+    "nw012023": ["1120"],
+    "ch012012_hion": ["834"]
 }
 
 
@@ -74,6 +87,21 @@ ATOM_CONFIG = {
 
 ACTIVE_SIMS  = ["en024048_hion"]
 ACTIVE_ATOMS = ["H"]
+
+
+def _build_split_tag(split_dict):
+    parts = []
+
+    for sim in sorted(split_dict):
+        snaps = "-".join(sorted(split_dict[sim], key=str))
+        parts.append(f"{sim}_{snaps}")
+
+    return "__".join(parts)
+
+
+def _dataset_filename(split_name, split_dict, patch, stride):
+    split_tag = _build_split_tag(split_dict)
+    return f"3D_sim_{split_name}_{split_tag}_patch{patch}_stride{stride}.hdf5"
 
 
 def build_multi3d_entries(split_dict):
@@ -162,33 +190,47 @@ MODEL_CONFIG = dict(
     width=48,
     n_layers=4,
     dropout=0.0,
+    spec_dropout=0.03,
+    vertical_dropout=0.03,
+    spec_dropout_layers=[1],
+    vertical_dropout_layers=[2],
     checkpoint_blocks=True,
 )
 
 
 IODIR = "IO/"
-TRAIN_FILE   = IODIR + f"3D_sim_train.hdf5"
-TEST_FILE   = IODIR + f"3D_sim_test.hdf5"
-MODEL_DIR  = f"training/"
-MODEL_FILE = MODEL_DIR + f"3D_sim_train_s123.pt"
+
+MODEL_DIR = f"training_{MODEL}_zscale/"
+MODEL_FILE = MODEL_DIR + "3D_sim_train_s123.pt"
+
+EXPAND_FROM_CHECKPOINT = "training_FFNO3D_expand/3D_sim_train_s123_expand.pt"
+ZERO_INIT_NEW_BLOCKS = True
 
 
 DEBUG_LOSS = False
 
 # Dataset Params
-NDEP=400
-PATCH=32
-STRIDE=16
+PATCH=40
+STRIDE=20
 SCALES=(1,2,3,4,5,6,7,8)
+
+TRAIN_FILE = os.path.join(
+    IODIR,
+    _dataset_filename("train", TRAIN_SPLIT, PATCH, STRIDE),
+)
+TEST_FILE = os.path.join(
+    IODIR,
+    _dataset_filename("test", VAL_SPLIT, PATCH, STRIDE),
+)
 
 
 # Training Params
-NUM_EPOCHS = 100
+NUM_EPOCHS = 400
 BATCH_SIZE = 1
 LEARNING_RATE = 1e-3
-MIN_LEARNING_RATE = 1e-6
-RESUME_LAST_EPOCH = 45
-RESUME_LAST_LEARNING_RATE = 5.8e-04
+MIN_LEARNING_RATE = 1e-8
+RESUME_LAST_EPOCH = 0
+RESUME_LAST_LEARNING_RATE = 1e-8
 WEIGHT_DECAY = 1e-4
 NUM_WORKERS = 8
 PIN_MEMORY = True

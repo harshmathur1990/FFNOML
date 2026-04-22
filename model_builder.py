@@ -1,8 +1,10 @@
+import os
 import sys
 import torch
 import torch.distributed as dist
 
-from models.ffno_model import *
+from models.ffno_model import FFNO3D, FFNOBlock3dBalanced
+from models.ffno_z1d_model import FFNO3DZ1D, FFNOBlock3dZ1D
 from loss.nlte_composite_loss import NLTECompositeLoss
 from loss.gradient_loss import GradientLoss
 from loss.weighted_mse_loss import WeightedMSE_L1
@@ -39,6 +41,10 @@ class ModelBuilder:
 
         if model == "FFNO3D":
             self.model_cls = FFNO3D
+            self.transformer_layer_cls = FFNOBlock3dBalanced
+        elif model == "FFNO3DZ1D":
+            self.model_cls = FFNO3DZ1D
+            self.transformer_layer_cls = FFNOBlock3dZ1D
         else:
             sys.stderr.write(f"Invalid Model class: {model}")
             sys.exit(-1)
@@ -58,6 +64,7 @@ class ModelBuilder:
         self.multi_gpu = multi_gpu
 
         self.rank = 0
+        self.local_rank = 0
         self.world_size = 1
 
         self.debug_loss = debug_loss
@@ -90,27 +97,24 @@ class ModelBuilder:
             dist.init_process_group("nccl")
 
         self.rank = dist.get_rank()
+        self.local_rank = int(os.environ.get("LOCAL_RANK", self.rank))
         self.world_size = dist.get_world_size()
 
-        torch.cuda.set_device(self.rank)
+        torch.cuda.set_device(self.local_rank)
 
-        self.device = f"cuda:{self.rank}"
+        self.device = f"cuda:{self.local_rank}"
 
     # ------------------------------------------------
     # MODEL
     # ------------------------------------------------
 
-    def build_model(self):
-
-        model = self.model_cls(**self.model_config)
-
-        model = model.to(self.device)
+    def wrap_model(self, model):
 
         if self.multi_gpu:
 
             auto_wrap_policy = partial(
                 transformer_auto_wrap_policy,
-                transformer_layer_cls={FFNOBlock3dBalanced},
+                transformer_layer_cls={self.transformer_layer_cls},
             )
 
             model = FSDP(
@@ -118,6 +122,17 @@ class ModelBuilder:
                 auto_wrap_policy=auto_wrap_policy,
                 device_id=torch.cuda.current_device(),
             )
+
+        return model
+
+    def build_model(self, wrap_fsdp=True):
+
+        model = self.model_cls(**self.model_config)
+
+        model = model.to(self.device)
+
+        if wrap_fsdp:
+            model = self.wrap_model(model)
 
         return model
 

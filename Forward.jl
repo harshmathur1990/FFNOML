@@ -94,10 +94,6 @@ const CONFIG_ML = (
     x_pick     = 33,
     y_pick     = 21,
 
-    cmass_n      = 400,
-    cmass_logmin = -6.0,
-    cmass_logmax =  2.0,
-
     voigt = (
         a_min = 1f-4,
         a_max = 1f1,
@@ -124,15 +120,15 @@ const CONFIG_BIFROST = (
             lower_level = 2,
             upper_level = 3
         ),
-        (
-            name = "CA",
-            atom_file = "/mn/stornext/u3/harshm/Documents/WorkRepo/multi3d/input/atoms/atom.ca2.yaml",
-            pops_file = "/mn/stornext/d9/data/harshm/bifrost_data/$(sim_name)/$(snap)/CA/out_pop",
-            nlevels = 6,
-            line_index = 5,
-            lower_level = 3,
-            upper_level = 5
-        )
+        # (
+        #     name = "CA",
+        #     atom_file = "/mn/stornext/u3/harshm/Documents/WorkRepo/multi3d/input/atoms/atom.ca2.yaml",
+        #     pops_file = "/mn/stornext/d9/data/harshm/bifrost_data/$(sim_name)/$(snap)/CA/out_pop",
+        #     nlevels = 6,
+        #     line_index = 5,
+        #     lower_level = 3,
+        #     upper_level = 5
+        # )
     ],
 
     mesh_file  = "/mn/stornext/d9/data/harshm/bifrost_data/$(sim_name)/$(snap)/mesh",
@@ -144,9 +140,48 @@ const CONFIG_BIFROST = (
     x_pick     = 33,
     y_pick     = 21,
 
-    cmass_n      = 400,
-    cmass_logmin = -6.0,
-    cmass_logmax =  2.0,
+    voigt = (
+        a_min = 1f-4,
+        a_max = 1f1,
+        a_n   = 20000,
+        v_min = 0f0,
+        v_max = 5f2,
+        v_n   = 2500
+    )
+)
+
+const CONFIG_TIAGO = (
+    mode = :tiago,
+
+    atoms = [
+        (
+            name = "H",
+            atom_file = "/mn/stornext/u3/harshm/Documents/WorkRepo/multi3d/input/atoms/atom.h6_tiago2.yaml",
+            pops_file = "/mn/stornext/d9/data/harshm/bifrost_data/$(sim_name)/$(snap)/H/out_pop",
+            nlevels = 6,
+            line_index = 5,
+            lower_level = 2,
+            upper_level = 3
+        ),
+        # (
+        #     name = "CA",
+        #     atom_file = "/mn/stornext/u3/harshm/Documents/WorkRepo/multi3d/input/atoms/atom.ca2.yaml",
+        #     pops_file = "/mn/stornext/d9/data/harshm/bifrost_data/$(sim_name)/$(snap)/CA/out_pop",
+        #     nlevels = 6,
+        #     line_index = 5,
+        #     lower_level = 3,
+        #     upper_level = 5
+        # )
+    ],
+
+    mesh_file  = "/mn/stornext/d9/data/harshm/bifrost_data/$(sim_name)/$(snap)/mesh",
+    atmos_file = "/mn/stornext/d9/data/harshm/bifrost_data/$(sim_name)/$(snap)/atm3d",
+
+    out_h5     = "IO/intensity_bifrost_TIAGO_MODE_$(sim_name)_$(snap).h5",
+    out_prefix = "diag_bifrost",
+
+    x_pick     = 33,
+    y_pick     = 21,
 
     voigt = (
         a_min = 1f-4,
@@ -162,151 +197,9 @@ const CONFIG_BIFROST = (
 # USER CHOOSES WHICH ONE TO RUN
 # ============================================================
 
-const CFG = CONFIG_ML
+# const CFG = CONFIG_ML
 # const CFG = CONFIG_BIFROST
-
-# -----------------------------
-# Column-mass remapping helpers
-# (directly from your notebook, with minor cleanup)
-# -----------------------------
-function cmass_from_rho(ρ::AbstractVector{T}, z::AbstractVector{T}) where {T<:Real}
-    n = length(ρ)
-    cm = similar(ρ)
-    cm[1] = zero(T)
-    @inbounds for i in 2:n
-        dz = -(z[i] - z[i-1])  # z increases upward
-        cm[i] = cm[i-1] + 0.5*(ρ[i] + ρ[i-1]) * dz
-    end
-    return cm
-end
-
-function interpolate_column(ρ, z, Y, cmass_new; logx::Bool=false, logy::Bool=false)
-    cm = cmass_from_rho(ρ, z)
-
-    x    = logx ? log10.(cm)        : cm
-    xnew = logx ? log10.(cmass_new) : cmass_new
-
-    m     = length(cmass_new)
-    nvars = size(Y, 2)
-    out   = Matrix{eltype(Y)}(undef, m, nvars)
-
-    @inbounds for v in 1:nvars
-        ycol = view(Y, :, v)
-        y    = logy ? log10.(ycol) : ycol
-
-        itp = LinearInterpolation(x, y, extrapolation_bc=Line())
-        vals = itp.(xnew)
-
-        out[:, v] .= logy ? 10 .^ vals : vals
-    end
-
-    return out
-end
-
-"""
-ρ_super   :: (nx, ny, nz)
-pops4d    :: (nx, ny, nz, nvars)
-cmass_new :: (m)
-
-returns   :: (nx, ny, m, nvars)
-"""
-function interpolate_everything(ρ_super, z, pops4d, cmass_new; logx::Bool=false, logy::Bool=false)
-    nx, ny, nz = size(ρ_super)
-    @assert size(pops4d,1) == nx
-    @assert size(pops4d,2) == ny
-    @assert size(pops4d,3) == nz
-
-    nvars = size(pops4d, 4)
-    m     = length(cmass_new)
-    out   = Array{eltype(pops4d)}(undef, nx, ny, m, nvars)
-
-    @threads for ix in 1:nx
-        for iy in 1:ny
-            ρ = view(ρ_super, ix, iy, :)
-            Y = reshape(view(pops4d, ix, iy, :, :), nz, nvars)  # force (nz, nvars)
-            col = interpolate_column(ρ, z, Y, cmass_new; logx=logx, logy=logy)  # (m, nvars)
-            @inbounds out[ix, iy, :, :] .= col
-        end
-    end
-
-    return out
-end
-
-function compute_ztop(rho3d, z, mtop)
-    nx, ny, nz = size(rho3d)
-    ztop = Array{eltype(rho3d)}(undef, nx, ny)
-    for ix in 1:nx, iy in 1:ny
-        ρ  = view(rho3d, ix, iy, :)
-        cm = cmass_from_rho(ρ, z)
-        itp = LinearInterpolation(cm, z, extrapolation_bc=Line())
-        ztop[ix,iy] = itp(mtop)
-    end
-    return ztop
-end
-
-function invert_cmass(cmass, rho, ztop)
-    N = length(cmass)
-    z = similar(cmass)
-    z[1] = ztop
-    @inbounds for i = 2:N
-        dm = cmass[i] - cmass[i-1]
-        z[i] = z[i-1] - dm / rho[i-1]
-    end
-    return z
-end
-
-function compute_z_from_cmass_3d(rho_new, cmass_new, ztop)
-    nx, ny, nz = size(rho_new)
-    znew = Array{eltype(rho_new)}(undef, nx, ny, nz)
-    for ix in 1:nx, iy in 1:ny
-        znew[ix,iy,:] = invert_cmass(cmass_new, view(rho_new, ix, iy, :), ztop[ix,iy])
-    end
-    return znew
-end
-
-function remap_atmosphere_cmass(atmos::Atmosphere3D, new_cmass_scale)
-    nx, ny, nz = atmos.nx, atmos.ny, atmos.nz
-
-    # (nz,nx,ny) → (nx,ny,nz)
-    temp = permutedims(atmos.temperature,       (2,3,1))
-    vx   = permutedims(atmos.velocity_x,        (2,3,1))
-    vy   = permutedims(atmos.velocity_y,        (2,3,1))
-    vz   = permutedims(atmos.velocity_z,        (2,3,1))
-    ne   = permutedims(atmos.electron_density,  (2,3,1))
-    nh   = permutedims(atmos.hydrogen1_density, (2,3,1))
-    np   = permutedims(atmos.proton_density,    (2,3,1))
-    rho  = permutedims(atmos.plasma_density,    (2,3,1))
-
-    ztop = compute_ztop(rho, atmos.z, new_cmass_scale[1])
-
-    f4(A) = reshape(A, nx, ny, nz, 1)
-    temp4, vx4, vy4, vz4 = f4(temp), f4(vx), f4(vy), f4(vz)
-    ne4, nh4, np4, rho4  = f4(ne),   f4(nh), f4(np), f4(rho)
-
-    temp_new = dropdims(interpolate_everything(rho, atmos.z, temp4, new_cmass_scale; logx=true, logy=false), dims=4)
-    vx_new   = dropdims(interpolate_everything(rho, atmos.z, vx4,   new_cmass_scale; logx=true, logy=false), dims=4)
-    vy_new   = dropdims(interpolate_everything(rho, atmos.z, vy4,   new_cmass_scale; logx=true, logy=false), dims=4)
-    vz_new   = dropdims(interpolate_everything(rho, atmos.z, vz4,   new_cmass_scale; logx=true, logy=false), dims=4)
-    ne_new   = dropdims(interpolate_everything(rho, atmos.z, ne4,   new_cmass_scale; logx=true, logy=true),  dims=4)
-    nh_new   = dropdims(interpolate_everything(rho, atmos.z, nh4,   new_cmass_scale; logx=true, logy=true),  dims=4)
-    np_new   = dropdims(interpolate_everything(rho, atmos.z, np4,   new_cmass_scale; logx=true, logy=true),  dims=4)
-    rho_new  = dropdims(interpolate_everything(rho, atmos.z, rho4,  new_cmass_scale; logx=true, logy=true),  dims=4)
-
-    z_new = compute_z_from_cmass_3d(rho_new, new_cmass_scale, ztop)
-
-    # back to Atmosphere3D layout (nz,nx,ny)
-    g(A) = permutedims(A, (3,1,2))
-
-    return Atmosphere3D(
-        nx, ny, length(z_new),
-        atmos.x, atmos.y,
-        g(z_new),
-        g(temp_new),
-        g(vx_new), g(vy_new), g(vz_new),
-        g(ne_new), g(nh_new), g(np_new),
-        g(rho_new)
-    )
-end
+const CFG = CONFIG_TIAGO
 
 
 function split_atoms(dep_coeff, atoms)
@@ -366,8 +259,8 @@ function lte_pops_saha(atom, atmos::Atmosphere3D)
     pops_s = SVector{atom.nlevels,Float32}.(pops)
     reint  = reshape(reinterpret(Float32, pops_s), atom.nlevels, size(pops_s)...)
 
-    # → (nx, ny, nz, nlevels)
-    pops4d = permutedims(reint, (3,4,2,1))
+    # → (nz, nx, ny, nlevels)
+    pops4d = permutedims(reint, (2,3,4,1))
 
     return pops4d
 end
@@ -377,7 +270,7 @@ function load_pred_depcoeff(pred_h5::String, pred_key::String)
     h5open(pred_h5, "r") do f
         raw = read(f[pred_key])
 
-        dep_coeff = PermutedDimsArray(raw, (3, 4, 2, 1))
+        dep_coeff = PermutedDimsArray(raw, (2, 3, 4, 1))
         return dep_coeff
 
     end
@@ -388,30 +281,6 @@ function load_multi3d_pops(pops_file::String, atmos::Atmosphere3D, nlevels::Int)
     return pops_out_nlte, pops_out_lte
 end
 
-function remap_pops_to_cmass(atmos::Atmosphere3D, pops4d_nxnyznv, new_cmass_scale; logx=true, logy=true)
-    # expects pops in (nx,ny,nz,nvars) OR a PermutedDimsArray that behaves like that
-    rho_nxnyz = PermutedDimsArray(atmos.plasma_density, (2, 3, 1))  # (nx,ny,nz)
-    pops_new  = interpolate_everything(rho_nxnyz, atmos.z, pops4d_nxnyznv, new_cmass_scale; logx=logx, logy=logy)
-    return pops_new
-end
-
-# Source function at line center (same algebra you used)
-function line_source_function(atom, λ0_m, nltepops, l, u)
-
-    h = 6.62607015e-34
-    c = 2.99792458e8
-    ν = c / λ0_m
-
-    n_l = nltepops[:, :, :, l]
-    n_u = nltepops[:, :, :, u]
-
-    g_l = atom.g[l]
-    g_u = atom.g[u]
-
-    prefactor = 2*h * ν^3 / c^2
-
-    return prefactor ./ ((g_u .* n_l) ./ (g_l .* n_u) .- 1)
-end
 
 # -----------------------------
 # Synthesis
@@ -452,7 +321,7 @@ function synthesize_intensity_3d(
         for j in 1:atms.ny
             calc_line_prep!(my_line, buf, atms[:, j, i], σ_itp)
             calc_line_1D!(my_line, buf, my_line.λ, atms[:, j, i],
-                          n_u[:, i, j], n_l[:, i, j], voigt_itp)
+                          n_u[:, j, i], n_l[:, j, i], voigt_itp)
             intensity[:, j, i] = buf.intensity
         end
         next!(p)
@@ -471,27 +340,55 @@ function save_intensity_h5(out_h5::String, intensity, wave)
     close(f)
 end
 
-function plot_diag_depcoeff(out_png::String, cmass_new, pred_dep::AbstractVector, orig_dep::Union{Nothing,AbstractVector})
-    x = log10.(cmass_new)
-    plt = plot(x, log10.(pred_dep), label="pred dep coeff", color=:black)
-    if orig_dep !== nothing
-        plot!(plt, x, log10.(orig_dep), label="orig dep coeff", color=:red)
+
+function calc_multi3d_hα(mesh_file, atmos_file, pops_file, atom_file)
+    h_atom = read_atom(atom_file)
+    my_line = h_atom.lines[5]  #  index 5 for Halpha
+
+    atmos, h_pops = read_atmos_hpops_multi3d(mesh_file, atmos_file, pops_file)
+    n_u = h_pops[:, :, :, 3]
+    n_l = h_pops[:, :, :, 2]
+
+    # Continuum opacity structures
+    bckgr_atoms = [
+        "Al.yaml",
+        "C.yaml",
+        "Ca.yaml",
+        "Fe.yaml",
+        "H_6.yaml",
+        "He.yaml",
+        "KI.yaml",
+        "Mg.yaml",
+        "N.yaml",
+        "Na.yaml",
+        "NiI.yaml",
+        "O.yaml",
+        "S.yaml",
+        "Si.yaml",
+    ]
+    atom_files = [joinpath(AtomicData.get_atom_dir(), a) for a in bckgr_atoms]
+    σ_itp = get_σ_itp(atmos, my_line.λ0, atom_files)
+
+    a = LinRange(1f-4, 1.5f1, 20000)
+    v = LinRange(0f2, 5f2, 2500)
+    voigt_itp = create_voigt_itp(a, v)
+
+    intensity = Array{Float32, 3}(undef, my_line.nλ, atmos.ny, atmos.nx)
+    p = ProgressMeter.Progress(atmos.nx)
+
+    Threads.@threads for i in 1:atmos.nx
+        buf = RTBuffer(atmos.nz, my_line.nλ, Float32)  # allocate inside for local scope
+        for j in 1:atmos.ny
+            calc_line_prep!(my_line, buf, atmos[:, j, i], σ_itp)
+            calc_line_1D!(my_line, buf, my_line.λ, atmos[:, j, i], n_u[:, j, i], n_l[:, j, i], voigt_itp)
+            intensity[:, j, i] = buf.intensity
+        end
+        ProgressMeter.next!(p)
     end
-    xlabel!(plt, "log10(cmass)")
-    ylabel!(plt, "log10(dep coeff)")
-    savefig(plt, out_png)
+
+    return (intensity=intensity, wave=my_line.λ, line=my_line)
 end
 
-function plot_diag_Snu(out_png::String, cmass_new, S_pred::AbstractVector, S_orig::Union{Nothing,AbstractVector})
-    x = log10.(cmass_new)
-    plt = plot(x, log10.(S_pred), label="pred Sν", color=:black)
-    if S_orig !== nothing
-        plot!(plt, x, log10.(S_orig), label="orig Sν", color=:red)
-    end
-    xlabel!(plt, "log10(cmass)")
-    ylabel!(plt, "log10(Sν)  [SI units]")
-    savefig(plt, out_png)
-end
 
 # -----------------------------
 # Main pipeline
@@ -506,24 +403,19 @@ function main()
     println("Reading atmosphere...")
     atmos = read_atmos_multi3d(cfg.mesh_file, cfg.atmos_file)
 
-    new_cmass_scale = Float32.(10 .^ range(cfg.cmass_logmin, cfg.cmass_logmax, length=cfg.cmass_n))
-
-    println("Computing LTE pops...")
-    lte_atoms = Dict{String,Any}()
-
-    for a in cfg.atoms
-        atom = Muspel.read_atom(a.atom_file)
-        pops = lte_pops_saha(atom, atmos)
-        lte_atoms[a.name] = remap_pops_to_cmass(atmos, pops, new_cmass_scale; logx=true, logy=true)
-    end
-
-    println("Remapping atmosphere...")
-    remapped_atmos = remap_atmosphere_cmass(atmos, new_cmass_scale)
-
     # ============================================================
     # ML MODE
     # ============================================================
     if cfg.mode == :ml
+
+        println("Computing LTE pops...")
+        lte_atoms = Dict{String,Any}()
+
+        for a in cfg.atoms
+            atom = Muspel.read_atom(a.atom_file)
+            pops = lte_pops_saha(atom, atmos)
+            lte_atoms[a.name] = pops
+        end
 
         dep_coeff_full = load_pred_depcoeff(cfg.pred_h5, cfg.pred_key)
 
@@ -545,7 +437,7 @@ function main()
 
             nlte_pop = dep .* lte_atoms[a.name]
 
-            nlte_atoms[a.name] = permutedims(nlte_pop, (3,1,2,4))
+            nlte_atoms[a.name] = nlte_pop
 
         end
 
@@ -565,101 +457,18 @@ function main()
             pops_out_nlte, pops_out_lte =
                 read_pops_multi3d(a.pops_file, atmos.nx, atmos.ny, atmos.nz, atom.nlevels)
 
-            pops_new = permutedims(
-                remap_pops_to_cmass(
-                    atmos,
-                    PermutedDimsArray(pops_out_nlte, (2,3,1,4)),
-                    new_cmass_scale;
-                    logx=true, logy=true
-                ),
-                (3,1,2,4)
-            )
-
-            nlte_atoms[a.name] = pops_new
+            nlte_atoms[a.name] = pops_out_nlte
         end
 
+    elseif cfg.mode == :tiago
+        println("tiago mode")
     else
         error("Unknown mode")
     end
 
-    # ---------------------------------------------------------
-    # Diagnostics: compare ML vs true NLTE if pops_file exists
-    # ---------------------------------------------------------
-    if cfg.mode == :ml && cfg.plot_diagnostics
-
-        println("Running diagnostics...")
-
-        for a in cfg.atoms
-
-            atom = Muspel.read_atom(a.atom_file)
-
-            # -------------------------
-            # TRUE NLTE pops
-            # -------------------------
-            pops_out_nlte, pops_out_lte =
-                read_pops_multi3d(a.pops_file, atmos.nx, atmos.ny, atmos.nz, atom.nlevels)
-
-            pops_true = permutedims(
-                remap_pops_to_cmass(
-                    atmos,
-                    PermutedDimsArray(pops_out_nlte, (2,3,1,4)),
-                    new_cmass_scale;
-                    logx=true, logy=true
-                ),
-                (3,1,2,4)
-            )
-
-            # -------------------------
-            # ML NLTE pops
-            # -------------------------
-            pops_ml = nlte_atoms[a.name]
-
-            # -------------------------
-            # LTE pops
-            # -------------------------
-            pops_lte = permutedims(
-                lte_atoms[a.name],
-                (3,1,2,4)
-            )
-
-            x = cfg.x_pick
-            y = cfg.y_pick
-
-            # -------------------------
-            # Departure coefficient diagnostic
-            # -------------------------
-            l = a.lower_level
-
-            dep_ml   = pops_ml[:,x,y,l] ./ pops_lte[:,x,y,l]
-            dep_true = pops_true[:,x,y,l] ./ pops_lte[:,x,y,l]
-
-            plot_diag_depcoeff(
-                "$(cfg.out_prefix)_$(a.name)_dep.png",
-                new_cmass_scale,
-                dep_ml,
-                dep_true
-            )
-
-            # -------------------------
-            # Source function diagnostic
-            # -------------------------
-            λ0 = atom.lines[a.line_index].λ0
-
-            S_ml   = line_source_function(atom, λ0, pops_ml, a.lower_level, a.upper_level)[:,x,y]
-            S_true = line_source_function(atom, λ0, pops_true, a.lower_level, a.upper_level)[:,x,y]
-
-            plot_diag_Snu(
-                "$(cfg.out_prefix)_$(a.name)_Snu.png",
-                new_cmass_scale,
-                S_ml,
-                S_true
-            )
-        end
-    end
-
-    for (k,v) in nlte_atoms
-        println(k, " NLTE shape = ", size(v))
-    end
+    # for (k,v) in nlte_atoms
+    #     println(k, " NLTE shape = ", size(v))
+    # end
 
     println("Synthesizing line profiles...")
     results = Dict{String,Any}()
@@ -668,19 +477,23 @@ function main()
 
         println("Synthesizing atom: ", a.name)
 
-        h_atom = Muspel.read_atom(a.atom_file)
+        if cfg.mode == :tiago
+            results[a.name] = calc_multi3d_hα(cfg.mesh_file, cfg.atmos_file, a.pops_file, a.atom_file)
+        else
+            h_atom = Muspel.read_atom(a.atom_file)
 
-        syn = synthesize_intensity_3d(
-            remapped_atmos,
-            h_atom,
-            a.line_index,
-            nlte_atoms[a.name],
-            a.lower_level,
-            a.upper_level;
-            voigt_cfg = cfg.voigt
-        )
+            syn = synthesize_intensity_3d(
+                atmos,
+                h_atom,
+                a.line_index,
+                nlte_atoms[a.name],
+                a.lower_level,
+                a.upper_level;
+                voigt_cfg = cfg.voigt
+            )
 
-        results[a.name] = syn
+            results[a.name] = syn
+        end
     end
 
     println("Saving output...")

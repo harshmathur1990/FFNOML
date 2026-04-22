@@ -1,4 +1,7 @@
 import os
+import re
+import inspect
+import warnings
 import torch
 import torch.distributed as dist
 from tqdm import tqdm
@@ -13,6 +16,80 @@ from torch.distributed.checkpoint.state_dict import (
 )
 
 
+def load_checkpoint(checkpoint_path, *, map_location="cpu"):
+    """
+    Compatibility wrapper for `torch.load` across PyTorch versions.
+
+    PyTorch 2.6 changed the default `weights_only` value from False to True, which
+    can fail for checkpoints containing NumPy arrays/dtypes unless those globals
+    are allowlisted. We first attempt a safe weights-only load and fall back to a
+    full unpickle only if needed.
+    """
+    supports_weights_only = False
+    try:
+        supports_weights_only = "weights_only" in inspect.signature(torch.load).parameters
+    except (TypeError, ValueError):
+        supports_weights_only = False
+
+    if not supports_weights_only:
+        return torch.load(checkpoint_path, map_location=map_location)
+
+    try:
+        return torch.load(
+            checkpoint_path,
+            map_location=map_location,
+            weights_only=True,
+        )
+    except Exception as e:
+        msg = str(e)
+        if "Weights only load failed" not in msg and "WeightsUnpickler" not in msg:
+            raise
+
+    # Retry with a small NumPy allowlist (common in our checkpoints for stats).
+    try:
+        import numpy as np
+
+        reconstruct = getattr(np.core.multiarray, "_reconstruct", None)
+        scalar = getattr(np.core.multiarray, "scalar", None)
+        allowed = [x for x in (reconstruct, scalar, np.ndarray, np.dtype) if x is not None]
+
+        try:
+            from torch.serialization import safe_globals
+        except Exception:
+            safe_globals = None
+
+        if safe_globals is not None:
+            with safe_globals(allowed):
+                return torch.load(
+                    checkpoint_path,
+                    map_location=map_location,
+                    weights_only=True,
+                )
+
+        # Older torch: persistently add allowlist if context manager isn't available.
+        if hasattr(torch.serialization, "add_safe_globals"):
+            torch.serialization.add_safe_globals(allowed)
+            return torch.load(
+                checkpoint_path,
+                map_location=map_location,
+                weights_only=True,
+            )
+    except Exception:
+        pass
+
+    # Last resort: old behavior (unsafe; only do this for trusted checkpoints).
+    warnings.warn(
+        "Falling back to torch.load(weights_only=False). "
+        "Only use trusted checkpoint files.",
+        RuntimeWarning,
+    )
+    return torch.load(
+        checkpoint_path,
+        map_location=map_location,
+        weights_only=False,
+    )
+
+
 def save_checkpoint_fsdp(
     model,
     optimizer,
@@ -22,6 +99,8 @@ def save_checkpoint_fsdp(
     train_comp,
     val_comp,
     save_path,
+    normalization_stats=None,
+    io_metadata=None,
 ):
     options = StateDictOptions(
         full_state_dict=True,
@@ -44,6 +123,10 @@ def save_checkpoint_fsdp(
         "train_components": train_comp,
         "val_components": val_comp,
     }
+    if normalization_stats is not None:
+        ckpt["normalization_stats"] = normalization_stats
+    if io_metadata is not None:
+        ckpt["io_metadata"] = io_metadata
     torch.save(ckpt, save_path)
 
 
@@ -60,6 +143,8 @@ def save_resume_checkpoint(
     scheduler,
     epoch,
     save_path,
+    normalization_stats=None,
+    io_metadata=None,
 ):
     options = StateDictOptions(
         full_state_dict=True,
@@ -80,7 +165,52 @@ def save_resume_checkpoint(
         "scheduler_state": scheduler.state_dict() if scheduler is not None else None,
         "current_lr": optimizer.param_groups[0]["lr"],
     }
+    if normalization_stats is not None:
+        ckpt["normalization_stats"] = normalization_stats
+    if io_metadata is not None:
+        ckpt["io_metadata"] = io_metadata
     torch.save(ckpt, save_path)
+
+
+def get_checkpoint_normalization(ckpt):
+    if not isinstance(ckpt, dict):
+        return None
+
+    stats = ckpt.get("normalization_stats")
+    if not isinstance(stats, dict):
+        return None
+
+    required = ("mean_X", "std_X", "mean_Y", "std_Y")
+    if not all(key in stats for key in required):
+        return None
+
+    out = {}
+    for key in required:
+        value = stats[key]
+        if torch.is_tensor(value):
+            value = value.detach().cpu().numpy()
+        else:
+            value = torch.as_tensor(value, dtype=torch.float32).cpu().numpy()
+        out[key] = value
+
+    return out
+
+
+def get_checkpoint_io_metadata(ckpt):
+    if not isinstance(ckpt, dict):
+        return None
+
+    meta = ckpt.get("io_metadata")
+    if not isinstance(meta, dict):
+        return None
+
+    if "Cin" not in meta or "Cout" not in meta:
+        return None
+
+    return {
+        "Cin": int(meta["Cin"]),
+        "Cout": int(meta["Cout"]),
+    }
 
 
 def load_training_state(
@@ -91,7 +221,7 @@ def load_training_state(
     *,
     map_location="cpu",
 ):
-    ckpt = torch.load(checkpoint_path, map_location=map_location)
+    ckpt = load_checkpoint(checkpoint_path, map_location=map_location)
     result = dict(ckpt)
     options = StateDictOptions(
         full_state_dict=True,
@@ -121,6 +251,71 @@ def load_training_state(
     return result
 
 
+def expand_model_from_checkpoint(
+    checkpoint_path,
+    model,
+    *,
+    map_location="cpu",
+    zero_init_new_blocks=True,
+):
+    ckpt = load_checkpoint(checkpoint_path, map_location=map_location)
+    if not isinstance(ckpt, dict) or "model_state" not in ckpt:
+        raise RuntimeError(f"Invalid checkpoint: {checkpoint_path}")
+
+    current_state = model.state_dict()
+    source_state = ckpt["model_state"]
+
+    merged_state = {}
+    copied = []
+    skipped = []
+
+    for key, current_tensor in current_state.items():
+        source_tensor = source_state.get(key)
+
+        if source_tensor is not None and tuple(source_tensor.shape) == tuple(current_tensor.shape):
+            merged_state[key] = source_tensor
+            copied.append(key)
+        else:
+            merged_state[key] = current_tensor
+            if source_tensor is not None:
+                skipped.append(key)
+
+    old_block_ids = set()
+    block_pattern = re.compile(r"blocks\.(\d+)\.")
+
+    for key in source_state.keys():
+        match = block_pattern.search(key)
+        if match:
+            old_block_ids.add(int(match.group(1)))
+
+    old_n_blocks = (max(old_block_ids) + 1) if old_block_ids else 0
+    zeroed = []
+
+    if zero_init_new_blocks:
+        for key, tensor in merged_state.items():
+            match = block_pattern.search(key)
+            if not match:
+                continue
+
+            block_idx = int(match.group(1))
+            if block_idx < old_n_blocks:
+                continue
+
+            if key.endswith(("res_fused", "res_pw", "res_mlp")):
+                merged_state[key] = torch.zeros_like(tensor)
+                zeroed.append(key)
+
+    model.load_state_dict(merged_state, strict=True)
+
+    return {
+        "checkpoint_path": checkpoint_path,
+        "copied_keys": copied,
+        "skipped_keys": skipped,
+        "old_n_blocks": old_n_blocks,
+        "zeroed_keys": zeroed,
+    }
+
+
 def is_dist():
     return dist.is_available() and dist.is_initialized()
 
@@ -145,6 +340,18 @@ def reduce_sum_scalar(value, device):
     if is_dist():
         dist.all_reduce(t, op=dist.ReduceOp.SUM)
     return t.item()
+
+
+def get_total_gpu_mem_used_gb(device):
+    """
+    Return the local device's used GPU memory in GiB.
+
+    Important: this helper is used from the main-rank-only tqdm/logging path,
+    so it must not perform distributed collectives. Calling `all_reduce` here
+    would deadlock because non-main ranks do not enter the logging code.
+    """
+    free_bytes, total_bytes = torch.cuda.mem_get_info(device)
+    return (total_bytes - free_bytes) / 1024**3
 
 
 def reduce_components(comp_sums, count, device):
@@ -182,13 +389,23 @@ def reduce_components(comp_sums, count, device):
     return out
 
 
-def compute_loss(pred, target, weight, loss_fn, x, pred_full=None, target_full=None):
+def compute_loss(
+    pred,
+    target,
+    weight,
+    loss_fn,
+    x,
+    pred_full=None,
+    target_full=None,
+    source_true=None,
+):
     loss, components = loss_fn(
         x,
         pred,
         target,
         logb_pred_full=pred_full,
         logb_true_full=target_full,
+        source_true=source_true,
     )
 
     if weight is not None:
@@ -301,7 +518,7 @@ def _make_postfix(loss, lr, device, components):
         postfix["lr"] = f"{lr:.1e}"
 
     if isinstance(device, str) and device.startswith("cuda"):
-        mem = torch.cuda.memory_allocated(device) / 1024**3
+        mem = get_total_gpu_mem_used_gb(device)
         postfix["gpu_mem"] = f"{mem:.2f}G"
 
     if components is not None and isinstance(components, dict):
@@ -316,7 +533,7 @@ def _make_postfix(loss, lr, device, components):
             postfix["L2"] = f"{float(components['source']):.2e}"
 
         if "gradient" in components and torch.is_tensor(components["gradient"]):
-            postfix["L3"] = f"{components['source'].item():.2e}"
+            postfix["L3"] = f"{components['gradient'].item():.2e}"
         elif "gradient" in components:
             postfix["L3"] = f"{float(components['gradient']):.2e}"
 
@@ -389,25 +606,35 @@ def train_one_epoch(
         disable=not is_main_process(),
     )
 
-    for x, y, dx, dy, scale, weight in pbar:
+    for x, y, z, dx, dy, scale, weight, source_target in pbar:
         x = x.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True)
+        z = z.to(device, non_blocking=True)
         dx = dx.to(device, non_blocking=True)
         dy = dy.to(device, non_blocking=True)
 
         if weight is not None:
             weight = weight.to(device, non_blocking=True)
 
+        if source_target is not None and source_target.numel() > 0:
+            source_target = source_target.to(device, non_blocking=True)
+        else:
+            source_target = None
+
         optimizer.zero_grad(set_to_none=True)
 
-        pred = model(x, dx, dy)
+        pred = model(x, z, dx, dy)
 
         pred_full = pred
         y_full = y
+        source_true = None
 
         pred = flatten_columns_logb(pred_full)
         y = flatten_columns_logb(y_full)
         x = flatten_columns_logb(x)
+
+        if source_target is not None and source_target.numel() > 0:
+            source_true = flatten_columns_logb(source_target)
 
         loss, components = compute_loss(
             pred=pred,
@@ -417,24 +644,8 @@ def train_one_epoch(
             x=x,
             pred_full=pred_full,
             target_full=y_full,
+            source_true=source_true,
         )
-
-        # ============================================
-        # Extra diagnostics (VERY IMPORTANT)
-        # ============================================
-        with torch.no_grad():
-            err = pred - y
-
-            mse = (err ** 2).mean()
-            rmse = torch.sqrt(mse)
-
-            target_std = y.std()
-            pred_std = pred.std()
-
-            rel_rmse = rmse / (target_std + 1e-8)
-            std_ratio = pred_std / (target_std + 1e-8)
-
-            p95_err = err.abs().quantile(0.95)
 
         loss.backward()
 
@@ -455,29 +666,13 @@ def train_one_epoch(
         _accumulate_components(comp_sums, components, weight_factor=weight_factor)
         _accumulate_components(running_comp, components, weight_factor=weight_factor)
 
-        # accumulate diagnostics
-        diag = {
-            "rmse": rmse,
-            "rel_rmse": rel_rmse,
-            "std_ratio": std_ratio,
-            "p95_err": p95_err,
-        }
-
-        _accumulate_components(running_comp, diag, weight_factor=weight_factor)
-        _accumulate_components(comp_sums, diag, weight_factor=weight_factor)
-
-        # all ranks must participate in collectives
-        global_running = reduce_sum_scalar(running, device)
-        global_n = reduce_sum_scalar(n_columns, device)
-
-        avg_so_far = global_running / max(1, global_n)
-
-        avg_comp = {}
-        for k, v in running_comp.items():
-            global_v = reduce_sum_scalar(v, device)
-            avg_comp[k] = global_v / max(1, global_n)
-
         if is_main_process():
+            avg_so_far = running / max(1, n_columns)
+            avg_comp = {
+                k: float(v) / max(1, n_columns)
+                for k, v in running_comp.items()
+                if isinstance(v, (int, float))
+            }
             postfix = _make_postfix(avg_so_far, lr, device, avg_comp)
             pbar.set_postfix(postfix)
 
@@ -495,8 +690,11 @@ def validate(
     loader,
     loss_fn,
     device,
+    collect_model_stats=False,
+    forward_kwargs=None,
 ):
     model.eval()
+    forward_kwargs = forward_kwargs or {}
 
     running = 0.0
     n_columns = 0
@@ -504,7 +702,7 @@ def validate(
 
     running_comp = {}
 
-    # model_stats_sums = {}
+    model_stats_sums = {}
 
     pbar = tqdm(
         loader,
@@ -514,24 +712,44 @@ def validate(
     )
 
     with torch.no_grad():
-        for x, y, dx, dy, scale, weight in pbar:
+        for x, y, z, dx, dy, scale, weight, source_target in pbar:
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
+            z = z.to(device, non_blocking=True)
             dx = dx.to(device, non_blocking=True)
             dy = dy.to(device, non_blocking=True)
 
             if weight is not None:
                 weight = weight.to(device, non_blocking=True)
 
-            # pred, stats = model(x, dx, dy, collect_stats=True)
-            pred = model(x, dx, dy)
+            if source_target is not None and source_target.numel() > 0:
+                source_target = source_target.to(device, non_blocking=True)
+            else:
+                source_target = None
+
+            if collect_model_stats:
+                pred, stats = model(
+                    x,
+                    z,
+                    dx,
+                    dy,
+                    collect_stats=True,
+                    **forward_kwargs,
+                )
+            else:
+                pred = model(x, z, dx, dy, **forward_kwargs)
+                stats = None
 
             pred_full = pred
             y_full = y
+            source_true = None
 
             pred = flatten_columns_logb(pred_full)
             y = flatten_columns_logb(y_full)
             x = flatten_columns_logb(x)
+
+            if source_target is not None and source_target.numel() > 0:
+                source_true = flatten_columns_logb(source_target)
 
             loss, components = compute_loss(
                 pred=pred,
@@ -541,6 +759,7 @@ def validate(
                 x=x,
                 pred_full=pred_full,
                 target_full=y_full,
+                source_true=source_true,
             )
 
             # ============================================
@@ -571,7 +790,7 @@ def validate(
             # local running (for tqdm)
             _accumulate_components(running_comp, components, weight_factor=weight_factor)
 
-            # _accumulate_model_stats(model_stats_sums, stats, weight_factor=pred.shape[0])
+            _accumulate_model_stats(model_stats_sums, stats, weight_factor=pred.shape[0])
 
             # accumulate diagnostics
             diag = {
@@ -584,17 +803,13 @@ def validate(
             _accumulate_components(running_comp, diag, weight_factor=weight_factor)
             _accumulate_components(comp_sums, diag, weight_factor=weight_factor)
 
-            global_running = reduce_sum_scalar(running, device)
-            global_n = reduce_sum_scalar(n_columns, device)
-
-            avg_so_far = global_running / max(1, global_n)
-
-            avg_comp = {}
-            for k, v in running_comp.items():
-                global_v = reduce_sum_scalar(v, device)
-                avg_comp[k] = global_v / max(1, global_n)
-
             if is_main_process():
+                avg_so_far = running / max(1, n_columns)
+                avg_comp = {
+                    k: float(v) / max(1, n_columns)
+                    for k, v in running_comp.items()
+                    if isinstance(v, (int, float))
+                }
                 postfix = _make_postfix(avg_so_far, None, device, avg_comp)
                 pbar.set_postfix(postfix)
 
@@ -604,9 +819,12 @@ def validate(
     global_avg_loss = global_running / max(1, global_batches)
     global_comp = reduce_components(comp_sums, n_columns, device)
 
-    # global_model_stats = reduce_components(model_stats_sums, n_columns, device)
+    global_model_stats = reduce_components(model_stats_sums, n_columns, device)
 
-    return global_avg_loss, global_comp  #, global_model_stats
+    if collect_model_stats:
+        return global_avg_loss, global_comp, global_model_stats
+
+    return global_avg_loss, global_comp
 
 
 def train(
@@ -626,6 +844,8 @@ def train(
     resume_state=None,
     resume_path=None,
     best_val_init=None,
+    normalization_stats=None,
+    io_metadata=None,
 ):
     latest_save_path = resume_path or get_resume_checkpoint_path(save_path)
     resume_state = resume_state or {}
@@ -718,6 +938,8 @@ def train(
                     train_comp=train_comp,
                     val_comp=val_comp,
                     save_path=save_path,
+                    normalization_stats=normalization_stats,
+                    io_metadata=io_metadata,
                 )
 
                 if is_main_process():
@@ -758,6 +980,8 @@ def train(
                 train_comp=train_comp,
                 val_comp=None,
                 save_path=save_path,
+                normalization_stats=normalization_stats,
+                io_metadata=io_metadata,
             )
 
             if is_main_process():
@@ -769,4 +993,6 @@ def train(
             scheduler=scheduler,
             epoch=epoch,
             save_path=latest_save_path,
+            normalization_stats=normalization_stats,
+            io_metadata=io_metadata,
         )

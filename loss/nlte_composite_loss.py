@@ -237,6 +237,9 @@ def compute_Sv_all_lines_T_batched(
     x = logb_ratio + boltz
     _check_tensor(x, "x", debug)
 
+    if return_x and not debug:
+        return None, x
+
     # stable exp(x) - 1
     expm1_x = torch.expm1(x)
     _check_tensor(expm1_x, "expm1(x)", debug)
@@ -429,9 +432,9 @@ class NLTECompositeLoss(nn.Module):
         data_loss_func,
         gradient_loss_func=None,
         atom_names=["H", "Ca"], 
-        lam=1e-1,
-        lam_S=0.1,
-        lam_g=0.1,
+        lam=0,
+        lam_S=0,
+        lam_g=0,
         min_stride=2,
         max_frac=0.25,
         delta=1e-1,
@@ -509,6 +512,7 @@ class NLTECompositeLoss(nn.Module):
         logb_true,
         logb_pred_full=None,
         logb_true_full=None,
+        source_true=None,
     ):
 
         std_x = self.std_X.to(X.dtype)
@@ -554,6 +558,7 @@ class NLTECompositeLoss(nn.Module):
         # ------------------ PHYSICS ------------------ #
         per_atom_source_losses = []
         per_atom_debug = []
+        source_line_offset = 0
 
         level_offsets = torch.zeros(len(self.levels)+1, device=logb_pred.device, dtype=torch.long)
         level_offsets[1:] = torch.cumsum(self.levels, dim=0)
@@ -591,16 +596,21 @@ class NLTECompositeLoss(nn.Module):
             )
 
             # ---- true source ----
-            _, x_true = compute_Sv_all_lines_T_batched(
-                T=T,
-                logb=logb_true_atom,
-                chi=chi_i,
-                lines=lines_i,
-                nu=nu_i,
-                K_prefactor=pref_i,
-                debug=False,
-                return_x=True
-            )
+            if source_true is not None:
+                n_source_lines = int(self.lines[i].shape[0])
+                x_true = source_true[:, source_line_offset:source_line_offset + n_source_lines, :]
+                source_line_offset += n_source_lines
+            else:
+                _, x_true = compute_Sv_all_lines_T_batched(
+                    T=T,
+                    logb=logb_true_atom,
+                    chi=chi_i,
+                    lines=lines_i,
+                    nu=nu_i,
+                    K_prefactor=pref_i,
+                    debug=False,
+                    return_x=True
+                )
 
             if self.print_once:
                 _check_tensor(T, f"T {rank}", True)

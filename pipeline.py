@@ -10,12 +10,12 @@ import h5py
 import json
 from helita.sim.multi3d import Multi3dAtmos, Multi3dOut
 import matplotlib.pyplot as plt
-from interp_utils import interpolate_everything
 from config import *
 from FFNONet import (
     build_dataset_ffno,
     build_solving_set_ffno,
     ffno_train_model,
+    ffno_test_model,
     ffno_predict_populations
 )
 import torch.distributed as dist
@@ -26,10 +26,52 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--build", action="store_true")
     parser.add_argument("--train", action="store_true")
+    parser.add_argument("--test", action="store_true")
     parser.add_argument("--predict", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--bestpath", action="store_true")
+    parser.add_argument("--expand", action="store_true")
     return parser.parse_args()
+
+
+def validate_runtime_device():
+    wants_cuda = str(DEVICE).startswith("cuda") or CUDA
+
+    if not wants_cuda:
+        return
+
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "config.py requests CUDA, but PyTorch could not find a CUDA-capable GPU. "
+            "Set DEVICE='cpu' if you want CPU execution."
+        )
+
+    gpu_count = torch.cuda.device_count()
+    gpu_names = [torch.cuda.get_device_name(i) for i in range(gpu_count)]
+
+    print("\n=== CUDA DEVICES ===")
+    for idx, name in enumerate(gpu_names):
+        print(f"GPU {idx}: {name}")
+
+
+def ensure_built_datasets_exist():
+    missing = []
+
+    if not os.path.exists(TRAIN_FILE):
+        missing.append(("train", TRAIN_FILE))
+
+    if not os.path.exists(TEST_FILE):
+        missing.append(("test", TEST_FILE))
+
+    if missing:
+        missing_lines = "\n".join(
+            f"  - {label}: {path}" for label, path in missing
+        )
+        raise FileNotFoundError(
+            "With the current config, the required dataset files do not exist.\n"
+            f"{missing_lines}\n"
+            "Run pipeline.py --build first."
+        )
 
 
 def build_datasets():
@@ -51,7 +93,10 @@ def build_datasets():
             multi3d_atmos['dx_list'],
             multi3d_atmos['dy_list'],
             save_path=TRAIN_FILE,
-            ndep=NDEP,
+            chi=chi,
+            lines=lines,
+            wave=wave,
+            levels=levels,
             patch=PATCH,
             stride=STRIDE,
             scales=SCALES,
@@ -75,7 +120,10 @@ def build_datasets():
             multi3d_atmos['dx_list'],
             multi3d_atmos['dy_list'],
             save_path=TEST_FILE,
-            ndep=NDEP,
+            chi=chi,
+            lines=lines,
+            wave=wave,
+            levels=levels,
             patch=PATCH,
             stride=STRIDE,
             scales=SCALES,
@@ -83,7 +131,8 @@ def build_datasets():
         )
 
 
-def train_model(*, resume=False, bestpath=False):
+def train_model(*, resume=False, bestpath=False, expand=False):
+    ensure_built_datasets_exist()
 
     ffno_train_model(
         model=MODEL,
@@ -115,12 +164,38 @@ def train_model(*, resume=False, bestpath=False):
         min_learning_rate=MIN_LEARNING_RATE,
         resume=resume,
         bestpath=bestpath,
-        load_earlier_val=LOAD_EARLIER_VAL
+        load_earlier_val=LOAD_EARLIER_VAL,
+        expand_from_checkpoint=EXPAND_FROM_CHECKPOINT if expand else None,
+        zero_init_new_blocks=ZERO_INIT_NEW_BLOCKS,
+    )
+
+
+def test_model():
+    ensure_built_datasets_exist()
+
+    diagnostic_path = MODEL_DIR + f"val_diagnostics_{MODEL}.json"
+
+    ffno_test_model(
+        model=MODEL,
+        checkpoint_path=MODEL_FILE,
+        train_h5=TRAIN_FILE,
+        val_h5=TEST_FILE,
+        diagnostic_path=diagnostic_path,
+        lines=lines,
+        wave=wave,
+        chi=chi,
+        levels=levels,
+        atom_names=atom_names,
+        model_config=MODEL_CONFIG,
+        dataset_type=DATASET_TYPE,
+        batch_size=BATCH_SIZE,
+        num_workers=NUM_WORKERS,
+        pin_memory=PIN_MEMORY,
+        device=DEVICE,
     )
 
 
 def run_predictions():
-
     for PRED_ATMOS in MULTI3D_PRED_DATA:
 
         PREDICT_FILE = MODEL_DIR + f"3D_sim_predict_{PRED_ATMOS['NAME']}.hdf5"
@@ -149,14 +224,12 @@ def run_predictions():
                     dx=dx,
                     dy=dy,
                     save_path=PREDICT_FILE,
-                    ndep=NDEP,
                 )
 
             ffno_predict_populations(
                 model=MODEL,
                 checkpoint_path=MODEL_FILE,
                 solve_h5=PREDICT_FILE,
-                train_h5=TRAIN_FILE,
                 save_path=OUTPUT_FILE,
                 model_config=MODEL_CONFIG,
                 lines=lines,
@@ -362,15 +435,29 @@ if __name__ == "__main__":
         raise RuntimeError("--resume can only be used together with --train")
     if args.bestpath and not args.train:
         raise RuntimeError("--bestpath can only be used together with --train")
+    if args.expand and not args.train:
+        raise RuntimeError("--expand can only be used together with --train")
+    if args.test and (args.resume or args.bestpath):
+        raise RuntimeError("--resume/--bestpath are only valid together with --train")
+    if args.expand and (args.resume or args.bestpath):
+        raise RuntimeError("--expand cannot be combined with --resume or --bestpath")
+    if args.expand and not EXPAND_FROM_CHECKPOINT:
+        raise RuntimeError("Set EXPAND_FROM_CHECKPOINT in config.py before using --expand")
 
     if args.build:
         build_datasets()
 
     elif args.train:
-        train_model(resume=args.resume, bestpath=args.bestpath)
+        validate_runtime_device()
+        train_model(resume=args.resume, bestpath=args.bestpath, expand=args.expand)
+
+    elif args.test:
+        validate_runtime_device()
+        test_model()
 
     elif args.predict:
+        validate_runtime_device()
         run_predictions()
 
     else:
-        raise RuntimeError("Specify one of: --build, --train, --predict")
+        raise RuntimeError("Specify one of: --build, --train, --test, --predict")

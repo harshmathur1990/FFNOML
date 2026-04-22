@@ -196,7 +196,6 @@ Dataset parameters:
 
 PATCH = 32
 STRIDE = 16
-NDEP = 400
 SCALES = (1, 2, 3, 4)
 
 ---
@@ -222,7 +221,6 @@ Stages:
 Training uses:
 
 - AdamW optimizer
-- optional mixed precision (AMP)
 - gradient clipping
 - validation-based checkpointing
 

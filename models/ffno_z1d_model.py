@@ -53,119 +53,176 @@ class PointwiseMLP(nn.Module):
 
 
 # ============================================================
-# Stronger Vertical Branch
+# 1D Z Neural Operator Branch
 # ============================================================
-class DepthwiseSeparable1D(nn.Module):
-    def __init__(self, ch, hidden_mult=2, k=5, dilation=1, dropout=0.0):
-        super().__init__()
-
-        pad = dilation * (k // 2)
-
-        self.dw = nn.Conv1d(
-            ch,
-            ch,
-            kernel_size=k,
-            padding=pad,
-            dilation=dilation,
-            groups=ch,
-            bias=False,
+def _prepare_z_scale(z_scale, x):
+    B, _, D, H, W = x.shape
+    if z_scale.ndim == 4:
+        z_scale = z_scale.unsqueeze(1)
+    if z_scale.shape != (B, 1, D, H, W):
+        raise ValueError(
+            f"z_scale must be [B, D, H, W] or [B, 1, D, H, W], got {tuple(z_scale.shape)}"
         )
+    return z_scale
 
-        hidden = ch * hidden_mult
-        self.pw = nn.Sequential(
-            nn.Conv1d(ch, hidden, 1, bias=False),
+
+class CoordMLP(nn.Module):
+    def __init__(self, in_dim, hidden_dim, out_dim, dropout=0.0):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
             nn.GELU(),
-            nn.Conv1d(hidden, ch, 1, bias=False),
-        )
-
-        self.gn = _gn(ch)
-        self.act = nn.GELU()
-        self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
-
-    def forward(self, x):
-        y = self.dw(x)
-        y = self.pw(y)
-        y = self.gn(y)
-        y = self.act(y)
-        y = self.drop(y)
-        return y
-
-
-class LiteVerticalResidualBlock(nn.Module):
-    def __init__(self, ch, k=5, dilation=1, dropout=0.0):
-        super().__init__()
-        self.b1 = DepthwiseSeparable1D(
-            ch, hidden_mult=2, k=k, dilation=dilation, dropout=dropout
-        )
-        self.b2 = DepthwiseSeparable1D(
-            ch, hidden_mult=2, k=k, dilation=1, dropout=dropout
-        )
-        self.out_gn = _gn(ch)
-        self.act = nn.GELU()
-
-    def forward(self, x):
-        y = self.b1(x)
-        y = self.b2(y)
-        return self.act(self.out_gn(x + y))
-
-
-class LiteMultiScaleVertical(nn.Module):
-    def __init__(self, ch, kernels=(3, 7, 15), dropout=0.0):
-        super().__init__()
-
-        self.branches = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv1d(
-                    ch,
-                    ch,
-                    kernel_size=k,
-                    padding=k // 2,
-                    groups=ch,
-                    bias=False,
-                ),
-                nn.Conv1d(ch, ch, 1, bias=False),
-            )
-            for k in kernels
-        ])
-
-        self.mix = nn.Sequential(
-            nn.Conv1d(ch, 2 * ch, 1, bias=False),
+            nn.Dropout(dropout) if dropout > 0 else nn.Identity(),
+            nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
-            nn.Conv1d(2 * ch, ch, 1, bias=False),
+            nn.Dropout(dropout) if dropout > 0 else nn.Identity(),
+            nn.Linear(hidden_dim, out_dim),
         )
 
-        self.gn = _gn(ch)
-        self.act = nn.GELU()
-        self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
-
     def forward(self, x):
-        y = 0.0
-        for b in self.branches:
-            y = y + b(x)
-        y = self.mix(y)
-        y = self.gn(y)
-        y = self.act(y)
-        y = self.drop(y)
-        return y
+        return self.net(x)
 
 
-class BalancedVerticalPhysicsStack(nn.Module):
+class LatentZKernelOperator1d(nn.Module):
     """
-    Stronger vertical branch:
-      - multiscale depth processing
-      - residual dilated depth blocks
-      - channel mixing
-      - learned depth gate
+    Coordinate-aware 1D neural operator over nonuniform z samples.
+    Applied independently to each (x, y) column.
     """
 
+    def __init__(
+        self,
+        channels,
+        n_latents=16,
+        kernel_hidden=64,
+        point_hidden=128,
+        dropout=0.0,
+    ):
+        super().__init__()
+        self.channels = channels
+        self.n_latents = n_latents
+
+        self.norm_in = nn.LayerNorm(channels)
+        self.norm_latent = nn.LayerNorm(channels)
+
+        self.latent_coords = nn.Parameter(torch.linspace(-1.0, 1.0, n_latents).view(1, n_latents, 1))
+
+        self.input_gate = nn.Sequential(
+            nn.Conv1d(channels, channels, 1, bias=False),
+            nn.GELU(),
+            nn.Conv1d(channels, channels, 1, bias=False),
+            nn.Sigmoid(),
+        )
+
+        self.coord_embed = nn.Sequential(
+            nn.Conv1d(3, channels, 1, bias=False),
+            nn.GELU(),
+            nn.Conv1d(channels, channels, 1, bias=False),
+        )
+
+        self.latent_init = CoordMLP(1, kernel_hidden, channels, dropout=dropout)
+
+        self.q_point = nn.Linear(channels, channels)
+        self.k_point = nn.Linear(channels, channels)
+        self.v_point = nn.Linear(channels, channels)
+        self.q_latent = nn.Linear(channels, channels)
+        self.k_latent = nn.Linear(channels, channels)
+        self.v_latent = nn.Linear(channels, channels)
+
+        self.enc_kernel = CoordMLP(5 + 2 * channels, kernel_hidden, channels, dropout=dropout)
+        self.lat_kernel = CoordMLP(5 + 2 * channels, kernel_hidden, channels, dropout=dropout)
+        self.dec_kernel = CoordMLP(5 + 2 * channels, kernel_hidden, channels, dropout=dropout)
+
+        self.pointwise = nn.Sequential(
+            nn.Linear(channels, point_hidden),
+            nn.GELU(),
+            nn.Dropout(dropout) if dropout > 0 else nn.Identity(),
+            nn.Linear(point_hidden, channels),
+        )
+
+    def _quadrature_weights(self, z):
+        if z.shape[-1] == 1:
+            return torch.ones_like(z)
+
+        dz = torch.empty_like(z)
+        dz[:, 1:-1] = 0.5 * (z[:, 2:] - z[:, :-2])
+        dz[:, 0] = z[:, 1] - z[:, 0]
+        dz[:, -1] = z[:, -1] - z[:, -2]
+        return dz.abs().clamp_min(1e-6)
+
+    def _coord_features(self, z):
+        span = (z.max(dim=-1, keepdim=True).values - z.min(dim=-1, keepdim=True).values).clamp_min(1e-6)
+        weights = self._quadrature_weights(z)
+        local_dz = weights / weights.mean(dim=-1, keepdim=True).clamp_min(1e-6)
+        coord = torch.stack(
+            [
+                z,
+                local_dz,
+                span.expand_as(z),
+            ],
+            dim=1,
+        )
+        return coord, z.unsqueeze(-1), weights
+
+    @staticmethod
+    def _pair_features(a_coords, b_coords, a_feat, b_feat, eps=1e-6):
+        rel = a_coords.unsqueeze(2) - b_coords.unsqueeze(1)
+        rel_norm = torch.sqrt((rel ** 2).sum(dim=-1, keepdim=True) + eps)
+
+        a_c = a_coords.unsqueeze(2).expand(-1, -1, b_coords.shape[1], -1)
+        b_c = b_coords.unsqueeze(1).expand(-1, a_coords.shape[1], -1, -1)
+        a_f = a_feat.unsqueeze(2).expand(-1, -1, b_feat.shape[1], -1)
+        b_f = b_feat.unsqueeze(1).expand(-1, a_feat.shape[1], -1, -1)
+        return torch.cat([a_c, b_c, rel, rel_norm, a_f, b_f], dim=-1)
+
+    def forward(self, x, z):
+        x = x * self.input_gate(x)
+        coord_embed, point_coords, weights = self._coord_features(z)
+        x = x + self.coord_embed(coord_embed)
+
+        u = x.transpose(1, 2)
+        u0 = u
+        u = self.norm_in(u)
+
+        B, D, C = u.shape
+        latent_coords = self.latent_coords.to(device=u.device, dtype=u.dtype).expand(B, -1, -1)
+        h = self.latent_init(latent_coords)
+
+        p_k = self.k_point(u)
+        p_v = self.v_point(u)
+        z_q = self.q_latent(h)
+
+        enc_feat = self._pair_features(latent_coords, point_coords, z_q, p_k)
+        enc_score = self.enc_kernel(enc_feat)
+        enc_alpha = torch.softmax(enc_score.mean(dim=-1), dim=-2).unsqueeze(-1)
+        src = (p_v * weights.unsqueeze(-1)).unsqueeze(1)
+        h = h + (enc_alpha * src).sum(dim=2)
+
+        h_in = h
+        h = self.norm_latent(h)
+        z_q2 = self.q_latent(h)
+        z_k2 = self.k_latent(h)
+        z_v2 = self.v_latent(h)
+        lat_feat = self._pair_features(latent_coords, latent_coords, z_q2, z_k2)
+        lat_score = self.lat_kernel(lat_feat)
+        lat_alpha = torch.softmax(lat_score.mean(dim=-1), dim=-1).unsqueeze(-1)
+        h = h_in + (lat_alpha * z_v2.unsqueeze(1)).sum(dim=2)
+
+        p_q = self.q_point(u)
+        z_k3 = self.k_latent(h)
+        z_v3 = self.v_latent(h)
+        dec_feat = self._pair_features(point_coords, latent_coords, p_q, z_k3)
+        dec_score = self.dec_kernel(dec_feat)
+        dec_alpha = torch.softmax(dec_score.mean(dim=-1), dim=-1).unsqueeze(-1)
+        upd = (dec_alpha * z_v3.unsqueeze(1)).sum(dim=2)
+
+        out = u0 + self.pointwise(upd)
+        return out.transpose(1, 2)
+
+
+class ZNeuralOperator1d(nn.Module):
     def __init__(self, channels, hidden=128, dropout=0.0, chunk=4):
         super().__init__()
         self.chunk = chunk
-
-        self.z_proj = nn.Sequential(
-            nn.Conv1d(1, hidden, 1, bias=False),
-            nn.GELU(),
-        )
 
         self.in_proj = nn.Sequential(
             nn.Conv1d(channels, hidden, 1, bias=False),
@@ -173,12 +230,20 @@ class BalancedVerticalPhysicsStack(nn.Module):
             nn.GELU(),
         )
 
-        self.net = nn.Sequential(
-            LiteMultiScaleVertical(hidden, kernels=(3, 7, 15), dropout=dropout),
-            LiteVerticalResidualBlock(hidden, k=5, dilation=1, dropout=dropout),
-            LiteVerticalResidualBlock(hidden, k=5, dilation=2, dropout=dropout),
-            LiteVerticalResidualBlock(hidden, k=5, dilation=4, dropout=dropout),
-            LiteVerticalResidualBlock(hidden, k=7, dilation=1, dropout=dropout),
+        self.operator = LatentZKernelOperator1d(
+            hidden,
+            n_latents=16,
+            kernel_hidden=max(64, hidden),
+            point_hidden=2 * hidden,
+            dropout=dropout,
+        )
+
+        self.local_mix = nn.Sequential(
+            nn.Conv1d(hidden, hidden, 1, bias=False),
+            nn.GELU(),
+            nn.Conv1d(hidden, hidden, kernel_size=3, padding=1, bias=False),
+            nn.GELU(),
+            nn.Conv1d(hidden, hidden, 1, bias=False),
         )
 
         self.depth_gate = nn.Sequential(
@@ -188,29 +253,27 @@ class BalancedVerticalPhysicsStack(nn.Module):
             nn.Sigmoid(),
         )
 
+        self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
         self.out_proj = nn.Conv1d(hidden, channels, 1, bias=False)
         self.out_gn = _gn(channels)
 
     def forward(self, x, z_scale):
         B, C, D, H, W = x.shape
-        if z_scale.ndim == 4:
-            z_scale = z_scale.unsqueeze(1)
-        if z_scale.shape != (B, 1, D, H, W):
-            raise ValueError(
-                f"z_scale must be [B, D, H, W] or [B, 1, D, H, W], got {tuple(z_scale.shape)}"
-            )
-        x = x.permute(0, 3, 4, 1, 2).reshape(B, H * W, C, D)
-        z_scale = z_scale.permute(0, 3, 4, 1, 2).reshape(B, H * W, 1, D)
+        z_scale = _prepare_z_scale(z_scale, x)
+
+        x_cols = x.permute(0, 3, 4, 1, 2).reshape(B, H * W, C, D)
+        z_cols = z_scale.permute(0, 3, 4, 1, 2).reshape(B, H * W, D)
 
         chunks = []
         for i in range(0, H * W, self.chunk):
             j = min(i + self.chunk, H * W)
-            xi = x[:, i:j].reshape(-1, C, D)
-            zi = z_scale[:, i:j].reshape(-1, 1, D)
+            xi = x_cols[:, i:j].reshape(-1, C, D)
+            zi = z_cols[:, i:j].reshape(-1, D)
 
-            yi = self.in_proj(xi) + self.z_proj(zi)
-            yi = self.net(yi)
+            yi = self.in_proj(xi)
+            yi = self.operator(yi, zi) + self.local_mix(yi)
             yi = yi * self.depth_gate(yi)
+            yi = self.drop(yi)
             yi = self.out_proj(yi)
 
             yi = yi.reshape(B, j - i, C, D)
@@ -326,7 +389,7 @@ class SpectralConv2dFull(nn.Module):
 # ============================================================
 # Balanced Strong Block
 # ============================================================
-class FFNOBlock3dBalanced(nn.Module):
+class FFNOBlock3dZ1D(nn.Module):
     """
     Spectral and vertical branches are both strengthened and fused by:
       - same input to both branches
@@ -352,7 +415,7 @@ class FFNOBlock3dBalanced(nn.Module):
             post_mix_expansion=2,
         )
 
-        self.vertical = BalancedVerticalPhysicsStack(
+        self.vertical = ZNeuralOperator1d(
             width,
             hidden=32,
             dropout=dropout,
@@ -492,7 +555,7 @@ class FFNOBlock3dBalanced(nn.Module):
 # ============================================================
 # Full Model
 # ============================================================
-class FFNO3D(nn.Module):
+class FFNO3DZ1D(nn.Module):
     def __init__(
         self,
         in_channels=6,
@@ -517,7 +580,7 @@ class FFNO3D(nn.Module):
         )
 
         self.blocks = nn.ModuleList([
-            FFNOBlock3dBalanced(
+            FFNOBlock3dZ1D(
                 width=width,
                 dropout=dropout,
                 spec_dropout=_resolve_layer_dropout(
