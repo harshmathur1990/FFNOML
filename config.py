@@ -175,7 +175,7 @@ MULTI3D_PRED_DATA = [
 
 MULTI_GPU = True
 
-MODEL = "FFNO3D"
+MODEL = "FFNO3DZ1D"
 
 MODEL_CONFIG = dict(
     in_channels=6,
