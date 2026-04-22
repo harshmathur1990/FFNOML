@@ -94,10 +94,6 @@ const CONFIG_ML = (
     x_pick     = 33,
     y_pick     = 21,
 
-    cmass_n      = 400,
-    cmass_logmin = -6.0,
-    cmass_logmax =  2.0,
-
     voigt = (
         a_min = 1f-4,
         a_max = 1f1,
@@ -144,10 +140,6 @@ const CONFIG_BIFROST = (
     x_pick     = 33,
     y_pick     = 21,
 
-    cmass_n      = 400,
-    cmass_logmin = -6.0,
-    cmass_logmax =  2.0,
-
     voigt = (
         a_min = 1f-4,
         a_max = 1f1,
@@ -190,10 +182,6 @@ const CONFIG_TIAGO = (
 
     x_pick     = 33,
     y_pick     = 21,
-
-    cmass_n      = 400,
-    cmass_logmin = -6.0,
-    cmass_logmax =  2.0,
 
     voigt = (
         a_min = 1f-4,
