@@ -5,22 +5,29 @@ import os
 SIMULATIONS = {
     "en024048_hion": {
         "base_path": "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion",
-        "snaps": ["385", "386", "465"],
+        "snaps": ["385", "386", "465", "700"],
     },
     "nw012023": {
         "base_path": "/mn/stornext/d9/data/harshm/bifrost_data/nw012023",
-        "snaps": ["1050", "1120", "915"],
+        "snaps": ["1050", "1120", "915", "940"],
+    },
+    "ch012012_hion": {
+        "base_path": "/mn/stornext/d9/data/harshm/bifrost_data/ch012012_hion",
+        "snaps": ["759", "834", "910", "984"]
+
     }
 }
 
 TRAIN_SPLIT = {
     "en024048_hion": ["385", "465"],
-    "nw012023": ["1050", "1120"]
+    "nw012023": ["1050", "1120"],
+    "ch012012_hion": ["759", "910"]
 }
 
 VAL_SPLIT = {
-    "en024048_hion": ["386"],
-    "nw012023": ["915"]
+    "en024048_hion": ["700"],
+    "nw012023": ["1120"],
+    "ch012012_hion": ["834"]
 }
 
 
@@ -175,7 +182,7 @@ MULTI3D_PRED_DATA = [
 
 MULTI_GPU = True
 
-MODEL = "FFNO3DZ1D"
+MODEL = "FFNO3D"
 
 MODEL_CONFIG = dict(
     in_channels=6,
@@ -193,7 +200,7 @@ MODEL_CONFIG = dict(
 
 IODIR = "IO/"
 
-MODEL_DIR = "training_FFNO3D_zscale/"
+MODEL_DIR = f"training_{MODEL}_zscale/"
 MODEL_FILE = MODEL_DIR + "3D_sim_train_s123.pt"
 
 EXPAND_FROM_CHECKPOINT = "training_FFNO3D_expand/3D_sim_train_s123_expand.pt"
@@ -218,12 +225,12 @@ TEST_FILE = os.path.join(
 
 
 # Training Params
-NUM_EPOCHS = 100
+NUM_EPOCHS = 400
 BATCH_SIZE = 1
 LEARNING_RATE = 1e-3
-MIN_LEARNING_RATE = 1e-6
+MIN_LEARNING_RATE = 1e-8
 RESUME_LAST_EPOCH = 0
-RESUME_LAST_LEARNING_RATE = 1e-7
+RESUME_LAST_LEARNING_RATE = 1e-8
 WEIGHT_DECAY = 1e-4
 NUM_WORKERS = 8
 PIN_MEMORY = True
