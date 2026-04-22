@@ -10,7 +10,6 @@ import h5py
 import json
 from helita.sim.multi3d import Multi3dAtmos, Multi3dOut
 import matplotlib.pyplot as plt
-from interp_utils import interpolate_everything
 from config import *
 from FFNONet import (
     build_dataset_ffno,
