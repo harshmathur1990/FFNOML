@@ -197,8 +197,6 @@ def test_model():
 
 
 def run_predictions():
-    ensure_built_datasets_exist()
-
     for PRED_ATMOS in MULTI3D_PRED_DATA:
 
         PREDICT_FILE = MODEL_DIR + f"3D_sim_predict_{PRED_ATMOS['NAME']}.hdf5"
