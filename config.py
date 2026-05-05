@@ -240,7 +240,7 @@ PATIENCE = 400
 MIN_DELTA = 1e-5
 DATASET_TYPE = "patch"
 USE_COSINE = True
-LOAD_EARLIER_VAL = False
+LOAD_EARLIER_VAL = True
 
 # Prediction params
 CUDA = DEVICE == "cuda"
