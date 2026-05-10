@@ -40,7 +40,7 @@ default(show=false)
 model  = "FFNO3D"
 snap = 385
 
-train_dir = "training"
+train_dir = "training_FFNO3D_zscale"
 
 sim_name = "en024048_hion"
 
@@ -197,9 +197,9 @@ const CONFIG_TIAGO = (
 # USER CHOOSES WHICH ONE TO RUN
 # ============================================================
 
-# const CFG = CONFIG_ML
+const CFG = CONFIG_ML
 # const CFG = CONFIG_BIFROST
-const CFG = CONFIG_TIAGO
+# const CFG = CONFIG_TIAGO
 
 
 function split_atoms(dep_coeff, atoms)
