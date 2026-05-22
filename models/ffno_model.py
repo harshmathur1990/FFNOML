@@ -163,7 +163,7 @@ class BalancedVerticalPhysicsStack(nn.Module):
         self.chunk = chunk
 
         self.z_proj = nn.Sequential(
-            nn.Conv1d(1, hidden, 1, bias=False),
+            nn.Conv1d(4, hidden, 1, bias=False),
             nn.GELU(),
         )
 
@@ -191,6 +191,31 @@ class BalancedVerticalPhysicsStack(nn.Module):
         self.out_proj = nn.Conv1d(hidden, channels, 1, bias=False)
         self.out_gn = _gn(channels)
 
+    def _z_features(self, z_scale):
+        if z_scale.shape[-1] == 1:
+            dz = torch.ones_like(z_scale)
+        else:
+            dz = torch.empty_like(z_scale)
+            dz[:, :, 1:-1] = 0.5 * (z_scale[:, :, 2:] - z_scale[:, :, :-2])
+            dz[:, :, 0] = z_scale[:, :, 1] - z_scale[:, :, 0]
+            dz[:, :, -1] = z_scale[:, :, -1] - z_scale[:, :, -2]
+
+        z_min = z_scale.min(dim=-1, keepdim=True).values
+        z_span = (z_scale.max(dim=-1, keepdim=True).values - z_min).clamp_min(1e-6)
+        z_norm = (z_scale - z_min) / z_span
+        dz_norm = dz.abs() / dz.abs().mean(dim=-1, keepdim=True).clamp_min(1e-6)
+
+        # Keep absolute z_scale as the first channel; derived channels only add geometry context.
+        return torch.cat(
+            [
+                z_scale,
+                z_norm,
+                dz_norm,
+                z_span.expand_as(z_scale),
+            ],
+            dim=1,
+        )
+
     def forward(self, x, z_scale):
         B, C, D, H, W = x.shape
         if z_scale.ndim == 4:
@@ -207,8 +232,9 @@ class BalancedVerticalPhysicsStack(nn.Module):
             j = min(i + self.chunk, H * W)
             xi = x[:, i:j].reshape(-1, C, D)
             zi = z_scale[:, i:j].reshape(-1, 1, D)
+            z_feat = self._z_features(zi)
 
-            yi = self.in_proj(xi) + self.z_proj(zi)
+            yi = self.in_proj(xi) + self.z_proj(z_feat)
             yi = self.net(yi)
             yi = yi * self.depth_gate(yi)
             yi = self.out_proj(yi)

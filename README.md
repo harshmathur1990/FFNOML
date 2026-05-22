@@ -68,6 +68,12 @@ The currently implemented model names are:
 - `FFNO3D`
 - `FFNO3DZ1D`
 
+`FFNO3D` uses a cheap coordinate-conditioned vertical branch: it keeps absolute
+`z_scale` as an input feature and also derives local normalized depth,
+local `dz`, and total z-span before the vertical projection. This is lighter
+than `FFNO3DZ1D`, but gives the model more information about nonuniform z grids
+than depth-index convolutions alone.
+
 ## Installation
 
 At minimum you need:

@@ -275,6 +275,19 @@ def expand_model_from_checkpoint(
         if source_tensor is not None and tuple(source_tensor.shape) == tuple(current_tensor.shape):
             merged_state[key] = source_tensor
             copied.append(key)
+        elif (
+            source_tensor is not None
+            and key.endswith("vertical.z_proj.0.weight")
+            and source_tensor.ndim == current_tensor.ndim == 3
+            and source_tensor.shape[0] == current_tensor.shape[0]
+            and source_tensor.shape[1] == 1
+            and current_tensor.shape[1] > 1
+            and source_tensor.shape[2] == current_tensor.shape[2]
+        ):
+            upgraded = torch.zeros_like(current_tensor)
+            upgraded[:, :1, :] = source_tensor
+            merged_state[key] = upgraded
+            copied.append(key)
         else:
             merged_state[key] = current_tensor
             if source_tensor is not None:

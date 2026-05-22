@@ -14,20 +14,31 @@ SIMULATIONS = {
     "ch012012_hion": {
         "base_path": "/mn/stornext/d9/data/harshm/bifrost_data/ch012012_hion",
         "snaps": ["759", "834", "910", "984"]
-
+    },
+    "ch012006": {
+        "base_path": "/mn/stornext/d9/data/harshm/bifrost_data/ch012006",
+        "snaps": ["795", "820", "836", "849"]
+    },
+    "qs006003_sap": {
+        "base_path": "/mn/stornext/d9/data/harshm/bifrost_data/qs006003_sap",
+        "snaps": ["1100", "1297", "689", "900"]
     }
 }
 
 TRAIN_SPLIT = {
-    "en024048_hion": ["385", "465"],
-    "nw012023": ["1050", "1120"],
-    "ch012012_hion": ["759", "910"]
+    "en024048_hion": ["465"],
+    "nw012023": ["915"],
+    "ch012012_hion": ["910"],
+    "ch012006": ["836"],
+    "qs006003_sap": ["689"]
 }
 
 VAL_SPLIT = {
     "en024048_hion": ["700"],
-    "nw012023": ["1120"],
-    "ch012012_hion": ["834"]
+    "nw012023": ["940"],
+    "ch012012_hion": ["984"],
+    "ch012006": ["849"],
+    "qs006003_sap": ["900"]
 }
 
 
@@ -200,10 +211,10 @@ MODEL_CONFIG = dict(
 
 IODIR = "IO/"
 
-MODEL_DIR = f"training_{MODEL}_zscale/"
+MODEL_DIR = f"training_{MODEL}_zscale_expand/"
 MODEL_FILE = MODEL_DIR + "3D_sim_train_s123.pt"
 
-EXPAND_FROM_CHECKPOINT = "training_FFNO3D_expand/3D_sim_train_s123_expand.pt"
+EXPAND_FROM_CHECKPOINT = "training_FFNO3D_zscale/3D_sim_train_s123.pt"
 ZERO_INIT_NEW_BLOCKS = True
 
 
@@ -240,7 +251,7 @@ PATIENCE = 400
 MIN_DELTA = 1e-5
 DATASET_TYPE = "patch"
 USE_COSINE = True
-LOAD_EARLIER_VAL = False
+LOAD_EARLIER_VAL = True
 
 # Prediction params
 CUDA = DEVICE == "cuda"
