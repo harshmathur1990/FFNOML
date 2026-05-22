@@ -14,12 +14,14 @@ SIMULATIONS = {
     "ch012012_hion": {
         "base_path": "/mn/stornext/d9/data/harshm/bifrost_data/ch012012_hion",
         "snaps": ["759", "834", "910", "984"]
-
     },
     "ch012006": {
         "base_path": "/mn/stornext/d9/data/harshm/bifrost_data/ch012006",
         "snaps": ["795", "820", "836", "849"]
-
+    },
+    "qs006003_sap": {
+        "base_path": "/mn/stornext/d9/data/harshm/bifrost_data/qs006003_sap",
+        "snaps": ["1100", "1297", "689", "900"]
     }
 }
 
@@ -27,14 +29,16 @@ TRAIN_SPLIT = {
     "en024048_hion": ["465"],
     "nw012023": ["915"],
     "ch012012_hion": ["910"],
-    "ch012006": ["836"]
+    "ch012006": ["836"],
+    "qs006003_sap": ["689"]
 }
 
 VAL_SPLIT = {
     "en024048_hion": ["700"],
     "nw012023": ["940"],
     "ch012012_hion": ["984"],
-    "ch012006": ["849"]
+    "ch012006": ["849"],
+    "qs006003_sap": ["900"]
 }
 
 
