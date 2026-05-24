@@ -2,12 +2,13 @@
 
 FFNOML is a training and inference pipeline for predicting NLTE departure coefficients from 3D MULTI3D/Bifrost atmospheres with Fourier Neural Operators.
 
-The codebase currently supports four main workflows through `pipeline.py`:
+The codebase currently supports five main workflows through `pipeline.py`:
 
 - `--build`: build HDF5 training and validation datasets from MULTI3D outputs
 - `--train`: train a model checkpoint from the built HDF5 datasets
 - `--test`: run validation diagnostics and branch-ablation analysis on the validation set
 - `--predict`: build inference inputs for configured atmospheres and write predicted departure coefficients
+- `--fsdppredict`: run distributed full-volume prediction through `torchrun`
 
 This README describes the code as it exists now. The current pipeline is `z_scale`-based, not column-mass-based.
 
@@ -55,7 +56,7 @@ Important sections:
 - `SIMULATIONS`: available simulation roots and snapshots
 - `TRAIN_SPLIT` / `VAL_SPLIT`: snapshots used for dataset building
 - `ACTIVE_ATOMS`: atoms to concatenate into one target tensor
-- `MULTI3D_PRED_DATA`: atmospheres used by `--predict`
+- `MULTI3D_PRED_DATA`: atmospheres used by `--predict` and `--fsdppredict`
 - `MODEL`, `MODEL_CONFIG`: architecture choice and hyperparameters
 - `PATCH`, `STRIDE`, `SCALES`: patch extraction and multiscale dataset settings
 - `TRAIN_FILE`, `TEST_FILE`: HDF5 dataset paths derived from the active split and patch config
@@ -277,6 +278,36 @@ Important current behavior:
 - it skips rebuilding outputs if the final prediction file already exists
 - tiling is controlled by `TILED`, `PATCH`, and `STRIDE`
 
+## Distributed Full Prediction Mode
+
+Run with `torchrun`:
+
+```bash
+torchrun --nproc_per_node=4 pipeline.py --fsdppredict
+```
+
+For multi-node jobs, pass the usual `torchrun` rendezvous arguments, for example:
+
+```bash
+torchrun \
+  --nnodes=2 \
+  --nproc_per_node=4 \
+  --node_rank=<rank> \
+  --rdzv_id=<job_id> \
+  --rdzv_backend=c10d \
+  --rdzv_endpoint=<master_addr>:<master_port> \
+  pipeline.py --fsdppredict
+```
+
+`--fsdppredict` uses the same configured atmospheres, checkpoint, solving-set path, and final HDF5 output path as `--predict`. The difference is the inference path:
+
+- it initializes `torch.distributed` with NCCL
+- each rank owns a slab along the `nx`/H dimension
+- the spectral branch uses distributed inference helpers instead of local full-cube FFTs
+- rank 0 gathers the slabs and writes the final prediction HDF5
+
+Use this mode when the full prediction volume is too large for the single-process or tiled `--predict` path. Existing final prediction files are still not overwritten.
+
 ### Solving-Set HDF5 Layout
 
 The intermediate solving input written by `build_solving_set_ffno` contains:
@@ -311,7 +342,7 @@ Note: the diagnostics path is passed into inference, but the current `ffno_predi
 
 ## Runtime Device Behavior
 
-Before `--train`, `--test`, or `--predict`, `pipeline.py` calls `validate_runtime_device()`.
+Before `--train`, `--test`, `--predict`, or `--fsdppredict`, `pipeline.py` calls `validate_runtime_device()`.
 
 If `DEVICE` or `CUDA` requests GPU execution:
 
@@ -388,6 +419,12 @@ python pipeline.py --test
 python pipeline.py --predict
 ```
 
+For distributed full-volume prediction, replace the last command with:
+
+```bash
+torchrun --nproc_per_node=4 pipeline.py --fsdppredict
+```
+
 For continuing an interrupted run:
 
 ```bash
@@ -422,7 +459,7 @@ It now compares on shared `z_scale` directly and does not interpolate to column 
 ## Caveats
 
 - The code does not overwrite existing dataset, solving-set, prediction, or checkpoint outputs by default
-- `--predict` assumes `MODEL_FILE` already contains normalization and I/O metadata
+- `--predict` and `--fsdppredict` assume `MODEL_FILE` already contains normalization and I/O metadata
 - grouped patch datasets can have variable native depth across samples
 - some configured output names still contain historical strings such as `s5`; these are just file naming conventions
 - config values are the source of truth for splits, active atoms, paths, and model dimensions
