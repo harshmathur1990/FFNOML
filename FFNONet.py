@@ -499,6 +499,7 @@ def build_dataset_ffno(
     patch=96,
     stride=48,
     scales=(1,2,3,4),
+    sample_weights=None,
     stat_file=None
 ):
 
@@ -507,6 +508,22 @@ def build_dataset_ffno(
 
     num_samples = len(temp_list)
     scale_list = tuple(scales)
+    if sample_weights is None:
+        sample_weights = np.full(num_samples, 1.0 / max(1, num_samples), dtype=np.float32)
+    else:
+        sample_weights = np.asarray(sample_weights, dtype=np.float32)
+        if sample_weights.shape != (num_samples,):
+            raise ValueError(
+                f"sample_weights must have shape ({num_samples},), got {sample_weights.shape}"
+            )
+        if not np.all(np.isfinite(sample_weights)):
+            raise ValueError("sample_weights must be finite")
+        if np.any(sample_weights < 0):
+            raise ValueError("sample_weights must be non-negative")
+        total_sample_weight = float(sample_weights.sum())
+        if total_sample_weight <= 0.0:
+            raise ValueError("sample_weights must sum to a positive value")
+        sample_weights = sample_weights / total_sample_weight
 
     if stat_file is None:
         # ============================================================
@@ -591,7 +608,6 @@ def build_dataset_ffno(
     # ============================================================
 
     patch_groups = []
-    all_scale_arrays = []
     group_prefix = _infer_patch_group_prefix(save_path)
 
     total_build_steps = max(1, num_samples * max(1, len(scale_list)))
@@ -698,38 +714,28 @@ def build_dataset_ffno(
             patch_groups.append(
                 dict(
                     name=f"{group_prefix}_{len(patch_groups) + 1}",
+                    sample_weight=float(sample_weights[sample_idx - 1]),
                     inputs=group_inputs,
                     targets=group_targets,
                     z_scale=group_z,
                     dx=group_dx,
                     dy=group_dy,
                     scale=group_scale,
-                    attrs=dict(native_depth=int(group_inputs.shape[2])),
+                    attrs=dict(
+                        native_depth=int(group_inputs.shape[2]),
+                        sample_weight=float(sample_weights[sample_idx - 1]),
+                    ),
                 )
             )
-            all_scale_arrays.append(group_scale)
 
     if len(patch_groups) == 0:
         raise RuntimeError("No patches generated. Check patch size and scales.")
 
-    scale_all = np.concatenate(all_scale_arrays)
-    scale_weights = np.zeros_like(scale_all, dtype=np.float32)
-
     with tqdm(
-        total=len(np.unique(scale_all)) + len(patch_groups) + 1,
+        total=len(patch_groups) + 1,
         desc="build_dataset_ffno: finalize",
         unit="step",
     ) as pbar:
-        for s in np.unique(scale_all):
-            mask = scale_all == s
-            scale_weights[mask] = 1.0 / mask.sum()
-            pbar.set_postfix(step="scale-weights", scale=int(s), refresh=False)
-            pbar.update(1)
-
-        scale_weights *= len(scale_weights)
-        scale_weights /= scale_weights.mean()
-
-        offset = 0
         x_sum = 0.0
         x_sq_sum = 0.0
         y_sum = 0.0
@@ -739,8 +745,15 @@ def build_dataset_ffno(
 
         for group in patch_groups:
             n = group["inputs"].shape[0]
-            group["weights"] = scale_weights[offset:offset + n]
-            offset += n
+            group_weights = np.zeros(n, dtype=np.float32)
+            unique_scales = np.unique(group["scale"])
+            per_scale_weight = group["sample_weight"] / max(1, len(unique_scales))
+
+            for s in unique_scales:
+                mask = group["scale"] == s
+                group_weights[mask] = per_scale_weight / mask.sum()
+
+            group["weights"] = group_weights
 
             x_sum += float(group["inputs"].sum(dtype=np.float64))
             x_sq_sum += float(np.square(group["inputs"], dtype=np.float64).sum(dtype=np.float64))
@@ -750,6 +763,18 @@ def build_dataset_ffno(
             y_count += int(group["targets"].size)
             pbar.set_postfix(step="group-stats", group=group["name"], refresh=False)
             pbar.update(1)
+
+        weight_sum = sum(
+            float(group["weights"].sum(dtype=np.float64))
+            for group in patch_groups
+        )
+        weight_count = sum(int(group["weights"].size) for group in patch_groups)
+        mean_weight = weight_sum / max(1, weight_count)
+        if mean_weight > 0:
+            for group in patch_groups:
+                group["weights"] = group["weights"] / mean_weight
+        pbar.set_postfix(step="normalize-weights", refresh=False)
+        pbar.update(1)
 
         x_mean = x_sum / max(1, x_count)
         y_mean = y_sum / max(1, y_count)
