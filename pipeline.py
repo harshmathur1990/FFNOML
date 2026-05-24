@@ -16,7 +16,8 @@ from FFNONet import (
     build_solving_set_ffno,
     ffno_train_model,
     ffno_test_model,
-    ffno_predict_populations
+    ffno_predict_populations,
+    ffno_predict_populations_distributed_full,
 )
 import torch.distributed as dist
 import argparse
@@ -28,6 +29,7 @@ def parse_args():
     parser.add_argument("--train", action="store_true")
     parser.add_argument("--test", action="store_true")
     parser.add_argument("--predict", action="store_true")
+    parser.add_argument("--fsdppredict", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--bestpath", action="store_true")
     parser.add_argument("--expand", action="store_true")
@@ -48,6 +50,9 @@ def validate_runtime_device():
 
     gpu_count = torch.cuda.device_count()
     gpu_names = [torch.cuda.get_device_name(i) for i in range(gpu_count)]
+
+    if int(os.environ.get("RANK", "0")) != 0:
+        return
 
     print("\n=== CUDA DEVICES ===")
     for idx, name in enumerate(gpu_names):
@@ -213,8 +218,38 @@ def test_model():
     )
 
 
-def run_predictions():
+def is_main_process():
+    if dist.is_available() and dist.is_initialized():
+        return dist.get_rank() == 0
+    return True
+
+
+def barrier_if_distributed():
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier()
+
+
+def init_distributed_prediction():
+    if dist.is_available() and dist.is_initialized():
+        return
+
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
+    try:
+        dist.init_process_group(
+            "nccl",
+            device_id=torch.device(f"cuda:{local_rank}"),
+        )
+    except TypeError:
+        dist.init_process_group("nccl")
+
+
+def run_predictions(*, distributed_full=False):
     ensure_checkpoint_exists()
+
+    if distributed_full:
+        init_distributed_prediction()
 
     for PRED_ATMOS in MULTI3D_PRED_DATA:
 
@@ -226,7 +261,7 @@ def run_predictions():
 
         if not os.path.exists(OUTPUT_FILE):
 
-            if not os.path.exists(PREDICT_FILE):
+            if is_main_process() and not os.path.exists(PREDICT_FILE):
 
                 rho, z_scale, temp, vx, vy, vz, ne, dx, dy = load_pred_data(
                     mesh_file=PRED_ATMOS['MESH'],
@@ -246,23 +281,45 @@ def run_predictions():
                     save_path=PREDICT_FILE,
                 )
 
-            ffno_predict_populations(
-                model=MODEL,
-                checkpoint_path=MODEL_FILE,
-                solve_h5=PREDICT_FILE,
-                save_path=OUTPUT_FILE,
-                model_config=MODEL_CONFIG,
-                lines=lines,
-                wave=wave,
-                chi=chi,
-                levels=levels,
-                atom_names=atom_names,
-                diagnostic_path=DIAGNOSTIC_PATH,
-                cuda=CUDA,
-                tiled=TILED,
-                patch=PATCH,
-                stride=STRIDE
-            )
+            barrier_if_distributed()
+
+            if distributed_full:
+                ffno_predict_populations_distributed_full(
+                    model=MODEL,
+                    checkpoint_path=MODEL_FILE,
+                    solve_h5=PREDICT_FILE,
+                    save_path=OUTPUT_FILE,
+                    model_config=MODEL_CONFIG,
+                    lines=lines,
+                    wave=wave,
+                    chi=chi,
+                    levels=levels,
+                    atom_names=atom_names,
+                    cuda=CUDA,
+                )
+            else:
+                ffno_predict_populations(
+                    model=MODEL,
+                    checkpoint_path=MODEL_FILE,
+                    solve_h5=PREDICT_FILE,
+                    save_path=OUTPUT_FILE,
+                    model_config=MODEL_CONFIG,
+                    lines=lines,
+                    wave=wave,
+                    chi=chi,
+                    levels=levels,
+                    atom_names=atom_names,
+                    diagnostic_path=DIAGNOSTIC_PATH,
+                    cuda=CUDA,
+                    tiled=TILED,
+                    patch=PATCH,
+                    stride=STRIDE
+                )
+
+
+def cleanup_distributed():
+    if dist.is_available() and dist.is_initialized():
+        dist.destroy_process_group()
 
 
 def read_mesh(mesh_file):
@@ -451,6 +508,16 @@ if __name__ == "__main__":
 
     args = parse_args()
 
+    selected_modes = [
+        args.build,
+        args.train,
+        args.test,
+        args.predict,
+        args.fsdppredict,
+    ]
+    if sum(bool(mode) for mode in selected_modes) > 1:
+        raise RuntimeError("Specify only one of: --build, --train, --test, --predict, --fsdppredict")
+
     if args.resume and not args.train:
         raise RuntimeError("--resume can only be used together with --train")
     if args.bestpath and not args.train:
@@ -464,20 +531,28 @@ if __name__ == "__main__":
     if args.expand and not EXPAND_FROM_CHECKPOINT:
         raise RuntimeError("Set EXPAND_FROM_CHECKPOINT in config.py before using --expand")
 
-    if args.build:
-        build_datasets()
+    try:
+        if args.build:
+            build_datasets()
 
-    elif args.train:
-        validate_runtime_device()
-        train_model(resume=args.resume, bestpath=args.bestpath, expand=args.expand)
+        elif args.train:
+            validate_runtime_device()
+            train_model(resume=args.resume, bestpath=args.bestpath, expand=args.expand)
 
-    elif args.test:
-        validate_runtime_device()
-        test_model()
+        elif args.test:
+            validate_runtime_device()
+            test_model()
 
-    elif args.predict:
-        validate_runtime_device()
-        run_predictions()
+        elif args.predict:
+            validate_runtime_device()
+            run_predictions()
 
-    else:
-        raise RuntimeError("Specify one of: --build, --train, --test, --predict")
+        elif args.fsdppredict:
+            validate_runtime_device()
+            run_predictions(distributed_full=True)
+
+        else:
+            raise RuntimeError("Specify one of: --build, --train, --test, --predict, --fsdppredict")
+
+    finally:
+        cleanup_distributed()

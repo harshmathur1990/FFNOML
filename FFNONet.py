@@ -30,6 +30,10 @@ from train_utils import (
 )
 from scipy.ndimage import gaussian_filter
 from model_builder import ModelBuilder
+from distributed_inference import (
+    enable_distributed_inference,
+    partition_range,
+)
 from data_builder import DataLoaderBuilder
 from normalize_utils import *
 from tqdm import tqdm
@@ -1578,4 +1582,195 @@ def ffno_predict_populations(
             f.attrs["val_loss"] = float(ckpt["val_loss"])
         f.attrs["epoch"] = int(ckpt.get("epoch", -1))
 
+    return save_path
+
+
+def ffno_predict_populations_distributed_full(
+    *,
+    model,
+    checkpoint_path,
+    solve_h5,
+    save_path,
+    model_config,
+    lines,
+    wave,
+    chi,
+    levels,
+    atom_names,
+    cuda=True,
+):
+    """
+    Full-volume distributed inference.
+
+    Each rank owns one slab along the H/nx dimension. The spectral branch uses
+    distributed FFT transposes, so no rank performs the full 2D FFT locally.
+    Training remains unchanged; this path mutates only the loaded inference
+    model instance.
+    """
+    if not (dist.is_available() and dist.is_initialized()):
+        raise RuntimeError(
+            "Distributed full prediction requires torchrun/distributed initialization."
+        )
+
+    if os.path.isfile(save_path):
+        raise IOError(f"Output exists: {save_path}")
+
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+    device = f"cuda:{int(os.environ.get('LOCAL_RANK', rank))}" if (cuda and torch.cuda.is_available()) else "cpu"
+
+    Cin, Cout, mean_X, std_X, mean_Y, std_Y = _load_inference_metadata_from_checkpoint(
+        checkpoint_path,
+    )
+
+    model_config = dict(model_config)
+    model_config["in_channels"] = Cin
+    model_config["out_channels"] = Cout
+
+    builder = ModelBuilder(
+        model=model,
+        model_config=model_config,
+        chi=chi,
+        lines=lines,
+        wave=wave,
+        levels=levels,
+        atom_names=atom_names,
+        device=device,
+        lr=0.0,
+        weight_decay=0.0,
+        multi_gpu=False,
+        debug_loss=False,
+        mean_X=mean_X,
+        std_X=std_X,
+        mean_Y=mean_Y,
+        std_Y=std_Y,
+    )
+
+    model = builder.build_model(wrap_fsdp=False)
+    ckpt = load_checkpoint(checkpoint_path, map_location="cpu")
+    model.load_state_dict(ckpt["model_state"])
+    model = enable_distributed_inference(model)
+    model.eval()
+
+    with h5py.File(solve_h5, "r") as f:
+        _, _, D, nx, ny = f["inputs"].shape
+        h0, h1 = partition_range(nx, rank, world_size)
+        X = f["inputs"][:, :, :, h0:h1, :]
+        z_scale = f["z_scale"][:, :, h0:h1, :]
+        dx = f["dx"][...]
+        dy = f["dy"][...]
+
+    X = torch.from_numpy(X.astype(np.float32, copy=False)).to(device)
+    z_scale = torch.from_numpy(z_scale.astype(np.float32, copy=False)).to(device)
+    dx = torch.from_numpy(dx.astype(np.float32, copy=False)).to(device)
+    dy = torch.from_numpy(dy.astype(np.float32, copy=False)).to(device)
+
+    mean_X_t = torch.from_numpy(mean_X).float()[None, :, None, None, None].to(device)
+    std_X_t = torch.from_numpy(std_X).float()[None, :, None, None, None].to(device)
+    X = (X - mean_X_t) / std_X_t
+
+    if rank == 0:
+        print("=== DISTRIBUTED FULL PREDICTION ===")
+        print(f"global shape: B=1, Cin={Cin}, D={D}, H={nx}, W={ny}")
+        print(f"ranks: {world_size}")
+    print(f"[rank {rank}] H slab: {h0}:{h1}, local X shape: {tuple(X.shape)}")
+
+    with torch.no_grad():
+        if rank == 0:
+            print("[full prediction] lift", flush=True)
+        x = model._run_lift(X, collect_stats=False)
+
+        for i, blk in enumerate(model.blocks):
+            if rank == 0:
+                print(f"[full prediction] block {i + 1}/{len(model.blocks)}", flush=True)
+                spec = getattr(blk, "spec", None)
+                if hasattr(spec, "progress_label"):
+                    spec.progress_label = f"block {i + 1}/{len(model.blocks)} spectral"
+                vertical = getattr(blk, "vertical", None)
+                if hasattr(vertical, "progress_label"):
+                    vertical.progress_label = f"block {i + 1}/{len(model.blocks)} vertical"
+
+            residual = x
+
+            spec = blk.spec_drop(blk.act(blk.norm_spec(blk.spec(x, dx, dy))))
+            if rank == 0:
+                print(f"[full prediction] block {i + 1}/{len(model.blocks)} vertical", flush=True)
+            vert = blk.vert_drop(blk.act(blk.norm_vert(blk.vertical(x, z_scale))))
+
+            if rank == 0:
+                print(f"[full prediction] block {i + 1}/{len(model.blocks)} fuse", flush=True)
+                for name, module in blk.fuse.named_modules():
+                    if hasattr(module, "progress_label"):
+                        module.progress_label = f"block {i + 1}/{len(model.blocks)} fuse {name}"
+            fused, _, _, _, _ = blk._fuse_branches(x, spec, vert)
+            x1 = residual + blk.res_fused * fused
+
+            if rank == 0:
+                print(f"[full prediction] block {i + 1}/{len(model.blocks)} pointwise", flush=True)
+            pw = blk.norm_pw(blk.pw(x1))
+            x2 = x1 + blk.res_pw * pw
+
+            if rank == 0:
+                print(f"[full prediction] block {i + 1}/{len(model.blocks)} mlp", flush=True)
+            mlp = torch.tanh(blk.norm_mlp(blk.mlp(x2)))
+            x = x2 + blk.res_mlp * mlp
+
+            if rank == 0:
+                print(f"[full prediction] block {i + 1}/{len(model.blocks)} done", flush=True)
+
+        if rank == 0:
+            print("[full prediction] head", flush=True)
+        pred_log = model._run_head(x, collect_stats=False)
+        if rank == 0:
+            print("[full prediction] forward done", flush=True)
+
+    if torch.isnan(pred_log).any():
+        print(f"[rank {rank}] NaN in prediction")
+    if torch.isinf(pred_log).any():
+        print(f"[rank {rank}] Inf in prediction")
+
+    mean_Y_t = torch.from_numpy(mean_Y).float()[None, :, None, None, None].to(device)
+    std_Y_t = torch.from_numpy(std_Y).float()[None, :, None, None, None].to(device)
+    pred_log = pred_log * std_Y_t + mean_Y_t
+
+    dep = invert_log_departure(pred_log).float().cpu().numpy()
+    dep = np.transpose(dep, (0, 3, 4, 2, 1)).astype(np.float32, copy=False)[0]
+    z_local = z_scale[0].detach().cpu().numpy().astype(np.float32, copy=False)
+
+    gathered_dep = [None for _ in range(world_size)] if rank == 0 else None
+    gathered_z = [None for _ in range(world_size)] if rank == 0 else None
+    dist.gather_object(dep, gathered_dep, dst=0)
+    dist.gather_object(z_local, gathered_z, dst=0)
+
+    if rank == 0:
+        dep_full = np.concatenate(gathered_dep, axis=0)
+        z_full = np.concatenate(gathered_z, axis=1)
+        print(
+            "dep range:",
+            float(dep_full.min()),
+            float(dep_full.max()),
+            flush=True,
+        )
+
+        with h5py.File(save_path, "w") as f:
+            d = f.create_dataset(
+                "departure_coefficients",
+                data=np.asfortranarray(dep_full),
+                compression="gzip",
+                compression_opts=4,
+                shuffle=True,
+            )
+            d.attrs["depth_scale_type"] = "z"
+            f.create_dataset(
+                "z_scale",
+                data=z_full,
+                compression="gzip",
+                compression_opts=4,
+                shuffle=True,
+            )
+            if "val_loss" in ckpt:
+                f.attrs["val_loss"] = float(ckpt["val_loss"])
+            f.attrs["epoch"] = int(ckpt.get("epoch", -1))
+
+    dist.barrier()
     return save_path
