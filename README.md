@@ -464,6 +464,14 @@ It now compares on shared `z_scale` directly and does not interpolate to column 
 - some configured output names still contain historical strings such as `s5`; these are just file naming conventions
 - config values are the source of truth for splits, active atoms, paths, and model dimensions
 
+## Usage And Citation
+
+If you want to use this code, please contact the author.
+
+Please cite:
+
+- H. Mathur and T. Pereira 2026, in preparation
+
 ## Author
 
 Harsh Mathur
