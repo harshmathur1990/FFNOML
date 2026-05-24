@@ -41,6 +41,14 @@ VAL_SPLIT = {
     "qs006003_sap": ["900"]
 }
 
+SIMULATION_SPLIT_IMPORTANCE = {
+    "en024048_hion": 0.25,
+    "ch012012_hion": 0.25,
+    "nw012023": 1.0 / 6.0,
+    "ch012006": 1.0 / 6.0,
+    "qs006003_sap": 1.0 / 6.0,
+}
+
 
 ATOM_CONFIG = {
     "H": {
@@ -122,6 +130,14 @@ def build_multi3d_entries(split_dict):
     for sim, snaps in split_dict.items():
 
         base = SIMULATIONS[sim]["base_path"]
+        sim_weight = SIMULATION_SPLIT_IMPORTANCE.get(sim)
+
+        if sim_weight is None:
+            raise ValueError(
+                f"{sim} is missing from SIMULATION_SPLIT_IMPORTANCE"
+            )
+
+        per_snapshot_weight = sim_weight / len(snaps)
 
         for snap in snaps:
 
@@ -134,6 +150,9 @@ def build_multi3d_entries(split_dict):
                 "MULTI3D_PATHS": [],
                 "MULTI3D_ATMOS": f"{base}/{snap}/atm3d",
                 "MESH": f"{base}/{snap}/mesh",
+                "SIMULATION": sim,
+                "SNAP": snap,
+                "SAMPLE_WEIGHT": per_snapshot_weight,
             }
 
             for atom in ACTIVE_ATOMS:
