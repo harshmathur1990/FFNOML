@@ -123,10 +123,6 @@ def build_datasets():
             patch=PATCH,
             stride=STRIDE,
             scales=SCALES,
-            sample_weights=[
-                entry["SAMPLE_WEIGHT"]
-                for entry in MULTI3D_TRAIN_DATA
-            ],
             stat_file=None
         )
 
@@ -154,10 +150,6 @@ def build_datasets():
             patch=PATCH,
             stride=STRIDE,
             scales=SCALES,
-            sample_weights=[
-                entry["SAMPLE_WEIGHT"]
-                for entry in MULTI3D_VAL_DATA
-            ],
             stat_file=TRAIN_FILE
         )
 
