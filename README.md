@@ -408,6 +408,14 @@ The current build pipeline writes grouped patch datasets, and the default config
 
 For grouped native-depth patch datasets, `batch_size` must remain `1`.
 
+`TRAINSELECT` can be set below `1.0` to randomly thin each grouped training
+dataset at load time without rebuilding HDF5 files. Selection is done
+independently within each stored weight value in each `train_*` group, and the
+remaining sample weights are rescaled so every weight class keeps the same total
+weight. Single-sample weight classes are kept unchanged. The selected rows are
+resampled every epoch using `TRAINSELECT_SEED + epoch`, so the run is
+reproducible while each epoch can see a different subset.
+
 ## Current End-To-End Workflow
 
 Typical usage is:

@@ -19,18 +19,22 @@ class DataLoaderBuilder:
         batch_size=1,
         num_workers=4,
         pin_memory=True,
+        train_select=1.0,
+        train_select_seed=None,
     ):
 
         self.dataset_type = dataset_type
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.pin_memory = pin_memory
+        self.train_select = train_select
+        self.train_select_seed = train_select_seed
 
     # ------------------------------------------------
     # DATASET
     # ------------------------------------------------
 
-    def build_dataset(self, h5_file):
+    def build_dataset(self, h5_file, *, train_select=None):
 
         if self.dataset_type == "patch":
             DatasetClass = H5PatchDataset
@@ -41,7 +45,19 @@ class DataLoaderBuilder:
         else:
             raise ValueError("dataset_type must be 'patch' or 'cube'")
 
-        dataset = DatasetClass(h5_file)
+        if train_select is None:
+            train_select = 1.0
+
+        if DatasetClass is H5PatchDataset:
+            dataset = DatasetClass(
+                h5_file,
+                train_select=train_select,
+                train_select_seed=self.train_select_seed,
+            )
+        else:
+            if float(train_select) != 1.0:
+                raise ValueError("TRAINSELECT is only supported for patch datasets")
+            dataset = DatasetClass(h5_file)
 
         return dataset
 
@@ -57,6 +73,11 @@ class DataLoaderBuilder:
             )
 
         sampler = None
+        persistent_workers = self.num_workers > 0 and not getattr(
+            dataset,
+            "dynamic_length",
+            False,
+        )
 
         if is_distributed():
 
@@ -75,7 +96,7 @@ class DataLoaderBuilder:
             sampler=sampler,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
-            persistent_workers=self.num_workers > 0,
+            persistent_workers=persistent_workers,
         )
 
         return loader, sampler
@@ -86,7 +107,10 @@ class DataLoaderBuilder:
 
     def build(self, train_h5, val_h5=None):
 
-        train_dataset = self.build_dataset(train_h5)
+        train_dataset = self.build_dataset(
+            train_h5,
+            train_select=self.train_select,
+        )
 
         train_loader, train_sampler = self.build_dataloader(
             train_dataset,

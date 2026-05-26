@@ -859,6 +859,8 @@ def ffno_train_model(
     load_earlier_val=False,
     expand_from_checkpoint=None,
     zero_init_new_blocks=True,
+    train_select=1.0,
+    train_select_seed=None,
 ):
     resume_path = get_resume_checkpoint_path(save_path)
     load_path = None
@@ -1012,7 +1014,9 @@ def ffno_train_model(
         dataset_type=dataset_type,
         batch_size=batch_size,
         num_workers=num_workers,
-        pin_memory=pin_memory
+        pin_memory=pin_memory,
+        train_select=train_select,
+        train_select_seed=train_select_seed,
     )
 
     train_loader, val_loader, _, _ = data_builder.build(
