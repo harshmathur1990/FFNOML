@@ -421,10 +421,10 @@ def compute_loss(
         source_true=source_true,
     )
 
-    loss = loss.mean()
-
     if weight is not None:
-        loss = loss * weight.float().mean()
+        loss = (loss * weight).sum() / (weight.sum() + 1e-12)
+    else:
+        loss = loss.mean()
 
     return loss, components
 
