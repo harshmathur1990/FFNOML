@@ -203,8 +203,8 @@ MODEL_CONFIG = dict(
     dropout=0.0,
     spec_dropout=0.03,
     vertical_dropout=0.08,
-    spec_dropout_layers=[0, 1, 2],
-    vertical_dropout_layers=[1, 2, 3],
+    spec_dropout_layers=[0, 1, 2, 3],
+    vertical_dropout_layers=[0, 1, 2, 3],
     checkpoint_blocks=True,
 )
 

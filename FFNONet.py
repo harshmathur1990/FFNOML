@@ -8,6 +8,7 @@
 #   ffno_predict_populations
 #   ffno_predict_populations_distributed_full
 #   ffno_test_model
+#   ffno_inspect_freq_gate
 #
 # ============================================================
 
@@ -106,6 +107,174 @@ def _compute_departure_coefficients(lte, nlte, eps=1e-30):
 
 def invert_log_departure(pred_log):
     return torch.pow(10.0, pred_log)
+
+
+@torch.no_grad()
+def ffno_inspect_freq_gate(
+    *,
+    model,
+    checkpoint_path,
+    model_config,
+    lines,
+    wave,
+    chi,
+    levels,
+    atom_names,
+    H,
+    W,
+    dx,
+    dy,
+    save_path=None,
+    cuda=True,
+):
+    """
+    Evaluate each spectral branch freq_mlp on a chosen horizontal Fourier grid.
+
+    This inspects g(k) in the spectral weight
+        W_eff(i,o,k) = W(i,o) * g(k)
+    without running an input field through the network.
+    """
+    device = "cuda" if (cuda and torch.cuda.is_available()) else "cpu"
+
+    Cin, Cout, mean_X, std_X, mean_Y, std_Y = _load_inference_metadata_from_checkpoint(
+        checkpoint_path,
+    )
+
+    model_config = dict(model_config)
+    model_config["in_channels"] = Cin
+    model_config["out_channels"] = Cout
+
+    builder = ModelBuilder(
+        model=model,
+        model_config=model_config,
+        chi=chi,
+        lines=lines,
+        wave=wave,
+        levels=levels,
+        atom_names=atom_names,
+        device=device,
+        lr=0.0,
+        weight_decay=0.0,
+        multi_gpu=False,
+        debug_loss=False,
+        mean_X=mean_X,
+        std_X=std_X,
+        mean_Y=mean_Y,
+        std_Y=std_Y,
+    )
+
+    model_obj, scheduler, optimizer, loss_fn = builder.build()
+    ckpt = load_checkpoint(checkpoint_path, map_location=device)
+    model_obj.load_state_dict(ckpt["model_state"])
+    model_obj.eval()
+
+    dx = float(np.asarray(dx).reshape(-1)[0])
+    dy = float(np.asarray(dy).reshape(-1)[0])
+    H = int(H)
+    W = int(W)
+
+    ky_1d = torch.fft.fftfreq(H, d=dy, device=device)
+    kx_1d = torch.fft.rfftfreq(W, d=dx, device=device)
+    ky, kx = torch.meshgrid(ky_1d, kx_1d, indexing="ij")
+    k_feat = torch.stack(
+        [
+            kx,
+            ky,
+            torch.sqrt(kx ** 2 + ky ** 2 + 1e-12),
+            torch.sign(ky),
+        ],
+        dim=-1,
+    )
+
+    print("\n=== FREQUENCY GATE INSPECTION ===")
+    print(f"checkpoint: {checkpoint_path}")
+    print(f"grid: H={H}, W={W}, Wf={kx_1d.numel()}, dx={dx}, dy={dy}")
+
+    arrays = {
+        "kx": kx.detach().cpu().numpy(),
+        "ky": ky.detach().cpu().numpy(),
+    }
+    summary = []
+
+    for layer_idx, block in enumerate(model_obj.blocks):
+        spec = block.spec
+        gate = spec.freq_mlp(k_feat)
+        gr = gate[..., 0]
+        gi = gate[..., 1]
+        g_complex = torch.complex(gr, gi)
+        g_abs = torch.abs(g_complex)
+        phase = torch.atan2(gi, gr)
+        deviation = torch.abs(g_complex - g_complex.mean())
+
+        layer_summary = {
+            "layer": layer_idx,
+            "gate_shape": tuple(gate.shape),
+            "gr_min": gr.min().item(),
+            "gr_max": gr.max().item(),
+            "gr_mean": gr.mean().item(),
+            "gr_std": gr.std().item(),
+            "gi_min": gi.min().item(),
+            "gi_max": gi.max().item(),
+            "gi_mean": gi.mean().item(),
+            "gi_std": gi.std().item(),
+            "abs_min": g_abs.min().item(),
+            "abs_max": g_abs.max().item(),
+            "abs_mean": g_abs.mean().item(),
+            "abs_std": g_abs.std().item(),
+            "phase_min": phase.min().item(),
+            "phase_max": phase.max().item(),
+            "phase_std": phase.std().item(),
+            "mean_abs_g_minus_mean": deviation.mean().item(),
+            "max_abs_g_minus_mean": deviation.max().item(),
+        }
+        summary.append(layer_summary)
+
+        print(f"\nLayer {layer_idx}")
+        print(f"gate shape: {tuple(gate.shape)}")
+        print(
+            "gr min/max/mean/std: "
+            f"{layer_summary['gr_min']:.6e} "
+            f"{layer_summary['gr_max']:.6e} "
+            f"{layer_summary['gr_mean']:.6e} "
+            f"{layer_summary['gr_std']:.6e}"
+        )
+        print(
+            "gi min/max/mean/std: "
+            f"{layer_summary['gi_min']:.6e} "
+            f"{layer_summary['gi_max']:.6e} "
+            f"{layer_summary['gi_mean']:.6e} "
+            f"{layer_summary['gi_std']:.6e}"
+        )
+        print(
+            "|g| min/max/mean/std: "
+            f"{layer_summary['abs_min']:.6e} "
+            f"{layer_summary['abs_max']:.6e} "
+            f"{layer_summary['abs_mean']:.6e} "
+            f"{layer_summary['abs_std']:.6e}"
+        )
+        print(
+            "mean/max |g - mean(g)|: "
+            f"{layer_summary['mean_abs_g_minus_mean']:.6e} "
+            f"{layer_summary['max_abs_g_minus_mean']:.6e}"
+        )
+
+        arrays[f"layer_{layer_idx}_gr"] = gr.detach().cpu().numpy()
+        arrays[f"layer_{layer_idx}_gi"] = gi.detach().cpu().numpy()
+        arrays[f"layer_{layer_idx}_abs"] = g_abs.detach().cpu().numpy()
+        arrays[f"layer_{layer_idx}_phase"] = phase.detach().cpu().numpy()
+
+    if save_path is not None:
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        arrays["summary_json"] = np.asarray(json.dumps(summary, indent=2))
+        arrays["H"] = np.asarray(H)
+        arrays["W"] = np.asarray(W)
+        arrays["dx"] = np.asarray(dx)
+        arrays["dy"] = np.asarray(dy)
+        np.savez(save_path, **arrays)
+        print(f"\nSaved frequency gate diagnostics to {save_path}")
+
+    print("=== FREQUENCY GATE INSPECTION END ===")
+    return summary
 
 
 def _infer_patch_group_prefix(save_path):
