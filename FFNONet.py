@@ -1032,6 +1032,41 @@ def ffno_train_model(
     effective_resume_path = None if expand_from_checkpoint is not None else resume_path
     effective_best_val_init = None if expand_from_checkpoint is not None else best_val_init
 
+    if (
+        expand_from_checkpoint is None
+        and resume
+        and bestpath
+        and val_loader is not None
+    ):
+        if (
+            not multi_gpu
+            or not dist.is_available()
+            or not dist.is_initialized()
+            or dist.get_rank() == 0
+        ):
+            print("Running validation baseline before training from best checkpoint")
+
+        initial_val_loss, initial_val_comp = validate(
+            model=model,
+            loader=val_loader,
+            loss_fn=loss_fn,
+            device=builder.device,
+        )
+        effective_best_val_init = initial_val_loss
+
+        if (
+            not multi_gpu
+            or not dist.is_available()
+            or not dist.is_initialized()
+            or dist.get_rank() == 0
+        ):
+            print(
+                "[Bestpath baseline] "
+                f"val={initial_val_loss:.6e} "
+                f"L1={initial_val_comp.get('data', 0):.3e} "
+                f"L2={initial_val_comp.get('source', 0):.3e}"
+            )
+
     # run training
     train(
         model,
