@@ -367,9 +367,15 @@ class DistributedSpectralConv2dFull(nn.Module):
         x_ft = torch.fft.fft(x_w, dim=-2)
         del x_w
 
+        freq_multiplier = 1e5
+
         ky = torch.fft.fftfreq(h_global, d=dy, device=x.device)
         kx = torch.fft.rfftfreq(w, d=dx, device=x.device)[wf_start:wf_stop]
         ky, kx = torch.meshgrid(ky, kx, indexing="ij")
+
+        ky = ky * freq_multiplier
+
+        kx = kx * freq_multiplier
 
         k_feat = torch.stack(
             [

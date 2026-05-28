@@ -176,6 +176,11 @@ def ffno_inspect_freq_gate(
     ky_1d = torch.fft.fftfreq(H, d=dy, device=device)
     kx_1d = torch.fft.rfftfreq(W, d=dx, device=device)
     ky, kx = torch.meshgrid(ky_1d, kx_1d, indexing="ij")
+
+    freq_multiplier = 1e5
+    ky = ky * freq_multiplier
+    kx = kx * freq_multiplier
+
     k_feat = torch.stack(
         [
             kx,
@@ -189,6 +194,7 @@ def ffno_inspect_freq_gate(
     print("\n=== FREQUENCY GATE INSPECTION ===")
     print(f"checkpoint: {checkpoint_path}")
     print(f"grid: H={H}, W={W}, Wf={kx_1d.numel()}, dx={dx}, dy={dy}")
+    print(f"freq_multiplier: {freq_multiplier}")
 
     arrays = {
         "kx": kx.detach().cpu().numpy(),
