@@ -882,11 +882,14 @@ def ffno_train_model(
         )
 
     if resume:
-        if os.path.isfile(resume_path):
+        if bestpath:
+            if os.path.isfile(save_path):
+                load_path = save_path
+            else:
+                raise IOError(f"Best checkpoint not found: {save_path}")
+        elif os.path.isfile(resume_path):
             load_path = resume_path
             load_optimizer_state = True
-        elif bestpath and os.path.isfile(save_path):
-            load_path = save_path
         else:
             raise IOError(f"Resume checkpoint not found: {resume_path}")
 
