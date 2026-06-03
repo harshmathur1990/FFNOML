@@ -6,8 +6,6 @@ from tqdm import tqdm
 
 from models.ffno_model import SpectralConv2dFull as SpectralConv2dFull3D
 from models.ffno_model import BalancedVerticalPhysicsStack
-from models.ffno_z1d_model import SpectralConv2dFull as SpectralConv2dFullZ1D
-from models.ffno_z1d_model import ZNeuralOperator1d
 
 
 def is_dist():
@@ -231,8 +229,6 @@ class ProgressVerticalWrapper(nn.Module):
         self._progress("start")
         if isinstance(self.source, BalancedVerticalPhysicsStack):
             y = self._forward_balanced_vertical(x, z_scale)
-        elif isinstance(self.source, ZNeuralOperator1d):
-            y = self._forward_z1d_vertical(x, z_scale)
         else:
             y = self.source(x, z_scale)
         self._progress("done")
@@ -272,37 +268,6 @@ class ProgressVerticalWrapper(nn.Module):
             yi = self.source.in_proj(xi) + self.source.z_proj(z_feat)
             yi = self.source.net(yi)
             yi = yi * self.source.depth_gate(yi)
-            yi = self.source.out_proj(yi)
-
-            yi = yi.reshape(B, j - i, C, D)
-            chunks.append(yi)
-
-        y = torch.cat(chunks, dim=1)
-        y = y.reshape(B, H, W, C, D).permute(0, 3, 4, 1, 2).contiguous()
-        return self.source.out_gn(y)
-
-    def _forward_z1d_vertical(self, x, z_scale):
-        B, C, D, H, W = x.shape
-        if z_scale.ndim == 4:
-            z_scale = z_scale.unsqueeze(1)
-        if z_scale.shape != (B, 1, D, H, W):
-            raise ValueError(
-                f"z_scale must be [B, D, H, W] or [B, 1, D, H, W], got {tuple(z_scale.shape)}"
-            )
-
-        x_cols = x.permute(0, 3, 4, 1, 2).reshape(B, H * W, C, D)
-        z_cols = z_scale.permute(0, 3, 4, 1, 2).reshape(B, H * W, D)
-
-        chunks = []
-        for i in self._iter_columns(H * W):
-            j = min(i + self.source.chunk, H * W)
-            xi = x_cols[:, i:j].reshape(-1, C, D)
-            zi = z_cols[:, i:j].reshape(-1, D)
-
-            yi = self.source.in_proj(xi)
-            yi = self.source.operator(yi, zi) + self.source.local_mix(yi)
-            yi = yi * self.source.depth_gate(yi)
-            yi = self.source.drop(yi)
             yi = self.source.out_proj(yi)
 
             yi = yi.reshape(B, j - i, C, D)
@@ -442,11 +407,11 @@ class DistributedSpectralConv2dFull(nn.Module):
 
 def _replace_modules(parent):
     for name, child in list(parent.named_children()):
-        if isinstance(child, (SpectralConv2dFull3D, SpectralConv2dFullZ1D)):
+        if isinstance(child, SpectralConv2dFull3D):
             setattr(parent, name, DistributedSpectralConv2dFull(child))
             continue
 
-        if isinstance(child, (BalancedVerticalPhysicsStack, ZNeuralOperator1d)):
+        if isinstance(child, BalancedVerticalPhysicsStack):
             setattr(parent, name, ProgressVerticalWrapper(child))
             continue
 
