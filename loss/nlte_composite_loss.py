@@ -17,7 +17,7 @@ except:
 
 c_AHz = np.float32(2.99792458e18)  # Hz * Å
 h  = np.float32(6.62607015e-34)
-c  = np.float32(2.99792458e8)
+c_mps  = np.float32(2.99792458e8)
 kB = np.float32(1.380649e-23)
 
 
@@ -603,7 +603,7 @@ class NLTECompositeLoss(nn.Module):
         self.gradient_loss = gradient_loss_func
 
         self.chi = nn.ParameterList(
-            [nn.Parameter(torch.tensor(c, dtype=torch.float32), requires_grad=False) for c in chi]
+            [nn.Parameter(torch.tensor(chi_i, dtype=torch.float32), requires_grad=False) for chi_i in chi]
         )
 
         self.lines = nn.ParameterList(
@@ -617,7 +617,7 @@ class NLTECompositeLoss(nn.Module):
         self.K_prefactor = nn.ParameterList(
             [
                 nn.Parameter(
-                    torch.tensor((2.0*h*(c_AHz/w)/(c**2)) * (c_AHz/w)**2,
+                    torch.tensor((2.0*h*(c_AHz/w)/(c_mps**2)) * (c_AHz/w)**2,
                     dtype=torch.float32),
                     requires_grad=False
                 )
