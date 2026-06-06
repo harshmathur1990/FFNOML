@@ -18,6 +18,7 @@ except:
 c_AHz = np.float32(2.99792458e18)  # Hz * Å
 h  = np.float32(6.62607015e-34)
 c_mps  = np.float32(2.99792458e8)
+c = c_mps  # Backwards-compatible alias for modules importing the constant.
 kB = np.float32(1.380649e-23)
 
 
