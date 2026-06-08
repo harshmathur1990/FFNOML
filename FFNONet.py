@@ -33,6 +33,7 @@ from train_utils import (
 from scipy.ndimage import gaussian_filter
 from model_builder import ModelBuilder
 from distributed_inference import (
+    chunked_fuse_branches,
     enable_distributed_inference,
     partition_range,
 )
@@ -1920,18 +1921,25 @@ def ffno_predict_populations_distributed_full(
                 for name, module in blk.fuse.named_modules():
                     if hasattr(module, "progress_label"):
                         module.progress_label = f"block {i + 1}/{len(model.blocks)} fuse {name}"
-            fused, _, _, _, _ = blk._fuse_branches(x, spec, vert)
+            fused = chunked_fuse_branches(blk, x, spec, vert, normalize=False)
+            del spec, vert
+            if torch.cuda.is_available() and X.is_cuda:
+                torch.cuda.empty_cache()
+            fused = blk.act(blk.norm_fuse(fused))
             x1 = residual + blk.res_fused * fused
+            del fused, residual, x
 
             if rank == 0:
                 print(f"[full prediction] block {i + 1}/{len(model.blocks)} pointwise", flush=True)
             pw = blk.norm_pw(blk.pw(x1))
             x2 = x1 + blk.res_pw * pw
+            del x1, pw
 
             if rank == 0:
                 print(f"[full prediction] block {i + 1}/{len(model.blocks)} mlp", flush=True)
             mlp = torch.tanh(blk.norm_mlp(blk.mlp(x2)))
             x = x2 + blk.res_mlp * mlp
+            del x2, mlp
 
             if rank == 0:
                 print(f"[full prediction] block {i + 1}/{len(model.blocks)} done", flush=True)

@@ -278,6 +278,50 @@ class ProgressVerticalWrapper(nn.Module):
         return self.source.out_gn(y)
 
 
+def chunked_fuse_branches(block, x, spec, vert, chunk_depth=32, normalize=True):
+    """
+    Inference-only version of FFNOBlock3dBalanced._fuse_branches.
+
+    The standard path materializes full-volume concatenations with 3*width and
+    2*width channels. On full 384^3 slabs this exceeds 16 GB T4 memory. Chunking
+    over depth keeps peak memory bounded while preserving the 3x3x3 fuse
+    depthwise convolution with a one-cell depth halo.
+    """
+    _, _, depth, _, _ = x.shape
+    fused_chunks = []
+
+    for d0 in range(0, depth, chunk_depth):
+        d1 = min(d0 + chunk_depth, depth)
+        halo0 = max(0, d0 - 1)
+        halo1 = min(depth, d1 + 1)
+        inner0 = d0 - halo0
+        inner1 = inner0 + (d1 - d0)
+
+        x_h = x[:, :, halo0:halo1]
+        spec_h = spec[:, :, halo0:halo1]
+        vert_h = vert[:, :, halo0:halo1]
+
+        gates = block.branch_gate(torch.cat([x_h, spec_h, vert_h], dim=1))
+        spec_gate, vert_gate = gates.chunk(2, dim=1)
+        spec_mix = spec_h * spec_gate
+        vert_mix = vert_h * vert_gate
+        del gates, spec_gate, vert_gate, x_h, spec_h, vert_h
+
+        fused_h = block.fuse(torch.cat([spec_mix, vert_mix], dim=1))
+        fused_h = fused_h + 0.5 * (spec_mix + vert_mix)
+        fused_chunks.append(fused_h[:, :, inner0:inner1].contiguous())
+        del spec_mix, vert_mix, fused_h
+
+        if torch.cuda.is_available() and x.is_cuda:
+            torch.cuda.empty_cache()
+
+    fused = torch.cat(fused_chunks, dim=2)
+    del fused_chunks
+    if normalize:
+        fused = block.act(block.norm_fuse(fused))
+    return fused
+
+
 class DistributedSpectralConv2dFull(nn.Module):
     def __init__(self, source):
         super().__init__()
