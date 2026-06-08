@@ -45,59 +45,61 @@ def _to_spacing_value(spacing):
     raise TypeError(f"Unsupported spacing type: {type(spacing)}")
 
 
+def _as_dist_tensor(tensor):
+    if tensor.is_complex():
+        return torch.view_as_real(tensor)
+    return tensor
+
+
+def _empty_dist_tensor(shape, *, device, dtype):
+    tensor = torch.empty(shape, device=device, dtype=dtype)
+    return tensor, _as_dist_tensor(tensor)
+
+
 def _all_to_all_tensor_list(input_list, output_shapes, concat_dim=None):
     if not is_dist():
         return input_list[0] if concat_dim is not None else [input_list[0]]
 
     device = input_list[0].device
     dtype = input_list[0].dtype
-    ndim = input_list[0].ndim
     world_size = get_world_size()
+    rank = get_rank()
 
-    max_shape = [0] * ndim
-    for shape in [tuple(t.shape) for t in input_list] + [tuple(s) for s in output_shapes]:
-        for i, value in enumerate(shape):
-            max_shape[i] = max(max_shape[i], int(value))
-
-    max_shape_t = torch.tensor(max_shape, device=device, dtype=torch.int64)
-    dist.all_reduce(max_shape_t, op=dist.ReduceOp.MAX)
-    max_shape = [int(v) for v in max_shape_t.cpu().tolist()]
-
-    padded = []
-    for tensor in input_list:
-        out = torch.zeros(max_shape, device=device, dtype=dtype)
-        slices = tuple(slice(0, s) for s in tensor.shape)
-        out[slices] = tensor
-        padded.append(out)
-
-    send = torch.stack(padded, dim=0).contiguous()
-    del padded
-
-    if send.is_complex():
-        send_real = torch.view_as_real(send)
-        recv_real = torch.empty(
-            (world_size, *max_shape, 2),
-            device=device,
-            dtype=send_real.dtype,
+    if len(input_list) != world_size or len(output_shapes) != world_size:
+        raise ValueError(
+            f"Expected {world_size} tensors/shapes, got "
+            f"{len(input_list)} tensors and {len(output_shapes)} shapes."
         )
-        dist.all_to_all_single(recv_real, send_real)
-        del send_real
-        recv = torch.view_as_complex(recv_real.contiguous())
-        del recv_real
-    else:
-        recv = torch.empty((world_size, *max_shape), device=device, dtype=dtype)
-        dist.all_to_all_single(recv, send)
-    del send
 
-    output_list = []
-    for src, shape in enumerate(output_shapes):
-        slices = (src, *[slice(0, int(s)) for s in shape])
-        output_list.append(recv[slices])
+    output_list = [None for _ in range(world_size)]
+    output_list[rank] = input_list[rank]
+
+    for step in range(1, world_size):
+        dst = (rank + step) % world_size
+        src = (rank - step) % world_size
+
+        send = input_list[dst].contiguous()
+        recv, recv_dist = _empty_dist_tensor(
+            tuple(int(s) for s in output_shapes[src]),
+            device=device,
+            dtype=dtype,
+        )
+
+        ops = [
+            dist.P2POp(dist.irecv, recv_dist, src),
+            dist.P2POp(dist.isend, _as_dist_tensor(send), dst),
+        ]
+        for req in dist.batch_isend_irecv(ops):
+            req.wait()
+
+        output_list[src] = recv
+        input_list[dst] = None
+        del send
+
     if concat_dim is not None:
         out = torch.cat(output_list, dim=concat_dim)
-        del recv, output_list
+        del output_list
         return out
-    del recv
     return output_list
 
 

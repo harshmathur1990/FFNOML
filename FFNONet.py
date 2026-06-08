@@ -1940,6 +1940,8 @@ def ffno_predict_populations_distributed_full(
             mlp = torch.tanh(blk.norm_mlp(blk.mlp(x2)))
             x = x2 + blk.res_mlp * mlp
             del x2, mlp
+            if torch.cuda.is_available() and X.is_cuda:
+                torch.cuda.empty_cache()
 
             if rank == 0:
                 print(f"[full prediction] block {i + 1}/{len(model.blocks)} done", flush=True)
