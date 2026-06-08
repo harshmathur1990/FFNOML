@@ -304,6 +304,11 @@ class DistributedSpectralConv2dFull(nn.Module):
         dx = _to_spacing_value(dx)
         dy = _to_spacing_value(dy)
 
+        # Create the cuBLAS handle before the large spectral work buffers fill
+        # the device. Otherwise the small freq_mlp call can fail at cublasCreate.
+        if torch.cuda.is_available() and x.is_cuda:
+            _ = self.source.freq_mlp(torch.zeros(1, 4, device=x.device, dtype=x.dtype))
+
         self._progress("input gate")
         g = self.source.input_gate(x)
         x = x * g
@@ -331,6 +336,8 @@ class DistributedSpectralConv2dFull(nn.Module):
         self._progress("fft over H")
         x_ft = torch.fft.fft(x_w, dim=-2)
         del x_w
+        if torch.cuda.is_available() and x.is_cuda:
+            torch.cuda.empty_cache()
 
         freq_multiplier = 1e5
 
