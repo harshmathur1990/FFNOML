@@ -6,8 +6,6 @@ from tqdm import tqdm
 
 from models.ffno_model import SpectralConv2dFull as SpectralConv2dFull3D
 from models.ffno_model import BalancedVerticalPhysicsStack
-from models.ffno_z1d_model import SpectralConv2dFull as SpectralConv2dFullZ1D
-from models.ffno_z1d_model import ZNeuralOperator1d
 
 
 def is_dist():
@@ -47,59 +45,61 @@ def _to_spacing_value(spacing):
     raise TypeError(f"Unsupported spacing type: {type(spacing)}")
 
 
+def _as_dist_tensor(tensor):
+    if tensor.is_complex():
+        return torch.view_as_real(tensor)
+    return tensor
+
+
+def _empty_dist_tensor(shape, *, device, dtype):
+    tensor = torch.empty(shape, device=device, dtype=dtype)
+    return tensor, _as_dist_tensor(tensor)
+
+
 def _all_to_all_tensor_list(input_list, output_shapes, concat_dim=None):
     if not is_dist():
         return input_list[0] if concat_dim is not None else [input_list[0]]
 
     device = input_list[0].device
     dtype = input_list[0].dtype
-    ndim = input_list[0].ndim
     world_size = get_world_size()
+    rank = get_rank()
 
-    max_shape = [0] * ndim
-    for shape in [tuple(t.shape) for t in input_list] + [tuple(s) for s in output_shapes]:
-        for i, value in enumerate(shape):
-            max_shape[i] = max(max_shape[i], int(value))
-
-    max_shape_t = torch.tensor(max_shape, device=device, dtype=torch.int64)
-    dist.all_reduce(max_shape_t, op=dist.ReduceOp.MAX)
-    max_shape = [int(v) for v in max_shape_t.cpu().tolist()]
-
-    padded = []
-    for tensor in input_list:
-        out = torch.zeros(max_shape, device=device, dtype=dtype)
-        slices = tuple(slice(0, s) for s in tensor.shape)
-        out[slices] = tensor
-        padded.append(out)
-
-    send = torch.stack(padded, dim=0).contiguous()
-    del padded
-
-    if send.is_complex():
-        send_real = torch.view_as_real(send)
-        recv_real = torch.empty(
-            (world_size, *max_shape, 2),
-            device=device,
-            dtype=send_real.dtype,
+    if len(input_list) != world_size or len(output_shapes) != world_size:
+        raise ValueError(
+            f"Expected {world_size} tensors/shapes, got "
+            f"{len(input_list)} tensors and {len(output_shapes)} shapes."
         )
-        dist.all_to_all_single(recv_real, send_real)
-        del send_real
-        recv = torch.view_as_complex(recv_real.contiguous())
-        del recv_real
-    else:
-        recv = torch.empty((world_size, *max_shape), device=device, dtype=dtype)
-        dist.all_to_all_single(recv, send)
-    del send
 
-    output_list = []
-    for src, shape in enumerate(output_shapes):
-        slices = (src, *[slice(0, int(s)) for s in shape])
-        output_list.append(recv[slices])
+    output_list = [None for _ in range(world_size)]
+    output_list[rank] = input_list[rank]
+
+    for step in range(1, world_size):
+        dst = (rank + step) % world_size
+        src = (rank - step) % world_size
+
+        send = input_list[dst].contiguous()
+        recv, recv_dist = _empty_dist_tensor(
+            tuple(int(s) for s in output_shapes[src]),
+            device=device,
+            dtype=dtype,
+        )
+
+        ops = [
+            dist.P2POp(dist.irecv, recv_dist, src),
+            dist.P2POp(dist.isend, _as_dist_tensor(send), dst),
+        ]
+        for req in dist.batch_isend_irecv(ops):
+            req.wait()
+
+        output_list[src] = recv
+        input_list[dst] = None
+        del send
+
     if concat_dim is not None:
         out = torch.cat(output_list, dim=concat_dim)
-        del recv, output_list
+        del output_list
         return out
-    del recv
     return output_list
 
 
@@ -231,8 +231,6 @@ class ProgressVerticalWrapper(nn.Module):
         self._progress("start")
         if isinstance(self.source, BalancedVerticalPhysicsStack):
             y = self._forward_balanced_vertical(x, z_scale)
-        elif isinstance(self.source, ZNeuralOperator1d):
-            y = self._forward_z1d_vertical(x, z_scale)
         else:
             y = self.source(x, z_scale)
         self._progress("done")
@@ -281,36 +279,49 @@ class ProgressVerticalWrapper(nn.Module):
         y = y.reshape(B, H, W, C, D).permute(0, 3, 4, 1, 2).contiguous()
         return self.source.out_gn(y)
 
-    def _forward_z1d_vertical(self, x, z_scale):
-        B, C, D, H, W = x.shape
-        if z_scale.ndim == 4:
-            z_scale = z_scale.unsqueeze(1)
-        if z_scale.shape != (B, 1, D, H, W):
-            raise ValueError(
-                f"z_scale must be [B, D, H, W] or [B, 1, D, H, W], got {tuple(z_scale.shape)}"
-            )
 
-        x_cols = x.permute(0, 3, 4, 1, 2).reshape(B, H * W, C, D)
-        z_cols = z_scale.permute(0, 3, 4, 1, 2).reshape(B, H * W, D)
+def chunked_fuse_branches(block, x, spec, vert, chunk_depth=32, normalize=True):
+    """
+    Inference-only version of FFNOBlock3dBalanced._fuse_branches.
 
-        chunks = []
-        for i in self._iter_columns(H * W):
-            j = min(i + self.source.chunk, H * W)
-            xi = x_cols[:, i:j].reshape(-1, C, D)
-            zi = z_cols[:, i:j].reshape(-1, D)
+    The standard path materializes full-volume concatenations with 3*width and
+    2*width channels. On full 384^3 slabs this exceeds 16 GB T4 memory. Chunking
+    over depth keeps peak memory bounded while preserving the 3x3x3 fuse
+    depthwise convolution with a one-cell depth halo.
+    """
+    _, _, depth, _, _ = x.shape
+    fused_chunks = []
 
-            yi = self.source.in_proj(xi)
-            yi = self.source.operator(yi, zi) + self.source.local_mix(yi)
-            yi = yi * self.source.depth_gate(yi)
-            yi = self.source.drop(yi)
-            yi = self.source.out_proj(yi)
+    for d0 in range(0, depth, chunk_depth):
+        d1 = min(d0 + chunk_depth, depth)
+        halo0 = max(0, d0 - 1)
+        halo1 = min(depth, d1 + 1)
+        inner0 = d0 - halo0
+        inner1 = inner0 + (d1 - d0)
 
-            yi = yi.reshape(B, j - i, C, D)
-            chunks.append(yi)
+        x_h = x[:, :, halo0:halo1]
+        spec_h = spec[:, :, halo0:halo1]
+        vert_h = vert[:, :, halo0:halo1]
 
-        y = torch.cat(chunks, dim=1)
-        y = y.reshape(B, H, W, C, D).permute(0, 3, 4, 1, 2).contiguous()
-        return self.source.out_gn(y)
+        gates = block.branch_gate(torch.cat([x_h, spec_h, vert_h], dim=1))
+        spec_gate, vert_gate = gates.chunk(2, dim=1)
+        spec_mix = spec_h * spec_gate
+        vert_mix = vert_h * vert_gate
+        del gates, spec_gate, vert_gate, x_h, spec_h, vert_h
+
+        fused_h = block.fuse(torch.cat([spec_mix, vert_mix], dim=1))
+        fused_h = fused_h + 0.5 * (spec_mix + vert_mix)
+        fused_chunks.append(fused_h[:, :, inner0:inner1].contiguous())
+        del spec_mix, vert_mix, fused_h
+
+        if torch.cuda.is_available() and x.is_cuda:
+            torch.cuda.empty_cache()
+
+    fused = torch.cat(fused_chunks, dim=2)
+    del fused_chunks
+    if normalize:
+        fused = block.act(block.norm_fuse(fused))
+    return fused
 
 
 class DistributedSpectralConv2dFull(nn.Module):
@@ -339,6 +350,11 @@ class DistributedSpectralConv2dFull(nn.Module):
         dx = _to_spacing_value(dx)
         dy = _to_spacing_value(dy)
 
+        # Create the cuBLAS handle before the large spectral work buffers fill
+        # the device. Otherwise the small freq_mlp call can fail at cublasCreate.
+        if torch.cuda.is_available() and x.is_cuda:
+            _ = self.source.freq_mlp(torch.zeros(1, 4, device=x.device, dtype=x.dtype))
+
         self._progress("input gate")
         g = self.source.input_gate(x)
         x = x * g
@@ -366,10 +382,18 @@ class DistributedSpectralConv2dFull(nn.Module):
         self._progress("fft over H")
         x_ft = torch.fft.fft(x_w, dim=-2)
         del x_w
+        if torch.cuda.is_available() and x.is_cuda:
+            torch.cuda.empty_cache()
+
+        freq_multiplier = 1e5
 
         ky = torch.fft.fftfreq(h_global, d=dy, device=x.device)
         kx = torch.fft.rfftfreq(w, d=dx, device=x.device)[wf_start:wf_stop]
         ky, kx = torch.meshgrid(ky, kx, indexing="ij")
+
+        ky = ky * freq_multiplier
+
+        kx = kx * freq_multiplier
 
         k_feat = torch.stack(
             [
@@ -436,11 +460,11 @@ class DistributedSpectralConv2dFull(nn.Module):
 
 def _replace_modules(parent):
     for name, child in list(parent.named_children()):
-        if isinstance(child, (SpectralConv2dFull3D, SpectralConv2dFullZ1D)):
+        if isinstance(child, SpectralConv2dFull3D):
             setattr(parent, name, DistributedSpectralConv2dFull(child))
             continue
 
-        if isinstance(child, (BalancedVerticalPhysicsStack, ZNeuralOperator1d)):
+        if isinstance(child, BalancedVerticalPhysicsStack):
             setattr(parent, name, ProgressVerticalWrapper(child))
             continue
 

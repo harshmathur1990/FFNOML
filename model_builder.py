@@ -4,7 +4,6 @@ import torch
 import torch.distributed as dist
 
 from models.ffno_model import FFNO3D, FFNOBlock3dBalanced
-from models.ffno_z1d_model import FFNO3DZ1D, FFNOBlock3dZ1D
 from loss.nlte_composite_loss import NLTECompositeLoss
 from loss.gradient_loss import GradientLoss
 from loss.weighted_mse_loss import WeightedMSE_L1
@@ -42,9 +41,6 @@ class ModelBuilder:
         if model == "FFNO3D":
             self.model_cls = FFNO3D
             self.transformer_layer_cls = FFNOBlock3dBalanced
-        elif model == "FFNO3DZ1D":
-            self.model_cls = FFNO3DZ1D
-            self.transformer_layer_cls = FFNOBlock3dZ1D
         else:
             sys.stderr.write(f"Invalid Model class: {model}")
             sys.exit(-1)

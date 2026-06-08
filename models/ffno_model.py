@@ -305,9 +305,15 @@ class SpectralConv2dFull(nn.Module):
         x = x * g
         x_ft = torch.fft.rfft2(x, dim=(-2, -1))
 
+        freq_multiplier = 1e5
+
         ky = torch.fft.fftfreq(H, d=dy, device=x.device)
         kx = torch.fft.rfftfreq(W, d=dx, device=x.device)
         ky, kx = torch.meshgrid(ky, kx, indexing="ij")
+
+        ky = ky * freq_multiplier
+
+        kx = kx * freq_multiplier
 
         k_feat = torch.stack(
             [

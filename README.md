@@ -67,13 +67,12 @@ Important sections:
 The currently implemented model names are:
 
 - `FFNO3D`
-- `FFNO3DZ1D`
 
 `FFNO3D` uses a cheap coordinate-conditioned vertical branch: it keeps absolute
 `z_scale` as an input feature and also derives local normalized depth,
 local `dz`, and total z-span before the vertical projection. This is lighter
-than `FFNO3DZ1D`, but gives the model more information about nonuniform z grids
-than depth-index convolutions alone.
+than the deleted z-operator variant, but gives the model more information about
+nonuniform z grids than depth-index convolutions alone.
 
 ## Installation
 
@@ -407,6 +406,14 @@ The current build pipeline writes grouped patch datasets, and the default config
 - `DATASET_TYPE = "patch"`
 
 For grouped native-depth patch datasets, `batch_size` must remain `1`.
+
+`TRAINSELECT` can be set below `1.0` to randomly thin each grouped training
+dataset at load time without rebuilding HDF5 files. Selection is done
+independently within each stored weight value in each `train_*` group, and the
+remaining sample weights are rescaled so every weight class keeps the same total
+weight. Single-sample weight classes are kept unchanged. The selected rows are
+resampled every epoch using `TRAINSELECT_SEED + epoch`, so the run is
+reproducible while each epoch can see a different subset.
 
 ## Current End-To-End Workflow
 

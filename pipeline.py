@@ -18,6 +18,7 @@ from FFNONet import (
     ffno_test_model,
     ffno_predict_populations,
     ffno_predict_populations_distributed_full,
+    ffno_inspect_freq_gate,
 )
 import torch.distributed as dist
 import argparse
@@ -33,6 +34,12 @@ def parse_args():
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--bestpath", action="store_true")
     parser.add_argument("--expand", action="store_true")
+    parser.add_argument("--inspectfreqgate", action="store_true")
+    parser.add_argument("--inspect-h", type=int, default=None)
+    parser.add_argument("--inspect-w", type=int, default=None)
+    parser.add_argument("--inspect-dx", type=float, default=None)
+    parser.add_argument("--inspect-dy", type=float, default=None)
+    parser.add_argument("--inspect-out", default=None)
     return parser.parse_args()
 
 
@@ -190,6 +197,8 @@ def train_model(*, resume=False, bestpath=False, expand=False):
         load_earlier_val=LOAD_EARLIER_VAL,
         expand_from_checkpoint=EXPAND_FROM_CHECKPOINT if expand else None,
         zero_init_new_blocks=ZERO_INIT_NEW_BLOCKS,
+        train_select=TRAINSELECT,
+        train_select_seed=TRAINSELECT_SEED,
     )
 
 
@@ -315,6 +324,50 @@ def run_predictions(*, distributed_full=False):
                     patch=PATCH,
                     stride=STRIDE
                 )
+
+
+def inspect_frequency_gate(*, H=None, W=None, dx=None, dy=None, save_path=None):
+    ensure_checkpoint_exists()
+
+    H = PATCH if H is None else H
+    W = PATCH if W is None else W
+
+    if dx is None or dy is None:
+        if not MULTI3D_PRED_DATA:
+            raise RuntimeError(
+                "Set --inspect-dx and --inspect-dy when MULTI3D_PRED_DATA is empty."
+            )
+        mesh_path = MULTI3D_PRED_DATA[0]["MESH"]
+        if not os.path.exists(mesh_path):
+            raise FileNotFoundError(
+                f"Cannot infer dx/dy because the configured mesh does not exist: {mesh_path}\n"
+                "Pass --inspect-dx and --inspect-dy explicitly."
+            )
+        mesh_dx, mesh_dy = compute_dx_dy(mesh_path)
+        mesh_dx = abs(mesh_dx)
+        mesh_dy = abs(mesh_dy)
+        dx = mesh_dx if dx is None else dx
+        dy = mesh_dy if dy is None else dy
+
+    if save_path is None:
+        save_path = MODEL_DIR + f"freq_gate_{MODEL}_H{int(H)}_W{int(W)}.npz"
+
+    ffno_inspect_freq_gate(
+        model=MODEL,
+        checkpoint_path=MODEL_FILE,
+        model_config=MODEL_CONFIG,
+        lines=lines,
+        wave=wave,
+        chi=chi,
+        levels=levels,
+        atom_names=atom_names,
+        H=H,
+        W=W,
+        dx=dx,
+        dy=dy,
+        save_path=save_path,
+        cuda=CUDA,
+    )
 
 
 def cleanup_distributed():
@@ -514,9 +567,10 @@ if __name__ == "__main__":
         args.test,
         args.predict,
         args.fsdppredict,
+        args.inspectfreqgate,
     ]
     if sum(bool(mode) for mode in selected_modes) > 1:
-        raise RuntimeError("Specify only one of: --build, --train, --test, --predict, --fsdppredict")
+        raise RuntimeError("Specify only one of: --build, --train, --test, --predict, --fsdppredict, --inspectfreqgate")
 
     if args.resume and not args.train:
         raise RuntimeError("--resume can only be used together with --train")
@@ -551,8 +605,18 @@ if __name__ == "__main__":
             validate_runtime_device()
             run_predictions(distributed_full=True)
 
+        elif args.inspectfreqgate:
+            validate_runtime_device()
+            inspect_frequency_gate(
+                H=args.inspect_h,
+                W=args.inspect_w,
+                dx=args.inspect_dx,
+                dy=args.inspect_dy,
+                save_path=args.inspect_out,
+            )
+
         else:
-            raise RuntimeError("Specify one of: --build, --train, --test, --predict, --fsdppredict")
+            raise RuntimeError("Specify one of: --build, --train, --test, --predict, --fsdppredict, --inspectfreqgate")
 
     finally:
         cleanup_distributed()

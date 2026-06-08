@@ -8,6 +8,7 @@
 #   ffno_predict_populations
 #   ffno_predict_populations_distributed_full
 #   ffno_test_model
+#   ffno_inspect_freq_gate
 #
 # ============================================================
 
@@ -32,6 +33,7 @@ from train_utils import (
 from scipy.ndimage import gaussian_filter
 from model_builder import ModelBuilder
 from distributed_inference import (
+    chunked_fuse_branches,
     enable_distributed_inference,
     partition_range,
 )
@@ -106,6 +108,180 @@ def _compute_departure_coefficients(lte, nlte, eps=1e-30):
 
 def invert_log_departure(pred_log):
     return torch.pow(10.0, pred_log)
+
+
+@torch.no_grad()
+def ffno_inspect_freq_gate(
+    *,
+    model,
+    checkpoint_path,
+    model_config,
+    lines,
+    wave,
+    chi,
+    levels,
+    atom_names,
+    H,
+    W,
+    dx,
+    dy,
+    save_path=None,
+    cuda=True,
+):
+    """
+    Evaluate each spectral branch freq_mlp on a chosen horizontal Fourier grid.
+
+    This inspects g(k) in the spectral weight
+        W_eff(i,o,k) = W(i,o) * g(k)
+    without running an input field through the network.
+    """
+    device = "cuda" if (cuda and torch.cuda.is_available()) else "cpu"
+
+    Cin, Cout, mean_X, std_X, mean_Y, std_Y = _load_inference_metadata_from_checkpoint(
+        checkpoint_path,
+    )
+
+    model_config = dict(model_config)
+    model_config["in_channels"] = Cin
+    model_config["out_channels"] = Cout
+
+    builder = ModelBuilder(
+        model=model,
+        model_config=model_config,
+        chi=chi,
+        lines=lines,
+        wave=wave,
+        levels=levels,
+        atom_names=atom_names,
+        device=device,
+        lr=0.0,
+        weight_decay=0.0,
+        multi_gpu=False,
+        debug_loss=False,
+        mean_X=mean_X,
+        std_X=std_X,
+        mean_Y=mean_Y,
+        std_Y=std_Y,
+    )
+
+    model_obj, scheduler, optimizer, loss_fn = builder.build()
+    ckpt = load_checkpoint(checkpoint_path, map_location=device)
+    model_obj.load_state_dict(ckpt["model_state"])
+    model_obj.eval()
+
+    dx = float(np.asarray(dx).reshape(-1)[0])
+    dy = float(np.asarray(dy).reshape(-1)[0])
+    H = int(H)
+    W = int(W)
+
+    ky_1d = torch.fft.fftfreq(H, d=dy, device=device)
+    kx_1d = torch.fft.rfftfreq(W, d=dx, device=device)
+    ky, kx = torch.meshgrid(ky_1d, kx_1d, indexing="ij")
+
+    freq_multiplier = 1e5
+    ky = ky * freq_multiplier
+    kx = kx * freq_multiplier
+
+    k_feat = torch.stack(
+        [
+            kx,
+            ky,
+            torch.sqrt(kx ** 2 + ky ** 2 + 1e-12),
+            torch.sign(ky),
+        ],
+        dim=-1,
+    )
+
+    print("\n=== FREQUENCY GATE INSPECTION ===")
+    print(f"checkpoint: {checkpoint_path}")
+    print(f"grid: H={H}, W={W}, Wf={kx_1d.numel()}, dx={dx}, dy={dy}")
+    print(f"freq_multiplier: {freq_multiplier}")
+
+    arrays = {
+        "kx": kx.detach().cpu().numpy(),
+        "ky": ky.detach().cpu().numpy(),
+    }
+    summary = []
+
+    for layer_idx, block in enumerate(model_obj.blocks):
+        spec = block.spec
+        gate = spec.freq_mlp(k_feat)
+        gr = gate[..., 0]
+        gi = gate[..., 1]
+        g_complex = torch.complex(gr, gi)
+        g_abs = torch.abs(g_complex)
+        phase = torch.atan2(gi, gr)
+        deviation = torch.abs(g_complex - g_complex.mean())
+
+        layer_summary = {
+            "layer": layer_idx,
+            "gate_shape": tuple(gate.shape),
+            "gr_min": gr.min().item(),
+            "gr_max": gr.max().item(),
+            "gr_mean": gr.mean().item(),
+            "gr_std": gr.std().item(),
+            "gi_min": gi.min().item(),
+            "gi_max": gi.max().item(),
+            "gi_mean": gi.mean().item(),
+            "gi_std": gi.std().item(),
+            "abs_min": g_abs.min().item(),
+            "abs_max": g_abs.max().item(),
+            "abs_mean": g_abs.mean().item(),
+            "abs_std": g_abs.std().item(),
+            "phase_min": phase.min().item(),
+            "phase_max": phase.max().item(),
+            "phase_std": phase.std().item(),
+            "mean_abs_g_minus_mean": deviation.mean().item(),
+            "max_abs_g_minus_mean": deviation.max().item(),
+        }
+        summary.append(layer_summary)
+
+        print(f"\nLayer {layer_idx}")
+        print(f"gate shape: {tuple(gate.shape)}")
+        print(
+            "gr min/max/mean/std: "
+            f"{layer_summary['gr_min']:.6e} "
+            f"{layer_summary['gr_max']:.6e} "
+            f"{layer_summary['gr_mean']:.6e} "
+            f"{layer_summary['gr_std']:.6e}"
+        )
+        print(
+            "gi min/max/mean/std: "
+            f"{layer_summary['gi_min']:.6e} "
+            f"{layer_summary['gi_max']:.6e} "
+            f"{layer_summary['gi_mean']:.6e} "
+            f"{layer_summary['gi_std']:.6e}"
+        )
+        print(
+            "|g| min/max/mean/std: "
+            f"{layer_summary['abs_min']:.6e} "
+            f"{layer_summary['abs_max']:.6e} "
+            f"{layer_summary['abs_mean']:.6e} "
+            f"{layer_summary['abs_std']:.6e}"
+        )
+        print(
+            "mean/max |g - mean(g)|: "
+            f"{layer_summary['mean_abs_g_minus_mean']:.6e} "
+            f"{layer_summary['max_abs_g_minus_mean']:.6e}"
+        )
+
+        arrays[f"layer_{layer_idx}_gr"] = gr.detach().cpu().numpy()
+        arrays[f"layer_{layer_idx}_gi"] = gi.detach().cpu().numpy()
+        arrays[f"layer_{layer_idx}_abs"] = g_abs.detach().cpu().numpy()
+        arrays[f"layer_{layer_idx}_phase"] = phase.detach().cpu().numpy()
+
+    if save_path is not None:
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        arrays["summary_json"] = np.asarray(json.dumps(summary, indent=2))
+        arrays["H"] = np.asarray(H)
+        arrays["W"] = np.asarray(W)
+        arrays["dx"] = np.asarray(dx)
+        arrays["dy"] = np.asarray(dy)
+        np.savez(save_path, **arrays)
+        print(f"\nSaved frequency gate diagnostics to {save_path}")
+
+    print("=== FREQUENCY GATE INSPECTION END ===")
+    return summary
 
 
 def _infer_patch_group_prefix(save_path):
@@ -859,6 +1035,8 @@ def ffno_train_model(
     load_earlier_val=False,
     expand_from_checkpoint=None,
     zero_init_new_blocks=True,
+    train_select=1.0,
+    train_select_seed=None,
 ):
     resume_path = get_resume_checkpoint_path(save_path)
     load_path = None
@@ -880,11 +1058,14 @@ def ffno_train_model(
         )
 
     if resume:
-        if os.path.isfile(resume_path):
+        if bestpath:
+            if os.path.isfile(save_path):
+                load_path = save_path
+            else:
+                raise IOError(f"Best checkpoint not found: {save_path}")
+        elif os.path.isfile(resume_path):
             load_path = resume_path
             load_optimizer_state = True
-        elif bestpath and os.path.isfile(save_path):
-            load_path = save_path
         else:
             raise IOError(f"Resume checkpoint not found: {resume_path}")
 
@@ -1012,7 +1193,9 @@ def ffno_train_model(
         dataset_type=dataset_type,
         batch_size=batch_size,
         num_workers=num_workers,
-        pin_memory=pin_memory
+        pin_memory=pin_memory,
+        train_select=train_select,
+        train_select_seed=train_select_seed,
     )
 
     train_loader, val_loader, _, _ = data_builder.build(
@@ -1024,6 +1207,41 @@ def ffno_train_model(
     effective_resume_state = {} if expand_from_checkpoint is not None else resume_state
     effective_resume_path = None if expand_from_checkpoint is not None else resume_path
     effective_best_val_init = None if expand_from_checkpoint is not None else best_val_init
+
+    if (
+        expand_from_checkpoint is None
+        and resume
+        and bestpath
+        and val_loader is not None
+    ):
+        if (
+            not multi_gpu
+            or not dist.is_available()
+            or not dist.is_initialized()
+            or dist.get_rank() == 0
+        ):
+            print("Running validation baseline before training from best checkpoint")
+
+        initial_val_loss, initial_val_comp = validate(
+            model=model,
+            loader=val_loader,
+            loss_fn=loss_fn,
+            device=builder.device,
+        )
+        effective_best_val_init = initial_val_loss
+
+        if (
+            not multi_gpu
+            or not dist.is_available()
+            or not dist.is_initialized()
+            or dist.get_rank() == 0
+        ):
+            print(
+                "[Bestpath baseline] "
+                f"val={initial_val_loss:.6e} "
+                f"L1={initial_val_comp.get('data', 0):.3e} "
+                f"L2={initial_val_comp.get('source', 0):.3e}"
+            )
 
     # run training
     train(
@@ -1703,18 +1921,27 @@ def ffno_predict_populations_distributed_full(
                 for name, module in blk.fuse.named_modules():
                     if hasattr(module, "progress_label"):
                         module.progress_label = f"block {i + 1}/{len(model.blocks)} fuse {name}"
-            fused, _, _, _, _ = blk._fuse_branches(x, spec, vert)
+            fused = chunked_fuse_branches(blk, x, spec, vert, normalize=False)
+            del spec, vert
+            if torch.cuda.is_available() and X.is_cuda:
+                torch.cuda.empty_cache()
+            fused = blk.act(blk.norm_fuse(fused))
             x1 = residual + blk.res_fused * fused
+            del fused, residual, x
 
             if rank == 0:
                 print(f"[full prediction] block {i + 1}/{len(model.blocks)} pointwise", flush=True)
             pw = blk.norm_pw(blk.pw(x1))
             x2 = x1 + blk.res_pw * pw
+            del x1, pw
 
             if rank == 0:
                 print(f"[full prediction] block {i + 1}/{len(model.blocks)} mlp", flush=True)
             mlp = torch.tanh(blk.norm_mlp(blk.mlp(x2)))
             x = x2 + blk.res_mlp * mlp
+            del x2, mlp
+            if torch.cuda.is_available() and X.is_cuda:
+                torch.cuda.empty_cache()
 
             if rank == 0:
                 print(f"[full prediction] block {i + 1}/{len(model.blocks)} done", flush=True)

@@ -17,8 +17,151 @@ except:
 
 c_AHz = np.float32(2.99792458e18)  # Hz * Å
 h  = np.float32(6.62607015e-34)
-c  = np.float32(2.99792458e8)
+c_mps  = np.float32(2.99792458e8)
+c = c_mps  # Backwards-compatible alias for modules importing the constant.
 kB = np.float32(1.380649e-23)
+
+
+def _format_atom_label(atom_names, atom_index):
+    if atom_names is not None and atom_index < len(atom_names):
+        return f"{atom_names[atom_index]} (index {atom_index})"
+    return f"index {atom_index}"
+
+
+def _as_1d_float_array(value, name, atom_label):
+    try:
+        arr = np.asarray(value, dtype=np.float32)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Invalid {name} for atom {atom_label}: expected numeric values, got {value!r}"
+        ) from exc
+
+    if arr.ndim != 1 or arr.size == 0:
+        raise ValueError(
+            f"Invalid {name} for atom {atom_label}: expected a non-empty 1D array, "
+            f"got shape {arr.shape}"
+        )
+
+    if not np.isfinite(arr).all():
+        raise ValueError(
+            f"Invalid {name} for atom {atom_label}: all values must be finite"
+        )
+
+    return arr
+
+
+def _as_lines_array(value, levels_i, atom_label):
+    try:
+        arr = np.asarray(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Invalid lines for atom {atom_label}: expected line index pairs, got {value!r}"
+        ) from exc
+
+    if arr.ndim != 2 or arr.shape[1] != 2 or arr.shape[0] == 0:
+        raise ValueError(
+            f"Invalid lines for atom {atom_label}: expected shape (Nlines, 2), "
+            f"got {arr.shape}"
+        )
+
+    if not np.issubdtype(arr.dtype, np.number) or not np.isfinite(arr).all():
+        raise ValueError(
+            f"Invalid lines for atom {atom_label}: line indices must be finite numeric values"
+        )
+
+    if not np.allclose(arr, np.rint(arr)):
+        raise ValueError(
+            f"Invalid lines for atom {atom_label}: line indices must be integers"
+        )
+
+    arr = arr.astype(np.int64)
+    if arr.min() < 0 or arr.max() >= int(levels_i):
+        raise ValueError(
+            f"Invalid lines for atom {atom_label}: indices must be within "
+            f"[0, {int(levels_i) - 1}]"
+        )
+
+    return arr
+
+
+def _validate_atomic_metadata(chi, lines, wave, levels, atom_names):
+    groups = {
+        "chi": chi,
+        "lines": lines,
+        "wave": wave,
+        "levels": levels,
+    }
+
+    for name, values in groups.items():
+        if values is None:
+            raise ValueError(f"NLTECompositeLoss requires {name}, got None")
+
+    natoms = len(levels)
+    for name, values in groups.items():
+        if len(values) != natoms:
+            raise ValueError(
+                f"NLTECompositeLoss metadata length mismatch: levels has {natoms} atoms "
+                f"but {name} has {len(values)}"
+            )
+
+    if atom_names is not None and len(atom_names) != natoms:
+        raise ValueError("atom_names must match number of atoms")
+
+    clean_chi = []
+    clean_lines = []
+    clean_wave = []
+    clean_levels = []
+
+    for atom_index, levels_i in enumerate(levels):
+        atom_label = _format_atom_label(atom_names, atom_index)
+
+        try:
+            levels_int = int(levels_i)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Invalid levels for atom {atom_label}: expected a positive integer, "
+                f"got {levels_i!r}"
+            ) from exc
+
+        if levels_int <= 0:
+            raise ValueError(
+                f"Invalid levels for atom {atom_label}: expected a positive integer, "
+                f"got {levels_i!r}"
+            )
+
+        chi_i = _as_1d_float_array(chi[atom_index], "chi", atom_label)
+        lines_i = _as_lines_array(lines[atom_index], levels_int, atom_label)
+        wave_i = _as_1d_float_array(wave[atom_index], "wave", atom_label)
+
+        if chi_i.size != levels_int - 1:
+            raise ValueError(
+                f"Invalid chi for atom {atom_label}: expected {levels_int - 1} "
+                f"ionization/excitation entries for {levels_int} levels, got {chi_i.size}"
+            )
+
+        if lines_i.max() >= chi_i.size:
+            raise ValueError(
+                f"Invalid lines for atom {atom_label}: source-function line indices "
+                f"must fit chi entries [0, {chi_i.size - 1}]"
+            )
+
+        if wave_i.size != lines_i.shape[0]:
+            raise ValueError(
+                f"Invalid wave for atom {atom_label}: expected one wavelength per line "
+                f"({lines_i.shape[0]}), got {wave_i.size}"
+            )
+
+        if (wave_i <= 0).any():
+            raise ValueError(
+                f"Invalid wave for atom {atom_label}: wavelengths must be positive"
+            )
+
+        clean_chi.append(chi_i)
+        clean_lines.append(lines_i)
+        clean_wave.append(wave_i)
+        clean_levels.append(levels_int)
+
+    return clean_chi, clean_lines, clean_wave, clean_levels
 
 
 def _nan_stats(x, name):
@@ -431,7 +574,7 @@ class NLTECompositeLoss(nn.Module):
         levels,
         data_loss_func,
         gradient_loss_func=None,
-        atom_names=["H", "Ca"], 
+        atom_names=None,
         lam=0,
         lam_S=0,
         lam_g=0,
@@ -447,11 +590,21 @@ class NLTECompositeLoss(nn.Module):
     ):
         super().__init__()
 
+        chi, lines, wave, levels = _validate_atomic_metadata(
+            chi=chi,
+            lines=lines,
+            wave=wave,
+            levels=levels,
+            atom_names=atom_names,
+        )
+        if atom_names is None:
+            atom_names = [f"A{i}" for i in range(len(levels))]
+
         self.data_loss = data_loss_func
         self.gradient_loss = gradient_loss_func
 
         self.chi = nn.ParameterList(
-            [nn.Parameter(torch.tensor(c, dtype=torch.float32), requires_grad=False) for c in chi]
+            [nn.Parameter(torch.tensor(chi_i, dtype=torch.float32), requires_grad=False) for chi_i in chi]
         )
 
         self.lines = nn.ParameterList(
@@ -459,13 +612,13 @@ class NLTECompositeLoss(nn.Module):
         )
 
         self.nu = nn.ParameterList(
-            [nn.Parameter(torch.tensor(c_AHz / np.array(w), dtype=torch.float32), requires_grad=False) for w in wave]
+            [nn.Parameter(torch.tensor(c_AHz / w, dtype=torch.float32), requires_grad=False) for w in wave]
         )
 
         self.K_prefactor = nn.ParameterList(
             [
                 nn.Parameter(
-                    torch.tensor((2.0*h*(c_AHz/np.array(w))/(c**2)) * (c_AHz/np.array(w))**2,
+                    torch.tensor((2.0*h*(c_AHz/w)/(c_mps**2)) * (c_AHz/w)**2,
                     dtype=torch.float32),
                     requires_grad=False
                 )
@@ -485,12 +638,6 @@ class NLTECompositeLoss(nn.Module):
 
         self.debug = debug
         self._debug_triggered = False  # print once
-
-        if atom_names is None:
-            atom_names = [f"A{i}" for i in range(len(levels))]
-
-        if len(atom_names) != len(levels):
-            raise ValueError("atom_names must match number of atoms")
 
         self.atom_names = atom_names
 

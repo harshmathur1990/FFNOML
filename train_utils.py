@@ -594,6 +594,20 @@ def save_epoch_stats(stats, epoch, save_dir):
     torch.save(payload, path)
 
 
+def resample_train_dataset(loader, epoch):
+    dataset = getattr(loader, "dataset", None)
+    if dataset is None or not hasattr(dataset, "resample_train_selection"):
+        return
+
+    base_seed = getattr(dataset, "train_select_seed", None)
+    if base_seed is None:
+        seed = epoch
+    else:
+        seed = int(base_seed) + int(epoch)
+
+    dataset.resample_train_selection(seed)
+
+
 def train_one_epoch(
     model,
     loader,
@@ -893,6 +907,8 @@ def train(
         torch.cuda.empty_cache()
 
     for epoch in range(start_epoch, num_epochs + 1):
+
+        resample_train_dataset(train_loader, epoch)
 
         # Important when using DistributedSampler
         if hasattr(train_loader, "sampler") and hasattr(train_loader.sampler, "set_epoch"):

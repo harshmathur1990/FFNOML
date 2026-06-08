@@ -202,9 +202,9 @@ MODEL_CONFIG = dict(
     n_layers=4,
     dropout=0.0,
     spec_dropout=0.03,
-    vertical_dropout=0.03,
-    spec_dropout_layers=[1],
-    vertical_dropout_layers=[2],
+    vertical_dropout=0.08,
+    spec_dropout_layers=[0, 1, 2, 3],
+    vertical_dropout_layers=[0, 1, 2, 3],
     checkpoint_blocks=True,
 )
 
@@ -241,15 +241,17 @@ BATCH_SIZE = 1
 LEARNING_RATE = 1e-3
 MIN_LEARNING_RATE = 1e-8
 RESUME_LAST_EPOCH = 0
-RESUME_LAST_LEARNING_RATE = 1e-8
-WEIGHT_DECAY = 1e-4
+RESUME_LAST_LEARNING_RATE = 5e-5
+WEIGHT_DECAY = 3e-4
 NUM_WORKERS = 8
 PIN_MEMORY = True
 GRAD_CLIP = 1.0
 DEVICE = "cuda"
-PATIENCE = 400
-MIN_DELTA = 1e-5
+PATIENCE = 50
+MIN_DELTA = 5e-5
 DATASET_TYPE = "patch"
+TRAINSELECT = 1
+TRAINSELECT_SEED = 12345
 USE_COSINE = True
 LOAD_EARLIER_VAL = True
 
