@@ -719,12 +719,14 @@ def validate(
     device,
     collect_model_stats=False,
     forward_kwargs=None,
+    return_metadata=False,
 ):
     model.eval()
     forward_kwargs = forward_kwargs or {}
 
     running = 0.0
     n_columns = 0
+    n_items = 0
     comp_sums = {}
 
     running_comp = {}
@@ -777,6 +779,8 @@ def validate(
 
             if source_target is not None and source_target.numel() > 0:
                 source_true = flatten_columns_logb(source_target)
+
+            n_items += pred_full.shape[0]
 
             loss, components = compute_loss(
                 pred=pred,
@@ -842,15 +846,42 @@ def validate(
 
     global_running = reduce_sum_scalar(running, device)
     global_batches = reduce_sum_scalar(n_columns, device)
+    global_items = reduce_sum_scalar(n_items, device)
 
     global_avg_loss = global_running / max(1, global_batches)
     global_comp = reduce_components(comp_sums, n_columns, device)
 
     global_model_stats = reduce_components(model_stats_sums, n_columns, device)
 
+    metadata = {
+        "num_columns": int(global_batches),
+        "num_items": int(global_items),
+        "local_columns": int(n_columns),
+        "local_items": int(n_items),
+        "world_size": get_world_size(),
+        "rank": get_rank(),
+    }
+    dataset = getattr(loader, "dataset", None)
+    sampler = getattr(loader, "sampler", None)
+    if dataset is not None:
+        metadata["dataset_items"] = int(len(dataset))
+        metadata["visited_all_dataset_items_once"] = (
+            metadata["num_items"] == metadata["dataset_items"]
+        )
+    if sampler is not None:
+        metadata["sampler"] = sampler.__class__.__name__
+        try:
+            metadata["local_sampler_items"] = int(len(sampler))
+        except TypeError:
+            pass
+
     if collect_model_stats:
+        if return_metadata:
+            return global_avg_loss, global_comp, global_model_stats, metadata
         return global_avg_loss, global_comp, global_model_stats
 
+    if return_metadata:
+        return global_avg_loss, global_comp, metadata
     return global_avg_loss, global_comp
 
 

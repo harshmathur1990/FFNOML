@@ -206,6 +206,9 @@ def test_model():
     ensure_validation_dataset_exists()
     ensure_checkpoint_exists()
 
+    if MULTI_GPU:
+        init_distributed_runtime()
+
     diagnostic_path = MODEL_DIR + f"val_diagnostics_{MODEL}.json"
 
     ffno_test_model(
@@ -224,6 +227,7 @@ def test_model():
         num_workers=NUM_WORKERS,
         pin_memory=PIN_MEMORY,
         device=DEVICE,
+        multi_gpu=MULTI_GPU,
     )
 
 
@@ -238,7 +242,7 @@ def barrier_if_distributed():
         dist.barrier()
 
 
-def init_distributed_prediction():
+def init_distributed_runtime():
     if dist.is_available() and dist.is_initialized():
         return
 
@@ -252,6 +256,10 @@ def init_distributed_prediction():
         )
     except TypeError:
         dist.init_process_group("nccl")
+
+
+def init_distributed_prediction():
+    init_distributed_runtime()
 
 
 def run_predictions(*, distributed_full=False):
