@@ -7,6 +7,11 @@ from tqdm import tqdm
 from models.ffno_model import SpectralConv2dFull as SpectralConv2dFull3D
 from models.ffno_model import BalancedVerticalPhysicsStack
 
+try:
+    from config import DEBUG_DIST_INFERENCE
+except Exception:
+    DEBUG_DIST_INFERENCE = False
+
 
 def is_dist():
     return dist.is_available() and dist.is_initialized()
@@ -18,6 +23,19 @@ def get_rank():
 
 def get_world_size():
     return dist.get_world_size() if is_dist() else 1
+
+
+def debug_dist_inference_enabled():
+    return bool(DEBUG_DIST_INFERENCE)
+
+
+def debug_progress(progress_label, message):
+    if (
+        debug_dist_inference_enabled()
+        and get_rank() == 0
+        and progress_label is not None
+    ):
+        print(f"[{progress_label}] {message}", flush=True)
 
 
 def partition_range(n, rank=None, world_size=None):
@@ -168,8 +186,7 @@ class DistributedHDepthwiseConv3d(nn.Module):
         self.local_padding = (pd, 0, pw)
 
     def _progress(self, message):
-        if get_rank() == 0 and self.progress_label is not None:
-            print(f"[{self.progress_label}] {message}", flush=True)
+        debug_progress(self.progress_label, message)
 
     def forward(self, x):
         if not is_dist():
@@ -224,8 +241,7 @@ class ProgressVerticalWrapper(nn.Module):
         self.progress_label = None
 
     def _progress(self, message):
-        if get_rank() == 0 and self.progress_label is not None:
-            print(f"[{self.progress_label}] {message}", flush=True)
+        debug_progress(self.progress_label, message)
 
     def forward(self, x, z_scale):
         self._progress("start")
@@ -238,7 +254,7 @@ class ProgressVerticalWrapper(nn.Module):
 
     def _iter_columns(self, total):
         iterator = range(0, total, self.source.chunk)
-        if get_rank() != 0:
+        if get_rank() != 0 or not debug_dist_inference_enabled():
             return iterator
 
         return tqdm(
@@ -331,8 +347,7 @@ class DistributedSpectralConv2dFull(nn.Module):
         self.progress_label = None
 
     def _progress(self, message):
-        if get_rank() == 0 and self.progress_label is not None:
-            print(f"[{self.progress_label}] {message}", flush=True)
+        debug_progress(self.progress_label, message)
 
     def forward(self, x, dx, dy):
         if not is_dist():

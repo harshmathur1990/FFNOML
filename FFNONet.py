@@ -40,6 +40,8 @@ from scipy.ndimage import gaussian_filter
 from model_builder import ModelBuilder
 from distributed_inference import (
     chunked_fuse_branches,
+    debug_dist_inference_enabled,
+    debug_progress,
     enable_distributed_inference,
     partition_range,
 )
@@ -2226,20 +2228,34 @@ def ffno_predict_populations_distributed_full(
     std_X_t = torch.from_numpy(std_X).float()[None, :, None, None, None].to(device)
     X = (X - mean_X_t) / std_X_t
 
-    if rank == 0:
-        print("=== DISTRIBUTED FULL PREDICTION ===")
-        print(f"global shape: B=1, Cin={Cin}, D={D}, H={nx}, W={ny}")
-        print(f"ranks: {world_size}")
-    print(f"[rank {rank}] H slab: {h0}:{h1}, local X shape: {tuple(X.shape)}")
+    debug_progress("full prediction", "start")
+    debug_progress(
+        "full prediction",
+        f"global shape: B=1, Cin={Cin}, D={D}, H={nx}, W={ny}",
+    )
+    debug_progress("full prediction", f"ranks: {world_size}")
+    if debug_dist_inference_enabled():
+        print(
+            f"[rank {rank}] H slab: {h0}:{h1}, local X shape: {tuple(X.shape)}",
+            flush=True,
+        )
 
     with torch.no_grad():
-        if rank == 0:
-            print("[full prediction] lift", flush=True)
-        x = model._run_lift(X, collect_stats=False)
+        pbar = tqdm(
+            total=len(model.blocks) + 2,
+            desc="distributed-full-predict",
+            leave=True,
+            disable=rank != 0,
+        )
+        try:
+            pbar.set_postfix(step="lift", refresh=True)
+            debug_progress("full prediction", "lift")
+            x = model._run_lift(X, collect_stats=False)
+            pbar.update(1)
 
-        for i, blk in enumerate(model.blocks):
-            if rank == 0:
-                print(f"[full prediction] block {i + 1}/{len(model.blocks)}", flush=True)
+            for i, blk in enumerate(model.blocks):
+                pbar.set_postfix(step=f"block {i + 1}/{len(model.blocks)}", refresh=True)
+                debug_progress("full prediction", f"block {i + 1}/{len(model.blocks)}")
                 spec = getattr(blk, "spec", None)
                 if hasattr(spec, "progress_label"):
                     spec.progress_label = f"block {i + 1}/{len(model.blocks)} spectral"
@@ -2247,53 +2263,51 @@ def ffno_predict_populations_distributed_full(
                 if hasattr(vertical, "progress_label"):
                     vertical.progress_label = f"block {i + 1}/{len(model.blocks)} vertical"
 
-            residual = x
+                residual = x
 
-            spec = blk.spec_drop(blk.act(blk.norm_spec(blk.spec(x, dx, dy))))
-            if rank == 0:
-                print(f"[full prediction] block {i + 1}/{len(model.blocks)} vertical", flush=True)
-            vert = blk.vert_drop(blk.act(blk.norm_vert(blk.vertical(x, z_scale))))
+                spec = blk.spec_drop(blk.act(blk.norm_spec(blk.spec(x, dx, dy))))
+                debug_progress("full prediction", f"block {i + 1}/{len(model.blocks)} vertical")
+                vert = blk.vert_drop(blk.act(blk.norm_vert(blk.vertical(x, z_scale))))
 
-            if rank == 0:
-                print(f"[full prediction] block {i + 1}/{len(model.blocks)} fuse", flush=True)
+                debug_progress("full prediction", f"block {i + 1}/{len(model.blocks)} fuse")
                 for name, module in blk.fuse.named_modules():
                     if hasattr(module, "progress_label"):
                         module.progress_label = f"block {i + 1}/{len(model.blocks)} fuse {name}"
-            fused = chunked_fuse_branches(blk, x, spec, vert, normalize=False)
-            del spec, vert
-            if torch.cuda.is_available() and X.is_cuda:
-                torch.cuda.empty_cache()
-            fused = blk.act(blk.norm_fuse(fused))
-            x1 = residual + blk.res_fused * fused
-            del fused, residual, x
+                fused = chunked_fuse_branches(blk, x, spec, vert, normalize=False)
+                del spec, vert
+                if torch.cuda.is_available() and X.is_cuda:
+                    torch.cuda.empty_cache()
+                fused = blk.act(blk.norm_fuse(fused))
+                x1 = residual + blk.res_fused * fused
+                del fused, residual, x
 
-            if rank == 0:
-                print(f"[full prediction] block {i + 1}/{len(model.blocks)} pointwise", flush=True)
-            pw = blk.norm_pw(blk.pw(x1))
-            x2 = x1 + blk.res_pw * pw
-            del x1, pw
+                debug_progress("full prediction", f"block {i + 1}/{len(model.blocks)} pointwise")
+                pw = blk.norm_pw(blk.pw(x1))
+                x2 = x1 + blk.res_pw * pw
+                del x1, pw
 
-            if rank == 0:
-                print(f"[full prediction] block {i + 1}/{len(model.blocks)} mlp", flush=True)
-            mlp = torch.tanh(blk.norm_mlp(blk.mlp(x2)))
-            x = x2 + blk.res_mlp * mlp
-            del x2, mlp
-            if torch.cuda.is_available() and X.is_cuda:
-                torch.cuda.empty_cache()
+                debug_progress("full prediction", f"block {i + 1}/{len(model.blocks)} mlp")
+                mlp = torch.tanh(blk.norm_mlp(blk.mlp(x2)))
+                x = x2 + blk.res_mlp * mlp
+                del x2, mlp
+                if torch.cuda.is_available() and X.is_cuda:
+                    torch.cuda.empty_cache()
 
-            if rank == 0:
-                print(f"[full prediction] block {i + 1}/{len(model.blocks)} done", flush=True)
+                debug_progress("full prediction", f"block {i + 1}/{len(model.blocks)} done")
+                pbar.update(1)
 
-        if rank == 0:
-            print("[full prediction] head", flush=True)
-        pred_log = model._run_head(x, collect_stats=False)
-        if rank == 0:
-            print("[full prediction] forward done", flush=True)
+            pbar.set_postfix(step="head", refresh=True)
+            debug_progress("full prediction", "head")
+            pred_log = model._run_head(x, collect_stats=False)
+            debug_progress("full prediction", "forward done")
+            pbar.update(1)
+        finally:
+            pbar.close()
 
     if torch.isnan(pred_log).any():
-        print(f"[rank {rank}] NaN in prediction")
+        debug_progress("full prediction", f"[rank {rank}] NaN in prediction")
     if torch.isinf(pred_log).any():
-        print(f"[rank {rank}] Inf in prediction")
+        debug_progress("full prediction", f"[rank {rank}] Inf in prediction")
 
     mean_Y_t = torch.from_numpy(mean_Y).float()[None, :, None, None, None].to(device)
     std_Y_t = torch.from_numpy(std_Y).float()[None, :, None, None, None].to(device)
@@ -2311,11 +2325,9 @@ def ffno_predict_populations_distributed_full(
     if rank == 0:
         dep_full = np.concatenate(gathered_dep, axis=0)
         z_full = np.concatenate(gathered_z, axis=1)
-        print(
-            "dep range:",
-            float(dep_full.min()),
-            float(dep_full.max()),
-            flush=True,
+        debug_progress(
+            "full prediction",
+            f"dep range: {float(dep_full.min())} {float(dep_full.max())}",
         )
 
         with h5py.File(save_path, "w") as f:
