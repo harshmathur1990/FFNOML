@@ -219,6 +219,7 @@ ZERO_INIT_NEW_BLOCKS = True
 
 
 DEBUG_LOSS = False
+DEBUG_DIST_INFERENCE = False
 
 # Dataset Params
 PATCH=40

@@ -20,20 +20,28 @@ import h5py
 import torch
 import torch.distributed as dist
 from train_utils import (
+    _accumulate_components,
+    _accumulate_model_stats,
+    compute_loss,
     train,
     validate,
     compute_mean_stats,
     expand_model_from_checkpoint,
+    flatten_columns_logb,
     get_checkpoint_io_metadata,
     get_resume_checkpoint_path,
     get_checkpoint_normalization,
     load_training_state,
     load_checkpoint,
+    reduce_components,
+    reduce_sum_scalar,
 )
 from scipy.ndimage import gaussian_filter
 from model_builder import ModelBuilder
 from distributed_inference import (
     chunked_fuse_branches,
+    debug_dist_inference_enabled,
+    debug_progress,
     enable_distributed_inference,
     partition_range,
 )
@@ -144,7 +152,6 @@ def ffno_inspect_freq_gate(
     model_config = dict(model_config)
     model_config["in_channels"] = Cin
     model_config["out_channels"] = Cout
-
     builder = ModelBuilder(
         model=model,
         model_config=model_config,
@@ -1295,6 +1302,276 @@ def _to_serializable(value):
     return value
 
 
+def _validation_sample_refs(h5_file):
+    group_names = []
+    if "patch_dataset_names" in h5_file:
+        group_names = [str(name) for name in h5_file["patch_dataset_names"].asstr()[...]]
+    else:
+        group_names = [
+            name
+            for name, obj in h5_file.items()
+            if isinstance(obj, h5py.Group) and "inputs" in obj
+        ]
+        group_names = sorted(group_names)
+
+    if group_names:
+        refs = []
+        for group_name in group_names:
+            n = int(h5_file[group_name]["inputs"].shape[0])
+            refs.extend((group_name, i) for i in range(n))
+        return refs
+
+    n = int(h5_file["inputs"].shape[0])
+    return [(None, i) for i in range(n)]
+
+
+def _read_validation_sample_slab(h5_file, ref, h0, h1):
+    group_name, idx = ref
+    group = h5_file if group_name is None else h5_file[group_name]
+
+    x = group["inputs"][idx:idx + 1, :, :, h0:h1, :]
+    y = group["targets"][idx:idx + 1, :, :, h0:h1, :]
+    z = group["z_scale"][idx:idx + 1, :, h0:h1, :]
+    dx = group["dx"][idx]
+    dy = group["dy"][idx]
+
+    weight = None
+    if "weights" in group:
+        weight = group["weights"][idx]
+
+    source_target = None
+    if "source_targets" in group:
+        source_target = group["source_targets"][idx:idx + 1, :, :, h0:h1, :]
+
+    return x, y, z, dx, dy, weight, source_target
+
+
+def _distributed_full_forward(model, X, z_scale, dx, dy, *, collect_stats=False, branch_mask=None):
+    rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
+    branch_mask = branch_mask or {}
+    spec_mask = float(branch_mask.get("spec", 1.0))
+    vert_mask = float(branch_mask.get("vertical", 1.0))
+    pw_mask = float(branch_mask.get("pw", 1.0))
+    mlp_mask = float(branch_mask.get("mlp", 1.0))
+
+    x = model._run_lift(X, collect_stats=False)
+    all_stats = [] if collect_stats else None
+
+    for i, blk in enumerate(model.blocks):
+        if rank == 0:
+            spec = getattr(blk, "spec", None)
+            if hasattr(spec, "progress_label"):
+                spec.progress_label = f"test block {i + 1}/{len(model.blocks)} spectral"
+            vertical = getattr(blk, "vertical", None)
+            if hasattr(vertical, "progress_label"):
+                vertical.progress_label = f"test block {i + 1}/{len(model.blocks)} vertical"
+
+        residual = x
+
+        spec = blk.spec_drop(blk.act(blk.norm_spec(blk.spec(x, dx, dy))))
+        vert = blk.vert_drop(blk.act(blk.norm_vert(blk.vertical(x, z_scale))))
+
+        spec_eff = spec_mask * spec
+        vert_eff = vert_mask * vert
+        fused = chunked_fuse_branches(blk, x, spec_eff, vert_eff, normalize=False)
+        fused = blk.act(blk.norm_fuse(fused))
+        x1 = residual + blk.res_fused * fused
+
+        pw = blk.norm_pw(blk.pw(x1))
+        x2 = x1 + (blk.res_pw * pw_mask) * pw
+
+        mlp = torch.tanh(blk.norm_mlp(blk.mlp(x2)))
+        x = x2 + (blk.res_mlp * mlp_mask) * mlp
+
+        if collect_stats:
+            with torch.no_grad():
+                stats = {
+                    "layer": i,
+                    "spec_norm": spec.abs().mean().item(),
+                    "vertical_norm": vert.abs().mean().item(),
+                    "fuse_norm": fused.abs().mean().item(),
+                    "pw_norm": pw.abs().mean().item(),
+                    "mlp_norm": mlp.abs().mean().item(),
+                    "spec_weight": spec_mask,
+                    "vertical_weight": vert_mask,
+                    "spec_weight_effective": spec_mask,
+                    "vertical_weight_effective": vert_mask,
+                    "res_fused": float(blk.res_fused.item()),
+                    "res_pw": float(blk.res_pw.item()),
+                    "res_mlp": float(blk.res_mlp.item()),
+                    "fuse_contrib": (blk.res_fused * fused).abs().mean().item(),
+                    "pw_contrib": ((blk.res_pw * pw_mask) * pw).abs().mean().item(),
+                    "mlp_contrib": ((blk.res_mlp * mlp_mask) * mlp).abs().mean().item(),
+                    "fused_update": (x1 - residual).abs().mean().item(),
+                    "pw_update": (x2 - x1).abs().mean().item(),
+                    "mlp_update": (x - x2).abs().mean().item(),
+                }
+                all_stats.append(stats)
+
+        del residual, spec, vert, spec_eff, vert_eff, fused, x1, pw, x2, mlp
+        if torch.cuda.is_available() and X.is_cuda:
+            torch.cuda.empty_cache()
+
+    out = model._run_head(x, collect_stats=False)
+    return out, all_stats
+
+
+def _validate_distributed_full_inference(
+    *,
+    model,
+    val_h5,
+    loss_fn,
+    device,
+    collect_model_stats=False,
+    branch_mask=None,
+):
+    if not (dist.is_available() and dist.is_initialized()):
+        raise RuntimeError("Distributed full validation requires initialized distributed runtime.")
+
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+
+    running = 0.0
+    n_columns = 0
+    comp_sums = {}
+    model_stats_sums = {}
+
+    with h5py.File(val_h5, "r") as f:
+        refs = _validation_sample_refs(f)
+        n_items = len(refs)
+
+        iterator = tqdm(
+            refs,
+            desc="distributed-full-val",
+            leave=True,
+            disable=rank != 0,
+        )
+
+        with torch.no_grad():
+            for ref in iterator:
+                group_name, idx = ref
+                group = f if group_name is None else f[group_name]
+                _, _, _, H, _ = group["inputs"].shape
+                if H < world_size:
+                    raise RuntimeError(
+                        f"Distributed full validation requires H >= world_size, "
+                        f"got H={H}, world_size={world_size}."
+                    )
+                h0, h1 = partition_range(H, rank, world_size)
+
+                x_np, y_np, z_np, dx_np, dy_np, weight_np, source_np = _read_validation_sample_slab(
+                    f,
+                    ref,
+                    h0,
+                    h1,
+                )
+
+                x = torch.from_numpy(x_np.astype(np.float32, copy=False)).to(device)
+                y = torch.from_numpy(y_np.astype(np.float32, copy=False)).to(device)
+                z = torch.from_numpy(z_np.astype(np.float32, copy=False)).to(device)
+                dx = torch.as_tensor(dx_np, dtype=torch.float32, device=device)
+                dy = torch.as_tensor(dy_np, dtype=torch.float32, device=device)
+
+                weight = None
+                if weight_np is not None:
+                    weight = torch.as_tensor(weight_np, dtype=torch.float32, device=device)
+
+                source_target = None
+                if source_np is not None:
+                    source_target = torch.from_numpy(
+                        source_np.astype(np.float32, copy=False)
+                    ).to(device)
+
+                pred, stats = _distributed_full_forward(
+                    model,
+                    x,
+                    z,
+                    dx,
+                    dy,
+                    collect_stats=collect_model_stats,
+                    branch_mask=branch_mask,
+                )
+                if not collect_model_stats:
+                    stats = None
+
+                pred_full = pred
+                y_full = y
+                pred = flatten_columns_logb(pred_full)
+                y = flatten_columns_logb(y_full)
+                x_flat = flatten_columns_logb(x)
+
+                source_true = None
+                if source_target is not None and source_target.numel() > 0:
+                    source_true = flatten_columns_logb(source_target)
+
+                loss, components = compute_loss(
+                    pred=pred,
+                    target=y,
+                    weight=weight,
+                    loss_fn=loss_fn,
+                    x=x_flat,
+                    pred_full=pred_full,
+                    target_full=y_full,
+                    source_true=source_true,
+                )
+
+                with torch.no_grad():
+                    err = pred - y
+                    mse = (err ** 2).mean()
+                    rmse = torch.sqrt(mse)
+                    target_std = y.std()
+                    pred_std = pred.std()
+                    diag = {
+                        "rmse": rmse,
+                        "rel_rmse": rmse / (target_std + 1e-8),
+                        "std_ratio": pred_std / (target_std + 1e-8),
+                        "p95_err": err.abs().quantile(0.95),
+                    }
+
+                weight_factor = pred.shape[0]
+                running += loss.item() * weight_factor
+                n_columns += weight_factor
+
+                _accumulate_components(comp_sums, components, weight_factor=weight_factor)
+                _accumulate_components(comp_sums, diag, weight_factor=weight_factor)
+                _accumulate_model_stats(model_stats_sums, stats, weight_factor=weight_factor)
+
+                if rank == 0:
+                    global_seen = reduce_sum_scalar(n_columns, device)
+                    iterator.set_postfix(
+                        {
+                            "loss": f"{running / max(1, n_columns):.2e}",
+                            "columns": int(global_seen),
+                        }
+                    )
+                else:
+                    reduce_sum_scalar(n_columns, device)
+
+    global_running = reduce_sum_scalar(running, device)
+    global_columns = reduce_sum_scalar(n_columns, device)
+    global_avg_loss = global_running / max(1, global_columns)
+    global_comp = reduce_components(comp_sums, n_columns, device)
+    global_model_stats = reduce_components(model_stats_sums, n_columns, device)
+
+    metadata = {
+        "strategy": "distributed_full_h_slab",
+        "distributed_inference_enabled": True,
+        "distributed_initialized": True,
+        "fsdp_enabled": False,
+        "world_size": world_size,
+        "num_items": int(n_items),
+        "dataset_items": int(n_items),
+        "visited_all_dataset_items_once": True,
+        "num_columns": int(global_columns),
+        "local_columns": int(n_columns),
+        "rank": rank,
+    }
+
+    if collect_model_stats:
+        return global_avg_loss, global_comp, global_model_stats, metadata
+    return global_avg_loss, global_comp, metadata
+
+
 def ffno_test_model(
     *,
     model,
@@ -1312,6 +1589,7 @@ def ffno_test_model(
     num_workers=8,
     pin_memory=True,
     device="cuda",
+    multi_gpu=False,
 ):
     if diagnostic_path is None:
         raise ValueError("diagnostic_path is required for test mode")
@@ -1325,6 +1603,7 @@ def ffno_test_model(
     model_config = dict(model_config)
     model_config["in_channels"] = Cin
     model_config["out_channels"] = Cout
+    use_distributed_full_inference = dist.is_available() and dist.is_initialized()
 
     builder = ModelBuilder(
         model=model,
@@ -1345,38 +1624,66 @@ def ffno_test_model(
         std_Y=std_Y,
     )
 
-    model, _, optimizer, loss_fn = builder.build()
-    del optimizer
+    model = builder.build_model(wrap_fsdp=False)
+    _, _, loss_fn = builder.build_training_components(model)
 
-    load_training_state(
-        checkpoint_path,
-        model,
-        optimizer=None,
-        scheduler=None,
-        map_location="cpu",
-    )
+    if use_distributed_full_inference:
+        ckpt = load_checkpoint(checkpoint_path, map_location="cpu")
+        model.load_state_dict(ckpt["model_state"])
+        model = enable_distributed_inference(model)
+        del ckpt
+    else:
+        load_training_state(
+            checkpoint_path,
+            model,
+            optimizer=None,
+            scheduler=None,
+            map_location="cpu",
+        )
     model.eval()
 
-    data_builder = DataLoaderBuilder(
-        dataset_type=dataset_type,
-        batch_size=batch_size,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-    )
+    if use_distributed_full_inference:
+        baseline_loss, baseline_comp, baseline_stats, baseline_metadata = (
+            _validate_distributed_full_inference(
+                model=model,
+                val_h5=val_h5,
+                loss_fn=loss_fn,
+                device=builder.device,
+                collect_model_stats=True,
+            )
+        )
+    else:
+        data_builder = DataLoaderBuilder(
+            dataset_type=dataset_type,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+        )
 
-    val_dataset = data_builder.build_dataset(val_h5)
-    val_loader, _ = data_builder.build_dataloader(val_dataset, shuffle=False)
+        val_dataset = data_builder.build_dataset(val_h5)
+        val_loader, _ = data_builder.build_dataloader(val_dataset, shuffle=False)
 
-    baseline_loss, baseline_comp, baseline_stats = validate(
-        model=model,
-        loader=val_loader,
-        loss_fn=loss_fn,
-        device=builder.device,
-        collect_model_stats=True,
-    )
+        baseline_loss, baseline_comp, baseline_stats, baseline_metadata = validate(
+            model=model,
+            loader=val_loader,
+            loss_fn=loss_fn,
+            device=builder.device,
+            collect_model_stats=True,
+            return_metadata=True,
+        )
 
     baseline_stats = dict(baseline_stats)
     baseline_stats.update(compute_mean_stats(baseline_stats))
+    baseline_metadata = dict(baseline_metadata)
+    baseline_metadata.update(
+        {
+            "distributed_initialized": (
+                dist.is_available() and dist.is_initialized()
+            ),
+            "distributed_inference_enabled": bool(use_distributed_full_inference),
+            "fsdp_enabled": False,
+        }
+    )
 
     branch_masks = {
         "full": {"spec": 1.0, "vertical": 1.0, "pw": 1.0, "mlp": 1.0},
@@ -1393,16 +1700,47 @@ def ffno_test_model(
             comp = baseline_comp
             stats = baseline_stats
         else:
-            loss, comp, stats = validate(
-                model=model,
-                loader=val_loader,
-                loss_fn=loss_fn,
-                device=builder.device,
-                collect_model_stats=True,
-                forward_kwargs={"branch_mask": mask},
-            )
+            if use_distributed_full_inference:
+                loss, comp, stats, metadata = _validate_distributed_full_inference(
+                    model=model,
+                    val_h5=val_h5,
+                    loss_fn=loss_fn,
+                    device=builder.device,
+                    collect_model_stats=True,
+                    branch_mask=mask,
+                )
+            else:
+                loss, comp, stats, metadata = validate(
+                    model=model,
+                    loader=val_loader,
+                    loss_fn=loss_fn,
+                    device=builder.device,
+                    collect_model_stats=True,
+                    forward_kwargs={"branch_mask": mask},
+                    return_metadata=True,
+                )
             stats = dict(stats)
             stats.update(compute_mean_stats(stats))
+            metadata = dict(metadata)
+            metadata.update(
+                {
+                    "distributed_initialized": (
+                        dist.is_available() and dist.is_initialized()
+                    ),
+                    "distributed_inference_enabled": bool(use_distributed_full_inference),
+                    "fsdp_enabled": False,
+                }
+            )
+            is_main = (
+                not dist.is_available()
+                or not dist.is_initialized()
+                or dist.get_rank() == 0
+            )
+            if metadata != baseline_metadata and is_main:
+                print(
+                    f"WARNING: validation metadata changed for ablation {name}: {metadata}",
+                    flush=True,
+                )
 
         ablations[name] = {
             "branch_mask": mask,
@@ -1424,14 +1762,16 @@ def ffno_test_model(
         "baseline_loss": float(baseline_loss),
         "baseline_components": _to_serializable(baseline_comp),
         "baseline_stats": _to_serializable(baseline_stats),
+        "validation_metadata": _to_serializable(baseline_metadata),
         "branch_importance": branch_importance,
         "ablations": ablations,
     }
 
-    with open(diagnostic_path, "w", encoding="utf-8") as f:
-        json.dump(summary, f, indent=2)
+    if not dist.is_available() or not dist.is_initialized() or dist.get_rank() == 0:
+        with open(diagnostic_path, "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2)
 
-    print(f"Saved validation diagnostics to {diagnostic_path}")
+        print(f"Saved validation diagnostics to {diagnostic_path}")
 
     return summary
 
@@ -1888,20 +2228,34 @@ def ffno_predict_populations_distributed_full(
     std_X_t = torch.from_numpy(std_X).float()[None, :, None, None, None].to(device)
     X = (X - mean_X_t) / std_X_t
 
-    if rank == 0:
-        print("=== DISTRIBUTED FULL PREDICTION ===")
-        print(f"global shape: B=1, Cin={Cin}, D={D}, H={nx}, W={ny}")
-        print(f"ranks: {world_size}")
-    print(f"[rank {rank}] H slab: {h0}:{h1}, local X shape: {tuple(X.shape)}")
+    debug_progress("full prediction", "start")
+    debug_progress(
+        "full prediction",
+        f"global shape: B=1, Cin={Cin}, D={D}, H={nx}, W={ny}",
+    )
+    debug_progress("full prediction", f"ranks: {world_size}")
+    if debug_dist_inference_enabled():
+        print(
+            f"[rank {rank}] H slab: {h0}:{h1}, local X shape: {tuple(X.shape)}",
+            flush=True,
+        )
 
     with torch.no_grad():
-        if rank == 0:
-            print("[full prediction] lift", flush=True)
-        x = model._run_lift(X, collect_stats=False)
+        pbar = tqdm(
+            total=len(model.blocks) + 2,
+            desc="distributed-full-predict",
+            leave=True,
+            disable=rank != 0,
+        )
+        try:
+            pbar.set_postfix(step="lift", refresh=True)
+            debug_progress("full prediction", "lift")
+            x = model._run_lift(X, collect_stats=False)
+            pbar.update(1)
 
-        for i, blk in enumerate(model.blocks):
-            if rank == 0:
-                print(f"[full prediction] block {i + 1}/{len(model.blocks)}", flush=True)
+            for i, blk in enumerate(model.blocks):
+                pbar.set_postfix(step=f"block {i + 1}/{len(model.blocks)}", refresh=True)
+                debug_progress("full prediction", f"block {i + 1}/{len(model.blocks)}")
                 spec = getattr(blk, "spec", None)
                 if hasattr(spec, "progress_label"):
                     spec.progress_label = f"block {i + 1}/{len(model.blocks)} spectral"
@@ -1909,53 +2263,51 @@ def ffno_predict_populations_distributed_full(
                 if hasattr(vertical, "progress_label"):
                     vertical.progress_label = f"block {i + 1}/{len(model.blocks)} vertical"
 
-            residual = x
+                residual = x
 
-            spec = blk.spec_drop(blk.act(blk.norm_spec(blk.spec(x, dx, dy))))
-            if rank == 0:
-                print(f"[full prediction] block {i + 1}/{len(model.blocks)} vertical", flush=True)
-            vert = blk.vert_drop(blk.act(blk.norm_vert(blk.vertical(x, z_scale))))
+                spec = blk.spec_drop(blk.act(blk.norm_spec(blk.spec(x, dx, dy))))
+                debug_progress("full prediction", f"block {i + 1}/{len(model.blocks)} vertical")
+                vert = blk.vert_drop(blk.act(blk.norm_vert(blk.vertical(x, z_scale))))
 
-            if rank == 0:
-                print(f"[full prediction] block {i + 1}/{len(model.blocks)} fuse", flush=True)
+                debug_progress("full prediction", f"block {i + 1}/{len(model.blocks)} fuse")
                 for name, module in blk.fuse.named_modules():
                     if hasattr(module, "progress_label"):
                         module.progress_label = f"block {i + 1}/{len(model.blocks)} fuse {name}"
-            fused = chunked_fuse_branches(blk, x, spec, vert, normalize=False)
-            del spec, vert
-            if torch.cuda.is_available() and X.is_cuda:
-                torch.cuda.empty_cache()
-            fused = blk.act(blk.norm_fuse(fused))
-            x1 = residual + blk.res_fused * fused
-            del fused, residual, x
+                fused = chunked_fuse_branches(blk, x, spec, vert, normalize=False)
+                del spec, vert
+                if torch.cuda.is_available() and X.is_cuda:
+                    torch.cuda.empty_cache()
+                fused = blk.act(blk.norm_fuse(fused))
+                x1 = residual + blk.res_fused * fused
+                del fused, residual, x
 
-            if rank == 0:
-                print(f"[full prediction] block {i + 1}/{len(model.blocks)} pointwise", flush=True)
-            pw = blk.norm_pw(blk.pw(x1))
-            x2 = x1 + blk.res_pw * pw
-            del x1, pw
+                debug_progress("full prediction", f"block {i + 1}/{len(model.blocks)} pointwise")
+                pw = blk.norm_pw(blk.pw(x1))
+                x2 = x1 + blk.res_pw * pw
+                del x1, pw
 
-            if rank == 0:
-                print(f"[full prediction] block {i + 1}/{len(model.blocks)} mlp", flush=True)
-            mlp = torch.tanh(blk.norm_mlp(blk.mlp(x2)))
-            x = x2 + blk.res_mlp * mlp
-            del x2, mlp
-            if torch.cuda.is_available() and X.is_cuda:
-                torch.cuda.empty_cache()
+                debug_progress("full prediction", f"block {i + 1}/{len(model.blocks)} mlp")
+                mlp = torch.tanh(blk.norm_mlp(blk.mlp(x2)))
+                x = x2 + blk.res_mlp * mlp
+                del x2, mlp
+                if torch.cuda.is_available() and X.is_cuda:
+                    torch.cuda.empty_cache()
 
-            if rank == 0:
-                print(f"[full prediction] block {i + 1}/{len(model.blocks)} done", flush=True)
+                debug_progress("full prediction", f"block {i + 1}/{len(model.blocks)} done")
+                pbar.update(1)
 
-        if rank == 0:
-            print("[full prediction] head", flush=True)
-        pred_log = model._run_head(x, collect_stats=False)
-        if rank == 0:
-            print("[full prediction] forward done", flush=True)
+            pbar.set_postfix(step="head", refresh=True)
+            debug_progress("full prediction", "head")
+            pred_log = model._run_head(x, collect_stats=False)
+            debug_progress("full prediction", "forward done")
+            pbar.update(1)
+        finally:
+            pbar.close()
 
     if torch.isnan(pred_log).any():
-        print(f"[rank {rank}] NaN in prediction")
+        debug_progress("full prediction", f"[rank {rank}] NaN in prediction")
     if torch.isinf(pred_log).any():
-        print(f"[rank {rank}] Inf in prediction")
+        debug_progress("full prediction", f"[rank {rank}] Inf in prediction")
 
     mean_Y_t = torch.from_numpy(mean_Y).float()[None, :, None, None, None].to(device)
     std_Y_t = torch.from_numpy(std_Y).float()[None, :, None, None, None].to(device)
@@ -1973,11 +2325,9 @@ def ffno_predict_populations_distributed_full(
     if rank == 0:
         dep_full = np.concatenate(gathered_dep, axis=0)
         z_full = np.concatenate(gathered_z, axis=1)
-        print(
-            "dep range:",
-            float(dep_full.min()),
-            float(dep_full.max()),
-            flush=True,
+        debug_progress(
+            "full prediction",
+            f"dep range: {float(dep_full.min())} {float(dep_full.max())}",
         )
 
         with h5py.File(save_path, "w") as f:

@@ -225,6 +225,13 @@ Run:
 python pipeline.py --test
 ```
 
+With `MULTI_GPU=True`, run test mode through `torchrun` so validation uses the
+same distributed full H-slab inference strategy as `--fsdppredict`:
+
+```bash
+torchrun --nproc_per_node=4 pipeline.py --test
+```
+
 Test mode requires:
 
 - `TEST_FILE`
@@ -235,7 +242,7 @@ What it does:
 1. Builds the validation dataset loader from `TEST_FILE`
 2. Restores channel metadata and normalization stats directly from `MODEL_FILE`
 3. Loads the trained checkpoint from `MODEL_FILE`
-4. Evaluates validation loss/components
+4. Evaluates validation loss/components with distributed full H-slab inference
 5. Runs branch ablations for spectral, vertical, pointwise, and MLP branches
 6. Writes a JSON diagnostic summary
 
@@ -248,6 +255,7 @@ The JSON summary includes:
 - baseline loss
 - baseline component breakdown
 - baseline model statistics
+- validation coverage metadata, including inference strategy, visited dataset items, and columns
 - ablation results
 - branch importance scores
 
