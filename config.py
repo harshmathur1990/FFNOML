@@ -187,7 +187,7 @@ MULTI3D_PRED_DATA = [
     {
         "MULTI3D_ATMOS": PRED_DIR + "bifrost_data/en024031_by100_helium/109/atm3d",
         "MESH":  PRED_DIR + "bifrost_data/en024031_by100_helium/109/mesh",
-        "NAME": "en024048_hion_504_385"
+        "NAME": "en024031_by100_helium_109"
     }
 ]
 
