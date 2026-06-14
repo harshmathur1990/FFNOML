@@ -165,30 +165,35 @@ MULTI3D_PRED_DATA = [
         "NAME": "en024048_hion_385"
     },
     {
-        "MULTI3D_ATMOS": "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion/386/atm3d",
-        "MESH":  "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion/386/mesh",
-        "NAME": "en024048_hion_386"
-    },
-    {
-        "MULTI3D_ATMOS": "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion/465/atm3d",
-        "MESH":  "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion/465/mesh",
-        "NAME": "en024048_hion_465"
-    },
-    {
-        "MULTI3D_ATMOS": "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion_504/385/atm3d",
-        "MESH":  "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion_504/385/mesh",
-        "NAME": "en024048_hion_504_385"
-    },
-    {
-        "MULTI3D_ATMOS": "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion_504/465/atm3d",
-        "MESH":  "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion_504/465/mesh",
-        "NAME": "en024048_hion_504_465"
-    },
-    {
         "MULTI3D_ATMOS": "/mn/stornext/d9/data/harshm/bifrost_data/nw012023/1050/atm3d",
         "MESH":  "/mn/stornext/d9/data/harshm/bifrost_data/nw012023/1050/mesh",
         "NAME": "nw012023_1050"
-    }
+    },
+    {
+        "MULTI3D_ATMOS": "/mn/stornext/d9/data/harshm/bifrost_data/ch024031_by200bz005/450/atm3d",
+        "MESH":  "/mn/stornext/d9/data/harshm/bifrost_data/ch024031_by200bz005/450/mesh",
+        "NAME": "ch024031_by200bz005_450"
+    },
+    # {
+    #     "MULTI3D_ATMOS": "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion_504/385/atm3d",
+    #     "MESH":  "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion_504/385/mesh",
+    #     "NAME": "en024048_hion_504_385"
+    # },
+    # {
+    #     "MULTI3D_ATMOS": "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion_504/465/atm3d",
+    #     "MESH":  "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion_504/465/mesh",
+    #     "NAME": "en024048_hion_504_465"
+    # },
+    # {
+    #     "MULTI3D_ATMOS": "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion/386/atm3d",
+    #     "MESH":  "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion/386/mesh",
+    #     "NAME": "en024048_hion_386"
+    # },
+    # {
+    #     "MULTI3D_ATMOS": "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion/465/atm3d",
+    #     "MESH":  "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion/465/mesh",
+    #     "NAME": "en024048_hion_465"
+    # }
 ]
 
 MULTI_GPU = True
