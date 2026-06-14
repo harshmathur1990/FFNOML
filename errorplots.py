@@ -317,7 +317,7 @@ def make_snapshot_plot(dataset, output_dir, show=False):
     fig.tight_layout(rect=[0, 0, 1, 0.97])
 
     os.makedirs(output_dir, exist_ok=True)
-    outpath = os.path.join(output_dir, f"population_error_envelopes_{dataset['NAME']}.png")
+    outpath = os.path.join(output_dir, f"population_error_envelopes_{dataset['NAME']}.pdf")
     fig.savefig(outpath, dpi=200, bbox_inches="tight")
     print(f"Saved {outpath}")
 
@@ -334,7 +334,7 @@ def make_snapshot_plot(dataset, output_dir, show=False):
 
     outpath_log = os.path.join(
         output_dir,
-        f"log_population_error_envelopes_{dataset['NAME']}.png",
+        f"log_population_error_envelopes_{dataset['NAME']}.pdf",
     )
     fig_log.savefig(outpath_log, dpi=200, bbox_inches="tight")
     print(f"Saved {outpath_log}")
