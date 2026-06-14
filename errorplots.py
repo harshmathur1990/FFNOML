@@ -329,7 +329,7 @@ def make_snapshot_plot(dataset, output_dir, show=False):
         figsize=(12, 10),
         ncols=2,
     )
-    fig_log.suptitle(f"{dataset['NAME']} (log ratio)", fontsize=14)
+    fig_log.suptitle(f"Errors in predicted Departure coefficients : {dataset['NAME']}", fontsize=14)
     fig_log.tight_layout(rect=[0, 0, 1, 0.97])
 
     outpath_log = os.path.join(
