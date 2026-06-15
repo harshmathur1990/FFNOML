@@ -319,8 +319,8 @@ def make_snapshot_plot(dataset, output_dir, show=False):
         figsize=(12, 10),
         ncols=2,
     )
-    fig.suptitle(dataset["NAME"], fontsize=14)
-    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    # fig.suptitle(dataset["NAME"], fontsize=14)
+    fig.tight_layout(rect=[0, 0, 1, 1])
 
     os.makedirs(output_dir, exist_ok=True)
     outpath = os.path.join(output_dir, f"population_error_envelopes_{dataset['NAME']}.pdf")
