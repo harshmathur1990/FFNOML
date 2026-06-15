@@ -8,6 +8,7 @@ from helita.sim.multi3d import Multi3dAtmos, Multi3dOut
 
 from config import ACTIVE_ATOMS, MODEL, MODEL_DIR, MULTI3D_PRED_DATA
 from pipeline import compute_dx_dy
+from matplotlib.ticker import (MultipleLocator, AutoMinorLocator)
 
 
 def parse_args():
