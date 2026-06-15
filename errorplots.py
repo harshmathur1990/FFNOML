@@ -92,9 +92,9 @@ def plot_population_error_envelopes(
         ylim = max(np.max(np.abs(finite_rel_err)), 1e-12)
         for ax in axes.flat:
             if ax in fig.axes:
-                ax.set_ylim(-4, 4)
+                ax.set_ylim(-0.3, 0.3)
                 ax.yaxis.set_minor_locator(MultipleLocator(0.1))
-
+                ax.set_xlim(-1, 3)
     plt.tight_layout()
     return fig, axes
 
