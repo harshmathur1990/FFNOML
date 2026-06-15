@@ -346,7 +346,7 @@ def make_snapshot_plot(dataset, output_dir, show=False):
         plt.show()
     else:
         plt.close(fig)
-        plt.close(fig_log)
+        # plt.close(fig_log)
 
 
 def main():
