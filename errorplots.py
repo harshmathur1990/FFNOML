@@ -86,9 +86,12 @@ def plot_population_error_envelopes(
     for j in range(nlevels, nrows * ncols):
         fig.delaxes(axes[j // ncols, j % ncols])
 
-    for ax in axes.flat:
-        if ax in fig.axes:
-            ax.set_ylim(-0.4, 0.4)
+    finite_rel_err = rel_err[np.isfinite(rel_err)]
+    if finite_rel_err.size:
+        ylim = max(np.max(np.abs(finite_rel_err)), 1e-12)
+        for ax in axes.flat:
+            if ax in fig.axes:
+                ax.set_ylim(-ylim, ylim)
 
     plt.tight_layout()
     return fig, axes
@@ -321,23 +324,23 @@ def make_snapshot_plot(dataset, output_dir, show=False):
     fig.savefig(outpath, dpi=200, bbox_inches="tight")
     print(f"Saved {outpath}")
 
-    fig_log, _ = plot_log_population_error_envelopes(
-        pred_plot,
-        true_plot,
-        pred_z_axis,
-        level_names=level_names,
-        figsize=(12, 10),
-        ncols=2,
-    )
-    fig_log.suptitle(f"Errors in predicted Departure coefficients : {dataset['NAME']}", fontsize=14)
-    fig_log.tight_layout(rect=[0, 0, 1, 0.97])
+    # fig_log, _ = plot_log_population_error_envelopes(
+    #     pred_plot,
+    #     true_plot,
+    #     pred_z_axis,
+    #     level_names=level_names,
+    #     figsize=(12, 10),
+    #     ncols=2,
+    # )
+    # fig_log.suptitle(f"Errors in predicted Departure coefficients : {dataset['NAME']}", fontsize=14)
+    # fig_log.tight_layout(rect=[0, 0, 1, 0.97])
 
-    outpath_log = os.path.join(
-        output_dir,
-        f"log_population_error_envelopes_{dataset['NAME']}.pdf",
-    )
-    fig_log.savefig(outpath_log, dpi=200, bbox_inches="tight")
-    print(f"Saved {outpath_log}")
+    # outpath_log = os.path.join(
+    #     output_dir,
+    #     f"log_population_error_envelopes_{dataset['NAME']}.pdf",
+    # )
+    # fig_log.savefig(outpath_log, dpi=200, bbox_inches="tight")
+    # print(f"Saved {outpath_log}")
 
     if show:
         plt.show()
