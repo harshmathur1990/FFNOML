@@ -95,6 +95,7 @@ def plot_population_error_envelopes(
                 ax.set_ylim(-1, 1)
                 # ax.yaxis.set_minor_locator(MultipleLocator(0.1))
                 ax.set_xlim(-1, 5)
+                ax.set_yticks([-1, -0.8, -0.6, -0.4, -0.2, 0, 0.2, 0.4, 0.6, 0.8, 1], [-1, "", -0.6, "", -0.2, "", 0.2, "", 0.6, "", 1])
     plt.tight_layout()
     return fig, axes
 
