@@ -1,6 +1,7 @@
 import os
 import re
 import inspect
+import math
 import warnings
 import torch
 import torch.distributed as dist
@@ -145,6 +146,7 @@ def save_resume_checkpoint(
     save_path,
     normalization_stats=None,
     io_metadata=None,
+    training_stats=None,
 ):
     options = StateDictOptions(
         full_state_dict=True,
@@ -169,6 +171,8 @@ def save_resume_checkpoint(
         ckpt["normalization_stats"] = normalization_stats
     if io_metadata is not None:
         ckpt["io_metadata"] = io_metadata
+    if training_stats is not None:
+        ckpt["training_stats"] = training_stats
     torch.save(ckpt, save_path)
 
 
@@ -352,6 +356,16 @@ def reduce_sum_scalar(value, device):
     t = torch.tensor(float(value), device=device, dtype=torch.float64)
     if is_dist():
         dist.all_reduce(t, op=dist.ReduceOp.SUM)
+    return t.item()
+
+
+def reduce_max_scalar(value, device):
+    """
+    Max-reduce a python float across all ranks.
+    """
+    t = torch.tensor(float(value), device=device, dtype=torch.float64)
+    if is_dist():
+        dist.all_reduce(t, op=dist.ReduceOp.MAX)
     return t.item()
 
 
@@ -617,6 +631,7 @@ def train_one_epoch(
     epoch,
     num_epochs,
     grad_clip=1.0,
+    return_grad_clip_stats=False,
 ):
     model.train()
     running = 0.0
@@ -625,6 +640,11 @@ def train_one_epoch(
     running_comp = {}
 
     lr = optimizer.param_groups[0]["lr"]
+    grad_clip_enabled = grad_clip is not None and grad_clip > 0
+    grad_clip_checks = 0
+    grad_clip_hits = 0
+    grad_clip_nonfinite = 0
+    max_total_grad_norm = 0.0
 
     pbar = tqdm(
         loader,
@@ -676,12 +696,30 @@ def train_one_epoch(
 
         loss.backward()
 
-        if grad_clip is not None and grad_clip > 0:
+        if grad_clip_enabled:
 
             if isinstance(model, FSDP):
-                model.clip_grad_norm_(grad_clip)
+                total_grad_norm = model.clip_grad_norm_(grad_clip)
             else:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                total_grad_norm = torch.nn.utils.clip_grad_norm_(
+                    model.parameters(),
+                    grad_clip,
+                )
+
+            if torch.is_tensor(total_grad_norm):
+                total_grad_norm = float(total_grad_norm.detach().cpu())
+            else:
+                total_grad_norm = float(total_grad_norm)
+            grad_clip_checks += 1
+            if math.isnan(total_grad_norm):
+                grad_clip_nonfinite += 1
+                grad_clip_hits += 1
+            else:
+                if not math.isfinite(total_grad_norm):
+                    grad_clip_nonfinite += 1
+                max_total_grad_norm = max(max_total_grad_norm, total_grad_norm)
+                if total_grad_norm > grad_clip:
+                    grad_clip_hits += 1
 
         optimizer.step()
 
@@ -705,10 +743,28 @@ def train_one_epoch(
 
     global_running = reduce_sum_scalar(running, device)
     global_batches = reduce_sum_scalar(n_columns, device)
+    global_grad_clip_checks = int(reduce_sum_scalar(grad_clip_checks, device))
+    global_grad_clip_hits = int(reduce_sum_scalar(grad_clip_hits, device))
+    global_grad_clip_nonfinite = int(reduce_sum_scalar(grad_clip_nonfinite, device))
+    global_max_total_grad_norm = reduce_max_scalar(max_total_grad_norm, device)
 
     global_avg_loss = global_running / max(1, global_batches)
     global_comp = reduce_components(comp_sums, n_columns, device)
 
+    grad_clip_stats = {
+        "epoch": int(epoch),
+        "enabled": bool(grad_clip_enabled),
+        "max_norm": float(grad_clip) if grad_clip is not None else None,
+        "batches_checked": global_grad_clip_checks,
+        "batches_clipped": global_grad_clip_hits,
+        "batches_not_clipped": global_grad_clip_checks - global_grad_clip_hits,
+        "nonfinite_pre_clip_norms": global_grad_clip_nonfinite,
+        "max_pre_clip_norm": float(global_max_total_grad_norm),
+        "clipped_any": bool(global_grad_clip_hits > 0),
+    }
+
+    if return_grad_clip_stats:
+        return global_avg_loss, global_comp, grad_clip_stats
     return global_avg_loss, global_comp
 
 
@@ -907,6 +963,10 @@ def train(
 ):
     latest_save_path = resume_path or get_resume_checkpoint_path(save_path)
     resume_state = resume_state or {}
+    training_stats = dict(resume_state.get("training_stats") or {})
+    grad_clip_history = list(
+        (training_stats.get("grad_clipping") or {}).get("epochs") or []
+    )
 
     completed_epochs = resume_state.get("completed_epochs")
     if completed_epochs is None:
@@ -945,7 +1005,7 @@ def train(
         if hasattr(train_loader, "sampler") and hasattr(train_loader.sampler, "set_epoch"):
             train_loader.sampler.set_epoch(epoch)
 
-        train_loss, train_comp = train_one_epoch(
+        train_loss, train_comp, grad_clip_stats = train_one_epoch(
             model=model,
             loader=train_loader,
             optimizer=optimizer,
@@ -954,7 +1014,48 @@ def train(
             epoch=epoch,
             num_epochs=num_epochs,
             grad_clip=grad_clip,
+            return_grad_clip_stats=True,
         )
+
+        grad_clip_history = [
+            item
+            for item in grad_clip_history
+            if int(item.get("epoch", -1)) != int(epoch)
+        ]
+        grad_clip_history.append(grad_clip_stats)
+        total_grad_clip_checks = sum(
+            int(item.get("batches_checked", 0)) for item in grad_clip_history
+        )
+        total_grad_clip_hits = sum(
+            int(item.get("batches_clipped", 0)) for item in grad_clip_history
+        )
+        total_grad_clip_nonfinite = sum(
+            int(item.get("nonfinite_pre_clip_norms", 0))
+            for item in grad_clip_history
+        )
+        training_stats["grad_clipping"] = {
+            "epochs": grad_clip_history,
+            "summary": {
+                "enabled": bool(grad_clip is not None and grad_clip > 0),
+                "max_norm": float(grad_clip) if grad_clip is not None else None,
+                "epochs_recorded": len(grad_clip_history),
+                "batches_checked": total_grad_clip_checks,
+                "batches_clipped": total_grad_clip_hits,
+                "batches_not_clipped": (
+                    total_grad_clip_checks - total_grad_clip_hits
+                ),
+                "nonfinite_pre_clip_norms": total_grad_clip_nonfinite,
+                "max_pre_clip_norm": max(
+                    (
+                        float(item.get("max_pre_clip_norm", 0.0))
+                        for item in grad_clip_history
+                    ),
+                    default=0.0,
+                ),
+                "clipped_any": bool(total_grad_clip_hits > 0),
+                "last_epoch": int(epoch),
+            },
+        }
 
         if scheduler is not None:
             scheduler.step()
@@ -1055,4 +1156,5 @@ def train(
             save_path=latest_save_path,
             normalization_stats=normalization_stats,
             io_metadata=io_metadata,
+            training_stats=training_stats,
         )

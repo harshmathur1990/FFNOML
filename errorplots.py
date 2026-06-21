@@ -8,6 +8,7 @@ from helita.sim.multi3d import Multi3dAtmos, Multi3dOut
 
 from config import ACTIVE_ATOMS, MODEL, MODEL_DIR, MULTI3D_PRED_DATA
 from pipeline import compute_dx_dy
+from matplotlib.ticker import (MultipleLocator, AutoMinorLocator)
 
 
 def parse_args():
@@ -86,10 +87,15 @@ def plot_population_error_envelopes(
     for j in range(nlevels, nrows * ncols):
         fig.delaxes(axes[j // ncols, j % ncols])
 
-    for ax in axes.flat:
-        if ax in fig.axes:
-            ax.set_ylim(-0.4, 0.4)
-
+    finite_rel_err = rel_err[np.isfinite(rel_err)]
+    if finite_rel_err.size:
+        ylim = max(np.max(np.abs(finite_rel_err)), 1e-12)
+        for ax in axes.flat:
+            if ax in fig.axes:
+                ax.set_ylim(-1, 1)
+                # ax.yaxis.set_minor_locator(MultipleLocator(0.1))
+                ax.set_xlim(-1, 5)
+                ax.set_yticks([-1, -0.8, -0.6, -0.4, -0.2, 0, 0.2, 0.4, 0.6, 0.8, 1], [-1, "", -0.6, "", -0.2, "", 0.2, "", 0.6, "", 1])
     plt.tight_layout()
     return fig, axes
 
@@ -313,37 +319,37 @@ def make_snapshot_plot(dataset, output_dir, show=False):
         figsize=(12, 10),
         ncols=2,
     )
-    fig.suptitle(dataset["NAME"], fontsize=14)
-    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    # fig.suptitle(dataset["NAME"], fontsize=14)
+    fig.tight_layout(rect=[0, 0, 1, 1])
 
     os.makedirs(output_dir, exist_ok=True)
-    outpath = os.path.join(output_dir, f"population_error_envelopes_{dataset['NAME']}.png")
+    outpath = os.path.join(output_dir, f"population_error_envelopes_{dataset['NAME']}.pdf")
     fig.savefig(outpath, dpi=200, bbox_inches="tight")
     print(f"Saved {outpath}")
 
-    fig_log, _ = plot_log_population_error_envelopes(
-        pred_plot,
-        true_plot,
-        pred_z_axis,
-        level_names=level_names,
-        figsize=(12, 10),
-        ncols=2,
-    )
-    fig_log.suptitle(f"{dataset['NAME']} (log ratio)", fontsize=14)
-    fig_log.tight_layout(rect=[0, 0, 1, 0.97])
+    # fig_log, _ = plot_log_population_error_envelopes(
+    #     pred_plot,
+    #     true_plot,
+    #     pred_z_axis,
+    #     level_names=level_names,
+    #     figsize=(12, 10),
+    #     ncols=2,
+    # )
+    # fig_log.suptitle(f"Errors in predicted Departure coefficients : {dataset['NAME']}", fontsize=14)
+    # fig_log.tight_layout(rect=[0, 0, 1, 0.97])
 
-    outpath_log = os.path.join(
-        output_dir,
-        f"log_population_error_envelopes_{dataset['NAME']}.png",
-    )
-    fig_log.savefig(outpath_log, dpi=200, bbox_inches="tight")
-    print(f"Saved {outpath_log}")
+    # outpath_log = os.path.join(
+    #     output_dir,
+    #     f"log_population_error_envelopes_{dataset['NAME']}.pdf",
+    # )
+    # fig_log.savefig(outpath_log, dpi=200, bbox_inches="tight")
+    # print(f"Saved {outpath_log}")
 
     if show:
         plt.show()
     else:
         plt.close(fig)
-        plt.close(fig_log)
+        # plt.close(fig_log)
 
 
 def main():
