@@ -161,7 +161,8 @@ levels = [ATOM_CONFIG[a]["levels"]   for a in ACTIVE_ATOMS]
 PRED_OLIVIA_DIR = "/cluster/work/projects/nn2834k/harshm/"
 PRED_EAGLE7_DIR = "/mn/stornext/d9/data/harshm/"
 
-PRED_DIR = PRED_OLIVIA_DIR
+# PRED_DIR = PRED_OLIVIA_DIR
+PRED_DIR = PRED_EAGLE7_DIR
 
 MULTI3D_PRED_DATA = [
     {
