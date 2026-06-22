@@ -837,6 +837,7 @@ def make_line_core_intensity_compare_plots():
     for index, data in enumerate(plot_data):
         row = index // 2
         first_column = 2 * (index % 2)
+        panel_label = f"{chr(ord('a') + index)})"
 
         for column, source, title in (
             (first_column, "ml", "ML"),
@@ -859,10 +860,21 @@ def make_line_core_intensity_compare_plots():
                 vmax=12.0,
                 aspect="equal",
             )
-            ax.set_title(f'{data["name"]}\n{title}')
+            ax.set_title(title)
             ax.set_xlabel("x [Mm]")
             if column in (0, 2):
                 ax.set_ylabel("y [Mm]")
+            if source == "ml":
+                ax.text(
+                    0.03,
+                    0.97,
+                    panel_label,
+                    transform=ax.transAxes,
+                    ha="left",
+                    va="top",
+                    color="white",
+                    fontweight="bold",
+                )
 
     if image is not None:
         fig.colorbar(image, ax=axs, label="Line-core intensity", shrink=0.8)
