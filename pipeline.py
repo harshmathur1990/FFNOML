@@ -31,6 +31,7 @@ def parse_args():
     parser.add_argument("--test", action="store_true")
     parser.add_argument("--predict", action="store_true")
     parser.add_argument("--fsdppredict", action="store_true")
+    parser.add_argument("--buildforpredict", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--bestpath", action="store_true")
     parser.add_argument("--expand", action="store_true")
@@ -262,6 +263,34 @@ def init_distributed_prediction():
     init_distributed_runtime()
 
 
+def build_prediction_solving_sets():
+    for PRED_ATMOS in MULTI3D_PRED_DATA:
+
+        PREDICT_FILE = MODEL_DIR + f"3D_sim_predict_{PRED_ATMOS['NAME']}.hdf5"
+
+        if os.path.exists(PREDICT_FILE):
+            print(f"Prediction solving set already exists, skipping: {PREDICT_FILE}")
+            continue
+
+        rho, z_scale, temp, vx, vy, vz, ne, dx, dy = load_pred_data(
+            mesh_file=PRED_ATMOS['MESH'],
+            atmos_file=PRED_ATMOS['MULTI3D_ATMOS']
+        )
+
+        build_solving_set_ffno(
+            rho=rho,
+            z_scale=z_scale,
+            temp=temp,
+            vx=vx,
+            vy=vy,
+            vz=vz,
+            ne=ne,
+            dx=dx,
+            dy=dy,
+            save_path=PREDICT_FILE,
+        )
+
+
 def run_predictions(*, distributed_full=False):
     ensure_checkpoint_exists()
 
@@ -278,27 +307,12 @@ def run_predictions(*, distributed_full=False):
 
         if not os.path.exists(OUTPUT_FILE):
 
-            if is_main_process() and not os.path.exists(PREDICT_FILE):
-
-                rho, z_scale, temp, vx, vy, vz, ne, dx, dy = load_pred_data(
-                    mesh_file=PRED_ATMOS['MESH'],
-                    atmos_file=PRED_ATMOS['MULTI3D_ATMOS']
+            if not os.path.exists(PREDICT_FILE):
+                raise FileNotFoundError(
+                    "With the current config, the required prediction solving-set file does not exist.\n"
+                    f"  - predict: {PREDICT_FILE}\n"
+                    "Run pipeline.py --buildforpredict first."
                 )
-
-                build_solving_set_ffno(
-                    rho=rho,
-                    z_scale=z_scale,
-                    temp=temp,
-                    vx=vx,
-                    vy=vy,
-                    vz=vz,
-                    ne=ne,
-                    dx=dx,
-                    dy=dy,
-                    save_path=PREDICT_FILE,
-                )
-
-            barrier_if_distributed()
 
             if distributed_full:
                 ffno_predict_populations_distributed_full(
@@ -575,10 +589,11 @@ if __name__ == "__main__":
         args.test,
         args.predict,
         args.fsdppredict,
+        args.buildforpredict,
         args.inspectfreqgate,
     ]
     if sum(bool(mode) for mode in selected_modes) > 1:
-        raise RuntimeError("Specify only one of: --build, --train, --test, --predict, --fsdppredict, --inspectfreqgate")
+        raise RuntimeError("Specify only one of: --build, --train, --test, --predict, --fsdppredict, --buildforpredict, --inspectfreqgate")
 
     if args.resume and not args.train:
         raise RuntimeError("--resume can only be used together with --train")
@@ -596,6 +611,9 @@ if __name__ == "__main__":
     try:
         if args.build:
             build_datasets()
+
+        elif args.buildforpredict:
+            build_prediction_solving_sets()
 
         elif args.train:
             validate_runtime_device()
@@ -624,7 +642,7 @@ if __name__ == "__main__":
             )
 
         else:
-            raise RuntimeError("Specify one of: --build, --train, --test, --predict, --fsdppredict, --inspectfreqgate")
+            raise RuntimeError("Specify one of: --build, --train, --test, --predict, --fsdppredict, --inspectfreqgate, --buildforpredict")
 
     finally:
         cleanup_distributed()
