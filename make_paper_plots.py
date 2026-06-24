@@ -8,6 +8,27 @@ import numpy as np
 from config import MODEL, MODEL_DIR, MULTI3D_PRED_DATA, PRED_DIR
 
 
+def _read_mesh_dx_dy_megameters(mesh_path):
+    mesh = np.fromfile(mesh_path, sep=" ", dtype=np.float32)
+    offset = 0
+    nx = int(mesh[offset])
+    offset += 1
+    x = mesh[offset:offset + nx]
+    offset += nx
+    ny = int(mesh[offset])
+    offset += 1
+    y = mesh[offset:offset + ny]
+
+    if x.size < 2 or y.size < 2:
+        raise ValueError(f"Mesh {mesh_path!r} must contain at least two x/y points")
+
+    # Mesh coordinates are in cm. One megametre is 1e8 cm.
+    dx = abs(float(np.median(np.diff(x)))) * 1e-8
+    dy = abs(float(np.median(np.diff(y)))) * 1e-8
+
+    return dx, dy
+
+
 orig_json = {
     "checkpoint_path": "training_FFNO3D_zscale_expand_new_26_05_2026/3D_sim_train_s123.pt",
     "val_h5": "IO/3D_sim_test_ch012006_849__ch012012_hion_984__en024048_hion_700__nw012023_940__qs006003_sap_900_patch40_stride20.hdf5",
@@ -783,24 +804,7 @@ def get_data_for_line_core_intensity_plots():
                 bifrost_file["H"]["intensity"][:, :, 51]
             )
 
-        mesh = np.fromfile(
-            datasets_by_name[name]["MESH"], sep=" ", dtype=np.float32
-        )
-        offset = 0
-        nx = int(mesh[offset])
-        offset += 1
-        x = mesh[offset:offset + nx]
-        offset += nx
-        ny = int(mesh[offset])
-        offset += 1
-        y = mesh[offset:offset + ny]
-
-        if x.size < 2 or y.size < 2:
-            raise ValueError(f"Mesh for {name!r} must contain at least two x/y points")
-
-        # Mesh coordinates are in cm. One megametre is 1e8 cm.
-        dx = abs(float(np.median(np.diff(x)))) * 1e-8
-        dy = abs(float(np.median(np.diff(y)))) * 1e-8
+        dx, dy = _read_mesh_dx_dy_megameters(datasets_by_name[name]["MESH"])
 
         if ml_intensity.shape != bifrost_intensity.shape:
             raise ValueError(
@@ -852,7 +856,7 @@ def make_line_core_intensity_compare_plots():
             )
             ax = axs[row, column]
             image = ax.imshow(
-                intensity.T,
+                intensity,
                 origin="lower",
                 extent=extent,
                 cmap="gray",
@@ -888,6 +892,138 @@ def make_line_core_intensity_compare_plots():
     )
 
 
+def get_data_for_zero_shot_super_resolution_plots():
+    sel_names = [
+        "en024048_hion_385",
+        "nw012023_1050",
+        "ch024031_by200bz005_450",
+        "en024031_by100_helium_109"
+    ]
+
+    sel_names_super_resolution = [
+        "en024048_hion_504_385",
+        "nw012023_512_1050",
+        "ch024031_by200bz005_768_450",
+        "en024031_by100_helium_768_109"
+    ]
+
+    fnoml_dir = Path(PRED_DIR) / "FFNOML"
+    ml_intensity_dir = fnoml_dir / MODEL_DIR
+    datasets_by_name = {dataset["NAME"]: dataset for dataset in MULTI3D_PRED_DATA}
+    plot_data = []
+
+    for lowres_name, highres_name in zip(sel_names, sel_names_super_resolution):
+        if lowres_name not in datasets_by_name:
+            raise KeyError(f"No configured prediction dataset named {lowres_name!r}")
+        if highres_name not in datasets_by_name:
+            raise KeyError(f"No configured prediction dataset named {highres_name!r}")
+
+        lowres_path = ml_intensity_dir / f"intensity_ml_{lowres_name}_{MODEL}.h5"
+        highres_path = ml_intensity_dir / f"intensity_ml_{highres_name}_{MODEL}.h5"
+
+        with h5py.File(lowres_path, "r") as lowres_file:
+            lowres_intensity = np.asarray(
+                lowres_file["H"]["intensity"][:, :, 51]
+            )
+
+        with h5py.File(highres_path, "r") as highres_file:
+            highres_intensity = np.asarray(
+                highres_file["H"]["intensity"][:, :, 51]
+            )
+
+        lowres_dx, lowres_dy = _read_mesh_dx_dy_megameters(
+            datasets_by_name[lowres_name]["MESH"]
+        )
+        highres_dx, highres_dy = _read_mesh_dx_dy_megameters(
+            datasets_by_name[highres_name]["MESH"]
+        )
+
+        plot_data.append({
+            "name": lowres_name,
+            "super_resolution_name": highres_name,
+            "lowres": lowres_intensity,
+            "highres": highres_intensity,
+            "lowres_dx": lowres_dx,
+            "lowres_dy": lowres_dy,
+            "highres_dx": highres_dx,
+            "highres_dy": highres_dy,
+        })
+
+    return plot_data
+
+
+def make_zero_shot_super_resolution_plots():
+    plt.close('all')
+
+    plt.clf()
+
+    plt.cla()
+
+    font = {'size': 8}
+
+    matplotlib.rc('font', **font)
+
+    fig, axs = plt.subplots(2, 4, figsize=(7, 3.5), constrained_layout=True)
+    plot_data = get_data_for_zero_shot_super_resolution_plots()
+    image = None
+
+    for index, data in enumerate(plot_data):
+        row = index // 2
+        first_column = 2 * (index % 2)
+        panel_label = f"{chr(ord('a') + index)})"
+
+        for column, source, title in (
+            (first_column, "lowres", "coarse"),
+            (first_column + 1, "highres", "Fine"),
+        ):
+            intensity = data[source]
+            dx = data[f"{source}_dx"]
+            dy = data[f"{source}_dy"]
+            extent = (
+                0.0,
+                intensity.shape[0] * dx,
+                0.0,
+                intensity.shape[1] * dy,
+            )
+            ax = axs[row, column]
+            image = ax.imshow(
+                intensity,
+                origin="lower",
+                extent=extent,
+                cmap="gray",
+                vmin=0.0,
+                vmax=12.0,
+                aspect="equal",
+            )
+            ax.set_title(title)
+            ax.set_xlabel("x [Mm]")
+            if column in (0, 2):
+                ax.set_ylabel("y [Mm]")
+            if source == "lowres":
+                ax.text(
+                    0.03,
+                    0.97,
+                    panel_label,
+                    transform=ax.transAxes,
+                    ha="left",
+                    va="top",
+                    color="white",
+                    fontweight="bold",
+                )
+
+    if image is not None:
+        fig.colorbar(image, ax=axs, label="Line-core intensity", shrink=0.8)
+
+    output_dir = Path("figures")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(
+        output_dir / "zero_shot_super_resolution.pdf",
+        dpi=300,
+        format="pdf",
+    )
+
+
 if __name__ == '__main__':
     # make_branch_importance_plots()
     make_line_core_intensity_compare_plots()
+    make_zero_shot_super_resolution_plots()
