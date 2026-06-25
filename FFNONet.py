@@ -2322,6 +2322,8 @@ def ffno_predict_populations_distributed_full(
     dist.gather_object(dep, gathered_dep, dst=0)
     dist.gather_object(z_local, gathered_z, dst=0)
 
+    dist.barrier()
+
     if rank == 0:
         dep_full = np.concatenate(gathered_dep, axis=0)
         z_full = np.concatenate(gathered_z, axis=1)
@@ -2333,18 +2335,12 @@ def ffno_predict_populations_distributed_full(
         with h5py.File(save_path, "w") as f:
             d = f.create_dataset(
                 "departure_coefficients",
-                data=np.asfortranarray(dep_full),
-                compression="gzip",
-                compression_opts=4,
-                shuffle=True,
+                data=np.asfortranarray(dep_full)
             )
             d.attrs["depth_scale_type"] = "z"
             f.create_dataset(
                 "z_scale",
-                data=z_full,
-                compression="gzip",
-                compression_opts=4,
-                shuffle=True,
+                data=z_full
             )
             if "val_loss" in ckpt:
                 f.attrs["val_loss"] = float(ckpt["val_loss"])
