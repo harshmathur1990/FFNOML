@@ -1042,6 +1042,7 @@ def ffno_train_model(
     load_earlier_val=False,
     expand_from_checkpoint=None,
     zero_init_new_blocks=True,
+    force_expand_validation_baseline=False,
     train_select=1.0,
     train_select_seed=None,
 ):
@@ -1216,9 +1217,8 @@ def ffno_train_model(
     effective_best_val_init = None if expand_from_checkpoint is not None else best_val_init
 
     if (
-        expand_from_checkpoint is None
-        and resume
-        and bestpath
+        ((expand_from_checkpoint is None and resume and bestpath)
+        or (expand_from_checkpoint is not None and force_expand_validation_baseline))
         and val_loader is not None
     ):
         if (
