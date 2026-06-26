@@ -1962,37 +1962,6 @@ def ffno_predict_populations(
     stride=64
 ):
 
-    def _aggregate_stats(all_stats):
-
-        layer_dict = {}
-
-        for s in all_stats:
-            layer = s["layer"]
-            w = s.get("_weight", 1.0)
-
-            if layer not in layer_dict:
-                layer_dict[layer] = {}
-
-            for k, v in s.items():
-                if k in ("layer", "_weight"):
-                    continue
-
-                if k not in layer_dict[layer]:
-                    layer_dict[layer][k] = {"sum": 0.0, "w": 0.0}
-
-                layer_dict[layer][k]["sum"] += v * w
-                layer_dict[layer][k]["w"] += w
-
-        # weighted mean
-        agg = {}
-        for layer, vals in layer_dict.items():
-            agg[layer] = {
-                k: vals[k]["sum"] / (vals[k]["w"] + 1e-12)
-                for k in vals
-            }
-
-        return agg
-
     """
     Predict log-departure coeffs -> convert to departure coeffs -> (optional) to populations downstream.
 
