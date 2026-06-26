@@ -1042,6 +1042,7 @@ def ffno_train_model(
     load_earlier_val=False,
     expand_from_checkpoint=None,
     zero_init_new_blocks=True,
+    force_expand_validation_baseline=False,
     train_select=1.0,
     train_select_seed=None,
 ):
@@ -1216,9 +1217,8 @@ def ffno_train_model(
     effective_best_val_init = None if expand_from_checkpoint is not None else best_val_init
 
     if (
-        expand_from_checkpoint is None
-        and resume
-        and bestpath
+        ((expand_from_checkpoint is None and resume and bestpath)
+        or (expand_from_checkpoint is not None and force_expand_validation_baseline))
         and val_loader is not None
     ):
         if (
@@ -1961,37 +1961,6 @@ def ffno_predict_populations(
     patch=128,
     stride=64
 ):
-
-    def _aggregate_stats(all_stats):
-
-        layer_dict = {}
-
-        for s in all_stats:
-            layer = s["layer"]
-            w = s.get("_weight", 1.0)
-
-            if layer not in layer_dict:
-                layer_dict[layer] = {}
-
-            for k, v in s.items():
-                if k in ("layer", "_weight"):
-                    continue
-
-                if k not in layer_dict[layer]:
-                    layer_dict[layer][k] = {"sum": 0.0, "w": 0.0}
-
-                layer_dict[layer][k]["sum"] += v * w
-                layer_dict[layer][k]["w"] += w
-
-        # weighted mean
-        agg = {}
-        for layer, vals in layer_dict.items():
-            agg[layer] = {
-                k: vals[k]["sum"] / (vals[k]["w"] + 1e-12)
-                for k in vals
-            }
-
-        return agg
 
     """
     Predict log-departure coeffs -> convert to departure coeffs -> (optional) to populations downstream.

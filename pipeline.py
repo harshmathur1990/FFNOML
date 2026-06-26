@@ -198,6 +198,7 @@ def train_model(*, resume=False, bestpath=False, expand=False):
         load_earlier_val=LOAD_EARLIER_VAL,
         expand_from_checkpoint=EXPAND_FROM_CHECKPOINT if expand else None,
         zero_init_new_blocks=ZERO_INIT_NEW_BLOCKS,
+        force_expand_validation_baseline=FORCE_EXPAND_VALIDATION_BASELINE,
         train_select=TRAINSELECT,
         train_select_seed=TRAINSELECT_SEED,
     )
