@@ -2,6 +2,58 @@ import numpy as np
 import os
 
 
+def _build_split_tag(split_dict):
+    parts = []
+
+    for sim in sorted(split_dict):
+        snaps = "-".join(sorted(split_dict[sim], key=str))
+        parts.append(f"{sim}_{snaps}")
+
+    return "__".join(parts)
+
+
+def _active_atoms_tag(active_atoms):
+    return "-".join(active_atoms)
+
+
+def _dataset_filename(split_name, split_dict, patch, stride, active_atoms):
+    split_tag = _build_split_tag(split_dict)
+    atoms_tag = _active_atoms_tag(active_atoms)
+    return f"3D_sim_{split_name}_{split_tag}_atoms{atoms_tag}_patch{patch}_stride{stride}.hdf5"
+
+
+def build_multi3d_entries(split_dict):
+
+    data = []
+
+    for sim, snaps in split_dict.items():
+
+        base = SIMULATIONS[sim]["base_path"]
+
+        for snap in snaps:
+
+            if snap not in SIMULATIONS[sim]["snaps"]:
+                raise ValueError(
+                    f"{snap} not listed in SIMULATIONS[{sim}]"
+                )
+
+            entry = {
+                "MULTI3D_PATHS": [],
+                "MULTI3D_ATMOS": f"{base}/{snap}/atm3d",
+                "MESH": f"{base}/{snap}/mesh",
+            }
+
+            for atom in ACTIVE_ATOMS:
+                atom_dir = ATOM_CONFIG[atom]["subdir"]
+
+                entry["MULTI3D_PATHS"].append(
+                    f"{base}/{snap}/{atom_dir}"
+                )
+
+            data.append(entry)
+
+    return data
+
 SIMULATIONS = {
     "en024048_hion": {
         "base_path": "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion",
@@ -96,58 +148,7 @@ ATOM_CONFIG = {
     }
 }
 
-ACTIVE_SIMS  = ["en024048_hion"]
 ACTIVE_ATOMS = ["H"]
-
-
-def _build_split_tag(split_dict):
-    parts = []
-
-    for sim in sorted(split_dict):
-        snaps = "-".join(sorted(split_dict[sim], key=str))
-        parts.append(f"{sim}_{snaps}")
-
-    return "__".join(parts)
-
-
-def _dataset_filename(split_name, split_dict, patch, stride):
-    split_tag = _build_split_tag(split_dict)
-    return f"3D_sim_{split_name}_{split_tag}_patch{patch}_stride{stride}.hdf5"
-
-
-def build_multi3d_entries(split_dict):
-
-    data = []
-
-    for sim, snaps in split_dict.items():
-
-        base = SIMULATIONS[sim]["base_path"]
-
-        for snap in snaps:
-
-            if snap not in SIMULATIONS[sim]["snaps"]:
-                raise ValueError(
-                    f"{snap} not listed in SIMULATIONS[{sim}]"
-                )
-
-            entry = {
-                "MULTI3D_PATHS": [],
-                "MULTI3D_ATMOS": f"{base}/{snap}/atm3d",
-                "MESH": f"{base}/{snap}/mesh",
-            }
-
-            for atom in ACTIVE_ATOMS:
-                atom_dir = ATOM_CONFIG[atom]["subdir"]
-
-                entry["MULTI3D_PATHS"].append(
-                    f"{base}/{snap}/{atom_dir}"
-                )
-
-            data.append(entry)
-
-    return data
-
-
 MULTI3D_TRAIN_DATA = build_multi3d_entries(TRAIN_SPLIT)
 MULTI3D_VAL_DATA   = build_multi3d_entries(VAL_SPLIT)
 
@@ -251,11 +252,11 @@ SCALES=(1,2,3,4,5,6,7,8)
 
 TRAIN_FILE = os.path.join(
     IODIR,
-    _dataset_filename("train", TRAIN_SPLIT, PATCH, STRIDE),
+    _dataset_filename("train", TRAIN_SPLIT, PATCH, STRIDE, ACTIVE_ATOMS),
 )
 TEST_FILE = os.path.join(
     IODIR,
-    _dataset_filename("test", VAL_SPLIT, PATCH, STRIDE),
+    _dataset_filename("test", VAL_SPLIT, PATCH, STRIDE, ACTIVE_ATOMS),
 )
 
 
