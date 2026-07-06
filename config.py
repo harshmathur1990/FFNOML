@@ -230,6 +230,12 @@ IODIR = "IO/"
 MODEL_DIR = f"training_{MODEL}_zscale_expand/"
 MODEL_FILE = MODEL_DIR + "3D_sim_train_s123.pt"
 
+for pred_atmos in MULTI3D_PRED_DATA:
+    name_parts = pred_atmos["NAME"].split("_")
+    pred_atmos["SIM_NAME"] = "_".join(name_parts[:-1])
+    pred_atmos["SNAP"] = name_parts[-1]
+    pred_atmos["TRAIN_DIR"] = MODEL_DIR.rstrip("/")
+
 EXPAND_FROM_CHECKPOINT = "training_FFNO3D_zscale/3D_sim_train_s123.pt"
 ZERO_INIT_NEW_BLOCKS = True
 FORCE_EXPAND_VALIDATION_BASELINE = True

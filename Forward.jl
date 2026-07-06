@@ -34,34 +34,74 @@ default(show=false)
 # ============================================================
 
 # -----------------------------
-# MODE 1 — ML predicted pops
+# Config loaded from config.py
 # -----------------------------
 
-model  = "FFNO3D"
-snap = 385
+const RUN_MODE = :ml
 
-train_dir = "training_FFNO3D_zscale"
+function load_multi3d_pred_data()
+    script = """
+import sys
+import types
 
-sim_name = "en024048_hion"
-
-pred_h5 = joinpath(
-    train_dir,
-    "output_3D_sim_s5_$(sim_name)_$(snap)_$(model).hdf5"
+sys.modules.setdefault(
+    "numpy",
+    types.SimpleNamespace(
+        array=lambda values, dtype=None: values,
+        float32=float,
+    ),
 )
 
-out_h5 = joinpath(
-    train_dir,
-    "intensity_ml_$(sim_name)_$(snap)_$(model).h5"
-)
+import config
 
-const CONFIG_ML = (
-    mode = :ml,
+model_dir = config.MODEL_DIR.rstrip("/")
+for item in config.MULTI3D_PRED_DATA:
+    print("\\t".join([
+        item["NAME"],
+        item.get("SIM_NAME", "_".join(item["NAME"].split("_")[:-1])),
+        item.get("SNAP", item["NAME"].split("_")[-1]),
+        item["MESH"],
+        item["MULTI3D_ATMOS"],
+        item.get("TRAIN_DIR", model_dir).rstrip("/"),
+        config.MODEL,
+    ]))
+"""
 
-    atoms = [
+    output = cd(@__DIR__) do
+        read(`python3 -c $script`, String)
+    end
+
+    pred_data = []
+    for line in split(chomp(output), "\n")
+        isempty(line) && continue
+        fields = split(line, "\t")
+        length(fields) == 7 || error("Unexpected config.py output: $(line)")
+        name, sim_name, snap, mesh_file, atmos_file, train_dir, model = fields
+        push!(
+            pred_data,
+            (
+                name = name,
+                sim_name = sim_name,
+                snap = snap,
+                mesh_file = mesh_file,
+                atmos_file = atmos_file,
+                train_dir = train_dir,
+                model = model,
+            ),
+        )
+    end
+
+    return pred_data
+end
+
+function atom_configs(pred)
+    snapshot_dir = dirname(pred.mesh_file)
+
+    return [
         (
             name = "H",
             atom_file = "/mn/stornext/u3/harshm/Documents/WorkRepo/multi3d/input/atoms/atom.h6_tiago2.yaml",
-            pops_file = "/mn/stornext/d9/data/harshm/bifrost_data/$(sim_name)/$(snap)/H/out_pop",
+            pops_file = joinpath(snapshot_dir, "H", "out_pop"),
             nlevels = 6,
             line_index = 5,
             lower_level = 2,
@@ -70,31 +110,17 @@ const CONFIG_ML = (
         # (
         #     name = "CA",
         #     atom_file = "/mn/stornext/u3/harshm/Documents/WorkRepo/multi3d/input/atoms/atom.ca2.yaml",
-        #     pops_file = "/mn/stornext/d9/data/harshm/bifrost_data/$(sim_name)/385/CA/out_pop",
+        #     pops_file = joinpath(snapshot_dir, "CA", "out_pop"),
         #     nlevels = 6,
         #     line_index = 5,
         #     lower_level = 3,
         #     upper_level = 5
         # )
-    ],
+    ]
+end
 
-    mesh_file  = "/mn/stornext/d9/data/harshm/bifrost_data/$(sim_name)/$(snap)/mesh",
-    atmos_file = "/mn/stornext/d9/data/harshm/bifrost_data/$(sim_name)/$(snap)/atm3d",
-
-    model = model,
-
-    pred_h5 = pred_h5,
-    pred_key = "departure_coefficients",
-
-    plot_diagnostics = false,
-
-    out_h5 = out_h5,
-    out_prefix = joinpath(train_dir, "diag_ml"),
-
-    x_pick     = 33,
-    y_pick     = 21,
-
-    voigt = (
+function base_voigt_config()
+    return (
         a_min = 1f-4,
         a_max = 1f1,
         a_n   = 20000,
@@ -102,104 +128,87 @@ const CONFIG_ML = (
         v_max = 5f2,
         v_n   = 2500
     )
-)
+end
+
+function config_ml(pred)
+    return (
+        mode = :ml,
+        name = pred.name,
+        sim_name = pred.sim_name,
+        snap = pred.snap,
+        atoms = atom_configs(pred),
+        mesh_file = pred.mesh_file,
+        atmos_file = pred.atmos_file,
+        model = pred.model,
+        pred_h5 = joinpath(
+            pred.train_dir,
+            "output_3D_sim_s5_$(pred.name)_$(pred.model).hdf5"
+        ),
+        pred_key = "departure_coefficients",
+        plot_diagnostics = false,
+        out_h5 = joinpath(
+            pred.train_dir,
+            "intensity_ml_$(pred.name)_$(pred.model).h5"
+        ),
+        out_prefix = joinpath(pred.train_dir, "diag_ml"),
+        x_pick = 33,
+        y_pick = 21,
+        voigt = base_voigt_config()
+    )
+end
 
 # -----------------------------
 # MODE 2 — Original Bifrost NLTE pops
 # -----------------------------
-const CONFIG_BIFROST = (
-    mode = :bifrost,
-
-    atoms = [
-        (
-            name = "H",
-            atom_file = "/mn/stornext/u3/harshm/Documents/WorkRepo/multi3d/input/atoms/atom.h6_tiago2.yaml",
-            pops_file = "/mn/stornext/d9/data/harshm/bifrost_data/$(sim_name)/$(snap)/H/out_pop",
-            nlevels = 6,
-            line_index = 5,
-            lower_level = 2,
-            upper_level = 3
-        ),
-        # (
-        #     name = "CA",
-        #     atom_file = "/mn/stornext/u3/harshm/Documents/WorkRepo/multi3d/input/atoms/atom.ca2.yaml",
-        #     pops_file = "/mn/stornext/d9/data/harshm/bifrost_data/$(sim_name)/$(snap)/CA/out_pop",
-        #     nlevels = 6,
-        #     line_index = 5,
-        #     lower_level = 3,
-        #     upper_level = 5
-        # )
-    ],
-
-    mesh_file  = "/mn/stornext/d9/data/harshm/bifrost_data/$(sim_name)/$(snap)/mesh",
-    atmos_file = "/mn/stornext/d9/data/harshm/bifrost_data/$(sim_name)/$(snap)/atm3d",
-
-    out_h5     = "IO/intensity_bifrost_$(sim_name)_$(snap).h5",
-    out_prefix = "diag_bifrost",
-
-    x_pick     = 33,
-    y_pick     = 21,
-
-    voigt = (
-        a_min = 1f-4,
-        a_max = 1f1,
-        a_n   = 20000,
-        v_min = 0f0,
-        v_max = 5f2,
-        v_n   = 2500
+function config_bifrost(pred)
+    return (
+        mode = :bifrost,
+        name = pred.name,
+        sim_name = pred.sim_name,
+        snap = pred.snap,
+        atoms = atom_configs(pred),
+        mesh_file = pred.mesh_file,
+        atmos_file = pred.atmos_file,
+        out_h5 = "IO/intensity_bifrost_$(pred.name).h5",
+        out_prefix = "diag_bifrost",
+        x_pick = 33,
+        y_pick = 21,
+        voigt = base_voigt_config()
     )
-)
+end
 
-const CONFIG_TIAGO = (
-    mode = :tiago,
-
-    atoms = [
-        (
-            name = "H",
-            atom_file = "/mn/stornext/u3/harshm/Documents/WorkRepo/multi3d/input/atoms/atom.h6_tiago2.yaml",
-            pops_file = "/mn/stornext/d9/data/harshm/bifrost_data/$(sim_name)/$(snap)/H/out_pop",
-            nlevels = 6,
-            line_index = 5,
-            lower_level = 2,
-            upper_level = 3
-        ),
-        # (
-        #     name = "CA",
-        #     atom_file = "/mn/stornext/u3/harshm/Documents/WorkRepo/multi3d/input/atoms/atom.ca2.yaml",
-        #     pops_file = "/mn/stornext/d9/data/harshm/bifrost_data/$(sim_name)/$(snap)/CA/out_pop",
-        #     nlevels = 6,
-        #     line_index = 5,
-        #     lower_level = 3,
-        #     upper_level = 5
-        # )
-    ],
-
-    mesh_file  = "/mn/stornext/d9/data/harshm/bifrost_data/$(sim_name)/$(snap)/mesh",
-    atmos_file = "/mn/stornext/d9/data/harshm/bifrost_data/$(sim_name)/$(snap)/atm3d",
-
-    out_h5     = "IO/intensity_bifrost_TIAGO_MODE_$(sim_name)_$(snap).h5",
-    out_prefix = "diag_bifrost",
-
-    x_pick     = 33,
-    y_pick     = 21,
-
-    voigt = (
-        a_min = 1f-4,
-        a_max = 1f1,
-        a_n   = 20000,
-        v_min = 0f0,
-        v_max = 5f2,
-        v_n   = 2500
+function config_tiago(pred)
+    return (
+        mode = :tiago,
+        name = pred.name,
+        sim_name = pred.sim_name,
+        snap = pred.snap,
+        atoms = atom_configs(pred),
+        mesh_file = pred.mesh_file,
+        atmos_file = pred.atmos_file,
+        out_h5 = "IO/intensity_bifrost_TIAGO_MODE_$(pred.name).h5",
+        out_prefix = "diag_bifrost",
+        x_pick = 33,
+        y_pick = 21,
+        voigt = base_voigt_config()
     )
-)
+end
 
 # ============================================================
 # USER CHOOSES WHICH ONE TO RUN
 # ============================================================
 
-const CFG = CONFIG_ML
-# const CFG = CONFIG_BIFROST
-# const CFG = CONFIG_TIAGO
+function build_config(pred; mode=RUN_MODE)
+    if mode == :ml
+        return config_ml(pred)
+    elseif mode == :bifrost
+        return config_bifrost(pred)
+    elseif mode == :tiago
+        return config_tiago(pred)
+    else
+        error("Unknown mode: $(mode)")
+    end
+end
 
 
 function split_atoms(dep_coeff, atoms)
@@ -393,11 +402,12 @@ end
 # -----------------------------
 # Main pipeline
 # -----------------------------
-function main()
-
-    cfg = CFG
+function main(cfg)
 
     println("Mode        : ", cfg.mode)
+    println("Dataset     : ", cfg.name)
+    println("Simulation  : ", cfg.sim_name)
+    println("Snapshot    : ", cfg.snap)
     println("Threads     : ", Threads.nthreads())
 
     println("Reading atmosphere...")
@@ -511,4 +521,19 @@ function main()
 end
 
 # Run
-main()
+function run_all()
+    pred_data = load_multi3d_pred_data()
+    isempty(pred_data) && error("config.py MULTI3D_PRED_DATA is empty")
+
+    for (idx, pred) in enumerate(pred_data)
+        println("")
+        println("============================================================")
+        println("Forward synthesis $(idx)/$(length(pred_data)): $(pred.name)")
+        println("============================================================")
+
+        cfg = build_config(pred)
+        main(cfg)
+    end
+end
+
+run_all()
