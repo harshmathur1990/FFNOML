@@ -62,6 +62,7 @@ class WittEOSCppTests(unittest.TestCase):
             np.ctypeslib.ndpointer(dtype=np.float32, ndim=1, flags="C_CONTIGUOUS"),
             ctypes.c_size_t,
             ctypes.c_int,
+            ctypes.c_int,
         ]
         cls.lib.witt_ne_from_rho.restype = ctypes.c_int
 
@@ -87,6 +88,7 @@ class WittEOSCppTests(unittest.TestCase):
             ne,
             temp.size,
             threads,
+            0,
         )
         self.assertEqual(status, 0)
         return ne.astype(np.float64)

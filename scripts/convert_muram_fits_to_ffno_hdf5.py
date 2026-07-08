@@ -269,6 +269,7 @@ def _load_witt_cpp_library(args) -> ctypes.CDLL:
         np.ctypeslib.ndpointer(dtype=np.float32, ndim=1, flags="C_CONTIGUOUS"),
         ctypes.c_size_t,
         ctypes.c_int,
+        ctypes.c_int,
     ]
     lib.witt_ne_from_rho.restype = ctypes.c_int
     return lib
@@ -315,6 +316,7 @@ def _electron_density_from_witt_rho_cpp(args, temp: np.ndarray, rho: np.ndarray)
         ne_flat,
         temp_flat.size,
         threads,
+        int(args.show_eos_progress),
     )
     if status != 0:
         raise RuntimeError("C++ Witt EOS calculation failed")

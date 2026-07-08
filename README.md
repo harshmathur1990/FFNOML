@@ -350,8 +350,9 @@ computed from temperature and gas density using the Witt EOS. The converter
 finds the repo-local `scripts/witt.py` and `scripts/pf_Kurucz.input`
 automatically; use `--witt-path` only when those files live somewhere else. By
 default, this uses the C++ full-atmosphere EOS backend and all visible CPU
-threads; use `--eos-backend python` only for debugging or if no C++ compiler is
-available.
+threads; `--show-eos-progress` prints a C++-side progress line without Python
+callbacks. Use `--eos-backend python` only for debugging or if no C++ compiler
+is available.
 The optional `--multi3d-atmos-out` and `--multi3d-mesh-out` outputs write a
 plain Multi3D atmosphere for reference calculations. They contain temperature,
 electron density, gas density, and velocity only, with no magnetic field or

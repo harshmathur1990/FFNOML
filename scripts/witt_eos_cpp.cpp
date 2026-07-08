@@ -1,9 +1,12 @@
 #include <algorithm>
+#include <atomic>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <iostream>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -394,33 +397,87 @@ extern "C" int witt_ne_from_rho(
     const double* rho_kg_m3,
     float* ne_m3,
     std::size_t n,
-    int threads
+    int threads,
+    int show_progress
 ) {
     try {
         WittEOS eos(pf_path);
+        if (n == 0) return 0;
+
         unsigned int nthreads = threads > 0
             ? static_cast<unsigned int>(threads)
             : std::thread::hardware_concurrency();
         if (nthreads == 0) nthreads = 1;
         if (n < nthreads) nthreads = static_cast<unsigned int>(std::max<std::size_t>(n, 1));
 
+        std::atomic<std::size_t> completed{0};
+        std::atomic<bool> done{false};
+
+        std::thread progress_thread;
+        if (show_progress) {
+            progress_thread = std::thread([&]() {
+                using clock = std::chrono::steady_clock;
+                const auto start_time = clock::now();
+                while (!done.load(std::memory_order_relaxed)) {
+                    const std::size_t current = completed.load(std::memory_order_relaxed);
+                    const double fraction = static_cast<double>(current) / static_cast<double>(n);
+                    const auto elapsed = std::chrono::duration<double>(clock::now() - start_time).count();
+                    const double rate = elapsed > 0.0 ? static_cast<double>(current) / elapsed : 0.0;
+                    std::cerr << "\rwitt-rho ne: "
+                              << std::min(100.0, fraction * 100.0) << "% "
+                              << current << "/" << n
+                              << " [" << static_cast<std::uint64_t>(rate) << " cell/s]"
+                              << std::flush;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                }
+                const auto elapsed = std::chrono::duration<double>(clock::now() - start_time).count();
+                const double rate = elapsed > 0.0 ? static_cast<double>(n) / elapsed : 0.0;
+                std::cerr << "\rwitt-rho ne: 100% "
+                          << n << "/" << n
+                          << " [" << static_cast<std::uint64_t>(rate) << " cell/s]"
+                          << std::endl;
+            });
+        }
+
         auto worker = [&](std::size_t begin, std::size_t end) {
+            std::size_t since_update = 0;
             for (std::size_t i = begin; i < end; ++i) {
                 ne_m3[i] = static_cast<float>(eos.ne_from_rho_m3(temp[i], rho_kg_m3[i]));
+                ++since_update;
+                if (show_progress && since_update >= 1024) {
+                    completed.fetch_add(since_update, std::memory_order_relaxed);
+                    since_update = 0;
+                }
+            }
+            if (show_progress && since_update > 0) {
+                completed.fetch_add(since_update, std::memory_order_relaxed);
             }
         };
 
-        std::vector<std::thread> pool;
-        pool.reserve(nthreads);
-        const std::size_t block = (n + nthreads - 1) / nthreads;
-        for (unsigned int t = 0; t < nthreads; ++t) {
-            const std::size_t begin = std::min<std::size_t>(t * block, n);
-            const std::size_t end = std::min<std::size_t>(begin + block, n);
-            if (begin >= end) break;
-            pool.emplace_back(worker, begin, end);
-        }
-        for (auto& thread : pool) {
-            thread.join();
+        try {
+            std::vector<std::thread> pool;
+            pool.reserve(nthreads);
+            const std::size_t block = (n + nthreads - 1) / nthreads;
+            for (unsigned int t = 0; t < nthreads; ++t) {
+                const std::size_t begin = std::min<std::size_t>(t * block, n);
+                const std::size_t end = std::min<std::size_t>(begin + block, n);
+                if (begin >= end) break;
+                pool.emplace_back(worker, begin, end);
+            }
+            for (auto& thread : pool) {
+                thread.join();
+            }
+            if (show_progress) {
+                completed.store(n, std::memory_order_relaxed);
+                done.store(true, std::memory_order_relaxed);
+                progress_thread.join();
+            }
+        } catch (...) {
+            if (show_progress) {
+                done.store(true, std::memory_order_relaxed);
+                if (progress_thread.joinable()) progress_thread.join();
+            }
+            throw;
         }
         return 0;
     } catch (...) {
