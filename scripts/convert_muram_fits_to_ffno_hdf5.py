@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import multiprocessing as mp
 import os
 import sys
 from pathlib import Path
@@ -28,6 +29,7 @@ import numpy as np
 
 K_BOLTZMANN = 1.380649e-23
 K_BOLTZMANN_CGS = 1.3806488e-16
+_WITT_EOS = None
 
 
 def _import_h5py():
@@ -198,28 +200,82 @@ def _import_witt(witt_path: str | None):
     return witt()
 
 
-def _electron_density_from_witt_rho(args, temp: np.ndarray, rho: np.ndarray) -> np.ndarray:
-    eos = _import_witt(args.witt_path)
-    ne = np.empty_like(temp, dtype=np.float32)
-    rho_cgs = np.asarray(rho, dtype=np.float64) * 1e-3
+def _init_witt_worker(witt_path: str | None):
+    global _WITT_EOS
+    _WITT_EOS = _import_witt(witt_path)
 
-    iterator = np.ndindex(temp.shape)
+
+def _witt_ne_chunk(task):
+    start, temp_chunk, rho_chunk = task
+    if _WITT_EOS is None:
+        raise RuntimeError("Witt EOS worker was not initialized")
+
+    ne_chunk = np.empty(temp_chunk.shape, dtype=np.float32)
+    for i, (t_cell, rho_cell) in enumerate(zip(temp_chunk, rho_chunk)):
+        t_cell = float(t_cell)
+        rho_cell = float(rho_cell)
+        pgas_cgs = _WITT_EOS.pg_from_rho(t_cell, rho_cell)
+        pe_cgs = _WITT_EOS.pe_from_pg(t_cell, pgas_cgs)
+        ne_chunk[i] = np.float32(pe_cgs / (K_BOLTZMANN_CGS * t_cell) * 1e6)
+
+    return start, ne_chunk
+
+
+def _iter_witt_chunks(temp_flat, rho_flat, chunk_size):
+    for start in range(0, temp_flat.size, chunk_size):
+        end = min(start + chunk_size, temp_flat.size)
+        yield start, temp_flat[start:end], rho_flat[start:end]
+
+
+def _electron_density_from_witt_rho(args, temp: np.ndarray, rho: np.ndarray) -> np.ndarray:
+    temp_flat = np.asarray(temp, dtype=np.float64).reshape(-1)
+    rho_flat = (np.asarray(rho, dtype=np.float64).reshape(-1) * 1e-3)
+    ne_flat = np.empty(temp_flat.shape, dtype=np.float32)
+
+    worker_count = args.eos_workers
+    if worker_count is None:
+        worker_count = os.cpu_count() or 1
+    worker_count = max(1, int(worker_count))
+
+    chunk_size = max(1, int(args.eos_chunk_size))
+    chunks = _iter_witt_chunks(temp_flat, rho_flat, chunk_size)
+
+    progress = None
     if args.show_eos_progress:
         try:
             from tqdm import tqdm
 
-            iterator = tqdm(iterator, total=temp.size, desc="witt-rho ne")
+            progress = tqdm(total=temp_flat.size, desc="witt-rho ne")
         except ImportError:
-            pass
+            progress = None
 
-    for idx in iterator:
-        t_cell = float(temp[idx])
-        rho_cell = float(rho_cgs[idx])
-        pgas_cgs = eos.pg_from_rho(t_cell, rho_cell)
-        pe_cgs = eos.pe_from_pg(t_cell, pgas_cgs)
-        ne[idx] = np.float32(pe_cgs / (K_BOLTZMANN_CGS * t_cell) * 1e6)
+    try:
+        if worker_count == 1:
+            _init_witt_worker(args.witt_path)
+            for start, ne_chunk in map(_witt_ne_chunk, chunks):
+                ne_flat[start:start + ne_chunk.size] = ne_chunk
+                if progress is not None:
+                    progress.update(ne_chunk.size)
+        else:
+            context = mp.get_context(args.eos_start_method)
+            with context.Pool(
+                processes=worker_count,
+                initializer=_init_witt_worker,
+                initargs=(args.witt_path,),
+            ) as pool:
+                for start, ne_chunk in pool.imap_unordered(
+                    _witt_ne_chunk,
+                    chunks,
+                    chunksize=max(1, int(args.eos_pool_chunksize)),
+                ):
+                    ne_flat[start:start + ne_chunk.size] = ne_chunk
+                    if progress is not None:
+                        progress.update(ne_chunk.size)
+    finally:
+        if progress is not None:
+            progress.close()
 
-    return ne
+    return ne_flat.reshape(temp.shape)
 
 
 def _read_electron_density(
@@ -613,6 +669,33 @@ def parse_args() -> argparse.Namespace:
         "--show-eos-progress",
         action="store_true",
         help="Show a tqdm progress bar while computing ne in witt-rho mode.",
+    )
+    parser.add_argument(
+        "--eos-workers",
+        type=int,
+        default=None,
+        help=(
+            "Parallel worker count for witt-rho electron-density calculation. "
+            "Default uses os.cpu_count(). Use 1 for serial execution."
+        ),
+    )
+    parser.add_argument(
+        "--eos-chunk-size",
+        type=int,
+        default=4096,
+        help="Number of cells per Witt EOS worker task.",
+    )
+    parser.add_argument(
+        "--eos-pool-chunksize",
+        type=int,
+        default=1,
+        help="Number of EOS tasks batched per multiprocessing dispatch.",
+    )
+    parser.add_argument(
+        "--eos-start-method",
+        choices=mp.get_all_start_methods(),
+        default="fork" if "fork" in mp.get_all_start_methods() else mp.get_start_method(),
+        help="Multiprocessing start method for Witt EOS workers.",
     )
     parser.add_argument("--electron-pressure-fraction", type=float, default=1.0)
     parser.add_argument("--constant-electron-density", type=float, default=None)
