@@ -17,9 +17,12 @@ Input channels are:
 from __future__ import annotations
 
 import argparse
+import ctypes
 import math
 import multiprocessing as mp
 import os
+import platform
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -172,7 +175,7 @@ def _read_linear_quantity(
     return np.transpose(arr, (1, 2, 0)).astype(np.float32, copy=False)
 
 
-def _import_witt(witt_path: str | None):
+def _witt_candidate_paths(witt_path: str | None) -> list[Path]:
     candidate_paths = []
     if witt_path:
         candidate_paths.append(Path(witt_path))
@@ -183,11 +186,31 @@ def _import_witt(witt_path: str | None):
             Path.cwd(),
         ]
     )
+    return candidate_paths
 
-    for candidate_path in candidate_paths:
+
+def _find_witt_path(witt_path: str | None) -> Path | None:
+    for candidate_path in _witt_candidate_paths(witt_path):
         if (candidate_path / "witt.py").is_file():
-            sys.path.insert(0, os.fspath(candidate_path))
-            break
+            return candidate_path
+    return None
+
+
+def _find_pf_path(witt_path: str | None) -> Path:
+    for candidate_path in _witt_candidate_paths(witt_path):
+        pf_path = candidate_path / "pf_Kurucz.input"
+        if pf_path.is_file():
+            return pf_path
+    raise FileNotFoundError(
+        "Could not find pf_Kurucz.input next to the converter, in ./scripts, "
+        "or in the current directory. Pass --witt-path if it lives elsewhere."
+    )
+
+
+def _import_witt(witt_path: str | None):
+    found_path = _find_witt_path(witt_path)
+    if found_path is not None:
+        sys.path.insert(0, os.fspath(found_path))
 
     try:
         from witt import witt
@@ -198,6 +221,57 @@ def _import_witt(witt_path: str | None):
             "Pass --witt-path if the files live somewhere else."
         ) from exc
     return witt()
+
+
+def _shared_library_suffix() -> str:
+    if platform.system() == "Darwin":
+        return ".dylib"
+    if platform.system() == "Windows":
+        return ".dll"
+    return ".so"
+
+
+def _compile_witt_cpp_library(source_path: Path, library_path: Path) -> None:
+    compiler = os.environ.get("CXX", "c++")
+    command = [
+        compiler,
+        "-O3",
+        "-std=c++17",
+        "-shared",
+        "-fPIC",
+        "-pthread",
+        os.fspath(source_path),
+        "-o",
+        os.fspath(library_path),
+    ]
+    subprocess.run(command, check=True)
+
+
+def _load_witt_cpp_library(args) -> ctypes.CDLL:
+    source_path = Path(__file__).resolve().parent / "witt_eos_cpp.cpp"
+    library_dir = source_path.parent / "__pycache__"
+    library_path = library_dir / f"libwitt_eos_cpp{_shared_library_suffix()}"
+    if not source_path.is_file():
+        raise FileNotFoundError(source_path)
+
+    needs_build = not library_path.is_file()
+    if not needs_build:
+        needs_build = source_path.stat().st_mtime > library_path.stat().st_mtime
+    if needs_build:
+        library_dir.mkdir(parents=True, exist_ok=True)
+        _compile_witt_cpp_library(source_path, library_path)
+
+    lib = ctypes.CDLL(os.fspath(library_path))
+    lib.witt_ne_from_rho.argtypes = [
+        ctypes.c_char_p,
+        np.ctypeslib.ndpointer(dtype=np.float64, ndim=1, flags="C_CONTIGUOUS"),
+        np.ctypeslib.ndpointer(dtype=np.float64, ndim=1, flags="C_CONTIGUOUS"),
+        np.ctypeslib.ndpointer(dtype=np.float32, ndim=1, flags="C_CONTIGUOUS"),
+        ctypes.c_size_t,
+        ctypes.c_int,
+    ]
+    lib.witt_ne_from_rho.restype = ctypes.c_int
+    return lib
 
 
 def _init_witt_worker(witt_path: str | None):
@@ -227,7 +301,27 @@ def _iter_witt_chunks(temp_flat, rho_flat, chunk_size):
         yield start, temp_flat[start:end], rho_flat[start:end]
 
 
-def _electron_density_from_witt_rho(args, temp: np.ndarray, rho: np.ndarray) -> np.ndarray:
+def _electron_density_from_witt_rho_cpp(args, temp: np.ndarray, rho: np.ndarray) -> np.ndarray:
+    lib = _load_witt_cpp_library(args)
+    pf_path = _find_pf_path(args.witt_path)
+    temp_flat = np.ascontiguousarray(np.asarray(temp, dtype=np.float64).reshape(-1))
+    rho_flat = np.ascontiguousarray(np.asarray(rho, dtype=np.float64).reshape(-1))
+    ne_flat = np.empty(temp_flat.shape, dtype=np.float32)
+    threads = 0 if args.eos_workers is None else int(args.eos_workers)
+    status = lib.witt_ne_from_rho(
+        os.fsencode(pf_path),
+        temp_flat,
+        rho_flat,
+        ne_flat,
+        temp_flat.size,
+        threads,
+    )
+    if status != 0:
+        raise RuntimeError("C++ Witt EOS calculation failed")
+    return ne_flat.reshape(temp.shape)
+
+
+def _electron_density_from_witt_rho_python(args, temp: np.ndarray, rho: np.ndarray) -> np.ndarray:
     temp_flat = np.asarray(temp, dtype=np.float64).reshape(-1)
     rho_flat = (np.asarray(rho, dtype=np.float64).reshape(-1) * 1e-3)
     ne_flat = np.empty(temp_flat.shape, dtype=np.float32)
@@ -276,6 +370,18 @@ def _electron_density_from_witt_rho(args, temp: np.ndarray, rho: np.ndarray) -> 
             progress.close()
 
     return ne_flat.reshape(temp.shape)
+
+
+def _electron_density_from_witt_rho(args, temp: np.ndarray, rho: np.ndarray) -> np.ndarray:
+    if args.eos_backend in ("auto", "cpp"):
+        try:
+            return _electron_density_from_witt_rho_cpp(args, temp, rho)
+        except Exception as exc:
+            if args.eos_backend == "cpp":
+                raise
+            print(f"WARNING: C++ Witt EOS backend unavailable ({exc}); falling back to Python.")
+
+    return _electron_density_from_witt_rho_python(args, temp, rho)
 
 
 def _read_electron_density(
@@ -668,34 +774,44 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--show-eos-progress",
         action="store_true",
-        help="Show a tqdm progress bar while computing ne in witt-rho mode.",
+        help="Show a tqdm progress bar for the Python Witt EOS backend.",
+    )
+    parser.add_argument(
+        "--eos-backend",
+        choices=["auto", "cpp", "python"],
+        default="auto",
+        help=(
+            "Backend for witt-rho electron-density calculation. 'auto' uses "
+            "the C++ full-atmosphere backend when it can be compiled and "
+            "falls back to Python."
+        ),
     )
     parser.add_argument(
         "--eos-workers",
         type=int,
         default=None,
         help=(
-            "Parallel worker count for witt-rho electron-density calculation. "
-            "Default uses os.cpu_count(). Use 1 for serial execution."
+            "Worker/thread count for witt-rho electron-density calculation. "
+            "Default uses all visible CPUs. Use 1 for serial execution."
         ),
     )
     parser.add_argument(
         "--eos-chunk-size",
         type=int,
         default=4096,
-        help="Number of cells per Witt EOS worker task.",
+        help="Number of cells per worker task for the Python Witt EOS backend.",
     )
     parser.add_argument(
         "--eos-pool-chunksize",
         type=int,
         default=1,
-        help="Number of EOS tasks batched per multiprocessing dispatch.",
+        help="Number of EOS tasks batched per Python multiprocessing dispatch.",
     )
     parser.add_argument(
         "--eos-start-method",
         choices=mp.get_all_start_methods(),
         default="fork" if "fork" in mp.get_all_start_methods() else mp.get_start_method(),
-        help="Multiprocessing start method for Witt EOS workers.",
+        help="Multiprocessing start method for Python Witt EOS workers.",
     )
     parser.add_argument("--electron-pressure-fraction", type=float, default=1.0)
     parser.add_argument("--constant-electron-density", type=float, default=None)
