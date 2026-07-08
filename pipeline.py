@@ -32,6 +32,14 @@ def parse_args():
     parser.add_argument("--predict", action="store_true")
     parser.add_argument("--fsdppredict", action="store_true")
     parser.add_argument("--buildforpredict", action="store_true")
+    parser.add_argument(
+        "--predname",
+        default=None,
+        help=(
+            "Limit prediction/buildforpredict to one NAME. For --predict and "
+            "--fsdppredict, this can also name an already-built solving HDF5."
+        ),
+    )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--bestpath", action="store_true")
     parser.add_argument("--expand", action="store_true")
@@ -264,8 +272,30 @@ def init_distributed_prediction():
     init_distributed_runtime()
 
 
-def build_prediction_solving_sets():
-    for PRED_ATMOS in MULTI3D_PRED_DATA:
+def select_prediction_entries(prediction_name=None, *, allow_prebuilt=False):
+    if prediction_name is None:
+        return MULTI3D_PRED_DATA
+
+    selected = [
+        pred_atmos
+        for pred_atmos in MULTI3D_PRED_DATA
+        if pred_atmos["NAME"] == prediction_name
+    ]
+    if selected:
+        return selected
+
+    if allow_prebuilt:
+        return [{"NAME": prediction_name}]
+
+    configured_names = ", ".join(pred_atmos["NAME"] for pred_atmos in MULTI3D_PRED_DATA)
+    raise KeyError(
+        f"No configured prediction atmosphere named {prediction_name!r}. "
+        f"Configured names: {configured_names}"
+    )
+
+
+def build_prediction_solving_sets(prediction_name=None):
+    for PRED_ATMOS in select_prediction_entries(prediction_name):
 
         PREDICT_FILE = MODEL_DIR + f"3D_sim_predict_{PRED_ATMOS['NAME']}.hdf5"
 
@@ -292,13 +322,16 @@ def build_prediction_solving_sets():
         )
 
 
-def run_predictions(*, distributed_full=False):
+def run_predictions(*, distributed_full=False, prediction_name=None):
     ensure_checkpoint_exists()
 
     if distributed_full:
         init_distributed_prediction()
 
-    for PRED_ATMOS in MULTI3D_PRED_DATA:
+    for PRED_ATMOS in select_prediction_entries(
+        prediction_name,
+        allow_prebuilt=True,
+    ):
 
         PREDICT_FILE = MODEL_DIR + f"3D_sim_predict_{PRED_ATMOS['NAME']}.hdf5"
 
@@ -614,7 +647,7 @@ if __name__ == "__main__":
             build_datasets()
 
         elif args.buildforpredict:
-            build_prediction_solving_sets()
+            build_prediction_solving_sets(prediction_name=args.predname)
 
         elif args.train:
             validate_runtime_device()
@@ -626,11 +659,11 @@ if __name__ == "__main__":
 
         elif args.predict:
             validate_runtime_device()
-            run_predictions()
+            run_predictions(prediction_name=args.predname)
 
         elif args.fsdppredict:
             validate_runtime_device()
-            run_predictions(distributed_full=True)
+            run_predictions(distributed_full=True, prediction_name=args.predname)
 
         elif args.inspectfreqgate:
             validate_runtime_device()

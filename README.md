@@ -324,6 +324,45 @@ The intermediate solving input written by `build_solving_set_ffno` contains:
 - `dx`: `[1]`
 - `dy`: `[1]`
 
+### MURaM FITS Prediction Inputs
+
+For MURaM atmospheres stored as FITS cubes, generate the same solving-set HDF5
+directly with:
+
+```bash
+python scripts/convert_muram_fits_to_ffno_hdf5.py \
+  --folder /mn/stornext/d9/data/harshm/bifrost_data/ar098192/atmos \
+  --simulation-code MURaM \
+  --simulation-name ar098192 \
+  --snap 270000 \
+  --output training_FFNO3D_zscale_expand/3D_sim_predict_ar098192_270000.hdf5 \
+  --electron-density-mode witt-rho \
+  --show-eos-progress \
+  --multi3d-atmos-out /mn/stornext/d9/data/harshm/bifrost_data/ar098192/270000/atm3d \
+  --multi3d-mesh-out /mn/stornext/d9/data/harshm/bifrost_data/ar098192/270000/mesh
+```
+
+The converter reads `lgtg`, `lgr`, `ux`, `uy`, and `uz` FITS files, reverses the
+selected height range so the first depth index is the top of the atmosphere, and
+writes `inputs`, `z_scale`, `dx`, and `dy` in the layout used by
+`--fsdppredict`. With `--electron-density-mode witt-rho`, electron density is
+computed from temperature and gas density using the Witt EOS. The converter
+finds the repo-local `scripts/witt.py` and `scripts/pf_Kurucz.input`
+automatically; use `--witt-path` only when those files live somewhere else.
+The optional `--multi3d-atmos-out` and `--multi3d-mesh-out` outputs write a
+plain Multi3D atmosphere for reference calculations. They contain temperature,
+electron density, gas density, and velocity only, with no magnetic field or
+hydrogen populations.
+
+To run distributed prediction on only this generated file:
+
+```bash
+torchrun --nproc_per_node=4 pipeline.py --fsdppredict --predname ar098192_270000
+```
+
+The prediction path will look for
+`MODEL_DIR + "3D_sim_predict_ar098192_270000.hdf5"`.
+
 ### Prediction Output Layout
 
 Prediction outputs are written to:
