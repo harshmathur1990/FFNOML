@@ -219,7 +219,7 @@ def test_model():
     if MULTI_GPU:
         init_distributed_runtime()
 
-    diagnostic_path = MODEL_DIR + f"val_diagnostics_{MODEL}.json"
+    diagnostic_path = MODEL_DIR + f"val_diagnostics_{MODEL}_{active_atom_names_tag()}.json"
 
     ffno_test_model(
         model=MODEL,
@@ -294,6 +294,18 @@ def select_prediction_entries(prediction_name=None, *, allow_prebuilt=False):
     )
 
 
+def active_atom_names_tag():
+    return "_".join(ACTIVE_ATOMS)
+
+
+def prediction_output_file(prediction_name):
+    return MODEL_DIR + f"output_3D_sim_s5_{prediction_name}_{MODEL}_{active_atom_names_tag()}.hdf5"
+
+
+def prediction_diagnostic_file(prediction_name):
+    return MODEL_DIR + f"diagnostics_3D_sim_s5_{prediction_name}_{MODEL}_{active_atom_names_tag()}.npz"
+
+
 def build_prediction_solving_sets(prediction_name=None):
     for PRED_ATMOS in select_prediction_entries(prediction_name):
 
@@ -335,9 +347,9 @@ def run_predictions(*, distributed_full=False, prediction_name=None):
 
         PREDICT_FILE = MODEL_DIR + f"3D_sim_predict_{PRED_ATMOS['NAME']}.hdf5"
 
-        OUTPUT_FILE  = MODEL_DIR + f"output_3D_sim_s5_{PRED_ATMOS['NAME']}_{MODEL}.hdf5"
+        OUTPUT_FILE = prediction_output_file(PRED_ATMOS["NAME"])
 
-        DIAGNOSTIC_PATH = MODEL_DIR + f"diagnostics_3D_sim_s5_{PRED_ATMOS['NAME']}_{MODEL}.npz"
+        DIAGNOSTIC_PATH = prediction_diagnostic_file(PRED_ATMOS["NAME"])
 
         if not os.path.exists(OUTPUT_FILE):
 

@@ -248,7 +248,7 @@ What it does:
 
 Current output path:
 
-- `MODEL_DIR + "val_diagnostics_<MODEL>.json"`
+- `MODEL_DIR + "val_diagnostics_<MODEL>_<ACTIVE_ATOMS>.json"`
 
 The JSON summary includes:
 
@@ -371,7 +371,7 @@ The prediction path will look for
 
 Prediction outputs are written to:
 
-- `MODEL_DIR + "output_3D_sim_s5_<NAME>_<MODEL>.hdf5"`
+- `MODEL_DIR + "output_3D_sim_s5_<NAME>_<MODEL>_<ACTIVE_ATOMS>.hdf5"`
 
 The file contains:
 
@@ -386,7 +386,7 @@ Current attributes include:
 
 Prediction also writes a diagnostics path per atmosphere:
 
-- `MODEL_DIR + "diagnostics_3D_sim_s5_<NAME>_<MODEL>.npz"`
+- `MODEL_DIR + "diagnostics_3D_sim_s5_<NAME>_<MODEL>_<ACTIVE_ATOMS>.npz"`
 
 Note: the diagnostics path is passed into inference, but the current `ffno_predict_populations()` implementation only writes the HDF5 prediction output.
 
