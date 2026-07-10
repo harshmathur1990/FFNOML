@@ -55,6 +55,7 @@ sys.modules.setdefault(
 import config
 
 model_dir = config.MODEL_DIR.rstrip("/")
+active_atoms_tag = "_".join(config.ACTIVE_ATOMS)
 for item in config.MULTI3D_PRED_DATA:
     print("\\t".join([
         item["NAME"],
@@ -64,6 +65,7 @@ for item in config.MULTI3D_PRED_DATA:
         item["MULTI3D_ATMOS"],
         item.get("TRAIN_DIR", model_dir).rstrip("/"),
         config.MODEL,
+        active_atoms_tag,
     ]))
 """
 
@@ -75,8 +77,8 @@ for item in config.MULTI3D_PRED_DATA:
     for line in split(chomp(output), "\n")
         isempty(line) && continue
         fields = split(line, "\t")
-        length(fields) == 7 || error("Unexpected config.py output: $(line)")
-        name, sim_name, snap, mesh_file, atmos_file, train_dir, model = fields
+        length(fields) == 8 || error("Unexpected config.py output: $(line)")
+        name, sim_name, snap, mesh_file, atmos_file, train_dir, model, active_atoms_tag = fields
         push!(
             pred_data,
             (
@@ -87,6 +89,7 @@ for item in config.MULTI3D_PRED_DATA:
                 atmos_file = atmos_file,
                 train_dir = train_dir,
                 model = model,
+                active_atoms_tag = active_atoms_tag,
             ),
         )
     end
@@ -142,13 +145,13 @@ function config_ml(pred)
         model = pred.model,
         pred_h5 = joinpath(
             pred.train_dir,
-            "output_3D_sim_s5_$(pred.name)_$(pred.model).hdf5"
+            "output_3D_sim_s5_$(pred.name)_$(pred.model)_$(pred.active_atoms_tag).hdf5"
         ),
         pred_key = "departure_coefficients",
         plot_diagnostics = false,
         out_h5 = joinpath(
             pred.train_dir,
-            "intensity_ml_$(pred.name)_$(pred.model).h5"
+            "intensity_ml_$(pred.name)_$(pred.model)_$(pred.active_atoms_tag).h5"
         ),
         out_prefix = joinpath(pred.train_dir, "diag_ml"),
         x_pick = 33,
@@ -169,7 +172,7 @@ function config_bifrost(pred)
         atoms = atom_configs(pred),
         mesh_file = pred.mesh_file,
         atmos_file = pred.atmos_file,
-        out_h5 = "IO/intensity_bifrost_$(pred.name).h5",
+        out_h5 = "IO/intensity_bifrost_$(pred.name)_$(pred.active_atoms_tag).h5",
         out_prefix = "diag_bifrost",
         x_pick = 33,
         y_pick = 21,
@@ -186,7 +189,7 @@ function config_tiago(pred)
         atoms = atom_configs(pred),
         mesh_file = pred.mesh_file,
         atmos_file = pred.atmos_file,
-        out_h5 = "IO/intensity_bifrost_TIAGO_MODE_$(pred.name).h5",
+        out_h5 = "IO/intensity_bifrost_TIAGO_MODE_$(pred.name)_$(pred.active_atoms_tag).h5",
         out_prefix = "diag_bifrost",
         x_pick = 33,
         y_pick = 21,
