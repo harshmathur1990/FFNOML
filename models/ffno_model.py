@@ -374,19 +374,21 @@ class FFNOBlock3dBalanced(nn.Module):
         dropout=0.05,
         spec_dropout=0.0,
         vertical_dropout=0.0,
+        hidden_spectral=128,
+        hidden_vertical=128,
     ):
         super().__init__()
 
         self.spec = SpectralConv2dFull(
             width,
             width,
-            hidden=128,
+            hidden=hidden_spectral,
             post_mix_expansion=2,
         )
 
         self.vertical = BalancedVerticalPhysicsStack(
             width,
-            hidden=32,
+            hidden=hidden_vertical,
             dropout=dropout,
             chunk=4,
         )
@@ -537,6 +539,8 @@ class FFNO3D(nn.Module):
         spec_dropout_layers=None,
         vertical_dropout_layers=None,
         checkpoint_blocks=True,
+        hidden_spectral=128,
+        hidden_vertical=128,
     ):
         super().__init__()
 
@@ -558,6 +562,8 @@ class FFNO3D(nn.Module):
                 vertical_dropout=_resolve_layer_dropout(
                     vertical_dropout, vertical_dropout_layers, layer_idx
                 ),
+                hidden_spectral=hidden_spectral,
+                hidden_vertical=hidden_vertical
             )
             for layer_idx in range(n_layers)
         ])
