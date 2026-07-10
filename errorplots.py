@@ -217,7 +217,11 @@ def build_truth_paths(dataset):
 
 
 def build_prediction_file(dataset):
-    return os.path.join(MODEL_DIR, f"output_3D_sim_s5_{dataset['NAME']}_{MODEL}.hdf5")
+    active_atom_names = "_".join(ACTIVE_ATOMS)
+    return os.path.join(
+        MODEL_DIR,
+        f"output_3D_sim_s5_{dataset['NAME']}_{MODEL}_{active_atom_names}.hdf5",
+    )
 
 
 def build_plot_jobs():

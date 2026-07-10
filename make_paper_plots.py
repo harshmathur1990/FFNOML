@@ -883,7 +883,9 @@ def make_line_core_intensity_compare_plots():
     if image is not None:
         fig.colorbar(image, ax=axs, label="Line-core intensity", shrink=0.8)
 
-    output_dir = Path("figures")
+    fnoml_dir = Path(PRED_DIR) / "FFNOML"
+    ml_intensity_dir = fnoml_dir / MODEL_DIR
+    output_dir = ml_intensity_dir
     output_dir.mkdir(parents=True, exist_ok=True)
     fig.savefig(
         output_dir / "line_core_intensity_comparison.pdf",
@@ -1014,7 +1016,9 @@ def make_zero_shot_super_resolution_plots():
     if image is not None:
         fig.colorbar(image, ax=axs, label="Line-core intensity", shrink=0.8)
 
-    output_dir = Path("figures")
+    fnoml_dir = Path(PRED_DIR) / "FFNOML"
+    ml_intensity_dir = fnoml_dir / MODEL_DIR
+    output_dir = ml_intensity_dir
     output_dir.mkdir(parents=True, exist_ok=True)
     fig.savefig(
         output_dir / "zero_shot_super_resolution.pdf",
