@@ -18,11 +18,6 @@ def active_atom_names_tag():
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--output-dir",
-        default=MODEL_DIR,
-        help="Directory where plots are written.",
-    )
-    parser.add_argument(
         "--show",
         action="store_true",
         help="Display figures interactively in addition to saving them.",
@@ -366,7 +361,7 @@ def main():
     args = parse_args()
 
     for dataset in build_plot_jobs():
-        make_snapshot_plot(dataset, output_dir=args.output_dir, show=args.show)
+        make_snapshot_plot(dataset, output_dir=MODEL_DIR, show=args.show)
 
 
 if __name__ == "__main__":

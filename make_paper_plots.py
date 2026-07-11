@@ -25,6 +25,12 @@ def validate_paper_plot_atom():
         )
 
 
+def plot_output_dir():
+    output_dir = Path(MODEL_DIR)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return output_dir
+
+
 def _read_mesh_dx_dy_megameters(mesh_path):
     mesh = np.fromfile(mesh_path, sep=" ", dtype=np.float32)
     offset = 0
@@ -790,7 +796,7 @@ def make_branch_importance_plots():
 
     plt.subplots_adjust(left=0.15, right=0.99, top=0.85, bottom=0.15)
     plt.savefig(
-        f"figures/branch_importance_{active_atom_names_tag()}.pdf",
+        plot_output_dir() / f"branch_importance_{active_atom_names_tag()}.pdf",
         dpi=300,
         format="pdf",
     )
@@ -905,12 +911,8 @@ def make_line_core_intensity_compare_plots():
     if image is not None:
         fig.colorbar(image, ax=axs, label="Line-core intensity", shrink=0.8)
 
-    fnoml_dir = Path(PRED_DIR) / "FFNOML"
-    ml_intensity_dir = fnoml_dir / MODEL_DIR
-    output_dir = ml_intensity_dir
-    output_dir.mkdir(parents=True, exist_ok=True)
     fig.savefig(
-        output_dir / f"line_core_intensity_comparison_{paper_plot_tag()}.pdf",
+        plot_output_dir() / f"line_core_intensity_comparison_{paper_plot_tag()}.pdf",
         dpi=300,
         format="pdf",
     )
@@ -1039,12 +1041,8 @@ def make_zero_shot_super_resolution_plots():
     if image is not None:
         fig.colorbar(image, ax=axs, label="Line-core intensity", shrink=0.8)
 
-    fnoml_dir = Path(PRED_DIR) / "FFNOML"
-    ml_intensity_dir = fnoml_dir / MODEL_DIR
-    output_dir = ml_intensity_dir
-    output_dir.mkdir(parents=True, exist_ok=True)
     fig.savefig(
-        output_dir / f"zero_shot_super_resolution_{paper_plot_tag()}.pdf",
+        plot_output_dir() / f"zero_shot_super_resolution_{paper_plot_tag()}.pdf",
         dpi=300,
         format="pdf",
     )
