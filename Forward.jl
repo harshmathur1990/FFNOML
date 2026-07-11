@@ -62,8 +62,6 @@ sys.modules.setdefault(
 import config
 
 model_dir = config.MODEL_DIR.rstrip("/")
-active_atoms_tag = "_".join(config.ACTIVE_ATOMS)
-active_atoms_csv = ",".join(config.ACTIVE_ATOMS)
 for item in config.MULTI3D_PRED_DATA:
     print("\\t".join([
         item["NAME"],
@@ -73,8 +71,6 @@ for item in config.MULTI3D_PRED_DATA:
         item["MULTI3D_ATMOS"],
         item.get("TRAIN_DIR", model_dir).rstrip("/"),
         config.MODEL,
-        active_atoms_tag,
-        active_atoms_csv,
     ]))
 """
 
@@ -86,8 +82,8 @@ for item in config.MULTI3D_PRED_DATA:
     for line in split(chomp(output), "\n")
         isempty(line) && continue
         fields = split(line, "\t")
-        length(fields) == 9 || error("Unexpected config.py output: $(line)")
-        name, sim_name, snap, mesh_file, atmos_file, train_dir, model, model_atoms_tag, model_atoms_csv = fields
+        length(fields) == 7 || error("Unexpected config.py output: $(line)")
+        name, sim_name, snap, mesh_file, atmos_file, train_dir, model = fields
         push!(
             pred_data,
             (
@@ -98,8 +94,6 @@ for item in config.MULTI3D_PRED_DATA:
                 atmos_file = atmos_file,
                 train_dir = train_dir,
                 model = model,
-                model_atoms_tag = model_atoms_tag,
-                model_atom_names = split(model_atoms_csv, ","),
             ),
         )
     end
@@ -147,10 +141,6 @@ function atom_configs(pred)
     return atom_configs(pred, FORWARD_ATOMS)
 end
 
-function model_atom_configs(pred)
-    return atom_configs(pred, pred.model_atom_names)
-end
-
 function base_voigt_config()
     return (
         a_min = 1f-4,
@@ -173,13 +163,12 @@ function config_ml(pred)
         snap = pred.snap,
         atoms = atoms,
         atoms_tag = atoms_tag,
-        model_atoms = model_atom_configs(pred),
         mesh_file = pred.mesh_file,
         atmos_file = pred.atmos_file,
         model = pred.model,
         pred_h5 = joinpath(
             pred.train_dir,
-            "output_3D_sim_s5_$(pred.name)_$(pred.model)_$(pred.model_atoms_tag).hdf5"
+            "output_3D_sim_s5_$(pred.name)_$(pred.model)_$(atoms_tag).hdf5"
         ),
         pred_key = "departure_coefficients",
         plot_diagnostics = false,
@@ -536,17 +525,6 @@ function main(cfg)
     # ML MODE
     # ============================================================
     if cfg.mode == :ml
-        model_atom_names = [a.name for a in cfg.model_atoms]
-        missing_model_atoms = [
-            a.name for a in atoms_to_run if !(a.name in model_atom_names)
-        ]
-
-        if !isempty(missing_model_atoms)
-            error(
-                "Cannot synthesize $(join(missing_model_atoms, ", ")) in ML mode: " *
-                "prediction file $(cfg.pred_h5) contains model atoms $(join(model_atom_names, ", "))."
-            )
-        end
 
         println("Computing LTE pops...")
         lte_atoms = Dict{String,Any}()
@@ -562,7 +540,7 @@ function main(cfg)
         # ---------------------------------------------------
         # Split ML populations per atom
         # ---------------------------------------------------
-        dep_per_atom = split_atoms(dep_coeff_full, cfg.model_atoms)
+        dep_per_atom = split_atoms(dep_coeff_full, cfg.atoms)
 
         # Dictionary to store final NLTE pops per atom
         nlte_atoms = Dict{String,Any}()
