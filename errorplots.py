@@ -11,6 +11,10 @@ from pipeline import compute_dx_dy
 from matplotlib.ticker import (MultipleLocator, AutoMinorLocator)
 
 
+def active_atom_names_tag():
+    return "_".join(ACTIVE_ATOMS)
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -217,10 +221,9 @@ def build_truth_paths(dataset):
 
 
 def build_prediction_file(dataset):
-    active_atom_names = "_".join(ACTIVE_ATOMS)
     return os.path.join(
         MODEL_DIR,
-        f"output_3D_sim_s5_{dataset['NAME']}_{MODEL}_{active_atom_names}.hdf5",
+        f"output_3D_sim_s5_{dataset['NAME']}_{MODEL}_{active_atom_names_tag()}.hdf5",
     )
 
 
@@ -327,7 +330,10 @@ def make_snapshot_plot(dataset, output_dir, show=False):
     fig.tight_layout(rect=[0, 0, 1, 1])
 
     os.makedirs(output_dir, exist_ok=True)
-    outpath = os.path.join(output_dir, f"population_error_envelopes_{dataset['NAME']}.pdf")
+    outpath = os.path.join(
+        output_dir,
+        f"population_error_envelopes_{dataset['NAME']}_{active_atom_names_tag()}.pdf",
+    )
     fig.savefig(outpath, dpi=200, bbox_inches="tight")
     print(f"Saved {outpath}")
 
@@ -344,7 +350,7 @@ def make_snapshot_plot(dataset, output_dir, show=False):
 
     # outpath_log = os.path.join(
     #     output_dir,
-    #     f"log_population_error_envelopes_{dataset['NAME']}.pdf",
+    #     f"log_population_error_envelopes_{dataset['NAME']}_{active_atom_names_tag()}.pdf",
     # )
     # fig_log.savefig(outpath_log, dpi=200, bbox_inches="tight")
     # print(f"Saved {outpath_log}")
