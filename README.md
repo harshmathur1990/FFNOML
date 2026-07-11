@@ -516,6 +516,10 @@ It now compares on shared `z_scale` directly and does not interpolate to column 
 
 For ML mode, `Forward.jl` reads `output_3D_sim_s5_<NAME>_<MODEL>_<ACTIVE_ATOMS>.hdf5` and writes intensity files with the same active-atom tag.
 
+Set `FORWARD_ATOMS` near the top of `Forward.jl` to choose which atoms to synthesize, for example `["H"]`, `["CA"]`, or `["H", "CA"]`. The generated intensity filename uses that selection as its atom tag.
+
+`Forward.jl` skips atom outputs already present in the intensity HDF5. In Bifrost mode, if a required active-atom population folder or `out_pop` file is missing, it skips that atmosphere and prints the dataset/snapshot that could not run.
+
 ## Caveats
 
 - The code does not overwrite existing dataset, solving-set, prediction, or checkpoint outputs by default
