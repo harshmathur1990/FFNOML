@@ -233,10 +233,12 @@ MODEL_CONFIG = dict(
     width=48,
     n_layers=4,
     dropout=0.0,
-    spec_dropout=0.03,
+    spec_dropout=0.08,
     vertical_dropout=0.08,
     spec_dropout_layers=[0, 1, 2, 3],
     vertical_dropout_layers=[0, 1, 2, 3],
+    hidden_spectral=128,
+    hidden_vertical=128,
     checkpoint_blocks=True,
 )
 
