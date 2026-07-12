@@ -1,5 +1,7 @@
 import argparse
 import os
+import subprocess
+import tempfile
 
 import h5py
 import matplotlib.pyplot as plt
@@ -32,6 +34,7 @@ def plot_population_error_envelopes(
     level_names=None,
     figsize=(10, 10),
     ncols=2,
+    ylabel=r"(b$_{NN}$ - b) / b",
 ):
     """
     Plot median + 68% + 95% relative-error envelopes vs z_scale.
@@ -81,7 +84,7 @@ def plot_population_error_envelopes(
         ax.set_xlabel(r"z [Mm]")
 
     for ax in axes[:, 0]:
-        ax.set_ylabel(r"(b$_{NN}$ - b) / b")
+        ax.set_ylabel(ylabel)
 
     for j in range(nlevels, nrows * ncols):
         fig.delaxes(axes[j // ncols, j % ncols])
@@ -294,6 +297,145 @@ def prepare_plot_arrays(pred_dep, true_dep):
     return pred_plot, true_plot
 
 
+def prepare_forward_lte_populations(muspel_lte, simulation_lte_shape):
+    """Put Muspel LTE populations from ``Forward.jl`` in Multi3D layout.
+
+    ``lte_pops_saha`` in ``Forward.jl`` returns ``[nz, nx, ny, nlevels]``,
+    whereas helita reads the simulation populations as
+    ``[nx, ny, nz, nlevels]``.
+    """
+
+    muspel_lte = np.asarray(muspel_lte)
+    if muspel_lte.ndim != 4:
+        raise ValueError(
+            "Expected 4D Muspel LTE populations [nz, nx, ny, nlevels], "
+            f"got shape {muspel_lte.shape}"
+        )
+
+    forward_shape = (
+        simulation_lte_shape[2],
+        simulation_lte_shape[0],
+        simulation_lte_shape[1],
+        simulation_lte_shape[3],
+    )
+    if muspel_lte.shape == forward_shape:
+        muspel_lte = np.transpose(muspel_lte, (1, 2, 0, 3))
+    elif muspel_lte.shape != simulation_lte_shape:
+        raise ValueError(
+            "Muspel/simulation LTE shape mismatch: expected Forward.jl layout "
+            f"{forward_shape} (or Multi3D layout {simulation_lte_shape}), got "
+            f"{muspel_lte.shape}"
+        )
+
+    return muspel_lte
+
+
+def compute_muspel_lte(dataset, active_atoms=None):
+    """Run the Julia/Muspel LTE calculation and return one combined array."""
+
+    active_atoms = active_atoms or ACTIVE_ATOMS
+    julia_script = os.path.join(os.path.dirname(__file__), "compute_muspel_lte.jl")
+    output_file = None
+
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".h5", delete=False) as tmp:
+            output_file = tmp.name
+
+        command = [
+            os.environ.get("JULIA", "julia"),
+            "--startup-file=no",
+            julia_script,
+            dataset["MESH"],
+            dataset["MULTI3D_ATMOS"],
+            output_file,
+            *active_atoms,
+        ]
+        print(f"Computing Muspel LTE populations for {dataset['NAME']}...")
+        subprocess.run(command, check=True)
+
+        blocks = []
+        with h5py.File(output_file, "r") as file:
+            for atom in active_atoms:
+                if atom not in file:
+                    raise KeyError(f"Julia LTE output is missing atom {atom}")
+                group = file[atom]
+                shape = tuple(int(value) for value in group["shape"][...])
+                values = group["values"][...]
+                blocks.append(values.reshape(shape, order="F"))
+
+        return np.concatenate(blocks, axis=-1)
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "Could not launch Julia. Install Julia or set JULIA to its executable path."
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"Muspel LTE calculation failed for {dataset['NAME']}"
+        ) from exc
+    finally:
+        if output_file is not None and os.path.exists(output_file):
+            os.remove(output_file)
+
+
+def make_lte_population_comparison_plot(
+    dataset,
+    output_dir,
+    show=False,
+):
+    """Compare simulation LTE populations with those computed by Muspel.
+
+    Parameters
+    ----------
+    dataset : dict
+        A plot job produced by :func:`build_plot_jobs`.
+    output_dir : path-like
+        Directory in which to save the PDF.
+
+    The plotted quantity is ``(n_LTE,Muspel - n_LTE,simulation) /
+    n_LTE,simulation``. Percentile envelopes and panel layout match
+    :func:`make_snapshot_plot`.
+    """
+
+    muspel_lte = compute_muspel_lte(dataset)
+    _, true_z_scale, simulation_lte, _, level_names = (
+        load_true_multi3d_departures(dataset)
+    )
+    muspel_lte = prepare_forward_lte_populations(
+        muspel_lte, simulation_lte.shape
+    )
+    z_axis = extract_plot_z_axis(true_z_scale, scale_to_mm=True)
+    muspel_plot, simulation_plot = prepare_plot_arrays(
+        muspel_lte, simulation_lte
+    )
+
+    fig, axes = plot_population_error_envelopes(
+        muspel_plot,
+        simulation_plot,
+        z_axis,
+        level_names=level_names,
+        figsize=(12, 10),
+        ncols=2,
+        ylabel=r"$(n_{\mathrm{LTE,Muspel}}-n_{\mathrm{LTE,sim}}) / "
+        r"n_{\mathrm{LTE,sim}}$",
+    )
+    fig.tight_layout(rect=[0, 0, 1, 1])
+
+    os.makedirs(output_dir, exist_ok=True)
+    outpath = os.path.join(
+        output_dir,
+        f"lte_population_comparison_{dataset['NAME']}_{active_atom_names_tag()}.pdf",
+    )
+    fig.savefig(outpath, dpi=200, bbox_inches="tight")
+    print(f"Saved {outpath}")
+
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    return outpath, axes
+
+
 def make_snapshot_plot(dataset, output_dir, show=False):
     pred_dep, pred_z_scale = load_prediction_file(dataset["PRED_FILE"])
     _, true_z_scale, lte, nlte, level_names = load_true_multi3d_departures(dataset)
@@ -332,24 +474,6 @@ def make_snapshot_plot(dataset, output_dir, show=False):
     fig.savefig(outpath, dpi=200, bbox_inches="tight")
     print(f"Saved {outpath}")
 
-    # fig_log, _ = plot_log_population_error_envelopes(
-    #     pred_plot,
-    #     true_plot,
-    #     pred_z_axis,
-    #     level_names=level_names,
-    #     figsize=(12, 10),
-    #     ncols=2,
-    # )
-    # fig_log.suptitle(f"Errors in predicted Departure coefficients : {dataset['NAME']}", fontsize=14)
-    # fig_log.tight_layout(rect=[0, 0, 1, 0.97])
-
-    # outpath_log = os.path.join(
-    #     output_dir,
-    #     f"log_population_error_envelopes_{dataset['NAME']}_{active_atom_names_tag()}.pdf",
-    # )
-    # fig_log.savefig(outpath_log, dpi=200, bbox_inches="tight")
-    # print(f"Saved {outpath_log}")
-
     if show:
         plt.show()
     else:
@@ -362,6 +486,9 @@ def main():
 
     for dataset in build_plot_jobs():
         make_snapshot_plot(dataset, output_dir=MODEL_DIR, show=args.show)
+        make_lte_population_comparison_plot(
+            dataset, output_dir=MODEL_DIR, show=args.show
+        )
 
 
 if __name__ == "__main__":
