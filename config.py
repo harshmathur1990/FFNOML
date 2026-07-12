@@ -74,6 +74,14 @@ SIMULATIONS = {
     "qs006003_sap": {
         "base_path": "/mn/stornext/d9/data/harshm/bifrost_data/qs006003_sap",
         "snaps": ["1100", "1297", "689", "900"]
+    },
+    "ch024031_by200bz005": {
+        "base_path": "/mn/stornext/d9/data/harshm/bifrost_data/ch024031_by200bz005",
+        "snaps": ["450"]
+    },
+    "en024031_by100_helium": {
+        "base_path": "/mn/stornext/d9/data/harshm/bifrost_data/en024031_by100_helium",
+        "snaps": ["109"]
     }
 }
 
@@ -85,12 +93,19 @@ TRAIN_SPLIT = {
     "qs006003_sap": ["689"]
 }
 
+# VAL_SPLIT = {
+#     "en024048_hion": ["700"],
+#     "nw012023": ["940"],
+#     "ch012012_hion": ["984"],
+#     "ch012006": ["849"],
+#     "qs006003_sap": ["900"]
+# }
+
 VAL_SPLIT = {
-    "en024048_hion": ["700"],
-    "nw012023": ["940"],
-    "ch012012_hion": ["984"],
-    "ch012006": ["849"],
-    "qs006003_sap": ["900"]
+    "en024048_hion": ["385"],
+    "nw012023": ["1050"],
+    "ch024031_by200bz005": ["450"],
+    "en024031_by100_helium": ["109"]
 }
 
 

@@ -1255,6 +1255,8 @@ def ffno_train_model(
             )
 
         if validate_only:
+            if dist.is_available() and dist.is_initialized():
+                dist.barrier()
             return initial_val_loss, initial_val_comp
 
     # run training
