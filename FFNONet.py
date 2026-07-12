@@ -106,15 +106,15 @@ def _prepare_input_features(temp, vx, vy, vz, ne, rho):
     )
 
 
-def _compute_departure_coefficients(lte, nlte, eps=1e-30):
+def _compute_log_nlte_populations(nlte, eps=1e-30):
     """
-    lte/nlte: [nx, ny, nz, nlev] or [nx, ny, nz, Cout]
-    return: log10(nlte/lte)
+    nlte: [nx, ny, nz, nlev] or [nx, ny, nz, Cout]
+    return: log10(nlte)
     """
-    return np.log10((nlte + eps) / (lte + eps))
+    return np.log10(np.maximum(nlte, eps))
 
 
-def invert_log_departure(pred_log):
+def invert_log_population(pred_log):
     return torch.pow(10.0, pred_log)
 
 
@@ -366,11 +366,11 @@ def _make_inputs_ch_first(rho, temp, vx, vy, vz, ne):
 
 def _make_targets_ch_first(lte, nlte):
     """
-    returns dep: [Cout, nz, nx, ny]
+    returns log10 NLTE populations: [Cout, nz, nx, ny]
     """
-    dep = _compute_departure_coefficients(lte, nlte)  # [nx,ny,nz,Cout] (or nlev)
-    dep = np.transpose(dep, (3, 2, 0, 1)).astype(np.float32, copy=False)
-    return dep
+    del lte  # retained so existing dataset-building callers remain compatible
+    log_nlte = _compute_log_nlte_populations(nlte)
+    return np.transpose(log_nlte, (3, 2, 0, 1)).astype(np.float32, copy=False)
 
 
 # ============================================================
@@ -954,6 +954,7 @@ def build_dataset_ffno(
                 patch=int(patch),
                 stride=int(stride),
                 scales=np.array(scale_list),
+                target_representation="log10_nlte_population_m-3",
             ),
             mean_X=mean_X,
             std_X=std_X,
@@ -1972,10 +1973,10 @@ def ffno_predict_populations(
 ):
 
     """
-    Predict log-departure coeffs -> convert to departure coeffs -> (optional) to populations downstream.
+    Predict log10 NLTE populations and convert them to linear populations.
 
     This function writes:
-      save_path: dataset "departure_coefficients" (linear, not log)
+      save_path: dataset "nlte_populations" (linear, in m^-3)
                 + attrs "z_scale"
     """
     if os.path.isfile(save_path):
@@ -2096,8 +2097,8 @@ def ffno_predict_populations(
         pred_log.max().item()
     )
 
-    # pred_log is log10(dep). Convert to linear dep:
-    dep = invert_log_departure(pred_log).float().cpu().numpy()  # [1,Cout,D,nx,ny]
+    # pred_log is log10(n_NLTE). Convert to linear populations:
+    dep = invert_log_population(pred_log).float().cpu().numpy()  # [1,Cout,D,nx,ny]
 
     print(
         "dep range:",
@@ -2112,7 +2113,7 @@ def ffno_predict_populations(
 
     # Save
     with h5py.File(save_path, "w") as f:
-        d = f.create_dataset("departure_coefficients", data=np.asfortranarray(dep), compression="gzip", compression_opts=4, shuffle=True)
+        d = f.create_dataset("nlte_populations", data=np.asfortranarray(dep), compression="gzip", compression_opts=4, shuffle=True)
         d.attrs["depth_scale_type"] = "z"
         f.create_dataset("z_scale", data=z_scale_attr, compression="gzip", compression_opts=4, shuffle=True)
         if "val_loss" in ckpt:
@@ -2291,7 +2292,7 @@ def ffno_predict_populations_distributed_full(
     std_Y_t = torch.from_numpy(std_Y).float()[None, :, None, None, None].to(device)
     pred_log = pred_log * std_Y_t + mean_Y_t
 
-    dep = invert_log_departure(pred_log).float().cpu().numpy()
+    dep = invert_log_population(pred_log).float().cpu().numpy()
     dep = np.transpose(dep, (0, 3, 4, 2, 1)).astype(np.float32, copy=False)[0]
     z_local = z_scale[0].detach().cpu().numpy().astype(np.float32, copy=False)
 
@@ -2312,7 +2313,7 @@ def ffno_predict_populations_distributed_full(
 
         with h5py.File(save_path, "w") as f:
             d = f.create_dataset(
-                "departure_coefficients",
+                "nlte_populations",
                 data=np.asfortranarray(dep_full)
             )
             d.attrs["depth_scale_type"] = "z"

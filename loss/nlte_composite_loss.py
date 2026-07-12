@@ -365,7 +365,8 @@ def compute_Sv_all_lines_T_batched(
     l = lines[:, 0]
     u = lines[:, 1]
 
-    # log(b_l / b_u)
+    # Difference of log10 NLTE populations. Constants such as statistical
+    # weights cancel when the predicted and true source ratios are compared.
     logb_ratio = logb[:, l, :] - logb[:, u, :]
     _check_tensor(logb_ratio, "logb_ratio", debug)
 
@@ -373,11 +374,11 @@ def compute_Sv_all_lines_T_batched(
     dchi = (chi[u] - chi[l]).to(device=device, dtype=dtype)
     _check_tensor(dchi, "dchi", debug)
 
-    boltz = dchi[None, :, None] / (kB * T[:, None, :])
+    boltz = torch.zeros_like(logb_ratio)
     _check_tensor(boltz, "boltz", debug)
 
     # exponent argument (THIS is the physically important variable)
-    x = logb_ratio + boltz
+    x = np.float32(np.log(10.0)) * logb_ratio
     _check_tensor(x, "x", debug)
 
     if return_x and not debug:
@@ -529,7 +530,7 @@ def _validate_physics_inputs(T, logb, stage="input", strict=False):
     if (T <= 0).any():
         msgs.append(f"T <= 0 detected (min T = {T.min().item():.3e})")
 
-    # logb must be finite (log departure coefficients)
+    # logb must be finite (the historical variable name holds log10 populations)
     if not torch.isfinite(logb).all():
         msgs.append("logb contains NaN or Inf")
 

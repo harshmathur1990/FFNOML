@@ -251,13 +251,13 @@ def build_plot_jobs():
 
 def load_prediction_file(pred_file):
     with h5py.File(pred_file, "r") as f:
-        dep = f["departure_coefficients"][...]
+        populations = f["nlte_populations"][...]
         z_scale = f["z_scale"][...]
 
-    return dep, np.asarray(z_scale)
+    return populations, np.asarray(z_scale)
 
 
-def compute_true_departures(lte, nlte):
+def compute_departure_coefficients(lte, nlte):
     eps = 1e-30
     true_dep = (nlte + eps) / (lte + eps)
     return true_dep.astype(np.float32, copy=False)
@@ -437,9 +437,10 @@ def make_lte_population_comparison_plot(
 
 
 def make_snapshot_plot(dataset, output_dir, show=False):
-    pred_dep, pred_z_scale = load_prediction_file(dataset["PRED_FILE"])
+    pred_nlte, pred_z_scale = load_prediction_file(dataset["PRED_FILE"])
     _, true_z_scale, lte, nlte, level_names = load_true_multi3d_departures(dataset)
-    true_dep = compute_true_departures(lte, nlte)
+    pred_dep = compute_departure_coefficients(lte, pred_nlte)
+    true_dep = compute_departure_coefficients(lte, nlte)
 
     pred_z_axis = extract_plot_z_axis(pred_z_scale)
     true_z_axis = extract_plot_z_axis(true_z_scale, scale_to_mm=True)
