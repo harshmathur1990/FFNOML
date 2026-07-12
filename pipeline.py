@@ -28,6 +28,11 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--build", action="store_true")
     parser.add_argument("--train", action="store_true")
+    parser.add_argument(
+        "--val",
+        action="store_true",
+        help="Run one validation pass, print the loss terms, and exit.",
+    )
     parser.add_argument("--test", action="store_true")
     parser.add_argument("--predict", action="store_true")
     parser.add_argument("--fsdppredict", action="store_true")
@@ -170,7 +175,7 @@ def build_datasets():
         )
 
 
-def train_model(*, resume=False, bestpath=False, expand=False):
+def train_model(*, resume=False, bestpath=False, expand=False, validate_only=False):
     ensure_built_datasets_exist()
 
     ffno_train_model(
@@ -209,6 +214,7 @@ def train_model(*, resume=False, bestpath=False, expand=False):
         force_expand_validation_baseline=FORCE_EXPAND_VALIDATION_BASELINE,
         train_select=TRAINSELECT,
         train_select_seed=TRAINSELECT_SEED,
+        validate_only=validate_only,
     )
 
 
@@ -239,6 +245,10 @@ def test_model():
         device=DEVICE,
         multi_gpu=MULTI_GPU,
     )
+
+
+def validate_model():
+    train_model(resume=True, bestpath=True, validate_only=True)
 
 
 def is_main_process():
@@ -632,6 +642,7 @@ if __name__ == "__main__":
     selected_modes = [
         args.build,
         args.train,
+        args.val,
         args.test,
         args.predict,
         args.fsdppredict,
@@ -639,7 +650,7 @@ if __name__ == "__main__":
         args.inspectfreqgate,
     ]
     if sum(bool(mode) for mode in selected_modes) > 1:
-        raise RuntimeError("Specify only one of: --build, --train, --test, --predict, --fsdppredict, --buildforpredict, --inspectfreqgate")
+        raise RuntimeError("Specify only one of: --build, --train, --val, --test, --predict, --fsdppredict, --buildforpredict, --inspectfreqgate")
 
     if args.resume and not args.train:
         raise RuntimeError("--resume can only be used together with --train")
@@ -665,6 +676,10 @@ if __name__ == "__main__":
             validate_runtime_device()
             train_model(resume=args.resume, bestpath=args.bestpath, expand=args.expand)
 
+        elif args.val:
+            validate_runtime_device()
+            validate_model()
+
         elif args.test:
             validate_runtime_device()
             test_model()
@@ -688,7 +703,7 @@ if __name__ == "__main__":
             )
 
         else:
-            raise RuntimeError("Specify one of: --build, --train, --test, --predict, --fsdppredict, --inspectfreqgate, --buildforpredict")
+            raise RuntimeError("Specify one of: --build, --train, --val, --test, --predict, --fsdppredict, --inspectfreqgate, --buildforpredict")
 
     finally:
         cleanup_distributed()
