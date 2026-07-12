@@ -1045,6 +1045,7 @@ def ffno_train_model(
     force_expand_validation_baseline=False,
     train_select=1.0,
     train_select_seed=None,
+    validate_only=False,
 ):
     resume_path = get_resume_checkpoint_path(save_path)
     load_path = None
@@ -1216,6 +1217,9 @@ def ffno_train_model(
     effective_resume_path = None if expand_from_checkpoint is not None else resume_path
     effective_best_val_init = None if expand_from_checkpoint is not None else best_val_init
 
+    if validate_only and val_loader is None:
+        raise RuntimeError("Validation loader is unavailable.")
+
     if (
         ((expand_from_checkpoint is None and resume and bestpath)
         or (expand_from_checkpoint is not None and force_expand_validation_baseline))
@@ -1249,6 +1253,11 @@ def ffno_train_model(
                 f"L1={initial_val_comp.get('data', 0):.3e} "
                 f"L2={initial_val_comp.get('source', 0):.3e}"
             )
+
+        if validate_only:
+            if dist.is_available() and dist.is_initialized():
+                dist.barrier()
+            return initial_val_loss, initial_val_comp
 
     # run training
     train(

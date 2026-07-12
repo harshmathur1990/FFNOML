@@ -38,6 +38,13 @@ default(show=false)
 # -----------------------------
 
 const RUN_MODE = :ml
+# const FORWARD_ATOMS = ["H"]
+const FORWARD_ATOMS = ["CA"]
+# const FORWARD_ATOMS = ["H", "CA"]
+
+function atom_tag(atom_names)
+    return join(atom_names, "_")
+end
 
 function load_multi3d_pred_data()
     script = """
@@ -55,7 +62,6 @@ sys.modules.setdefault(
 import config
 
 model_dir = config.MODEL_DIR.rstrip("/")
-active_atoms_tag = "_".join(config.ACTIVE_ATOMS)
 for item in config.MULTI3D_PRED_DATA:
     print("\\t".join([
         item["NAME"],
@@ -65,7 +71,6 @@ for item in config.MULTI3D_PRED_DATA:
         item["MULTI3D_ATMOS"],
         item.get("TRAIN_DIR", model_dir).rstrip("/"),
         config.MODEL,
-        active_atoms_tag,
     ]))
 """
 
@@ -77,8 +82,8 @@ for item in config.MULTI3D_PRED_DATA:
     for line in split(chomp(output), "\n")
         isempty(line) && continue
         fields = split(line, "\t")
-        length(fields) == 8 || error("Unexpected config.py output: $(line)")
-        name, sim_name, snap, mesh_file, atmos_file, train_dir, model, active_atoms_tag = fields
+        length(fields) == 7 || error("Unexpected config.py output: $(line)")
+        name, sim_name, snap, mesh_file, atmos_file, train_dir, model = fields
         push!(
             pred_data,
             (
@@ -89,7 +94,6 @@ for item in config.MULTI3D_PRED_DATA:
                 atmos_file = atmos_file,
                 train_dir = train_dir,
                 model = model,
-                active_atoms_tag = active_atoms_tag,
             ),
         )
     end
@@ -97,7 +101,7 @@ for item in config.MULTI3D_PRED_DATA:
     return pred_data
 end
 
-function atom_configs(pred)
+function all_atom_configs(pred)
     snapshot_dir = dirname(pred.mesh_file)
 
     return [
@@ -110,16 +114,31 @@ function atom_configs(pred)
             lower_level = 2,
             upper_level = 3
         ),
-        # (
-        #     name = "CA",
-        #     atom_file = "/mn/stornext/u3/harshm/Documents/WorkRepo/multi3d/input/atoms/atom.ca2.yaml",
-        #     pops_file = joinpath(snapshot_dir, "CA", "out_pop"),
-        #     nlevels = 6,
-        #     line_index = 5,
-        #     lower_level = 3,
-        #     upper_level = 5
-        # )
+        (
+            name = "CA",
+            atom_file = "/mn/stornext/u3/harshm/Documents/WorkRepo/multi3d/input/atoms/atom.ca2.yaml",
+            pops_file = joinpath(snapshot_dir, "CA", "out_pop"),
+            nlevels = 6,
+            line_index = 5,
+            lower_level = 3,
+            upper_level = 5
+        )
     ]
+end
+
+function atom_configs(pred, atom_names)
+    available = Dict(a.name => a for a in all_atom_configs(pred))
+    unknown = [name for name in atom_names if !haskey(available, name)]
+
+    if !isempty(unknown)
+        error("Unknown Forward atom(s): $(join(unknown, ", ")). Available: $(join(sort(collect(keys(available))), ", "))")
+    end
+
+    return [available[name] for name in atom_names]
+end
+
+function atom_configs(pred)
+    return atom_configs(pred, FORWARD_ATOMS)
 end
 
 function base_voigt_config()
@@ -134,24 +153,28 @@ function base_voigt_config()
 end
 
 function config_ml(pred)
+    atoms = atom_configs(pred)
+    atoms_tag = atom_tag([a.name for a in atoms])
+
     return (
         mode = :ml,
         name = pred.name,
         sim_name = pred.sim_name,
         snap = pred.snap,
-        atoms = atom_configs(pred),
+        atoms = atoms,
+        atoms_tag = atoms_tag,
         mesh_file = pred.mesh_file,
         atmos_file = pred.atmos_file,
         model = pred.model,
         pred_h5 = joinpath(
             pred.train_dir,
-            "output_3D_sim_s5_$(pred.name)_$(pred.model)_$(pred.active_atoms_tag).hdf5"
+            "output_3D_sim_s5_$(pred.name)_$(pred.model)_$(atoms_tag).hdf5"
         ),
         pred_key = "departure_coefficients",
         plot_diagnostics = false,
         out_h5 = joinpath(
             pred.train_dir,
-            "intensity_ml_$(pred.name)_$(pred.model)_$(pred.active_atoms_tag).h5"
+            "intensity_ml_$(pred.name)_$(pred.model)_$(atoms_tag).h5"
         ),
         out_prefix = joinpath(pred.train_dir, "diag_ml"),
         x_pick = 33,
@@ -164,15 +187,19 @@ end
 # MODE 2 — Original Bifrost NLTE pops
 # -----------------------------
 function config_bifrost(pred)
+    atoms = atom_configs(pred)
+    atoms_tag = atom_tag([a.name for a in atoms])
+
     return (
         mode = :bifrost,
         name = pred.name,
         sim_name = pred.sim_name,
         snap = pred.snap,
-        atoms = atom_configs(pred),
+        atoms = atoms,
+        atoms_tag = atoms_tag,
         mesh_file = pred.mesh_file,
         atmos_file = pred.atmos_file,
-        out_h5 = "IO/intensity_bifrost_$(pred.name)_$(pred.active_atoms_tag).h5",
+        out_h5 = "IO/intensity_bifrost_$(pred.name)_$(atoms_tag).h5",
         out_prefix = "diag_bifrost",
         x_pick = 33,
         y_pick = 21,
@@ -181,15 +208,19 @@ function config_bifrost(pred)
 end
 
 function config_tiago(pred)
+    atoms = atom_configs(pred)
+    atoms_tag = atom_tag([a.name for a in atoms])
+
     return (
         mode = :tiago,
         name = pred.name,
         sim_name = pred.sim_name,
         snap = pred.snap,
-        atoms = atom_configs(pred),
+        atoms = atoms,
+        atoms_tag = atoms_tag,
         mesh_file = pred.mesh_file,
         atmos_file = pred.atmos_file,
-        out_h5 = "IO/intensity_bifrost_TIAGO_MODE_$(pred.name)_$(pred.active_atoms_tag).h5",
+        out_h5 = "IO/intensity_bifrost_TIAGO_MODE_$(pred.name)_$(atoms_tag).h5",
         out_prefix = "diag_bifrost",
         x_pick = 33,
         y_pick = 21,
@@ -353,6 +384,56 @@ function save_intensity_h5(out_h5::String, intensity, wave)
 end
 
 
+function output_atom_done(out_h5::String, atom_name::String)
+    isfile(out_h5) || return false
+
+    h5open(out_h5, "r") do f
+        atom_name in keys(f) || return false
+        grp = f[atom_name]
+        return "intensity" in keys(grp) && "wave" in keys(grp)
+    end
+end
+
+
+function pending_atoms(cfg)
+    return [a for a in cfg.atoms if !output_atom_done(cfg.out_h5, a.name)]
+end
+
+
+function missing_population_inputs(atoms)
+    missing = []
+
+    for a in atoms
+        pops_dir = dirname(a.pops_file)
+
+        if !isdir(pops_dir)
+            push!(missing, (atom = a.name, path = pops_dir, kind = "directory"))
+        elseif !isfile(a.pops_file)
+            push!(missing, (atom = a.name, path = a.pops_file, kind = "file"))
+        end
+    end
+
+    return missing
+end
+
+
+function save_synthesis_results(out_h5::String, results)
+    mode = isfile(out_h5) ? "r+" : "w"
+
+    h5open(out_h5, mode) do f
+        for (name, syn) in results
+            if name in keys(f)
+                delete_object(f, name)
+            end
+
+            grp = create_group(f, name)
+            grp["intensity"] = syn.intensity
+            grp["wave"]      = syn.wave
+        end
+    end
+end
+
+
 function calc_multi3d_hα(mesh_file, atmos_file, pops_file, atom_file)
     h_atom = read_atom(atom_file)
     my_line = h_atom.lines[5]  #  index 5 for Halpha
@@ -412,6 +493,30 @@ function main(cfg)
     println("Simulation  : ", cfg.sim_name)
     println("Snapshot    : ", cfg.snap)
     println("Threads     : ", Threads.nthreads())
+    println("Output      : ", cfg.out_h5)
+
+    atoms_to_run = pending_atoms(cfg)
+
+    if isempty(atoms_to_run)
+        println("Skipping $(cfg.name) snap $(cfg.snap): all requested atom outputs already exist.")
+        return
+    end
+
+    println("Pending atoms: ", join([a.name for a in atoms_to_run], ", "))
+
+    if cfg.mode == :bifrost
+        missing = missing_population_inputs(atoms_to_run)
+
+        if !isempty(missing)
+            println(
+                "Skipping $(cfg.name) snap $(cfg.snap): level populations are not available."
+            )
+            for item in missing
+                println("  - $(item.atom) missing $(item.kind): $(item.path)")
+            end
+            return
+        end
+    end
 
     println("Reading atmosphere...")
     atmos = read_atmos_multi3d(cfg.mesh_file, cfg.atmos_file)
@@ -424,7 +529,7 @@ function main(cfg)
         println("Computing LTE pops...")
         lte_atoms = Dict{String,Any}()
 
-        for a in cfg.atoms
+        for a in atoms_to_run
             atom = Muspel.read_atom(a.atom_file)
             pops = lte_pops_saha(atom, atmos)
             lte_atoms[a.name] = pops
@@ -440,7 +545,7 @@ function main(cfg)
         # Dictionary to store final NLTE pops per atom
         nlte_atoms = Dict{String,Any}()
 
-        for a in cfg.atoms
+        for a in atoms_to_run
 
             h_atom = Muspel.read_atom(a.atom_file)
 
@@ -463,7 +568,7 @@ function main(cfg)
 
         nlte_atoms = Dict{String,Any}()
 
-        for a in cfg.atoms
+        for a in atoms_to_run
 
             atom = Muspel.read_atom(a.atom_file)
 
@@ -486,7 +591,7 @@ function main(cfg)
     println("Synthesizing line profiles...")
     results = Dict{String,Any}()
 
-    for a in cfg.atoms
+    for a in atoms_to_run
 
         println("Synthesizing atom: ", a.name)
 
@@ -510,15 +615,7 @@ function main(cfg)
     end
 
     println("Saving output...")
-    f = h5open(cfg.out_h5, "w")
-
-    for (name, syn) in results
-        grp = create_group(f, name)
-        grp["intensity"] = syn.intensity
-        grp["wave"]      = syn.wave
-    end
-
-    close(f)
+    save_synthesis_results(cfg.out_h5, results)
 
     println("Done.")
 end

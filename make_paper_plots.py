@@ -5,7 +5,30 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 
-from config import MODEL, MODEL_DIR, MULTI3D_PRED_DATA, PRED_DIR
+from config import ACTIVE_ATOMS, MODEL, MODEL_DIR, MULTI3D_PRED_DATA, PRED_DIR
+
+PAPER_PLOT_ATOM = "H"
+
+
+def active_atom_names_tag():
+    return "_".join(ACTIVE_ATOMS)
+
+
+def paper_plot_tag():
+    return f"{active_atom_names_tag()}_{PAPER_PLOT_ATOM}"
+
+
+def validate_paper_plot_atom():
+    if PAPER_PLOT_ATOM not in ACTIVE_ATOMS:
+        raise ValueError(
+            f"PAPER_PLOT_ATOM={PAPER_PLOT_ATOM!r} must be one of ACTIVE_ATOMS={ACTIVE_ATOMS!r}"
+        )
+
+
+def plot_output_dir():
+    output_dir = Path(MODEL_DIR)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return output_dir
 
 
 def _read_mesh_dx_dy_megameters(mesh_path):
@@ -772,7 +795,11 @@ def make_branch_importance_plots():
         )
 
     plt.subplots_adjust(left=0.15, right=0.99, top=0.85, bottom=0.15)
-    plt.savefig('figures/branch_importance.pdf', dpi=300, format='pdf')
+    plt.savefig(
+        plot_output_dir() / f"branch_importance_{active_atom_names_tag()}.pdf",
+        dpi=300,
+        format="pdf",
+    )
 
 
 def get_data_for_line_core_intensity_plots():
@@ -788,20 +815,21 @@ def get_data_for_line_core_intensity_plots():
     bifrost_intensity_dir = fnoml_dir / "IO"
     datasets_by_name = {dataset["NAME"]: dataset for dataset in MULTI3D_PRED_DATA}
     plot_data = []
+    validate_paper_plot_atom()
 
     for name in valid_names:
         if name not in datasets_by_name:
             raise KeyError(f"No configured prediction dataset named {name!r}")
 
-        ml_path = ml_intensity_dir / f"intensity_ml_{name}_{MODEL}.h5"
-        bifrost_path = bifrost_intensity_dir / f"intensity_bifrost_{name}.h5"
+        ml_path = ml_intensity_dir / f"intensity_ml_{name}_{MODEL}_{active_atom_names_tag()}.h5"
+        bifrost_path = bifrost_intensity_dir / f"intensity_bifrost_{name}_{active_atom_names_tag()}.h5"
 
         with h5py.File(ml_path, "r") as ml_file:
-            ml_intensity = np.asarray(ml_file["H"]["intensity"][:, :, 51])
+            ml_intensity = np.asarray(ml_file[PAPER_PLOT_ATOM]["intensity"][:, :, 51])
 
         with h5py.File(bifrost_path, "r") as bifrost_file:
             bifrost_intensity = np.asarray(
-                bifrost_file["H"]["intensity"][:, :, 51]
+                bifrost_file[PAPER_PLOT_ATOM]["intensity"][:, :, 51]
             )
 
         dx, dy = _read_mesh_dx_dy_megameters(datasets_by_name[name]["MESH"])
@@ -883,12 +911,8 @@ def make_line_core_intensity_compare_plots():
     if image is not None:
         fig.colorbar(image, ax=axs, label="Line-core intensity", shrink=0.8)
 
-    fnoml_dir = Path(PRED_DIR) / "FFNOML"
-    ml_intensity_dir = fnoml_dir / MODEL_DIR
-    output_dir = ml_intensity_dir
-    output_dir.mkdir(parents=True, exist_ok=True)
     fig.savefig(
-        output_dir / "line_core_intensity_comparison.pdf",
+        plot_output_dir() / f"line_core_intensity_comparison_{paper_plot_tag()}.pdf",
         dpi=300,
         format="pdf",
     )
@@ -913,6 +937,7 @@ def get_data_for_zero_shot_super_resolution_plots():
     ml_intensity_dir = fnoml_dir / MODEL_DIR
     datasets_by_name = {dataset["NAME"]: dataset for dataset in MULTI3D_PRED_DATA}
     plot_data = []
+    validate_paper_plot_atom()
 
     for lowres_name, highres_name in zip(sel_names, sel_names_super_resolution):
         if lowres_name not in datasets_by_name:
@@ -920,17 +945,17 @@ def get_data_for_zero_shot_super_resolution_plots():
         if highres_name not in datasets_by_name:
             raise KeyError(f"No configured prediction dataset named {highres_name!r}")
 
-        lowres_path = ml_intensity_dir / f"intensity_ml_{lowres_name}_{MODEL}.h5"
-        highres_path = ml_intensity_dir / f"intensity_ml_{highres_name}_{MODEL}.h5"
+        lowres_path = ml_intensity_dir / f"intensity_ml_{lowres_name}_{MODEL}_{active_atom_names_tag()}.h5"
+        highres_path = ml_intensity_dir / f"intensity_ml_{highres_name}_{MODEL}_{active_atom_names_tag()}.h5"
 
         with h5py.File(lowres_path, "r") as lowres_file:
             lowres_intensity = np.asarray(
-                lowres_file["H"]["intensity"][:, :, 51]
+                lowres_file[PAPER_PLOT_ATOM]["intensity"][:, :, 51]
             )
 
         with h5py.File(highres_path, "r") as highres_file:
             highres_intensity = np.asarray(
-                highres_file["H"]["intensity"][:, :, 51]
+                highres_file[PAPER_PLOT_ATOM]["intensity"][:, :, 51]
             )
 
         lowres_dx, lowres_dy = _read_mesh_dx_dy_megameters(
@@ -1016,12 +1041,8 @@ def make_zero_shot_super_resolution_plots():
     if image is not None:
         fig.colorbar(image, ax=axs, label="Line-core intensity", shrink=0.8)
 
-    fnoml_dir = Path(PRED_DIR) / "FFNOML"
-    ml_intensity_dir = fnoml_dir / MODEL_DIR
-    output_dir = ml_intensity_dir
-    output_dir.mkdir(parents=True, exist_ok=True)
     fig.savefig(
-        output_dir / "zero_shot_super_resolution.pdf",
+        plot_output_dir() / f"zero_shot_super_resolution_{paper_plot_tag()}.pdf",
         dpi=300,
         format="pdf",
     )
