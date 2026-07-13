@@ -373,6 +373,12 @@ def _make_targets_ch_first(lte, nlte):
     return np.transpose(log_nlte, (3, 2, 0, 1)).astype(np.float32, copy=False)
 
 
+def _make_log_lte_ch_first(lte, eps=1e-30):
+    """Return unnormalized log10 LTE populations as [Cout, nz, nx, ny]."""
+    log_lte = np.log10(np.maximum(lte, eps))
+    return np.transpose(log_lte, (3, 2, 0, 1)).astype(np.float32, copy=False)
+
+
 # ============================================================
 # ---------------- PATCH EXTRACTION ---------------------------
 # ============================================================
@@ -531,6 +537,14 @@ def _save_hdf5_patches(
             g.create_dataset(
                 "targets",
                 data=group["targets"],
+                compression="gzip",
+                compression_opts=4,
+                shuffle=True,
+            )
+
+            g.create_dataset(
+                "log_lte_populations",
+                data=group["log_lte_populations"],
                 compression="gzip",
                 compression_opts=4,
                 shuffle=True,
@@ -803,6 +817,7 @@ def build_dataset_ffno(
             X = _make_inputs_ch_first(rho, temp, vx, vy, vz, ne)
 
             Y = _make_targets_ch_first(lte, nlte)
+            log_lte = _make_log_lte_ch_first(lte)
 
             # ---------------- NORMALIZE HERE ----------------
             X = normalize_channels(X, mean_X, std_X)
@@ -810,6 +825,7 @@ def build_dataset_ffno(
 
             group_inputs = []
             group_targets = []
+            group_log_lte = []
             group_z = []
             group_dx = []
             group_dy = []
@@ -821,6 +837,7 @@ def build_dataset_ffno(
 
             for s in scale_list:
                 Xs, Ys = _downsample_xy(X, Y, s)
+                _, log_lte_s = _downsample_xy(log_lte, log_lte, s)
 
                 z_native = z_native_full if s == 1 else z_native_full[:, ::s, ::s]
 
@@ -830,6 +847,12 @@ def build_dataset_ffno(
                     Xp, Yp = _extract_patches_xy(
                         Xs,
                         Ys,
+                        patch=patch,
+                        stride=stride,
+                    )
+                    _, log_lte_p = _extract_patches_xy(
+                        log_lte_s,
+                        log_lte_s,
                         patch=patch,
                         stride=stride,
                     )
@@ -844,6 +867,7 @@ def build_dataset_ffno(
 
                     group_inputs.append(Xp)
                     group_targets.append(Yp)
+                    group_log_lte.append(log_lte_p)
                     group_z.append(Zp)
 
                     group_dx.append(np.full(n, dx * s, dtype=np.float32))
@@ -873,6 +897,7 @@ def build_dataset_ffno(
 
             group_inputs = np.concatenate(group_inputs)
             group_targets = np.concatenate(group_targets)
+            group_log_lte = np.concatenate(group_log_lte)
             group_z = np.concatenate(group_z)
             group_dx = np.concatenate(group_dx)
             group_dy = np.concatenate(group_dy)
@@ -883,6 +908,7 @@ def build_dataset_ffno(
                     name=f"{group_prefix}_{len(patch_groups) + 1}",
                     inputs=group_inputs,
                     targets=group_targets,
+                    log_lte_populations=group_log_lte,
                     z_scale=group_z,
                     dx=group_dx,
                     dy=group_dy,
@@ -955,6 +981,7 @@ def build_dataset_ffno(
                 stride=int(stride),
                 scales=np.array(scale_list),
                 target_representation="log10_nlte_population_m-3",
+                lte_representation="log10_lte_population_m-3",
             ),
             mean_X=mean_X,
             std_X=std_X,
@@ -1349,11 +1376,11 @@ def _read_validation_sample_slab(h5_file, ref, h0, h1):
     if "weights" in group:
         weight = group["weights"][idx]
 
-    source_target = None
-    if "source_targets" in group:
-        source_target = group["source_targets"][idx:idx + 1, :, :, h0:h1, :]
+    log_lte = None
+    if "log_lte_populations" in group:
+        log_lte = group["log_lte_populations"][idx:idx + 1, :, :, h0:h1, :]
 
-    return x, y, z, dx, dy, weight, source_target
+    return x, y, z, dx, dy, weight, log_lte
 
 
 def _distributed_full_forward(model, X, z_scale, dx, dy, *, collect_stats=False, branch_mask=None):
@@ -1469,7 +1496,7 @@ def _validate_distributed_full_inference(
                     )
                 h0, h1 = partition_range(H, rank, world_size)
 
-                x_np, y_np, z_np, dx_np, dy_np, weight_np, source_np = _read_validation_sample_slab(
+                x_np, y_np, z_np, dx_np, dy_np, weight_np, log_lte_np = _read_validation_sample_slab(
                     f,
                     ref,
                     h0,
@@ -1486,11 +1513,14 @@ def _validate_distributed_full_inference(
                 if weight_np is not None:
                     weight = torch.as_tensor(weight_np, dtype=torch.float32, device=device)
 
-                source_target = None
-                if source_np is not None:
-                    source_target = torch.from_numpy(
-                        source_np.astype(np.float32, copy=False)
-                    ).to(device)
+                if log_lte_np is None:
+                    raise ValueError(
+                        "Validation dataset is missing log_lte_populations; rebuild "
+                        "it with the current build_dataset_ffno"
+                    )
+                log_lte = torch.from_numpy(
+                    log_lte_np.astype(np.float32, copy=False)
+                ).to(device)
 
                 pred, stats = _distributed_full_forward(
                     model,
@@ -1510,9 +1540,7 @@ def _validate_distributed_full_inference(
                 y = flatten_columns_logb(y_full)
                 x_flat = flatten_columns_logb(x)
 
-                source_true = None
-                if source_target is not None and source_target.numel() > 0:
-                    source_true = flatten_columns_logb(source_target)
+                log_lte = flatten_columns_logb(log_lte)
 
                 loss, components = compute_loss(
                     pred=pred,
@@ -1522,7 +1550,7 @@ def _validate_distributed_full_inference(
                     x=x_flat,
                     pred_full=pred_full,
                     target_full=y_full,
-                    source_true=source_true,
+                    log_lte=log_lte,
                 )
 
                 with torch.no_grad():

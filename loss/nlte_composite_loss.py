@@ -139,12 +139,6 @@ def _validate_atomic_metadata(chi, lines, wave, levels, atom_names):
                 f"ionization/excitation entries for {levels_int} levels, got {chi_i.size}"
             )
 
-        if lines_i.max() >= chi_i.size:
-            raise ValueError(
-                f"Invalid lines for atom {atom_label}: source-function line indices "
-                f"must fit chi entries [0, {chi_i.size - 1}]"
-            )
-
         if wave_i.size != lines_i.shape[0]:
             raise ValueError(
                 f"Invalid wave for atom {atom_label}: expected one wavelength per line "
@@ -326,6 +320,7 @@ def _report_S_negative(
 def compute_Sv_all_lines_T_batched(
     T,
     logb,
+    log_lte,
     chi,
     lines,
     nu,
@@ -339,6 +334,9 @@ def compute_Sv_all_lines_T_batched(
     """
     Returns:
         S : (B, Nlines, Nz)
+
+    logb and log_lte are log10 NLTE and LTE populations, respectively. Their
+    difference reconstructs log10 departure coefficients before x is formed.
 
     If return_x=True:
         returns (S, x)
@@ -365,20 +363,26 @@ def compute_Sv_all_lines_T_batched(
     l = lines[:, 0]
     u = lines[:, 1]
 
-    # Difference of log10 NLTE populations. Constants such as statistical
-    # weights cancel when the predicted and true source ratios are compared.
-    logb_ratio = logb[:, l, :] - logb[:, u, :]
+    # The network predicts log10 NLTE populations. Reconstruct log10 departure
+    # coefficients using the LTE populations supplied with the atmosphere.
+    log_departure = logb - log_lte
+    logb_ratio = log_departure[:, l, :] - log_departure[:, u, :]
     _check_tensor(logb_ratio, "logb_ratio", debug)
 
+    # chi stores levels 1..N-1; level 0 is the zero-energy ground state.
+    level_chi = torch.cat(
+        (torch.zeros(1, device=device, dtype=dtype), chi.to(device=device, dtype=dtype))
+    )
+
     # Δχ/(kT)
-    dchi = (chi[u] - chi[l]).to(device=device, dtype=dtype)
+    dchi = level_chi[u] - level_chi[l]
     _check_tensor(dchi, "dchi", debug)
 
-    boltz = torch.zeros_like(logb_ratio)
+    boltz = dchi[None, :, None] / (kB * T[:, None, :])
     _check_tensor(boltz, "boltz", debug)
 
     # exponent argument (THIS is the physically important variable)
-    x = np.float32(np.log(10.0)) * logb_ratio
+    x = np.float32(np.log(10.0)) * logb_ratio + boltz
     _check_tensor(x, "x", debug)
 
     if return_x and not debug:
@@ -660,7 +664,7 @@ class NLTECompositeLoss(nn.Module):
         logb_true,
         logb_pred_full=None,
         logb_true_full=None,
-        source_true=None,
+        log_lte=None,
     ):
 
         std_x = self.std_X.to(X.dtype)
@@ -671,6 +675,17 @@ class NLTECompositeLoss(nn.Module):
         if logb_pred.shape[1] != int(self.levels.sum()):
             raise ValueError(
                 f"logb has {logb_pred.shape[1]} levels but expected {int(self.levels.sum())}"
+            )
+
+        if log_lte is None:
+            raise ValueError(
+                "NLTECompositeLoss requires log10 LTE populations to reconstruct "
+                "departure coefficients"
+            )
+        if log_lte.shape != logb_pred.shape:
+            raise ValueError(
+                f"log_lte shape {tuple(log_lte.shape)} must match logb shape "
+                f"{tuple(logb_pred.shape)}"
             )
 
         # ------------------ INPUT VALIDATION ------------------ #
@@ -706,8 +721,6 @@ class NLTECompositeLoss(nn.Module):
         # ------------------ PHYSICS ------------------ #
         per_atom_source_losses = []
         per_atom_debug = []
-        source_line_offset = 0
-
         level_offsets = torch.zeros(len(self.levels)+1, device=logb_pred.device, dtype=torch.long)
         level_offsets[1:] = torch.cumsum(self.levels, dim=0)
 
@@ -725,6 +738,7 @@ class NLTECompositeLoss(nn.Module):
 
             logb_pred_atom = logb_pred[:, start:end, :] * std + mean
             logb_true_atom = logb_true[:, start:end, :] * std + mean
+            log_lte_atom = log_lte[:, start:end, :].to(logb_pred.dtype)
 
             chi_i   = self.chi[i]
             lines_i = self.lines[i]
@@ -735,6 +749,7 @@ class NLTECompositeLoss(nn.Module):
             _, x_pred = compute_Sv_all_lines_T_batched(
                 T=T,
                 logb=logb_pred_atom,
+                log_lte=log_lte_atom,
                 chi=chi_i,
                 lines=lines_i,
                 nu=nu_i,
@@ -744,21 +759,17 @@ class NLTECompositeLoss(nn.Module):
             )
 
             # ---- true source ----
-            if source_true is not None:
-                n_source_lines = int(self.lines[i].shape[0])
-                x_true = source_true[:, source_line_offset:source_line_offset + n_source_lines, :]
-                source_line_offset += n_source_lines
-            else:
-                _, x_true = compute_Sv_all_lines_T_batched(
-                    T=T,
-                    logb=logb_true_atom,
-                    chi=chi_i,
-                    lines=lines_i,
-                    nu=nu_i,
-                    K_prefactor=pref_i,
-                    debug=False,
-                    return_x=True
-                )
+            _, x_true = compute_Sv_all_lines_T_batched(
+                T=T,
+                logb=logb_true_atom,
+                log_lte=log_lte_atom,
+                chi=chi_i,
+                lines=lines_i,
+                nu=nu_i,
+                K_prefactor=pref_i,
+                debug=False,
+                return_x=True
+            )
 
             if self.print_once:
                 _check_tensor(T, f"T {rank}", True)

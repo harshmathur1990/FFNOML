@@ -424,7 +424,7 @@ def compute_loss(
     x,
     pred_full=None,
     target_full=None,
-    source_true=None,
+    log_lte=None,
 ):
     loss, components = loss_fn(
         x,
@@ -432,7 +432,7 @@ def compute_loss(
         target,
         logb_pred_full=pred_full,
         logb_true_full=target_full,
-        source_true=source_true,
+        log_lte=log_lte,
     )
 
     if weight is not None:
@@ -653,7 +653,7 @@ def train_one_epoch(
         disable=not is_main_process(),
     )
 
-    for x, y, z, dx, dy, scale, weight, source_target in pbar:
+    for x, y, z, dx, dy, scale, weight, log_lte in pbar:
         x = x.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True)
         z = z.to(device, non_blocking=True)
@@ -663,10 +663,12 @@ def train_one_epoch(
         if weight is not None:
             weight = weight.to(device, non_blocking=True)
 
-        if source_target is not None and source_target.numel() > 0:
-            source_target = source_target.to(device, non_blocking=True)
-        else:
-            source_target = None
+        if log_lte is None or log_lte.numel() == 0:
+            raise ValueError(
+                "Training dataset is missing log_lte_populations; rebuild it with "
+                "the current build_dataset_ffno"
+            )
+        log_lte = log_lte.to(device, non_blocking=True)
 
         optimizer.zero_grad(set_to_none=True)
 
@@ -674,14 +676,10 @@ def train_one_epoch(
 
         pred_full = pred
         y_full = y
-        source_true = None
-
         pred = flatten_columns_logb(pred_full)
         y = flatten_columns_logb(y_full)
         x = flatten_columns_logb(x)
-
-        if source_target is not None and source_target.numel() > 0:
-            source_true = flatten_columns_logb(source_target)
+        log_lte = flatten_columns_logb(log_lte)
 
         loss, components = compute_loss(
             pred=pred,
@@ -691,7 +689,7 @@ def train_one_epoch(
             x=x,
             pred_full=pred_full,
             target_full=y_full,
-            source_true=source_true,
+            log_lte=log_lte,
         )
 
         loss.backward()
@@ -797,7 +795,7 @@ def validate(
     )
 
     with torch.no_grad():
-        for x, y, z, dx, dy, scale, weight, source_target in pbar:
+        for x, y, z, dx, dy, scale, weight, log_lte in pbar:
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
             z = z.to(device, non_blocking=True)
@@ -807,10 +805,12 @@ def validate(
             if weight is not None:
                 weight = weight.to(device, non_blocking=True)
 
-            if source_target is not None and source_target.numel() > 0:
-                source_target = source_target.to(device, non_blocking=True)
-            else:
-                source_target = None
+            if log_lte is None or log_lte.numel() == 0:
+                raise ValueError(
+                    "Validation dataset is missing log_lte_populations; rebuild it "
+                    "with the current build_dataset_ffno"
+                )
+            log_lte = log_lte.to(device, non_blocking=True)
 
             if collect_model_stats:
                 pred, stats = model(
@@ -827,14 +827,10 @@ def validate(
 
             pred_full = pred
             y_full = y
-            source_true = None
-
             pred = flatten_columns_logb(pred_full)
             y = flatten_columns_logb(y_full)
             x = flatten_columns_logb(x)
-
-            if source_target is not None and source_target.numel() > 0:
-                source_true = flatten_columns_logb(source_target)
+            log_lte = flatten_columns_logb(log_lte)
 
             n_items += pred_full.shape[0]
 
@@ -846,7 +842,7 @@ def validate(
                 x=x,
                 pred_full=pred_full,
                 target_full=y_full,
-                source_true=source_true,
+                log_lte=log_lte,
             )
 
             # ============================================
