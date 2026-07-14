@@ -170,6 +170,7 @@ def plot_log_population_error_envelopes(
 def plot_departure_coefficient_scatter_by_height(
     pred,
     true,
+    z_scale,
     level_names=None,
     figsize=(16, 10),
     ncols=3,
@@ -177,7 +178,7 @@ def plot_departure_coefficient_scatter_by_height(
 ):
     """Compare predicted and true departure coefficients at every level.
 
-    Both axes are logarithmic and points are colored by vertical-grid index,
+    Both axes are logarithmic and points are colored by physical height,
     matching the height-coded comparison in the supplied reference plot.
     Large cubes are sampled uniformly in flattened-array order to keep the
     figure responsive; pass ``None`` for ``max_points_per_level`` to plot all
@@ -193,6 +194,13 @@ def plot_departure_coefficient_scatter_by_height(
         )
 
     nlevels, ndepth, nx, ny = pred.shape
+    z_axis = np.asarray(z_scale, dtype=np.float64)
+    if z_axis.shape != (ndepth,):
+        raise ValueError(
+            f"Expected z_scale with shape ({ndepth},), got {z_axis.shape}"
+        )
+    if not np.all(np.isfinite(z_axis)):
+        raise ValueError("z_scale contains non-finite values")
     if level_names is not None and len(level_names) != nlevels:
         raise ValueError(
             f"Expected {nlevels} level names, got {len(level_names)}"
@@ -204,7 +212,7 @@ def plot_departure_coefficient_scatter_by_height(
     fig, axes = plt.subplots(
         nrows, ncols, figsize=figsize, squeeze=False, constrained_layout=True
     )
-    height_index = np.repeat(np.arange(ndepth), nx * ny)
+    height_km = np.repeat(z_axis * 1e3, nx * ny)
 
     for ilevel in range(nlevels):
         ax = axes[ilevel // ncols, ilevel % ncols]
@@ -227,10 +235,10 @@ def plot_departure_coefficient_scatter_by_height(
             points = ax.scatter(
                 actual[valid],
                 predicted[valid],
-                c=height_index[valid],
+                c=height_km[valid],
                 cmap="viridis",
-                vmin=0,
-                vmax=max(ndepth - 1, 1),
+                vmin=np.min(height_km),
+                vmax=np.max(height_km),
                 s=2,
                 alpha=0.18,
                 linewidths=0,
@@ -249,7 +257,7 @@ def plot_departure_coefficient_scatter_by_height(
             ax.set_xlim(lower, upper)
             ax.set_ylim(lower, upper)
             colorbar = fig.colorbar(points, ax=ax, pad=0.02)
-            colorbar.set_label("Vertical-grid index (height)")
+            colorbar.set_label(r"z [km]")
             ax.legend(loc="upper left", fontsize=8)
         else:
             ax.text(
@@ -278,9 +286,9 @@ def plot_departure_coefficient_scatter_by_height(
 def plot_departure_coefficient_error_assessment(
     pred,
     true,
+    z_scale,
     level_names=None,
     figsize=None,
-    height_boundaries=(18, 37),
     residual_range=(-50, 50),
     residual_bins=100,
     coefficient_bins=80,
@@ -289,8 +297,9 @@ def plot_departure_coefficient_error_assessment(
 
     The top row shows relative errors in percent and the bottom row shows the
     corresponding true departure-coefficient distributions on a logarithmic
-    x axis. ``height_boundaries=(18, 37)`` reproduces the bottom/middle/top
-    split in the reference figure; boundaries are clipped for shallower cubes.
+    x axis. Cells are grouped into the physical-height ranges requested for
+    the comparison: below 750 km, 750--1200 km, 1200--2500 km, 2500--5000 km,
+    and 5000 km and above.
     """
 
     pred = np.asarray(pred)
@@ -302,29 +311,24 @@ def plot_departure_coefficient_error_assessment(
         )
 
     nlevels, ndepth, _, _ = pred.shape
+    z_axis = np.asarray(z_scale, dtype=np.float64)
+    if z_axis.shape != (ndepth,):
+        raise ValueError(
+            f"Expected z_scale with shape ({ndepth},), got {z_axis.shape}"
+        )
+    if not np.all(np.isfinite(z_axis)):
+        raise ValueError("z_scale contains non-finite values")
     if level_names is not None and len(level_names) != nlevels:
         raise ValueError(
             f"Expected {nlevels} level names, got {len(level_names)}"
         )
-    if len(height_boundaries) != 2:
-        raise ValueError("height_boundaries must contain exactly two indices")
-
-    lower_boundary, upper_boundary = sorted(
-        np.clip(np.asarray(height_boundaries, dtype=int), 0, ndepth)
-    )
-    if lower_boundary == upper_boundary:
-        lower_boundary, upper_boundary = np.linspace(
-            0, ndepth, 4, dtype=int
-        )[1:3]
-
+    z_km = z_axis * 1e3
     regions = (
-        (slice(0, lower_boundary), f"Bottom (z < {lower_boundary})", "#6c4bd9"),
-        (
-            slice(lower_boundary, upper_boundary),
-            f"Middle ({lower_boundary} <= z < {upper_boundary})",
-            "#66bd63",
-        ),
-        (slice(upper_boundary, ndepth), f"Top (z >= {upper_boundary})", "#df725f"),
+        (z_km < 750, r"$z < 750$ km", "#482878"),
+        ((z_km >= 750) & (z_km < 1200), r"$750 \leq z < 1200$ km", "#3e7c98"),
+        ((z_km >= 1200) & (z_km < 2500), r"$1200 \leq z < 2500$ km", "#55a868"),
+        ((z_km >= 2500) & (z_km < 5000), r"$2500 \leq z < 5000$ km", "#dd9c3c"),
+        (z_km >= 5000, r"$z \geq 5000$ km", "#c44e52"),
     )
     if figsize is None:
         figsize = (4.0 * nlevels, 7.5)
@@ -354,9 +358,9 @@ def plot_departure_coefficient_error_assessment(
                 log_max += 0.5
             log_bins = np.logspace(log_min, log_max, coefficient_bins + 1)
 
-        for region, label, color in regions:
-            actual = true[ilevel, region, :, :].ravel()
-            predicted = pred[ilevel, region, :, :].ravel()
+        for height_mask, label, color in regions:
+            actual = true[ilevel, height_mask, :, :].ravel()
+            predicted = pred[ilevel, height_mask, :, :].ravel()
             valid = (
                 np.isfinite(actual)
                 & np.isfinite(predicted)
@@ -718,6 +722,7 @@ def make_snapshot_plot(dataset, output_dir, show=False):
     scatter_fig, _ = plot_departure_coefficient_scatter_by_height(
         pred_plot,
         true_plot,
+        pred_z_axis,
         level_names=level_names,
     )
     scatter_outpath = os.path.join(
@@ -730,6 +735,7 @@ def make_snapshot_plot(dataset, output_dir, show=False):
     assessment_fig, _ = plot_departure_coefficient_error_assessment(
         pred_plot,
         true_plot,
+        pred_z_axis,
         level_names=level_names,
     )
     assessment_outpath = os.path.join(
