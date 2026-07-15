@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+
+import csv
+import os
+
+import h5py
+import numpy as np
+
+from config import ACTIVE_ATOMS, MODEL, MULTI3D_PRED_DATA
+from errorplots import (
+    active_atom_names_tag,
+    build_truth_paths,
+    compute_muspel_lte,
+    load_true_multi3d_departures,
+    prepare_forward_lte_populations,
+)
+
+
+OLD_DIR = "training_FFNO3D_zscale_expand"
+NEW_DIR = "training_FFNO3D_zscale_expand_lognlte"
+OUTPUT_CSV = "population_rmse_per_level.csv"
+
+
+def prediction_path(directory, dataset_name):
+    filename = (
+        f"output_3D_sim_s5_{dataset_name}_{MODEL}_"
+        f"{active_atom_names_tag()}.hdf5"
+    )
+    return os.path.join(directory, filename)
+
+
+def load_prediction(path, key):
+    with h5py.File(path, "r") as file:
+        return file[key][...]
+
+
+def rmse(prediction, truth):
+    difference = np.asarray(prediction, dtype=np.float64) - np.asarray(
+        truth, dtype=np.float64
+    )
+    return float(np.sqrt(np.mean(difference**2, dtype=np.float64)))
+
+
+def main():
+    rows = []
+
+    for configured_dataset in MULTI3D_PRED_DATA:
+        dataset = dict(configured_dataset)
+        dataset["MULTI3D_PATHS"] = build_truth_paths(dataset)
+
+        old_path = prediction_path(OLD_DIR, dataset["NAME"])
+        new_path = prediction_path(NEW_DIR, dataset["NAME"])
+        if not os.path.exists(old_path) or not os.path.exists(new_path):
+            print(f"Skipping {dataset['NAME']}: prediction file missing")
+            continue
+
+        print(f"\nProcessing {dataset['NAME']}")
+
+        old_departure = load_prediction(old_path, "departure_coefficients")
+        new_nlte = load_prediction(new_path, "nlte_populations")
+
+        _, _, _, truth_nlte, level_names = load_true_multi3d_departures(
+            dataset,
+            active_atoms=ACTIVE_ATOMS,
+        )
+        muspel_lte = compute_muspel_lte(
+            dataset,
+            active_atoms=ACTIVE_ATOMS,
+        )
+        muspel_lte = prepare_forward_lte_populations(
+            muspel_lte,
+            truth_nlte.shape,
+        )
+
+        if old_departure.shape != truth_nlte.shape:
+            raise ValueError(
+                f"Old prediction shape {old_departure.shape} does not match "
+                f"truth shape {truth_nlte.shape} for {dataset['NAME']}"
+            )
+        if new_nlte.shape != truth_nlte.shape:
+            raise ValueError(
+                f"New prediction shape {new_nlte.shape} does not match "
+                f"truth shape {truth_nlte.shape} for {dataset['NAME']}"
+            )
+
+        for level_index, level_name in enumerate(level_names):
+            old_nlte = (
+                old_departure[..., level_index]
+                * muspel_lte[..., level_index]
+            )
+            old_rmse = rmse(old_nlte, truth_nlte[..., level_index])
+            new_rmse = rmse(
+                new_nlte[..., level_index],
+                truth_nlte[..., level_index],
+            )
+
+            print(
+                f"  {level_name}: old={old_rmse:.6e} m^-3, "
+                f"new={new_rmse:.6e} m^-3"
+            )
+            rows.append(
+                {
+                    "simulation": dataset["NAME"],
+                    "level": level_name,
+                    "old_rmse_m3": old_rmse,
+                    "new_rmse_m3": new_rmse,
+                }
+            )
+
+    with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(
+            file,
+            fieldnames=(
+                "simulation",
+                "level",
+                "old_rmse_m3",
+                "new_rmse_m3",
+            ),
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+
+    print(f"\nSaved {OUTPUT_CSV}")
+
+
+if __name__ == "__main__":
+    main()
