@@ -179,8 +179,8 @@ def plot_departure_coefficient_scatter_by_height(
     """Compare predicted and true departure coefficients at every level.
 
     Both axes are logarithmic and points are colored by vertical-grid index.
-    Large cubes are sampled uniformly in flattened-array order to keep the
-    figure responsive; pass ``None`` for ``max_points_per_level`` to plot all
+    Large cubes are sampled evenly across depth indices to preserve visible
+    color separation; pass ``None`` for ``max_points_per_level`` to plot all
     valid cells.
     """
 
@@ -215,18 +215,43 @@ def plot_departure_coefficient_scatter_by_height(
         ax = axes[ilevel // ncols, ilevel % ncols]
         actual = true[ilevel].ravel()
         predicted = pred[ilevel].ravel()
-        valid = np.flatnonzero(
+        valid_mask = (
             np.isfinite(actual)
             & np.isfinite(predicted)
             & (actual > 0)
             & (predicted > 0)
         )
+        valid = np.flatnonzero(valid_mask)
 
         if max_points_per_level is not None and valid.size > max_points_per_level:
-            sample = np.linspace(
-                0, valid.size - 1, max_points_per_level, dtype=np.int64
+            cells_per_depth = nx * ny
+            valid_by_depth = valid_mask.reshape(ndepth, cells_per_depth)
+            sampled_depths = np.linspace(
+                0,
+                ndepth - 1,
+                min(ndepth, max_points_per_level),
+                dtype=np.int64,
             )
-            valid = valid[sample]
+            points_per_depth = max(
+                1, max_points_per_level // sampled_depths.size
+            )
+            sampled_valid = []
+
+            for idepth in sampled_depths:
+                local_valid = np.flatnonzero(valid_by_depth[idepth])
+                if local_valid.size > points_per_depth:
+                    sample = np.linspace(
+                        0,
+                        local_valid.size - 1,
+                        points_per_depth,
+                        dtype=np.int64,
+                    )
+                    local_valid = local_valid[sample]
+                sampled_valid.append(
+                    idepth * cells_per_depth + local_valid
+                )
+
+            valid = np.concatenate(sampled_valid)
 
         if valid.size:
             points = ax.scatter(
@@ -236,8 +261,8 @@ def plot_departure_coefficient_scatter_by_height(
                 cmap="viridis",
                 vmin=0,
                 vmax=ndepth - 1,
-                s=2,
-                alpha=0.18,
+                s=1.1,
+                alpha=0.55,
                 linewidths=0,
                 rasterized=True,
             )
