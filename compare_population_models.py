@@ -54,15 +54,41 @@ def main():
             print(f"Skipping {dataset['NAME']}: prediction file missing")
             continue
 
+        required_truth_files = [dataset["MULTI3D_ATMOS"], dataset["MESH"]]
+        for atom_path in dataset["MULTI3D_PATHS"].values():
+            required_truth_files.extend(
+                os.path.join(atom_path, filename)
+                for filename in (
+                    "multi3d.input",
+                    "out_par",
+                    "out_nu",
+                    "out_pop",
+                    "out_atm",
+                )
+            )
+        missing_truth_files = [
+            path for path in required_truth_files if not os.path.exists(path)
+        ]
+        if missing_truth_files:
+            print(
+                f"Skipping {dataset['NAME']}: missing Multi3D truth file "
+                f"{missing_truth_files[0]}"
+            )
+            continue
+
         print(f"\nProcessing {dataset['NAME']}")
 
         old_departure = load_prediction(old_path, "departure_coefficients")
         new_nlte = load_prediction(new_path, "nlte_populations")
 
-        _, _, _, truth_nlte, level_names = load_true_multi3d_departures(
-            dataset,
-            active_atoms=ACTIVE_ATOMS,
-        )
+        try:
+            _, _, _, truth_nlte, level_names = load_true_multi3d_departures(
+                dataset,
+                active_atoms=ACTIVE_ATOMS,
+            )
+        except FileNotFoundError as error:
+            print(f"Skipping {dataset['NAME']}: {error}")
+            continue
         muspel_lte = compute_muspel_lte(
             dataset,
             active_atoms=ACTIVE_ATOMS,
