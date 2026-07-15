@@ -10,7 +10,7 @@ from helita.sim.multi3d import Multi3dAtmos, Multi3dOut
 
 from config import ACTIVE_ATOMS, MODEL, MODEL_DIR, MULTI3D_PRED_DATA
 from pipeline import compute_dx_dy
-from matplotlib.ticker import (MultipleLocator, AutoMinorLocator)
+from matplotlib.ticker import AutoMinorLocator, MaxNLocator, MultipleLocator
 
 
 def active_atom_names_tag():
@@ -178,8 +178,7 @@ def plot_departure_coefficient_scatter_by_height(
 ):
     """Compare predicted and true departure coefficients at every level.
 
-    Both axes are logarithmic and points are colored by physical height,
-    matching the height-coded comparison in the supplied reference plot.
+    Both axes are logarithmic and points are colored by vertical-grid index.
     Large cubes are sampled uniformly in flattened-array order to keep the
     figure responsive; pass ``None`` for ``max_points_per_level`` to plot all
     valid cells.
@@ -199,8 +198,6 @@ def plot_departure_coefficient_scatter_by_height(
         raise ValueError(
             f"Expected z_scale with shape ({ndepth},), got {z_axis.shape}"
         )
-    if not np.all(np.isfinite(z_axis)):
-        raise ValueError("z_scale contains non-finite values")
     if level_names is not None and len(level_names) != nlevels:
         raise ValueError(
             f"Expected {nlevels} level names, got {len(level_names)}"
@@ -212,7 +209,7 @@ def plot_departure_coefficient_scatter_by_height(
     fig, axes = plt.subplots(
         nrows, ncols, figsize=figsize, squeeze=False, constrained_layout=True
     )
-    height_km = np.repeat(z_axis * 1e3, nx * ny)
+    depth_indices = np.repeat(np.arange(ndepth), nx * ny)
 
     for ilevel in range(nlevels):
         ax = axes[ilevel // ncols, ilevel % ncols]
@@ -235,10 +232,10 @@ def plot_departure_coefficient_scatter_by_height(
             points = ax.scatter(
                 actual[valid],
                 predicted[valid],
-                c=height_km[valid],
+                c=depth_indices[valid],
                 cmap="viridis",
-                vmin=np.min(height_km),
-                vmax=np.max(height_km),
+                vmin=0,
+                vmax=ndepth - 1,
                 s=2,
                 alpha=0.18,
                 linewidths=0,
@@ -260,8 +257,9 @@ def plot_departure_coefficient_scatter_by_height(
             # square plotting box instead of the taller subplot layout slot.
             colorbar_ax = ax.inset_axes((1.03, 0.0, 0.045, 1.0))
             colorbar = fig.colorbar(points, cax=colorbar_ax)
-            colorbar.set_label(r"z [km]", fontsize=13)
+            colorbar.set_label("Depth index", fontsize=13)
             colorbar.ax.tick_params(labelsize=11)
+            colorbar.ax.yaxis.set_major_locator(MaxNLocator(integer=True))
             ax.legend(loc="upper left", fontsize=10)
         else:
             ax.text(
@@ -283,7 +281,7 @@ def plot_departure_coefficient_scatter_by_height(
             if level_names is not None
             else f"Level {ilevel + 1}"
         )
-        ax.set_title(f"{title} (color-coded by height)", fontsize=14)
+        ax.set_title(title, fontsize=14)
         ax.set_xlabel("Actual departure coefficient", fontsize=13)
         ax.set_ylabel("Predicted departure coefficient", fontsize=13)
         ax.tick_params(axis="both", which="both", labelsize=11)
