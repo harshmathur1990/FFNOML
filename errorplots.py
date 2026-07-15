@@ -256,7 +256,10 @@ def plot_departure_coefficient_scatter_by_height(
             )
             ax.set_xlim(lower, upper)
             ax.set_ylim(lower, upper)
-            colorbar = fig.colorbar(points, ax=ax, pad=0.02)
+            # Anchor the colorbar to the axes itself so its height follows the
+            # square plotting box instead of the taller subplot layout slot.
+            colorbar_ax = ax.inset_axes((1.03, 0.0, 0.045, 1.0))
+            colorbar = fig.colorbar(points, cax=colorbar_ax)
             colorbar.set_label(r"z [km]", fontsize=13)
             colorbar.ax.tick_params(labelsize=11)
             ax.legend(loc="upper left", fontsize=10)
