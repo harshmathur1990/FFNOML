@@ -272,6 +272,9 @@ def plot_departure_coefficient_scatter_by_height(
 
         ax.set_xscale("log")
         ax.set_yscale("log")
+        # Matching limits plus a square axes box make the y=x reference line
+        # appear at its true 45-degree angle on the logarithmic scales.
+        ax.set_box_aspect(1)
         title = (
             level_names[ilevel]
             if level_names is not None
