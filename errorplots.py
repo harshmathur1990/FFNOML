@@ -172,7 +172,7 @@ def plot_departure_coefficient_scatter_by_height(
     true,
     z_scale,
     level_names=None,
-    figsize=(16, 10),
+    figsize=(13, 8),
     ncols=3,
     max_points_per_level=250_000,
 ):
@@ -257,8 +257,9 @@ def plot_departure_coefficient_scatter_by_height(
             ax.set_xlim(lower, upper)
             ax.set_ylim(lower, upper)
             colorbar = fig.colorbar(points, ax=ax, pad=0.02)
-            colorbar.set_label(r"z [km]")
-            ax.legend(loc="upper left", fontsize=8)
+            colorbar.set_label(r"z [km]", fontsize=13)
+            colorbar.ax.tick_params(labelsize=11)
+            ax.legend(loc="upper left", fontsize=10)
         else:
             ax.text(
                 0.5,
@@ -271,10 +272,15 @@ def plot_departure_coefficient_scatter_by_height(
 
         ax.set_xscale("log")
         ax.set_yscale("log")
-        title = level_names[ilevel] if level_names is not None else f"Level {ilevel + 1}"
-        ax.set_title(f"{title} (color-coded by height)")
-        ax.set_xlabel("Actual departure coefficient")
-        ax.set_ylabel("Predicted departure coefficient")
+        title = (
+            level_names[ilevel]
+            if level_names is not None
+            else f"Level {ilevel + 1}"
+        )
+        ax.set_title(f"{title} (color-coded by height)", fontsize=14)
+        ax.set_xlabel("Actual departure coefficient", fontsize=13)
+        ax.set_ylabel("Predicted departure coefficient", fontsize=13)
+        ax.tick_params(axis="both", which="both", labelsize=11)
         ax.grid(True, which="both", alpha=0.2)
 
     for j in range(nlevels, nrows * ncols):
@@ -331,7 +337,7 @@ def plot_departure_coefficient_error_assessment(
         (z_km >= 5000, r"$z \geq 5000$ km", "#c44e52"),
     )
     if figsize is None:
-        figsize = (4.0 * nlevels, 7.5)
+        figsize = (3.0 * nlevels, 6.3)
 
     fig, axes = plt.subplots(
         2,
@@ -394,19 +400,23 @@ def plot_departure_coefficient_error_assessment(
 
         residual_ax.axvline(0, color="0.25", linestyle="--", lw=1)
         residual_ax.set_xlim(*residual_range)
-        residual_ax.set_title(f"{title} residuals")
-        residual_ax.set_xlabel("Relative error (%)")
+        residual_ax.set_title(f"{title} residuals", fontsize=14)
+        residual_ax.set_xlabel("Relative error (%)", fontsize=13)
+        residual_ax.tick_params(axis="both", which="both", labelsize=11)
         residual_ax.grid(True, alpha=0.2)
 
         coefficient_ax.set_xscale("log")
-        coefficient_ax.set_title(f"{title} coefficient distribution")
-        coefficient_ax.set_xlabel("Departure coefficient")
+        coefficient_ax.set_title(
+            f"{title} coefficient distribution", fontsize=14
+        )
+        coefficient_ax.set_xlabel("Departure coefficient", fontsize=13)
+        coefficient_ax.tick_params(axis="both", which="both", labelsize=11)
         coefficient_ax.grid(True, which="both", alpha=0.2)
 
-    axes[0, 0].set_ylabel("Density")
-    axes[1, 0].set_ylabel("Count")
-    axes[0, -1].legend(loc="upper right", fontsize=8)
-    axes[1, -1].legend(loc="upper right", fontsize=8)
+    axes[0, 0].set_ylabel("Density", fontsize=13)
+    axes[1, 0].set_ylabel("Count", fontsize=13)
+    axes[0, -1].legend(loc="upper right", fontsize=10)
+    axes[1, -1].legend(loc="upper right", fontsize=10)
 
     return fig, axes
 
