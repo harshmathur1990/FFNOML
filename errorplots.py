@@ -304,16 +304,6 @@ def plot_departure_coefficient_scatter_by_height(
 
         ax.set_xscale("log")
         ax.set_yscale("log")
-        # Keep the two logarithmic axes directly comparable: use the y-axis
-        # tick positions and formatting for the x-axis as well.
-        ax.xaxis.set_major_locator(FixedLocator(ax.get_yticks(minor=False)))
-        ax.xaxis.set_minor_locator(FixedLocator(ax.get_yticks(minor=True)))
-        ax.xaxis.set_major_formatter(
-            copy.copy(ax.yaxis.get_major_formatter())
-        )
-        ax.xaxis.set_minor_formatter(
-            copy.copy(ax.yaxis.get_minor_formatter())
-        )
         # Matching limits plus a square axes box make the y=x reference line
         # appear at its true 45-degree angle on the logarithmic scales.
         ax.set_box_aspect(1)
@@ -330,6 +320,27 @@ def plot_departure_coefficient_scatter_by_height(
 
     for j in range(nlevels, nrows * ncols):
         fig.delaxes(axes[j // ncols, j % ncols])
+
+    # Let constrained layout choose the final y ticks, then freeze those tick
+    # positions and formatters on both axes.  Fixing both locators prevents a
+    # later savefig draw from recalculating only one axis (which can otherwise
+    # happen for panels spanning many decades).
+    fig.canvas.draw()
+    for ilevel in range(nlevels):
+        ax = axes[ilevel // ncols, ilevel % ncols]
+        major_ticks = ax.get_yticks(minor=False)
+        minor_ticks = ax.get_yticks(minor=True)
+        major_formatter = copy.copy(ax.yaxis.get_major_formatter())
+        minor_formatter = copy.copy(ax.yaxis.get_minor_formatter())
+
+        ax.xaxis.set_major_locator(FixedLocator(major_ticks))
+        ax.yaxis.set_major_locator(FixedLocator(major_ticks))
+        ax.xaxis.set_minor_locator(FixedLocator(minor_ticks))
+        ax.yaxis.set_minor_locator(FixedLocator(minor_ticks))
+        ax.xaxis.set_major_formatter(copy.copy(major_formatter))
+        ax.yaxis.set_major_formatter(copy.copy(major_formatter))
+        ax.xaxis.set_minor_formatter(copy.copy(minor_formatter))
+        ax.yaxis.set_minor_formatter(copy.copy(minor_formatter))
 
     return fig, axes
 
