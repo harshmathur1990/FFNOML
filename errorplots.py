@@ -258,11 +258,11 @@ def plot_departure_coefficient_scatter_by_height(
                 actual[valid],
                 predicted[valid],
                 c=depth_indices[valid],
-                cmap="viridis",
+                cmap="rainbow",
                 vmin=0,
                 vmax=ndepth - 1,
                 s=1.1,
-                alpha=0.55,
+                alpha=0.18,
                 linewidths=0,
                 rasterized=True,
             )
