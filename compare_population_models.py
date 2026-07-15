@@ -18,7 +18,7 @@ from errorplots import (
 
 OLD_DIR = "training_FFNO3D_zscale_expand"
 NEW_DIR = "training_FFNO3D_zscale_expand_lognlte"
-OUTPUT_CSV = "population_rmse_per_level.csv"
+OUTPUT_CSV = "population_nrmse_per_level.csv"
 
 
 def prediction_path(directory, dataset_name):
@@ -34,11 +34,16 @@ def load_prediction(path, key):
         return file[key][...]
 
 
-def rmse(prediction, truth):
+def normalized_rmse_percent(prediction, truth):
     difference = np.asarray(prediction, dtype=np.float64) - np.asarray(
         truth, dtype=np.float64
     )
-    return float(np.sqrt(np.mean(difference**2, dtype=np.float64)))
+    truth = np.asarray(truth, dtype=np.float64)
+    squared_error = np.sum(difference**2, dtype=np.float64)
+    squared_truth = np.sum(truth**2, dtype=np.float64)
+    if squared_truth == 0:
+        return np.nan
+    return float(100.0 * np.sqrt(squared_error / squared_truth))
 
 
 def main():
@@ -114,22 +119,25 @@ def main():
                 old_departure[..., level_index]
                 * muspel_lte[..., level_index]
             )
-            old_rmse = rmse(old_nlte, truth_nlte[..., level_index])
-            new_rmse = rmse(
+            old_nrmse = normalized_rmse_percent(
+                old_nlte,
+                truth_nlte[..., level_index],
+            )
+            new_nrmse = normalized_rmse_percent(
                 new_nlte[..., level_index],
                 truth_nlte[..., level_index],
             )
 
             print(
-                f"  {level_name}: old={old_rmse:.6e} m^-3, "
-                f"new={new_rmse:.6e} m^-3"
+                f"  {level_name}: old={old_nrmse:.4f}%, "
+                f"new={new_nrmse:.4f}%"
             )
             rows.append(
                 {
                     "simulation": dataset["NAME"],
                     "level": level_name,
-                    "old_rmse_m3": old_rmse,
-                    "new_rmse_m3": new_rmse,
+                    "old_nrmse_percent": old_nrmse,
+                    "new_nrmse_percent": new_nrmse,
                 }
             )
 
@@ -139,8 +147,8 @@ def main():
             fieldnames=(
                 "simulation",
                 "level",
-                "old_rmse_m3",
-                "new_rmse_m3",
+                "old_nrmse_percent",
+                "new_nrmse_percent",
             ),
         )
         writer.writeheader()
