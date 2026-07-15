@@ -1,4 +1,5 @@
 import argparse
+import copy
 import os
 import subprocess
 import tempfile
@@ -10,7 +11,12 @@ from helita.sim.multi3d import Multi3dAtmos, Multi3dOut
 
 from config import ACTIVE_ATOMS, MODEL, MODEL_DIR, MULTI3D_PRED_DATA
 from pipeline import compute_dx_dy
-from matplotlib.ticker import AutoMinorLocator, MaxNLocator, MultipleLocator
+from matplotlib.ticker import (
+    AutoMinorLocator,
+    FixedLocator,
+    MaxNLocator,
+    MultipleLocator,
+)
 
 
 def active_atom_names_tag():
@@ -298,6 +304,16 @@ def plot_departure_coefficient_scatter_by_height(
 
         ax.set_xscale("log")
         ax.set_yscale("log")
+        # Keep the two logarithmic axes directly comparable: use the y-axis
+        # tick positions and formatting for the x-axis as well.
+        ax.xaxis.set_major_locator(FixedLocator(ax.get_yticks(minor=False)))
+        ax.xaxis.set_minor_locator(FixedLocator(ax.get_yticks(minor=True)))
+        ax.xaxis.set_major_formatter(
+            copy.copy(ax.yaxis.get_major_formatter())
+        )
+        ax.xaxis.set_minor_formatter(
+            copy.copy(ax.yaxis.get_minor_formatter())
+        )
         # Matching limits plus a square axes box make the y=x reference line
         # appear at its true 45-degree angle on the logarithmic scales.
         ax.set_box_aspect(1)
