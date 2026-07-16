@@ -161,6 +161,8 @@ def main():
                 "level",
                 "old_nrmse_percent",
                 "new_nrmse_percent",
+                "old_log_nrmse_percent",
+                "new_log_nrmse_percent"
             ),
         )
         writer.writeheader()
