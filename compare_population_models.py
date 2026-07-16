@@ -127,10 +127,20 @@ def main():
                 new_nlte[..., level_index],
                 truth_nlte[..., level_index],
             )
+            old_nrmse_log = normalized_rmse_percent(
+                np.log10(old_nlte),
+                np.log10(truth_nlte[..., level_index]),
+            )
+            new_nrmse_log = normalized_rmse_percent(
+                np.log10(new_nlte[..., level_index]),
+                np.log10(truth_nlte[..., level_index]),
+            )
 
             print(
                 f"  {level_name}: old={old_nrmse:.4f}%, "
-                f"new={new_nrmse:.4f}%"
+                f"new={new_nrmse:.4f}%, "
+                f"old_log={old_nrmse_log:.4f}%, "
+                f"new_log={new_nrmse_log:.4f}%"
             )
             rows.append(
                 {
@@ -138,6 +148,8 @@ def main():
                     "level": level_name,
                     "old_nrmse_percent": old_nrmse,
                     "new_nrmse_percent": new_nrmse,
+                    "old_log_nrmse_percent": old_nrmse_log,
+                    "new_log_nrmse_percent": new_nrmse_log,
                 }
             )
 
