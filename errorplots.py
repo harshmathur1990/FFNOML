@@ -1,4 +1,5 @@
 import argparse
+import copy
 import os
 import subprocess
 import tempfile
@@ -10,7 +11,12 @@ from helita.sim.multi3d import Multi3dAtmos, Multi3dOut
 
 from config import ACTIVE_ATOMS, MODEL, MODEL_DIR, MULTI3D_PRED_DATA
 from pipeline import compute_dx_dy
-from matplotlib.ticker import (MultipleLocator, AutoMinorLocator)
+from matplotlib.ticker import (
+    AutoMinorLocator,
+    FixedLocator,
+    MaxNLocator,
+    MultipleLocator,
+)
 
 
 def active_atom_names_tag():
@@ -167,6 +173,310 @@ def plot_log_population_error_envelopes(
     return fig, axes
 
 
+def plot_departure_coefficient_scatter_by_height(
+    pred,
+    true,
+    z_scale,
+    level_names=None,
+    figsize=(13, 8),
+    ncols=3,
+    max_points_per_level=250_000,
+):
+    """Compare predicted and true departure coefficients at every level.
+
+    Both axes are logarithmic and points are colored by vertical-grid index.
+    Large cubes are sampled evenly across depth indices to preserve visible
+    color separation; pass ``None`` for ``max_points_per_level`` to plot all
+    valid cells.
+    """
+
+    pred = np.asarray(pred)
+    true = np.asarray(true)
+    if pred.shape != true.shape or pred.ndim != 4:
+        raise ValueError(
+            "Expected matching [nlevels, ndepth, nx, ny] arrays, got "
+            f"{pred.shape} and {true.shape}"
+        )
+
+    nlevels, ndepth, nx, ny = pred.shape
+    z_axis = np.asarray(z_scale, dtype=np.float64)
+    if z_axis.shape != (ndepth,):
+        raise ValueError(
+            f"Expected z_scale with shape ({ndepth},), got {z_axis.shape}"
+        )
+    if level_names is not None and len(level_names) != nlevels:
+        raise ValueError(
+            f"Expected {nlevels} level names, got {len(level_names)}"
+        )
+    if max_points_per_level is not None and max_points_per_level <= 0:
+        raise ValueError("max_points_per_level must be positive or None")
+
+    nrows = int(np.ceil(nlevels / ncols))
+    fig, axes = plt.subplots(
+        nrows, ncols, figsize=figsize, squeeze=False, constrained_layout=True
+    )
+    depth_indices = np.repeat(np.arange(ndepth), nx * ny)
+
+    for ilevel in range(nlevels):
+        ax = axes[ilevel // ncols, ilevel % ncols]
+        actual = true[ilevel].ravel()
+        predicted = pred[ilevel].ravel()
+        valid_mask = (
+            np.isfinite(actual)
+            & np.isfinite(predicted)
+            & (actual > 0)
+            & (predicted > 0)
+        )
+        valid = np.flatnonzero(valid_mask)
+
+        if max_points_per_level is not None and valid.size > max_points_per_level:
+            cells_per_depth = nx * ny
+            valid_by_depth = valid_mask.reshape(ndepth, cells_per_depth)
+            sampled_depths = np.linspace(
+                0,
+                ndepth - 1,
+                min(ndepth, max_points_per_level),
+                dtype=np.int64,
+            )
+            points_per_depth = max(
+                1, max_points_per_level // sampled_depths.size
+            )
+            sampled_valid = []
+
+            for idepth in sampled_depths:
+                local_valid = np.flatnonzero(valid_by_depth[idepth])
+                if local_valid.size > points_per_depth:
+                    sample = np.linspace(
+                        0,
+                        local_valid.size - 1,
+                        points_per_depth,
+                        dtype=np.int64,
+                    )
+                    local_valid = local_valid[sample]
+                sampled_valid.append(
+                    idepth * cells_per_depth + local_valid
+                )
+
+            valid = np.concatenate(sampled_valid)
+
+        if valid.size:
+            points = ax.scatter(
+                actual[valid],
+                predicted[valid],
+                c=depth_indices[valid],
+                cmap="rainbow",
+                vmin=0,
+                vmax=ndepth - 1,
+                s=1.1,
+                alpha=0.18,
+                linewidths=0,
+                rasterized=True,
+            )
+            lower = min(actual[valid].min(), predicted[valid].min())
+            upper = max(actual[valid].max(), predicted[valid].max())
+            ax.plot(
+                [lower, upper],
+                [lower, upper],
+                "--",
+                color="#b07a3c",
+                lw=1.2,
+                label=r"$y=x$ (perfect fit)",
+            )
+            ax.set_xlim(lower, upper)
+            ax.set_ylim(lower, upper)
+            # Anchor the colorbar to the axes itself so its height follows the
+            # square plotting box instead of the taller subplot layout slot.
+            colorbar_ax = ax.inset_axes((1.03, 0.0, 0.045, 1.0))
+            colorbar = fig.colorbar(points, cax=colorbar_ax)
+            colorbar.set_label("Depth index", fontsize=13)
+            colorbar.ax.tick_params(labelsize=11)
+            colorbar.ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+            ax.legend(loc="upper left", fontsize=10)
+        else:
+            ax.text(
+                0.5,
+                0.5,
+                "No positive finite values",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+            )
+
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        # Matching limits plus a square axes box make the y=x reference line
+        # appear at its true 45-degree angle on the logarithmic scales.
+        ax.set_box_aspect(1)
+        title = (
+            level_names[ilevel]
+            if level_names is not None
+            else f"Level {ilevel + 1}"
+        )
+        ax.set_title(title, fontsize=14)
+        ax.set_xlabel("Actual departure coefficient", fontsize=13)
+        ax.set_ylabel("Predicted departure coefficient", fontsize=13)
+        ax.tick_params(axis="both", which="both", labelsize=11)
+        ax.grid(True, which="both", alpha=0.2)
+
+    for j in range(nlevels, nrows * ncols):
+        fig.delaxes(axes[j // ncols, j % ncols])
+
+    # Let constrained layout choose the final y ticks, then freeze those tick
+    # positions and formatters on both axes.  Fixing both locators prevents a
+    # later savefig draw from recalculating only one axis (which can otherwise
+    # happen for panels spanning many decades).
+    fig.canvas.draw()
+    for ilevel in range(nlevels):
+        ax = axes[ilevel // ncols, ilevel % ncols]
+        major_ticks = ax.get_yticks(minor=False)
+        minor_ticks = ax.get_yticks(minor=True)
+        major_formatter = copy.copy(ax.yaxis.get_major_formatter())
+        minor_formatter = copy.copy(ax.yaxis.get_minor_formatter())
+
+        ax.xaxis.set_major_locator(FixedLocator(major_ticks))
+        ax.yaxis.set_major_locator(FixedLocator(major_ticks))
+        ax.xaxis.set_minor_locator(FixedLocator(minor_ticks))
+        ax.yaxis.set_minor_locator(FixedLocator(minor_ticks))
+        ax.xaxis.set_major_formatter(copy.copy(major_formatter))
+        ax.yaxis.set_major_formatter(copy.copy(major_formatter))
+        ax.xaxis.set_minor_formatter(copy.copy(minor_formatter))
+        ax.yaxis.set_minor_formatter(copy.copy(minor_formatter))
+
+    return fig, axes
+
+
+def plot_departure_coefficient_error_assessment(
+    pred,
+    true,
+    z_scale,
+    level_names=None,
+    figsize=None,
+    residual_range=(-50, 50),
+    residual_bins=100,
+    coefficient_bins=80,
+):
+    """Plot height-binned residual and coefficient distributions per level.
+
+    The top row shows relative errors in percent and the bottom row shows the
+    corresponding true departure-coefficient distributions on a logarithmic
+    x axis. Cells are grouped into the physical-height ranges requested for
+    the comparison: below 750 km, 750--1200 km, 1200--2500 km, 2500--5000 km,
+    and 5000 km and above.
+    """
+
+    pred = np.asarray(pred)
+    true = np.asarray(true)
+    if pred.shape != true.shape or pred.ndim != 4:
+        raise ValueError(
+            "Expected matching [nlevels, ndepth, nx, ny] arrays, got "
+            f"{pred.shape} and {true.shape}"
+        )
+
+    nlevels, ndepth, _, _ = pred.shape
+    z_axis = np.asarray(z_scale, dtype=np.float64)
+    if z_axis.shape != (ndepth,):
+        raise ValueError(
+            f"Expected z_scale with shape ({ndepth},), got {z_axis.shape}"
+        )
+    if not np.all(np.isfinite(z_axis)):
+        raise ValueError("z_scale contains non-finite values")
+    if level_names is not None and len(level_names) != nlevels:
+        raise ValueError(
+            f"Expected {nlevels} level names, got {len(level_names)}"
+        )
+    z_km = z_axis * 1e3
+    regions = (
+        (z_km < 750, r"$z < 750$ km", "#482878"),
+        ((z_km >= 750) & (z_km < 1200), r"$750 \leq z < 1200$ km", "#3e7c98"),
+        ((z_km >= 1200) & (z_km < 2500), r"$1200 \leq z < 2500$ km", "#55a868"),
+        ((z_km >= 2500) & (z_km < 5000), r"$2500 \leq z < 5000$ km", "#dd9c3c"),
+        (z_km >= 5000, r"$z \geq 5000$ km", "#c44e52"),
+    )
+    if figsize is None:
+        figsize = (3.0 * nlevels, 6.3)
+
+    fig, axes = plt.subplots(
+        2,
+        nlevels,
+        figsize=figsize,
+        squeeze=False,
+        constrained_layout=True,
+    )
+
+    for ilevel in range(nlevels):
+        residual_ax = axes[0, ilevel]
+        coefficient_ax = axes[1, ilevel]
+        title = level_names[ilevel] if level_names is not None else f"Level {ilevel + 1}"
+
+        positive_actual = true[ilevel][
+            np.isfinite(true[ilevel]) & (true[ilevel] > 0)
+        ]
+        log_bins = None
+        if positive_actual.size:
+            log_min = np.log10(positive_actual.min())
+            log_max = np.log10(positive_actual.max())
+            if np.isclose(log_min, log_max):
+                log_min -= 0.5
+                log_max += 0.5
+            log_bins = np.logspace(log_min, log_max, coefficient_bins + 1)
+
+        for height_mask, label, color in regions:
+            actual = true[ilevel, height_mask, :, :].ravel()
+            predicted = pred[ilevel, height_mask, :, :].ravel()
+            valid = (
+                np.isfinite(actual)
+                & np.isfinite(predicted)
+                & (actual > 0)
+            )
+            residual = 100.0 * (predicted[valid] - actual[valid]) / actual[valid]
+            residual = residual[np.isfinite(residual)]
+            if residual.size:
+                residual_ax.hist(
+                    residual,
+                    bins=residual_bins,
+                    range=residual_range,
+                    density=True,
+                    histtype="stepfilled",
+                    color=color,
+                    alpha=0.45,
+                    label=label,
+                )
+
+            actual = actual[np.isfinite(actual) & (actual > 0)]
+            if actual.size and log_bins is not None:
+                coefficient_ax.hist(
+                    actual,
+                    bins=log_bins,
+                    histtype="step",
+                    color=color,
+                    linewidth=1.4,
+                    hatch="//",
+                    label=f"Actual: {label}",
+                )
+
+        residual_ax.axvline(0, color="0.25", linestyle="--", lw=1)
+        residual_ax.set_xlim(*residual_range)
+        residual_ax.set_title(f"{title} residuals", fontsize=14)
+        residual_ax.set_xlabel("Relative error (%)", fontsize=13)
+        residual_ax.tick_params(axis="both", which="both", labelsize=11)
+        residual_ax.grid(True, alpha=0.2)
+
+        coefficient_ax.set_xscale("log")
+        coefficient_ax.set_title(
+            f"{title} coefficient distribution", fontsize=14
+        )
+        coefficient_ax.set_xlabel("Departure coefficient", fontsize=13)
+        coefficient_ax.tick_params(axis="both", which="both", labelsize=11)
+        coefficient_ax.grid(True, which="both", alpha=0.2)
+
+    axes[0, 0].set_ylabel("Density", fontsize=13)
+    axes[1, 0].set_ylabel("Count", fontsize=13)
+    axes[0, -1].legend(loc="upper right", fontsize=10)
+    axes[1, -1].legend(loc="upper right", fontsize=10)
+
+    return fig, axes
+
+
 def load_true_multi3d_departures(dataset, active_atoms=None):
     """
     Load Multi3D truth for one snapshot and concatenate atoms in ACTIVE_ATOMS order.
@@ -251,13 +561,13 @@ def build_plot_jobs():
 
 def load_prediction_file(pred_file):
     with h5py.File(pred_file, "r") as f:
-        dep = f["departure_coefficients"][...]
+        populations = f["nlte_populations"][...]
         z_scale = f["z_scale"][...]
 
-    return dep, np.asarray(z_scale)
+    return populations, np.asarray(z_scale)
 
 
-def compute_true_departures(lte, nlte):
+def compute_departure_coefficients(lte, nlte):
     eps = 1e-30
     true_dep = (nlte + eps) / (lte + eps)
     return true_dep.astype(np.float32, copy=False)
@@ -437,9 +747,10 @@ def make_lte_population_comparison_plot(
 
 
 def make_snapshot_plot(dataset, output_dir, show=False):
-    pred_dep, pred_z_scale = load_prediction_file(dataset["PRED_FILE"])
+    pred_nlte, pred_z_scale = load_prediction_file(dataset["PRED_FILE"])
     _, true_z_scale, lte, nlte, level_names = load_true_multi3d_departures(dataset)
-    true_dep = compute_true_departures(lte, nlte)
+    pred_dep = compute_departure_coefficients(lte, pred_nlte)
+    true_dep = compute_departure_coefficients(lte, nlte)
 
     pred_z_axis = extract_plot_z_axis(pred_z_scale)
     true_z_axis = extract_plot_z_axis(true_z_scale, scale_to_mm=True)
@@ -474,11 +785,38 @@ def make_snapshot_plot(dataset, output_dir, show=False):
     fig.savefig(outpath, dpi=200, bbox_inches="tight")
     print(f"Saved {outpath}")
 
+    scatter_fig, _ = plot_departure_coefficient_scatter_by_height(
+        pred_plot,
+        true_plot,
+        pred_z_axis,
+        level_names=level_names,
+    )
+    scatter_outpath = os.path.join(
+        output_dir,
+        f"departure_coefficient_scatter_{dataset['NAME']}_{active_atom_names_tag()}.pdf",
+    )
+    scatter_fig.savefig(scatter_outpath, dpi=200, bbox_inches="tight")
+    print(f"Saved {scatter_outpath}")
+
+    assessment_fig, _ = plot_departure_coefficient_error_assessment(
+        pred_plot,
+        true_plot,
+        pred_z_axis,
+        level_names=level_names,
+    )
+    assessment_outpath = os.path.join(
+        output_dir,
+        f"departure_coefficient_error_assessment_{dataset['NAME']}_{active_atom_names_tag()}.pdf",
+    )
+    assessment_fig.savefig(assessment_outpath, dpi=200, bbox_inches="tight")
+    print(f"Saved {assessment_outpath}")
+
     if show:
         plt.show()
     else:
         plt.close(fig)
-        # plt.close(fig_log)
+        plt.close(scatter_fig)
+        plt.close(assessment_fig)
 
 
 def main():

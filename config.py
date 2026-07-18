@@ -19,7 +19,7 @@ def _active_atoms_tag(active_atoms):
 def _dataset_filename(split_name, split_dict, patch, stride, active_atoms):
     split_tag = _build_split_tag(split_dict)
     atoms_tag = _active_atoms_tag(active_atoms)
-    return f"3D_sim_{split_name}_{split_tag}_atoms{atoms_tag}_patch{patch}_stride{stride}.hdf5"
+    return f"3D_sim_{split_name}_{split_tag}_atoms{atoms_tag}_target-lognlte_patch{patch}_stride{stride}.hdf5"
 
 
 def build_multi3d_entries(split_dict):
@@ -93,20 +93,20 @@ TRAIN_SPLIT = {
     "qs006003_sap": ["689"]
 }
 
-# VAL_SPLIT = {
-#     "en024048_hion": ["700"],
-#     "nw012023": ["940"],
-#     "ch012012_hion": ["984"],
-#     "ch012006": ["849"],
-#     "qs006003_sap": ["900"]
-# }
-
 VAL_SPLIT = {
-    "en024048_hion": ["385"],
-    "nw012023": ["1050"],
-    "ch024031_by200bz005": ["450"],
-    "en024031_by100_helium": ["109"]
+    "en024048_hion": ["700"],
+    "nw012023": ["940"],
+    "ch012012_hion": ["984"],
+    "ch012006": ["849"],
+    "qs006003_sap": ["900"]
 }
+
+# VAL_SPLIT = {
+#     "en024048_hion": ["385"],
+#     "nw012023": ["1050"],
+#     "ch024031_by200bz005": ["450"],
+#     "en024031_by100_helium": ["109"]
+# }
 
 
 ATOM_CONFIG = {
@@ -246,7 +246,7 @@ atoms_tag = _active_atoms_tag(ACTIVE_ATOMS)
 
 IODIR = "IO/"
 
-MODEL_DIR = f"training_{MODEL}_zscale_expand/"
+MODEL_DIR = f"training_{MODEL}_zscale_expand_lognlte/"
 MODEL_FILE = MODEL_DIR + f"3D_sim_train_{atoms_tag}.pt"
 
 for pred_atmos in MULTI3D_PRED_DATA:
@@ -255,7 +255,7 @@ for pred_atmos in MULTI3D_PRED_DATA:
     pred_atmos["SNAP"] = name_parts[-1]
     pred_atmos["TRAIN_DIR"] = MODEL_DIR.rstrip("/")
 
-EXPAND_FROM_CHECKPOINT = f"training_FFNO3D_zscale/3D_sim_train_{atoms_tag}.pt"
+EXPAND_FROM_CHECKPOINT = f"training_FFNO3D_zscale_lognlte/3D_sim_train_{atoms_tag}.pt"
 ZERO_INIT_NEW_BLOCKS = True
 FORCE_EXPAND_VALIDATION_BASELINE = True
 

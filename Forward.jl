@@ -7,7 +7,7 @@
 #   - Builds LTE populations via Saha-Boltzmann
 #   - Remaps atmosphere + populations to a new column-mass (cmass) scale
 #   - Two synthesis modes:
-#       (A) "ml"     : NLTE populations = (predicted departure coeffs) * (LTE pops)
+#       (A) "ml"     : NLTE populations read directly from the ML prediction
 #       (B) "bifrost": NLTE populations read from Multi3D out_pop (and remapped)
 #   - Synthesizes 1D line profiles for all columns (nx, ny) using Muspel
 #   - Writes intensity + wavelength to an HDF5 file
@@ -170,7 +170,7 @@ function config_ml(pred)
             pred.train_dir,
             "output_3D_sim_s5_$(pred.name)_$(pred.model)_$(atoms_tag).hdf5"
         ),
-        pred_key = "departure_coefficients",
+        pred_key = "nlte_populations",
         plot_diagnostics = false,
         out_h5 = joinpath(
             pred.train_dir,
@@ -526,21 +526,12 @@ function main(cfg)
     # ============================================================
     if cfg.mode == :ml
 
-        println("Computing LTE pops...")
-        lte_atoms = Dict{String,Any}()
-
-        for a in atoms_to_run
-            atom = Muspel.read_atom(a.atom_file)
-            pops = lte_pops_saha(atom, atmos)
-            lte_atoms[a.name] = pops
-        end
-
-        dep_coeff_full = load_pred_depcoeff(cfg.pred_h5, cfg.pred_key)
+        nlte_pop_full = load_pred_depcoeff(cfg.pred_h5, cfg.pred_key)
 
         # ---------------------------------------------------
         # Split ML populations per atom
         # ---------------------------------------------------
-        dep_per_atom = split_atoms(dep_coeff_full, cfg.atoms)
+        nlte_per_atom = split_atoms(nlte_pop_full, cfg.atoms)
 
         # Dictionary to store final NLTE pops per atom
         nlte_atoms = Dict{String,Any}()
@@ -549,11 +540,9 @@ function main(cfg)
 
             h_atom = Muspel.read_atom(a.atom_file)
 
-            dep = dep_per_atom[a.name]
+            nlte_pop = nlte_per_atom[a.name]
 
-            @assert size(dep,4) == h_atom.nlevels "Level mismatch for atom $(a.name)"
-
-            nlte_pop = dep .* lte_atoms[a.name]
+            @assert size(nlte_pop,4) == h_atom.nlevels "Level mismatch for atom $(a.name)"
 
             nlte_atoms[a.name] = nlte_pop
 

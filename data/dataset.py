@@ -82,7 +82,7 @@ class H5PatchDataset(Dataset):
         self._dy = None
         self._scale = None
         self._weights = None
-        self._S = None
+        self._log_lte = None
 
         with h5py.File(self.h5_path, "r") as f:
             self._group_names = _group_names_with_inputs(f)
@@ -100,12 +100,12 @@ class H5PatchDataset(Dataset):
                 first = f[self._group_names[0]]
                 self.has_scale = "scale" in first
                 self.has_weights = "weights" in first
-                self.has_source_targets = "source_targets" in first
+                self.has_log_lte = "log_lte_populations" in first
             else:
                 self.N = int(f["inputs"].shape[0])
                 self.has_scale = "scale" in f
                 self.has_weights = "weights" in f
-                self.has_source_targets = "source_targets" in f
+                self.has_log_lte = "log_lte_populations" in f
 
         if self._using_train_selection:
             self.resample_train_selection(self.train_select_seed)
@@ -184,8 +184,8 @@ class H5PatchDataset(Dataset):
         if self.has_weights:
             self._weights = self._f["weights"]
 
-        if self.has_source_targets:
-            self._S = self._f["source_targets"]
+        if self.has_log_lte:
+            self._log_lte = self._f["log_lte_populations"]
 
     def __len__(self):
         return self.N
@@ -226,11 +226,11 @@ class H5PatchDataset(Dataset):
             elif "weights" in group:
                 weight = torch.tensor(group["weights"][local_idx], dtype=torch.float32)
 
-            source_target = torch.empty(0, dtype=torch.float32)
-            if "source_targets" in group:
-                source_target = torch.from_numpy(group["source_targets"][local_idx])
+            log_lte = torch.empty(0, dtype=torch.float32)
+            if "log_lte_populations" in group:
+                log_lte = torch.from_numpy(group["log_lte_populations"][local_idx])
 
-            return x, y, z, dx, dy, scale, weight, source_target
+            return x, y, z, dx, dy, scale, weight, log_lte
 
         selected_weight = None
         if self._using_train_selection:
@@ -255,11 +255,11 @@ class H5PatchDataset(Dataset):
         elif self.has_weights:
             weight = torch.tensor(self._weights[idx], dtype=torch.float32)
 
-        source_target = torch.empty(0, dtype=torch.float32)
-        if self.has_source_targets:
-            source_target = torch.from_numpy(self._S[idx])
+        log_lte = torch.empty(0, dtype=torch.float32)
+        if self.has_log_lte:
+            log_lte = torch.from_numpy(self._log_lte[idx])
 
-        return x, y, z, dx, dy, scale, weight, source_target
+        return x, y, z, dx, dy, scale, weight, log_lte
 
 
 class H5CubeDataset(Dataset):
@@ -278,7 +278,7 @@ class H5CubeDataset(Dataset):
         self._dy = None
         self._weights = None
         self._scale = None
-        self._S = None
+        self._log_lte = None
         self.variable_depth = False
 
         with h5py.File(self.h5_path, "r") as f:
@@ -286,7 +286,7 @@ class H5CubeDataset(Dataset):
             self.has_targets = "targets" in f
             self.has_weights = "weights" in f
             self.has_scale = "scale" in f
-            self.has_source_targets = "source_targets" in f
+            self.has_log_lte = "log_lte_populations" in f
 
     def _ensure_open(self):
         if self._f is not None:
@@ -308,8 +308,8 @@ class H5CubeDataset(Dataset):
         if self.has_scale:
             self._scale = self._f["scale"]
 
-        if self.has_source_targets:
-            self._S = self._f["source_targets"]
+        if self.has_log_lte:
+            self._log_lte = self._f["log_lte_populations"]
 
     def __len__(self):
         return self.N
@@ -335,8 +335,8 @@ class H5CubeDataset(Dataset):
         if self.has_weights:
             weight = torch.tensor(self._weights[idx], dtype=torch.float32)
 
-        source_target = torch.empty(0, dtype=torch.float32)
-        if self.has_source_targets:
-            source_target = torch.from_numpy(self._S[idx])
+        log_lte = torch.empty(0, dtype=torch.float32)
+        if self.has_log_lte:
+            log_lte = torch.from_numpy(self._log_lte[idx])
 
-        return x, y, z, dx, dy, scale, weight, source_target
+        return x, y, z, dx, dy, scale, weight, log_lte

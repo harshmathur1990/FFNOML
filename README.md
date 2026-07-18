@@ -1,20 +1,20 @@
 # FFNOML
 
-FFNOML is a training and inference pipeline for predicting NLTE departure coefficients from 3D MULTI3D/Bifrost atmospheres with Fourier Neural Operators.
+FFNOML is a training and inference pipeline for predicting NLTE populations from 3D MULTI3D/Bifrost atmospheres with Fourier Neural Operators.
 
 The codebase currently supports five main workflows through `pipeline.py`:
 
 - `--build`: build HDF5 training and validation datasets from MULTI3D outputs
 - `--train`: train a model checkpoint from the built HDF5 datasets
 - `--test`: run validation diagnostics and branch-ablation analysis on the validation set
-- `--predict`: build inference inputs for configured atmospheres and write predicted departure coefficients
+- `--predict`: build inference inputs for configured atmospheres and write predicted NLTE populations
 - `--fsdppredict`: run distributed full-volume prediction through `torchrun`
 
 This README describes the code as it exists now. The current pipeline is `z_scale`-based, not column-mass-based.
 
 ## What The Model Learns
 
-The model maps atmospheric state variables to NLTE departure coefficients:
+The model maps atmospheric state variables to NLTE populations:
 
 `[B, Cin, D, H, W] -> [B, Cout, D, H, W]`
 
@@ -29,11 +29,11 @@ Input channels are constructed in `FFNONet.py` from:
 
 Targets are:
 
-- `log10(n_NLTE / n_LTE)`
+- `log10(n_NLTE [m^-3])`
 
 Prediction outputs are written back in linear space as:
 
-- `departure_coefficients = n_NLTE / n_LTE`
+- `nlte_populations = n_NLTE [m^-3]`
 
 ## Main Files
 
@@ -136,7 +136,7 @@ What it does:
 2. Reads all configured validation snapshots from `MULTI3D_VAL_DATA`
 3. Loads LTE and NLTE populations from each atom directory
 4. Concatenates active atoms along the output-channel dimension
-5. Builds input features and target departure coefficients
+5. Builds input features and `log10(n_NLTE)` targets
 6. Normalizes channels using global statistics from the training set
 7. Extracts multiscale XY patches using `PATCH`, `STRIDE`, and `SCALES`
 8. Writes grouped HDF5 patch datasets to `TRAIN_FILE` and `TEST_FILE`
@@ -276,7 +276,7 @@ What it does for each configured atmosphere:
 3. Builds a solving-set HDF5 if it does not already exist
 4. Loads normalization stats and channel metadata from `MODEL_FILE`
 5. Runs full-cube or tiled inference
-6. Writes predicted departure coefficients in linear space
+6. Writes predicted NLTE populations in linear space
 
 Important current behavior:
 
@@ -375,12 +375,12 @@ Prediction outputs are written to:
 
 The file contains:
 
-- `departure_coefficients`: `[nx, ny, D, Cout]`
+- `nlte_populations`: `[nx, ny, D, Cout]`
 - `z_scale`: `[D, nx, ny]`
 
 Current attributes include:
 
-- `departure_coefficients.attrs["depth_scale_type"] = "z"`
+- `nlte_populations.attrs["depth_scale_type"] = "z"`
 - file attribute `epoch`
 - file attribute `val_loss` when available in the checkpoint
 
@@ -508,11 +508,13 @@ python pipeline.py --train --expand
 - relative population error envelopes
 - log-ratio error envelopes
 
-It now compares on shared `z_scale` directly and does not interpolate to column mass.
+It converts predicted and true NLTE populations to departure coefficients using
+the same MULTI3D LTE populations, then compares them on shared `z_scale`
+directly without interpolating to column mass.
 
 ## Forward Synthesis
 
-`Forward.jl` is the Julia-side consumer for predicted departure coefficients and related atmospheric inputs. Use it for downstream synthesis after Python-side prediction has produced the HDF5 outputs.
+`Forward.jl` is the Julia-side consumer for predicted NLTE populations and related atmospheric inputs. Use it for downstream synthesis after Python-side prediction has produced the HDF5 outputs.
 
 For ML mode, `Forward.jl` reads `output_3D_sim_s5_<NAME>_<MODEL>_<FORWARD_ATOMS>.hdf5` and writes intensity files with the same Forward atom tag.
 
