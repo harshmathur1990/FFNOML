@@ -336,7 +336,6 @@ python scripts/convert_muram_fits_to_ffno_hdf5.py \
   --simulation-name ar098192 \
   --snap 270000 \
   --output training_FFNO3D_zscale_expand/3D_sim_predict_ar098192_270000.hdf5 \
-  --electron-density-mode witt-rho \
   --show-eos-progress \
   --multi3d-atmos-out /mn/stornext/d9/data/harshm/bifrost_data/ar098192/270000/atm3d \
   --multi3d-mesh-out /mn/stornext/d9/data/harshm/bifrost_data/ar098192/270000/mesh
@@ -345,9 +344,11 @@ python scripts/convert_muram_fits_to_ffno_hdf5.py \
 The converter reads `lgtg`, `lgr`, `ux`, `uy`, and `uz` FITS files, reverses the
 selected height range so the first depth index is the top of the atmosphere, and
 writes `inputs`, `z_scale`, `dx`, and `dy` in the layout used by
-`--fsdppredict`. With `--electron-density-mode witt-rho`, electron density is
-computed from temperature and gas density using the Witt EOS. The converter
-finds the repo-local `scripts/witt.py` and `scripts/pf_Kurucz.input`
+`--fsdppredict`. Electron density is selected automatically in priority order:
+`lgne` is read directly, otherwise `lgp` is passed with temperature to the Witt
+EOS, otherwise the Witt EOS derives it from `lgr`. Conversion fails if none of
+these three FITS files exists. The converter finds the repo-local
+`scripts/witt.py` and `scripts/pf_Kurucz.input`
 automatically; use `--witt-path` only when those files live somewhere else. By
 default, this uses the C++ full-atmosphere EOS backend and all visible CPU
 threads; `--show-eos-progress` prints a C++-side progress line without Python

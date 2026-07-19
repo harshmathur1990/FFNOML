@@ -65,6 +65,16 @@ class WittEOSCppTests(unittest.TestCase):
             ctypes.c_int,
         ]
         cls.lib.witt_ne_from_rho.restype = ctypes.c_int
+        cls.lib.witt_ne_from_pgas.argtypes = [
+            ctypes.c_char_p,
+            np.ctypeslib.ndpointer(dtype=np.float64, ndim=1, flags="C_CONTIGUOUS"),
+            np.ctypeslib.ndpointer(dtype=np.float64, ndim=1, flags="C_CONTIGUOUS"),
+            np.ctypeslib.ndpointer(dtype=np.float32, ndim=1, flags="C_CONTIGUOUS"),
+            ctypes.c_size_t,
+            ctypes.c_int,
+            ctypes.c_int,
+        ]
+        cls.lib.witt_ne_from_pgas.restype = ctypes.c_int
 
         sys.path.insert(0, str(SCRIPTS))
         from witt import witt
@@ -101,6 +111,29 @@ class WittEOSCppTests(unittest.TestCase):
             out[i] = pe / (self.py_eos.BK * float(t_cell)) * 1e6
         return out
 
+    def cpp_ne_from_pgas(self, temp, pgas_cgs, threads=4):
+        temp = np.ascontiguousarray(temp, dtype=np.float64)
+        pgas_si = np.ascontiguousarray(pgas_cgs / 10.0, dtype=np.float64)
+        ne = np.empty(temp.shape, dtype=np.float32)
+        status = self.lib.witt_ne_from_pgas(
+            self.pf_path,
+            temp,
+            pgas_si,
+            ne,
+            temp.size,
+            threads,
+            0,
+        )
+        self.assertEqual(status, 0)
+        return ne.astype(np.float64)
+
+    def python_ne_from_pgas(self, temp, pgas_cgs):
+        out = np.empty(temp.shape, dtype=np.float64)
+        for i, (t_cell, pgas_cell) in enumerate(zip(temp, pgas_cgs)):
+            pe = self.py_eos.pe_from_pg(float(t_cell), float(pgas_cell))
+            out[i] = pe / (self.py_eos.BK * float(t_cell)) * 1e6
+        return out
+
     def assert_cpp_matches_python(self, temp, rho_cgs):
         cpp = self.cpp_ne_from_rho(temp, rho_cgs)
         py = self.python_ne_from_rho(temp, rho_cgs)
@@ -129,6 +162,52 @@ class WittEOSCppTests(unittest.TestCase):
         rho = 10 ** rng.uniform(-13.0, -3.5, size=200)
 
         self.assert_cpp_matches_python(temp, rho)
+
+    def test_cpp_pgas_matches_python_pe_from_pg(self):
+        temperatures = np.array(
+            [2500.0, 3500.0, 4500.0, 5770.0, 8000.0, 12000.0, 20000.0],
+            dtype=np.float64,
+        )
+        pressures = np.logspace(-2, 6, temperatures.size, dtype=np.float64)
+
+        cpp = self.cpp_ne_from_pgas(temperatures, pressures)
+        py = self.python_ne_from_pgas(temperatures, pressures)
+        rel = np.abs(cpp - py) / np.maximum(np.abs(py), 1e-300)
+
+        self.assertTrue(np.all(np.isfinite(cpp)))
+        self.assertLess(float(rel.max()), 1e-6)
+
+
+@unittest.skipUnless(HAS_NUMPY, "NumPy is required to import the FITS converter")
+class ElectronDensitySourceSelectionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, str(SCRIPTS))
+        from convert_muram_fits_to_ffno_hdf5 import _find_electron_density_source
+
+        cls.find_source = staticmethod(_find_electron_density_source)
+
+    def quantity_path(self, folder, quantity):
+        return Path(folder) / f"MURaM_test_{quantity}_1.fits"
+
+    def test_source_priority_is_lgne_then_lgp_then_lgr(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            folder = Path(tmpdir)
+            lgr = self.quantity_path(folder, "lgr")
+            lgp = self.quantity_path(folder, "lgp")
+            lgne = self.quantity_path(folder, "lgne")
+
+            lgr.touch()
+            self.assertEqual(self.find_source(folder, "MURaM", "test", "1")[0], "lgr")
+            lgp.touch()
+            self.assertEqual(self.find_source(folder, "MURaM", "test", "1")[0], "lgp")
+            lgne.touch()
+            self.assertEqual(self.find_source(folder, "MURaM", "test", "1")[0], "lgne")
+
+    def test_missing_sources_fail(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaises(FileNotFoundError):
+                self.find_source(Path(tmpdir), "MURaM", "test", "1")
 
 
 if __name__ == "__main__":

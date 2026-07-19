@@ -30,7 +30,6 @@ from typing import Any
 import numpy as np
 
 
-K_BOLTZMANN = 1.380649e-23
 K_BOLTZMANN_CGS = 1.3806488e-16
 _WITT_EOS = None
 
@@ -93,6 +92,24 @@ def _require_file(path: Path) -> Path:
     if not path.is_file():
         raise FileNotFoundError(path)
     return path
+
+
+def _find_electron_density_source(
+    folder: Path,
+    simulation_code: str,
+    simulation_name: str,
+    snap: str,
+) -> tuple[str, Path]:
+    for quantity in ("lgne", "lgp", "lgr"):
+        path = _file_path(
+            folder, simulation_code, simulation_name, quantity, snap
+        )
+        if path.is_file():
+            return quantity, path
+    raise FileNotFoundError(
+        "Could not determine electron density: none of the expected lgne, "
+        "lgp, or lgr FITS files is available"
+    )
 
 
 def _parse_slice(start: int | None, end: int | None, size: int, axis_name: str) -> slice:
@@ -272,6 +289,16 @@ def _load_witt_cpp_library(args) -> ctypes.CDLL:
         ctypes.c_int,
     ]
     lib.witt_ne_from_rho.restype = ctypes.c_int
+    lib.witt_ne_from_pgas.argtypes = [
+        ctypes.c_char_p,
+        np.ctypeslib.ndpointer(dtype=np.float64, ndim=1, flags="C_CONTIGUOUS"),
+        np.ctypeslib.ndpointer(dtype=np.float64, ndim=1, flags="C_CONTIGUOUS"),
+        np.ctypeslib.ndpointer(dtype=np.float32, ndim=1, flags="C_CONTIGUOUS"),
+        ctypes.c_size_t,
+        ctypes.c_int,
+        ctypes.c_int,
+    ]
+    lib.witt_ne_from_pgas.restype = ctypes.c_int
     return lib
 
 
@@ -381,47 +408,62 @@ def _electron_density_from_witt_rho(args, temp: np.ndarray, rho: np.ndarray) -> 
         except Exception as exc:
             if args.eos_backend == "cpp":
                 raise
-            print(f"WARNING: C++ Witt EOS backend unavailable ({exc}); falling back to Python.")
+            print(
+                f"WARNING: C++ Witt EOS backend unavailable ({exc}); "
+                "falling back to Python."
+            )
 
     return _electron_density_from_witt_rho_python(args, temp, rho)
 
 
-def _read_electron_density(
-    args,
-    temp: np.ndarray,
-    pgas: np.ndarray | None,
-    rho: np.ndarray,
+def _electron_density_from_witt_pgas_cpp(
+    args, temp: np.ndarray, pgas: np.ndarray
 ) -> np.ndarray:
-    if args.electron_density_fits:
-        data, _, _ = _read_fits(Path(args.electron_density_fits))
-        arr = np.asarray(
-            data[args._z_indices, args._x_slice, args._y_slice],
-            dtype=np.float32,
-        )
-        arr = np.transpose(arr, (1, 2, 0)).astype(np.float32, copy=False)
-        if args.electron_density_log:
-            arr = (10.0 ** arr).astype(np.float32, copy=False)
-        return arr * np.float32(args.electron_density_scale)
-
-    if args.electron_density_mode == "pressure":
-        if pgas is None:
-            raise ValueError("Pressure electron-density mode requires lgp FITS data")
-        pressure_fraction = np.float32(args.electron_pressure_fraction)
-        return pressure_fraction * pgas / (np.float32(K_BOLTZMANN) * temp)
-
-    if args.electron_density_mode == "witt-rho":
-        return _electron_density_from_witt_rho(args, temp, rho)
-
-    if args.electron_density_mode == "constant":
-        if args.constant_electron_density is None:
-            raise ValueError("--constant-electron-density is required in constant mode")
-        return np.full_like(temp, np.float32(args.constant_electron_density))
-
-    raise ValueError(
-        "No electron density source was provided. Use --electron-density-fits, "
-        "--electron-density-mode witt-rho, --electron-density-mode pressure, "
-        "or --electron-density-mode constant."
+    lib = _load_witt_cpp_library(args)
+    pf_path = _find_pf_path(args.witt_path)
+    temp_flat = np.ascontiguousarray(np.asarray(temp, dtype=np.float64).reshape(-1))
+    pgas_flat = np.ascontiguousarray(np.asarray(pgas, dtype=np.float64).reshape(-1))
+    ne_flat = np.empty(temp_flat.shape, dtype=np.float32)
+    threads = 0 if args.eos_workers is None else int(args.eos_workers)
+    status = lib.witt_ne_from_pgas(
+        os.fsencode(pf_path),
+        temp_flat,
+        pgas_flat,
+        ne_flat,
+        temp_flat.size,
+        threads,
+        int(args.show_eos_progress),
     )
+    if status != 0:
+        raise RuntimeError("C++ Witt EOS gas-pressure calculation failed")
+    return ne_flat.reshape(temp.shape)
+
+
+def _electron_density_from_witt_pgas_python(
+    args, temp: np.ndarray, pgas: np.ndarray
+) -> np.ndarray:
+    eos = _import_witt(args.witt_path)
+    temp_flat = np.asarray(temp, dtype=np.float64).reshape(-1)
+    # The converter stores pressure in Pa; Witt uses dyn cm^-2.
+    pgas_flat = np.asarray(pgas, dtype=np.float64).reshape(-1) * 10.0
+    ne_flat = np.empty(temp_flat.shape, dtype=np.float32)
+    for i, (t_cell, pgas_cell) in enumerate(zip(temp_flat, pgas_flat)):
+        pe_cgs = eos.pe_from_pg(float(t_cell), float(pgas_cell))
+        ne_flat[i] = np.float32(pe_cgs / (K_BOLTZMANN_CGS * t_cell) * 1e6)
+    return ne_flat.reshape(temp.shape)
+
+
+def _electron_density_from_witt_pgas(
+    args, temp: np.ndarray, pgas: np.ndarray
+) -> np.ndarray:
+    if args.eos_backend in ("auto", "cpp"):
+        try:
+            return _electron_density_from_witt_pgas_cpp(args, temp, pgas)
+        except Exception as exc:
+            if args.eos_backend == "cpp":
+                raise
+            print(f"WARNING: C++ Witt EOS backend unavailable ({exc}); falling back to Python.")
+    return _electron_density_from_witt_pgas_python(args, temp, pgas)
 
 
 def _validate_positive(name: str, arr: np.ndarray) -> None:
@@ -496,6 +538,9 @@ def convert(args) -> None:
 
     folder = Path(args.folder)
     snap = str(args.snap)
+    electron_source, _ = _find_electron_density_source(
+        folder, args.simulation_code, args.simulation_name, snap
+    )
     temp_path = _require_file(
         _file_path(folder, args.simulation_code, args.simulation_name, "lgtg", snap)
     )
@@ -590,8 +635,20 @@ def convert(args) -> None:
         scale=args.velocity_scale,
     )
 
-    pgas = None
-    if args.electron_density_mode == "pressure":
+    if electron_source == "lgne":
+        ne = _read_log_quantity(
+            folder,
+            args.simulation_code,
+            args.simulation_name,
+            "lgne",
+            snap,
+            z_indices,
+            x_slice,
+            y_slice,
+            scale=args.electron_density_scale,
+        )
+        electron_density_source = "lgne"
+    elif electron_source == "lgp":
         pgas = _read_log_quantity(
             folder,
             args.simulation_code,
@@ -603,7 +660,11 @@ def convert(args) -> None:
             y_slice,
             scale=args.pressure_scale,
         )
-    ne = _read_electron_density(args, temp, pgas, rho)
+        ne = _electron_density_from_witt_pgas(args, temp, pgas)
+        electron_density_source = "witt-pgas"
+    else:
+        ne = _electron_density_from_witt_rho(args, temp, rho)
+        electron_density_source = "witt-rho"
 
     # Match the attached RH15D converter: reverse selected z so index 0 is top.
     height_selected = height_m[z_indices]
@@ -672,9 +733,7 @@ def convert(args) -> None:
         f.attrs["simulation_code"] = args.simulation_code
         f.attrs["simulation_name"] = args.simulation_name
         f.attrs["snap"] = snap
-        f.attrs["electron_density_source"] = (
-            args.electron_density_fits or args.electron_density_mode
-        )
+        f.attrs["electron_density_source"] = electron_density_source
 
     print(f"Wrote {output}")
     print(f"inputs shape: {(1,) + inputs.shape}")
@@ -747,43 +806,31 @@ def parse_args() -> argparse.Namespace:
         default=10.0,
         help="Multiplier after 10**lgp. Default converts dyn/cm^2 to Pa.",
     )
-    parser.add_argument("--electron-density-fits", default=None)
-    parser.add_argument(
-        "--electron-density-log",
-        action="store_true",
-        help="Apply 10** to --electron-density-fits before scaling.",
-    )
     parser.add_argument(
         "--electron-density-scale",
         type=float,
-        default=1.0,
-        help="Multiplier for electron-density FITS data to m^-3.",
-    )
-    parser.add_argument(
-        "--electron-density-mode",
-        choices=["none", "witt-rho", "pressure", "constant"],
-        default="none",
+        default=1e6,
         help=(
-            "Fallback source for ne. 'witt-rho' uses the Witt EOS from T and "
-            "rho; 'pressure' uses electron_pressure_fraction * pgas / (k_B T)."
+            "Multiplier after 10**lgne. Default converts cm^-3 to m^-3. "
+            "Used only when an lgne FITS file is available."
         ),
     )
     parser.add_argument(
         "--witt-path",
         default=None,
-        help="Directory containing witt.py and pf_Kurucz.input for witt-rho mode.",
+        help="Directory containing witt.py and pf_Kurucz.input for Witt EOS modes.",
     )
     parser.add_argument(
         "--show-eos-progress",
         action="store_true",
-        help="Show a tqdm progress bar for the Python Witt EOS backend.",
+        help="Show progress for the Witt EOS calculation when supported.",
     )
     parser.add_argument(
         "--eos-backend",
         choices=["auto", "cpp", "python"],
         default="auto",
         help=(
-            "Backend for witt-rho electron-density calculation. 'auto' uses "
+            "Backend for Witt electron-density calculations. 'auto' uses "
             "the C++ full-atmosphere backend when it can be compiled and "
             "falls back to Python."
         ),
@@ -793,7 +840,7 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help=(
-            "Worker/thread count for witt-rho electron-density calculation. "
+            "Worker/thread count for Witt electron-density calculation. "
             "Default uses all visible CPUs. Use 1 for serial execution."
         ),
     )
@@ -815,8 +862,6 @@ def parse_args() -> argparse.Namespace:
         default="fork" if "fork" in mp.get_all_start_methods() else mp.get_start_method(),
         help="Multiprocessing start method for Python Witt EOS workers.",
     )
-    parser.add_argument("--electron-pressure-fraction", type=float, default=1.0)
-    parser.add_argument("--constant-electron-density", type=float, default=None)
     parser.add_argument("--no-reverse-z", dest="reverse_z", action="store_false")
     parser.set_defaults(reverse_z=True)
     parser.add_argument(

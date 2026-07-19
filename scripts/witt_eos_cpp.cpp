@@ -112,6 +112,12 @@ public:
         return pe / (BK * temp) * 1.0e6;
     }
 
+    double ne_from_pgas_m3(double temp, double pgas_pa) const {
+        const double pgas_cgs = pgas_pa * 10.0;
+        const double pe = pe_from_pg(temp, pgas_cgs);
+        return pe / (BK * temp) * 1.0e6;
+    }
+
 private:
     std::array<double, 99> ABUND{};
     std::vector<double> tpf;
@@ -389,16 +395,15 @@ private:
     }
 };
 
-}  // namespace
-
-extern "C" int witt_ne_from_rho(
+int witt_ne(
     const char* pf_path,
     const double* temp,
-    const double* rho_kg_m3,
+    const double* thermodynamic_input,
     float* ne_m3,
     std::size_t n,
     int threads,
-    int show_progress
+    int show_progress,
+    bool input_is_pgas
 ) {
     try {
         WittEOS eos(pf_path);
@@ -423,7 +428,7 @@ extern "C" int witt_ne_from_rho(
                     const double fraction = static_cast<double>(current) / static_cast<double>(n);
                     const auto elapsed = std::chrono::duration<double>(clock::now() - start_time).count();
                     const double rate = elapsed > 0.0 ? static_cast<double>(current) / elapsed : 0.0;
-                    std::cerr << "\rwitt-rho ne: "
+                    std::cerr << (input_is_pgas ? "\rwitt-pgas ne: " : "\rwitt-rho ne: ")
                               << std::min(100.0, fraction * 100.0) << "% "
                               << current << "/" << n
                               << " [" << static_cast<std::uint64_t>(rate) << " cell/s]"
@@ -432,7 +437,7 @@ extern "C" int witt_ne_from_rho(
                 }
                 const auto elapsed = std::chrono::duration<double>(clock::now() - start_time).count();
                 const double rate = elapsed > 0.0 ? static_cast<double>(n) / elapsed : 0.0;
-                std::cerr << "\rwitt-rho ne: 100% "
+                std::cerr << (input_is_pgas ? "\rwitt-pgas ne: 100% " : "\rwitt-rho ne: 100% ")
                           << n << "/" << n
                           << " [" << static_cast<std::uint64_t>(rate) << " cell/s]"
                           << std::endl;
@@ -442,7 +447,10 @@ extern "C" int witt_ne_from_rho(
         auto worker = [&](std::size_t begin, std::size_t end) {
             std::size_t since_update = 0;
             for (std::size_t i = begin; i < end; ++i) {
-                ne_m3[i] = static_cast<float>(eos.ne_from_rho_m3(temp[i], rho_kg_m3[i]));
+                const double ne = input_is_pgas
+                    ? eos.ne_from_pgas_m3(temp[i], thermodynamic_input[i])
+                    : eos.ne_from_rho_m3(temp[i], thermodynamic_input[i]);
+                ne_m3[i] = static_cast<float>(ne);
                 ++since_update;
                 if (show_progress && since_update >= 1024) {
                     completed.fetch_add(since_update, std::memory_order_relaxed);
@@ -483,4 +491,34 @@ extern "C" int witt_ne_from_rho(
     } catch (...) {
         return 1;
     }
+}
+
+}  // namespace
+
+extern "C" int witt_ne_from_rho(
+    const char* pf_path,
+    const double* temp,
+    const double* rho_kg_m3,
+    float* ne_m3,
+    std::size_t n,
+    int threads,
+    int show_progress
+) {
+    return witt_ne(
+        pf_path, temp, rho_kg_m3, ne_m3, n, threads, show_progress, false
+    );
+}
+
+extern "C" int witt_ne_from_pgas(
+    const char* pf_path,
+    const double* temp,
+    const double* pgas_pa,
+    float* ne_m3,
+    std::size_t n,
+    int threads,
+    int show_progress
+) {
+    return witt_ne(
+        pf_path, temp, pgas_pa, ne_m3, n, threads, show_progress, true
+    );
 }
