@@ -14,6 +14,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 
 HAS_NUMPY = find_spec("numpy") is not None
+HAS_ASTROPY = find_spec("astropy") is not None
+HAS_H5PY = find_spec("h5py") is not None
 
 if HAS_NUMPY:
     import numpy as np
@@ -208,6 +210,175 @@ class ElectronDensitySourceSelectionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             with self.assertRaises(FileNotFoundError):
                 self.find_source(Path(tmpdir), "MURaM", "test", "1")
+
+
+@unittest.skipUnless(
+    HAS_NUMPY and HAS_ASTROPY,
+    "NumPy and Astropy are required for FITS converter unit tests",
+)
+class FitsHeaderUnitTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, str(SCRIPTS))
+        from astropy import units as u
+        from convert_muram_fits_to_ffno_hdf5 import (
+            _convert_values,
+            _unit_scale_from_header,
+        )
+
+        cls.unit_scale = staticmethod(_unit_scale_from_header)
+        cls.convert_values = staticmethod(_convert_values)
+        cls.u = u
+
+    def test_units_from_supplied_muram_headers_are_converted_to_si(self):
+        self.assertEqual(
+            self.unit_scale({"BUNIT": "K"}, "BUNIT", "K", "temperature"),
+            1.0,
+        )
+        self.assertEqual(
+            self.unit_scale(
+                {"BUNIT": "kg m^(-3)"}, "BUNIT", "kg / m3", "mass density"
+            ),
+            1.0,
+        )
+        self.assertEqual(
+            self.unit_scale(
+                {"BUNIT": "m s^(-1)"}, "BUNIT", "m / s", "velocity"
+            ),
+            1.0,
+        )
+        self.assertEqual(
+            self.unit_scale(
+                {"BUNIT": "N m^(-2)"}, "BUNIT", "Pa", "gas pressure"
+            ),
+            1.0,
+        )
+        self.assertEqual(
+            self.unit_scale({"CUNIT3": "Mm"}, "CUNIT3", "m", "length"),
+            1e6,
+        )
+
+    def test_common_cgs_header_units_are_converted_to_si(self):
+        self.assertAlmostEqual(
+            self.unit_scale(
+                {"BUNIT": "g cm^(-3)"}, "BUNIT", "kg / m3", "mass density"
+            ),
+            1e3,
+        )
+        self.assertAlmostEqual(
+            self.unit_scale(
+                {"BUNIT": "dyn cm^(-2)"}, "BUNIT", "Pa", "gas pressure"
+            ),
+            1e-1,
+        )
+        self.assertAlmostEqual(
+            self.unit_scale(
+                {"BUNIT": "cm^(-3)"}, "BUNIT", "1 / m3", "electron density"
+            ),
+            1e6,
+        )
+
+    def test_missing_or_unsupported_header_unit_fails(self):
+        with self.assertRaises(ValueError):
+            self.unit_scale({}, "BUNIT", "m / s", "velocity")
+        with self.assertRaises(ValueError):
+            self.unit_scale(
+                {"BUNIT": "not_a_physical_unit"}, "BUNIT", "m / s", "velocity"
+            )
+
+    def test_multi3d_conversions_are_derived_from_astropy_units(self):
+        u = self.u
+        np.testing.assert_allclose(
+            self.convert_values(np.array([1.0]), u.m / u.s, u.km / u.s),
+            [1e-3],
+        )
+        np.testing.assert_allclose(
+            self.convert_values(np.array([1.0]), u.m**-3, u.cm**-3),
+            [1e-6],
+        )
+        np.testing.assert_allclose(
+            self.convert_values(np.array([1.0]), u.kg / u.m**3, u.g / u.cm**3),
+            [1e-3],
+        )
+        np.testing.assert_allclose(
+            self.convert_values(np.array([1.0]), u.m, u.cm),
+            [1e2],
+        )
+
+
+@unittest.skipUnless(HAS_NUMPY, "NumPy is required for coordinate tests")
+class TargetCoordinateTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, str(SCRIPTS))
+        from convert_muram_fits_to_ffno_hdf5 import _reverse_to_target_coordinates
+
+        cls.reverse = staticmethod(_reverse_to_target_coordinates)
+
+    def test_depth_is_always_reversed_and_vy_vz_change_sign(self):
+        base = np.array([[[1.0, 2.0, 3.0]]], dtype=np.float32)
+        temp, rho, vx, vy, vz, ne, height = self.reverse(
+            base,
+            base + 10,
+            base + 20,
+            base + 30,
+            base + 40,
+            base + 50,
+            np.array([100.0, 200.0, 300.0]),
+        )
+
+        np.testing.assert_array_equal(temp, [[[3.0, 2.0, 1.0]]])
+        np.testing.assert_array_equal(rho, [[[13.0, 12.0, 11.0]]])
+        np.testing.assert_array_equal(vx, [[[23.0, 22.0, 21.0]]])
+        np.testing.assert_array_equal(vy, [[[-33.0, -32.0, -31.0]]])
+        np.testing.assert_array_equal(vz, [[[-43.0, -42.0, -41.0]]])
+        np.testing.assert_array_equal(ne, [[[53.0, 52.0, 51.0]]])
+        np.testing.assert_array_equal(height, [300.0, 200.0, 100.0])
+
+
+@unittest.skipUnless(
+    HAS_NUMPY and HAS_ASTROPY and HAS_H5PY,
+    "NumPy, Astropy, and h5py are required for FFNO HDF5 tests",
+)
+class FFNOHDF5WriterTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, str(SCRIPTS))
+        from convert_muram_fits_to_ffno_hdf5 import _write_ffno_hdf5
+
+        cls.write_hdf5 = staticmethod(_write_ffno_hdf5)
+
+    def test_velocity_channels_are_written_in_km_per_second(self):
+        import h5py
+
+        shape = (1, 1, 2)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "solving.hdf5"
+            self.write_hdf5(
+                output,
+                temp=np.full(shape, 5000.0, dtype=np.float32),
+                rho=np.full(shape, 1e-4, dtype=np.float32),
+                vx=np.full(shape, 1000.0, dtype=np.float32),
+                vy=np.full(shape, -2000.0, dtype=np.float32),
+                vz=np.full(shape, 3000.0, dtype=np.float32),
+                ne=np.full(shape, 1e16, dtype=np.float32),
+                height_m=np.array([2e6, 1e6], dtype=np.float32),
+                dx_m=192000.0,
+                dy_m=192000.0,
+                source_folder=Path(tmpdir),
+                simulation_code="MURaM",
+                simulation_name="test",
+                snap="1",
+                electron_density_source="lgne",
+                compression=1,
+                overwrite=False,
+            )
+
+            with h5py.File(output, "r") as f:
+                np.testing.assert_allclose(f["inputs"][0, 1], 1.0)
+                np.testing.assert_allclose(f["inputs"][0, 2], -2.0)
+                np.testing.assert_allclose(f["inputs"][0, 3], 3.0)
+                self.assertEqual(f.attrs["velocity_unit"], "km s^-1")
 
 
 if __name__ == "__main__":

@@ -10,8 +10,9 @@ The generated file is the solving-set consumed by pipeline.py --predict and
     dx      [1]               in m
     dy      [1]               in m
 
-Input channels are:
-    log10(T), ux, uy, uz, log10(ne), log10(rho)
+Input channels are normalized from FITS BUNIT/CUNIT metadata to:
+    log10(T [K]), ux [km/s], uy [km/s], uz [km/s],
+    log10(ne [m^-3]), log10(rho [kg/m^3])
 """
 
 from __future__ import annotations
@@ -146,6 +147,56 @@ def _maybe_infer_spacing(header: dict[str, Any], key: str, scale: float) -> floa
     return spacing
 
 
+def _import_astropy_units():
+    try:
+        from astropy import units as u
+    except ImportError as exc:
+        raise SystemExit(
+            "astropy is required to interpret FITS units and convert them to SI."
+        ) from exc
+    return u
+
+
+def _parse_header_unit(raw_unit: Any):
+    """Parse a FITS unit, accepting the parenthesized powers in MURaM headers."""
+    u = _import_astropy_units()
+    unit_text = str(raw_unit).strip().replace("−", "-")
+    try:
+        return u.Unit(unit_text)
+    except ValueError:
+        # MURaM writes e.g. ``m s^(-1)``; Astropy's generic/FITS-like syntax
+        # represents the same unit as ``m s^-1``.
+        normalized = unit_text.replace("^(", "^").replace(")", "")
+        return u.Unit(normalized)
+
+
+def _unit_scale_from_header(
+    header: dict[str, Any],
+    key: str,
+    target_unit: str,
+    quantity: str,
+) -> float:
+    """Return Astropy's conversion factor from a FITS header unit."""
+    raw_unit = header.get(key)
+    if raw_unit is None or not str(raw_unit).strip():
+        raise ValueError(f"FITS header has no {key} for {quantity}")
+
+    try:
+        source = _parse_header_unit(raw_unit)
+        target = _import_astropy_units().Unit(target_unit)
+        return float(source.to(target))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Cannot convert {key}={raw_unit!r} for {quantity} to {target_unit}"
+        ) from exc
+
+
+def _convert_values(values: np.ndarray, source_unit, target_unit) -> np.ndarray:
+    """Convert array values using an Astropy-derived multiplicative factor."""
+    factor = float(source_unit.to(target_unit))
+    return values * factor
+
+
 def _read_log_quantity(
     folder: Path,
     simulation_code: str,
@@ -156,12 +207,14 @@ def _read_log_quantity(
     x_slice: slice,
     y_slice: slice,
     *,
-    scale: float = 1.0,
+    si_unit: str,
+    quantity_name: str,
 ) -> np.ndarray:
     path = _require_file(
         _file_path(folder, simulation_code, simulation_name, quantity, snap)
     )
-    data, _, _ = _read_fits(path)
+    data, header, _ = _read_fits(path)
+    scale = _unit_scale_from_header(header, "BUNIT", si_unit, quantity_name)
     arr = (
         10.0 ** np.asarray(data[z_indices, x_slice, y_slice], dtype=np.float32)
     ).astype(np.float32, copy=False)
@@ -180,12 +233,14 @@ def _read_linear_quantity(
     x_slice: slice,
     y_slice: slice,
     *,
-    scale: float = 1.0,
+    si_unit: str,
+    quantity_name: str,
 ) -> np.ndarray:
     path = _require_file(
         _file_path(folder, simulation_code, simulation_name, quantity, snap)
     )
-    data, _, _ = _read_fits(path)
+    data, header, _ = _read_fits(path)
+    scale = _unit_scale_from_header(header, "BUNIT", si_unit, quantity_name)
     arr = np.asarray(data[z_indices, x_slice, y_slice], dtype=np.float32)
     if scale != 1.0:
         arr *= np.float32(scale)
@@ -473,6 +528,127 @@ def _validate_positive(name: str, arr: np.ndarray) -> None:
         raise ValueError(f"{name} must be positive before log10")
 
 
+def _reverse_to_target_coordinates(
+    temp: np.ndarray,
+    rho: np.ndarray,
+    vx: np.ndarray,
+    vy: np.ndarray,
+    vz: np.ndarray,
+    ne: np.ndarray,
+    height_m: np.ndarray,
+) -> tuple[np.ndarray, ...]:
+    """Reverse depth and transform velocity signs to the target coordinates."""
+    return (
+        temp[:, :, ::-1],
+        rho[:, :, ::-1],
+        vx[:, :, ::-1],
+        -vy[:, :, ::-1],
+        -vz[:, :, ::-1],
+        ne[:, :, ::-1],
+        height_m[::-1],
+    )
+
+
+def _write_ffno_hdf5(
+    output: Path,
+    *,
+    temp: np.ndarray,
+    rho: np.ndarray,
+    vx: np.ndarray,
+    vy: np.ndarray,
+    vz: np.ndarray,
+    ne: np.ndarray,
+    height_m: np.ndarray,
+    dx_m: float,
+    dy_m: float,
+    source_folder: Path,
+    simulation_code: str,
+    simulation_name: str,
+    snap: str,
+    electron_density_source: str,
+    compression: int,
+    overwrite: bool,
+) -> None:
+    """Build and write one FFNO solving-set HDF5 file.
+
+    Atmosphere inputs use SI units: K, kg m^-3, m s^-1, m^-3, and m.
+    Velocity channels are converted to km s^-1 and z_scale is converted to Mm
+    for compatibility with FFNO training data.
+    """
+    _validate_positive("temperature", temp)
+    _validate_positive("electron density", ne)
+    _validate_positive("density", rho)
+
+    u = _import_astropy_units()
+    vx_kms = _convert_values(vx, u.m / u.s, u.km / u.s)
+    vy_kms = _convert_values(vy, u.m / u.s, u.km / u.s)
+    vz_kms = _convert_values(vz, u.m / u.s, u.km / u.s)
+
+    inputs = np.stack(
+        [
+            np.log10(temp),
+            vx_kms,
+            vy_kms,
+            vz_kms,
+            np.log10(ne),
+            np.log10(rho),
+        ],
+        axis=0,
+    )
+    inputs = np.transpose(inputs, (0, 3, 1, 2)).astype(np.float32, copy=False)
+
+    height_mm = _convert_values(
+        np.asarray(height_m, dtype=np.float32), u.m, u.Mm
+    )
+    z_native = np.broadcast_to(
+        height_mm.reshape(-1, 1, 1),
+        (inputs.shape[1], inputs.shape[2], inputs.shape[3]),
+    )
+
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output exists: {output}")
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    h5py = _import_h5py()
+    mode = "w" if overwrite else "x"
+    with h5py.File(output, mode) as f:
+        f.create_dataset(
+            "inputs",
+            data=inputs[None, ...],
+            compression="gzip",
+            compression_opts=compression,
+            shuffle=True,
+        )
+        f.create_dataset(
+            "z_scale",
+            data=z_native[None, ...],
+            compression="gzip",
+            compression_opts=compression,
+            shuffle=True,
+        )
+        f.create_dataset("dx", data=np.array([dx_m], dtype=np.float32))
+        f.create_dataset("dy", data=np.array([dy_m], dtype=np.float32))
+        f.attrs["N"] = 1
+        f.attrs["Cin"] = inputs.shape[0]
+        f.attrs["D"] = inputs.shape[1]
+        f.attrs["nx"] = inputs.shape[2]
+        f.attrs["ny"] = inputs.shape[3]
+        f.attrs["native_depth"] = inputs.shape[1]
+        f.attrs["source_format"] = "MURaM FITS"
+        f.attrs["source_folder"] = os.fspath(source_folder)
+        f.attrs["simulation_code"] = simulation_code
+        f.attrs["simulation_name"] = simulation_name
+        f.attrs["snap"] = snap
+        f.attrs["electron_density_source"] = electron_density_source
+        f.attrs["velocity_unit"] = "km s^-1"
+
+    print(f"Wrote {output}")
+    print(f"inputs shape: {(1,) + inputs.shape}")
+    print(f"z_scale shape: {(1,) + z_native.shape}")
+    print(f"dx={dx_m} m, dy={dy_m} m")
+    print(f"height range: {float(height_m.min())} .. {float(height_m.max())} m")
+
+
 def _write_multi3d_atmosphere(
     atmos_path: Path,
     mesh_path: Path | None,
@@ -486,9 +662,37 @@ def _write_multi3d_atmosphere(
     dx_m: float,
     dy_m: float,
     height_m: np.ndarray,
-    velocity_to_kms: float,
     overwrite: bool,
 ) -> None:
+    """Write the converter's SI-valued atmosphere in Multi3D units.
+
+    Expected input units
+    --------------------
+    temp
+        Temperature in kelvin (K).
+    rho
+        Mass density in kilograms per cubic metre (kg m^-3).
+    vx, vy, vz
+        Velocity components in metres per second (m s^-1), the converter's
+        internal velocity unit.
+    ne
+        Electron number density in inverse cubic metres (m^-3).
+    dx_m, dy_m
+        Horizontal grid spacing in metres (m).
+    height_m
+        Vertical grid coordinates in metres (m).
+    Units written
+    -------------
+    The Multi3D atmosphere fields are written as: ``temp`` in K (unchanged),
+    ``rho`` in g cm^-3, ``ne`` in cm^-3, and ``vx``, ``vy``, ``vz`` in
+    km s^-1. If ``mesh_path`` is provided, its x, y, and z coordinates are
+    written in centimetres. Astropy performs all conversions from the SI
+    input units listed above.
+
+    All atmosphere arrays must have the same ``(nx, ny, nz)`` shape. The
+    ``atmos_path``, ``mesh_path``, and ``overwrite`` parameters control file
+    output only and therefore have no physical units.
+    """
     try:
         from helita.sim.multi3d import Multi3dAtmos
     except ImportError as exc:
@@ -506,19 +710,32 @@ def _write_multi3d_atmosphere(
     if mesh_path is not None:
         mesh_path.parent.mkdir(parents=True, exist_ok=True)
 
+    u = _import_astropy_units()
     nx, ny, nz = temp.shape
     atmos = Multi3dAtmos(os.fspath(atmos_path), nx, ny, nz, mode="w+", read_nh=False)
-    atmos.ne[:] = (ne * 1e-6).astype(np.float32, copy=False)
+    atmos.ne[:] = _convert_values(ne, u.m**-3, u.cm**-3).astype(
+        np.float32, copy=False
+    )
     atmos.temp[:] = temp.astype(np.float32, copy=False)
-    atmos.vx[:] = (vx * velocity_to_kms).astype(np.float32, copy=False)
-    atmos.vy[:] = (vy * velocity_to_kms).astype(np.float32, copy=False)
-    atmos.vz[:] = (vz * velocity_to_kms).astype(np.float32, copy=False)
-    atmos.rho[:] = (rho * 1e-3).astype(np.float32, copy=False)
+    atmos.vx[:] = _convert_values(vx, u.m / u.s, u.km / u.s).astype(
+        np.float32, copy=False
+    )
+    atmos.vy[:] = _convert_values(vy, u.m / u.s, u.km / u.s).astype(
+        np.float32, copy=False
+    )
+    atmos.vz[:] = _convert_values(vz, u.m / u.s, u.km / u.s).astype(
+        np.float32, copy=False
+    )
+    atmos.rho[:] = _convert_values(rho, u.kg / u.m**3, u.g / u.cm**3).astype(
+        np.float32, copy=False
+    )
 
     if mesh_path is not None:
-        x = np.arange(nx, dtype=np.float64) * dx_m * 1e2
-        y = np.arange(ny, dtype=np.float64) * dy_m * 1e2
-        z = np.asarray(height_m, dtype=np.float64) * 1e2
+        x_m = np.arange(nx, dtype=np.float64) * dx_m
+        y_m = np.arange(ny, dtype=np.float64) * dy_m
+        x = _convert_values(x_m, u.m, u.cm)
+        y = _convert_values(y_m, u.m, u.cm)
+        z = _convert_values(np.asarray(height_m, dtype=np.float64), u.m, u.cm)
 
         with open(mesh_path, "w") as mesh_file:
             mesh_file.write(f"{nx}\n")
@@ -534,8 +751,6 @@ def _write_multi3d_atmosphere(
 
 
 def convert(args) -> None:
-    h5py = _import_h5py()
-
     folder = Path(args.folder)
     snap = str(args.snap)
     electron_source, _ = _find_electron_density_source(
@@ -555,7 +770,10 @@ def convert(args) -> None:
         )
 
     nz_full, nx_full, ny_full = temp_data.shape
-    height_m = np.asarray(height, dtype=np.float64).reshape(-1) * args.height_unit_scale
+    height_scale = _unit_scale_from_header(
+        temp_header, "CUNIT3", "m", "vertical coordinate"
+    )
+    height_m = np.asarray(height, dtype=np.float64).reshape(-1) * height_scale
     if height_m.size != nz_full:
         raise ValueError(
             f"Height size {height_m.size} does not match FITS z dimension {nz_full}"
@@ -572,9 +790,15 @@ def convert(args) -> None:
     dx = args.dx
     dy = args.dy
     if dx is None:
-        dx = _maybe_infer_spacing(temp_header, "CDELT1", args.xy_unit_scale)
+        x_scale = _unit_scale_from_header(
+            temp_header, "CUNIT1", "m", "x coordinate"
+        )
+        dx = _maybe_infer_spacing(temp_header, "CDELT1", x_scale)
     if dy is None:
-        dy = _maybe_infer_spacing(temp_header, "CDELT2", args.xy_unit_scale)
+        y_scale = _unit_scale_from_header(
+            temp_header, "CUNIT2", "m", "y coordinate"
+        )
+        dy = _maybe_infer_spacing(temp_header, "CDELT2", y_scale)
     if dx is None or dy is None:
         raise ValueError(
             "Could not infer dx/dy from FITS CDELT1/CDELT2. Pass --dx and --dy in meters."
@@ -589,6 +813,8 @@ def convert(args) -> None:
         z_indices,
         x_slice,
         y_slice,
+        si_unit="K",
+        quantity_name="temperature",
     )
     rho = _read_log_quantity(
         folder,
@@ -599,7 +825,8 @@ def convert(args) -> None:
         z_indices,
         x_slice,
         y_slice,
-        scale=args.rho_scale,
+        si_unit="kg / m3",
+        quantity_name="mass density",
     )
     vx = _read_linear_quantity(
         folder,
@@ -610,7 +837,8 @@ def convert(args) -> None:
         z_indices,
         x_slice,
         y_slice,
-        scale=args.velocity_scale,
+        si_unit="m / s",
+        quantity_name="x velocity",
     )
     vy = _read_linear_quantity(
         folder,
@@ -621,7 +849,8 @@ def convert(args) -> None:
         z_indices,
         x_slice,
         y_slice,
-        scale=args.velocity_scale,
+        si_unit="m / s",
+        quantity_name="y velocity",
     )
     vz = _read_linear_quantity(
         folder,
@@ -632,7 +861,8 @@ def convert(args) -> None:
         z_indices,
         x_slice,
         y_slice,
-        scale=args.velocity_scale,
+        si_unit="m / s",
+        quantity_name="z velocity",
     )
 
     if electron_source == "lgne":
@@ -645,7 +875,8 @@ def convert(args) -> None:
             z_indices,
             x_slice,
             y_slice,
-            scale=args.electron_density_scale,
+            si_unit="1 / m3",
+            quantity_name="electron density",
         )
         electron_density_source = "lgne"
     elif electron_source == "lgp":
@@ -658,7 +889,8 @@ def convert(args) -> None:
             z_indices,
             x_slice,
             y_slice,
-            scale=args.pressure_scale,
+            si_unit="Pa",
+            quantity_name="gas pressure",
         )
         ne = _electron_density_from_witt_pgas(args, temp, pgas)
         electron_density_source = "witt-pgas"
@@ -666,80 +898,32 @@ def convert(args) -> None:
         ne = _electron_density_from_witt_rho(args, temp, rho)
         electron_density_source = "witt-rho"
 
-    # Match the attached RH15D converter: reverse selected z so index 0 is top.
     height_selected = height_m[z_indices]
-    if args.reverse_z:
-        temp = temp[:, :, ::-1]
-        rho = rho[:, :, ::-1]
-        vx = vx[:, :, ::-1]
-        vy = vy[:, :, ::-1]
-        vz = vz[:, :, ::-1]
-        ne = ne[:, :, ::-1]
-        height_selected = height_selected[::-1]
-
-    _validate_positive("temperature", temp)
-    _validate_positive("electron density", ne)
-    _validate_positive("density", rho)
-
-    inputs = np.stack(
-        [
-            np.log10(temp),
-            vx,
-            vy,
-            vz,
-            np.log10(ne),
-            np.log10(rho),
-        ],
-        axis=0,
-    )
-    inputs = np.transpose(inputs, (0, 3, 1, 2)).astype(np.float32, copy=False)
-
-    z_native = np.broadcast_to(
-        (height_selected.astype(np.float32) / np.float32(1e6)).reshape(-1, 1, 1),
-        (inputs.shape[1], inputs.shape[2], inputs.shape[3]),
+    # The target convention always stores index 0 at the top. Its y and z
+    # velocity axes point opposite to the corresponding source axes.
+    temp, rho, vx, vy, vz, ne, height_selected = _reverse_to_target_coordinates(
+        temp, rho, vx, vy, vz, ne, height_selected
     )
 
-    output = Path(args.output)
-    if output.exists() and not args.overwrite:
-        raise FileExistsError(f"Output exists: {output}")
-    output.parent.mkdir(parents=True, exist_ok=True)
-
-    mode = "w" if args.overwrite else "x"
-    with h5py.File(output, mode) as f:
-        f.create_dataset(
-            "inputs",
-            data=inputs[None, ...],
-            compression="gzip",
-            compression_opts=args.compression,
-            shuffle=True,
-        )
-        f.create_dataset(
-            "z_scale",
-            data=z_native[None, ...],
-            compression="gzip",
-            compression_opts=args.compression,
-            shuffle=True,
-        )
-        f.create_dataset("dx", data=np.array([dx], dtype=np.float32))
-        f.create_dataset("dy", data=np.array([dy], dtype=np.float32))
-        f.attrs["N"] = 1
-        f.attrs["Cin"] = inputs.shape[0]
-        f.attrs["D"] = inputs.shape[1]
-        f.attrs["nx"] = inputs.shape[2]
-        f.attrs["ny"] = inputs.shape[3]
-        f.attrs["native_depth"] = inputs.shape[1]
-        f.attrs["source_format"] = "MURaM FITS"
-        f.attrs["source_folder"] = os.fspath(folder)
-        f.attrs["simulation_code"] = args.simulation_code
-        f.attrs["simulation_name"] = args.simulation_name
-        f.attrs["snap"] = snap
-        f.attrs["electron_density_source"] = electron_density_source
-
-    print(f"Wrote {output}")
-    print(f"inputs shape: {(1,) + inputs.shape}")
-    print(f"z_scale shape: {(1,) + z_native.shape}")
-    print(f"dx={dx} m, dy={dy} m")
-    print(f"height range: {float(height_selected.min())} .. {float(height_selected.max())} m")
+    _write_ffno_hdf5(
+        Path(args.output),
+        temp=temp,
+        rho=rho,
+        vx=vx,
+        vy=vy,
+        vz=vz,
+        ne=ne,
+        height_m=height_selected,
+        dx_m=dx,
+        dy_m=dy,
+        source_folder=folder,
+        simulation_code=args.simulation_code,
+        simulation_name=args.simulation_name,
+        snap=snap,
+        electron_density_source=electron_density_source,
+        compression=args.compression,
+        overwrite=args.overwrite,
+    )
 
     if args.multi3d_atmos_out:
         _write_multi3d_atmosphere(
@@ -754,7 +938,6 @@ def convert(args) -> None:
             dx_m=dx,
             dy_m=dy,
             height_m=height_selected,
-            velocity_to_kms=args.multi3d_velocity_to_kms,
             overwrite=args.overwrite,
         )
 
@@ -774,47 +957,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--end-y", type=int, default=None)
     parser.add_argument("--height-min-m", type=float, default=-np.inf)
     parser.add_argument("--height-max-m", type=float, default=np.inf)
-    parser.add_argument(
-        "--height-unit-scale",
-        type=float,
-        default=1e6,
-        help="Multiplier from FITS height extension units to meters. Default assumes Mm.",
-    )
-    parser.add_argument(
-        "--xy-unit-scale",
-        type=float,
-        default=1e6,
-        help="Multiplier from FITS CDELT1/CDELT2 units to meters. Default assumes Mm.",
-    )
     parser.add_argument("--dx", type=float, default=None, help="Horizontal x spacing in meters")
     parser.add_argument("--dy", type=float, default=None, help="Horizontal y spacing in meters")
-    parser.add_argument(
-        "--rho-scale",
-        type=float,
-        default=1e3,
-        help="Multiplier after 10**lgr. Default converts g/cm^3 to kg/m^3.",
-    )
-    parser.add_argument(
-        "--velocity-scale",
-        type=float,
-        default=1.0,
-        help="Multiplier for ux/uy/uz. Use 1e3 if FITS velocities are km/s.",
-    )
-    parser.add_argument(
-        "--pressure-scale",
-        type=float,
-        default=10.0,
-        help="Multiplier after 10**lgp. Default converts dyn/cm^2 to Pa.",
-    )
-    parser.add_argument(
-        "--electron-density-scale",
-        type=float,
-        default=1e6,
-        help=(
-            "Multiplier after 10**lgne. Default converts cm^-3 to m^-3. "
-            "Used only when an lgne FITS file is available."
-        ),
-    )
     parser.add_argument(
         "--witt-path",
         default=None,
@@ -862,8 +1006,6 @@ def parse_args() -> argparse.Namespace:
         default="fork" if "fork" in mp.get_all_start_methods() else mp.get_start_method(),
         help="Multiprocessing start method for Python Witt EOS workers.",
     )
-    parser.add_argument("--no-reverse-z", dest="reverse_z", action="store_false")
-    parser.set_defaults(reverse_z=True)
     parser.add_argument(
         "--multi3d-atmos-out",
         default=None,
@@ -873,15 +1015,6 @@ def parse_args() -> argparse.Namespace:
         "--multi3d-mesh-out",
         default=None,
         help="Optional Multi3D mesh output path. Used only with --multi3d-atmos-out.",
-    )
-    parser.add_argument(
-        "--multi3d-velocity-to-kms",
-        type=float,
-        default=1e-5,
-        help=(
-            "Multiplier from internal converter velocity units to km/s for "
-            "Multi3D output. Default assumes ux/uy/uz are cm/s."
-        ),
     )
     parser.add_argument("--compression", type=int, default=4)
     parser.add_argument("--overwrite", action="store_true")
