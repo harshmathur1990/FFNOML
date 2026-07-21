@@ -113,6 +113,26 @@ def _find_electron_density_source(
     )
 
 
+def _find_hydrogen_population_paths(
+    folder: Path,
+    simulation_code: str,
+    simulation_name: str,
+    snap: str,
+) -> tuple[Path, ...] | None:
+    """Return lgn1..lgn6 paths when the complete population set is present."""
+    paths = tuple(
+        _file_path(
+            folder,
+            simulation_code,
+            simulation_name,
+            f"lgn{level}",
+            snap,
+        )
+        for level in range(1, 7)
+    )
+    return paths if all(path.is_file() for path in paths) else None
+
+
 def _parse_slice(start: int | None, end: int | None, size: int, axis_name: str) -> slice:
     start = 0 if start is None else start
     end = size if end is None else end
@@ -528,6 +548,11 @@ def _validate_positive(name: str, arr: np.ndarray) -> None:
         raise ValueError(f"{name} must be positive before log10")
 
 
+def _rotate_spatial_dimensions(arr: np.ndarray) -> np.ndarray:
+    """Apply ``[::-1, :].T`` to every horizontal plane of an (x, y, z) cube."""
+    return np.transpose(arr[::-1, :, :], (1, 0, 2))
+
+
 def _reverse_to_target_coordinates(
     temp: np.ndarray,
     rho: np.ndarray,
@@ -537,14 +562,14 @@ def _reverse_to_target_coordinates(
     ne: np.ndarray,
     height_m: np.ndarray,
 ) -> tuple[np.ndarray, ...]:
-    """Reverse depth and transform velocity signs to the target coordinates."""
+    """Rotate horizontal planes, reverse depth, and transform velocity signs."""
     return (
-        temp[:, :, ::-1],
-        rho[:, :, ::-1],
-        vx[:, :, ::-1],
-        -vy[:, :, ::-1],
-        -vz[:, :, ::-1],
-        ne[:, :, ::-1],
+        _rotate_spatial_dimensions(temp[:, :, ::-1]),
+        _rotate_spatial_dimensions(rho[:, :, ::-1]),
+        _rotate_spatial_dimensions(vx[:, :, ::-1]),
+        _rotate_spatial_dimensions(-vy[:, :, ::-1]),
+        _rotate_spatial_dimensions(-vz[:, :, ::-1]),
+        _rotate_spatial_dimensions(ne[:, :, ::-1]),
         height_m[::-1],
     )
 
@@ -659,6 +684,7 @@ def _write_multi3d_atmosphere(
     vy: np.ndarray,
     vz: np.ndarray,
     ne: np.ndarray,
+    nh: np.ndarray | None,
     dx_m: float,
     dy_m: float,
     height_m: np.ndarray,
@@ -677,6 +703,9 @@ def _write_multi3d_atmosphere(
         internal velocity unit.
     ne
         Electron number density in inverse cubic metres (m^-3).
+    nh
+        Optional hydrogen populations in inverse cubic metres, ordered as
+        ``(nx, ny, nz, 6)``. ``None`` writes an atmosphere without populations.
     dx_m, dy_m
         Horizontal grid spacing in metres (m).
     height_m
@@ -684,14 +713,15 @@ def _write_multi3d_atmosphere(
     Units written
     -------------
     The Multi3D atmosphere fields are written as: ``temp`` in K (unchanged),
-    ``rho`` in g cm^-3, ``ne`` in cm^-3, and ``vx``, ``vy``, ``vz`` in
-    km s^-1. If ``mesh_path`` is provided, its x, y, and z coordinates are
-    written in centimetres. Astropy performs all conversions from the SI
-    input units listed above.
+    ``rho`` in g cm^-3, ``ne`` and ``nh`` in cm^-3, and ``vx``, ``vy``,
+    ``vz`` in km s^-1. If ``mesh_path`` is provided, its x, y, and z
+    coordinates are written in centimetres. Astropy performs all conversions
+    from the SI input units listed above.
 
-    All atmosphere arrays must have the same ``(nx, ny, nz)`` shape. The
-    ``atmos_path``, ``mesh_path``, and ``overwrite`` parameters control file
-    output only and therefore have no physical units.
+    All scalar atmosphere arrays must have the same ``(nx, ny, nz)`` shape;
+    ``nh`` has one additional trailing level axis. The ``atmos_path``,
+    ``mesh_path``, and ``overwrite`` parameters control file output only and
+    therefore have no physical units.
     """
     try:
         from helita.sim.multi3d import Multi3dAtmos
@@ -712,7 +742,15 @@ def _write_multi3d_atmosphere(
 
     u = _import_astropy_units()
     nx, ny, nz = temp.shape
-    atmos = Multi3dAtmos(os.fspath(atmos_path), nx, ny, nz, mode="w+", read_nh=False)
+    if nh is not None and nh.shape != (nx, ny, nz, 6):
+        raise ValueError(
+            "Hydrogen populations must have shape "
+            f"{(nx, ny, nz, 6)}, got {nh.shape}"
+        )
+    read_nh = nh is not None
+    atmos = Multi3dAtmos(
+        os.fspath(atmos_path), nx, ny, nz, mode="w+", read_nh=read_nh
+    )
     atmos.ne[:] = _convert_values(ne, u.m**-3, u.cm**-3).astype(
         np.float32, copy=False
     )
@@ -729,6 +767,10 @@ def _write_multi3d_atmosphere(
     atmos.rho[:] = _convert_values(rho, u.kg / u.m**3, u.g / u.cm**3).astype(
         np.float32, copy=False
     )
+    if nh is not None:
+        atmos.nh[:] = _convert_values(nh, u.m**-3, u.cm**-3).astype(
+            np.float32, copy=False
+        )
 
     if mesh_path is not None:
         x_m = np.arange(nx, dtype=np.float64) * dx_m
@@ -754,6 +796,9 @@ def convert(args) -> None:
     folder = Path(args.folder)
     snap = str(args.snap)
     electron_source, _ = _find_electron_density_source(
+        folder, args.simulation_code, args.simulation_name, snap
+    )
+    hydrogen_population_paths = _find_hydrogen_population_paths(
         folder, args.simulation_code, args.simulation_name, snap
     )
     temp_path = _require_file(
@@ -899,11 +944,35 @@ def convert(args) -> None:
         electron_density_source = "witt-rho"
 
     height_selected = height_m[z_indices]
-    # The target convention always stores index 0 at the top. Its y and z
-    # velocity axes point opposite to the corresponding source axes.
+    # The target convention rotates each horizontal plane with [::-1, :].T,
+    # stores index 0 at the top, and points its y and z velocity axes opposite
+    # to the corresponding source axes.
     temp, rho, vx, vy, vz, ne, height_selected = _reverse_to_target_coordinates(
         temp, rho, vx, vy, vz, ne, height_selected
     )
+    # The horizontal rotation exchanges the x and y axes and their spacing.
+    dx, dy = dy, dx
+
+    nh = None
+    if args.multi3d_atmos_out and hydrogen_population_paths is not None:
+        print("Detected lgn1 through lgn6; reading hydrogen populations.")
+        nh = np.empty((*temp.shape, 6), dtype=np.float32)
+        for level in range(1, 7):
+            population = _read_log_quantity(
+                folder,
+                args.simulation_code,
+                args.simulation_name,
+                f"lgn{level}",
+                snap,
+                z_indices,
+                x_slice,
+                y_slice,
+                si_unit="1 / m3",
+                quantity_name=f"hydrogen level {level} population",
+            )
+            nh[..., level - 1] = _rotate_spatial_dimensions(
+                population[:, :, ::-1]
+            )
 
     _write_ffno_hdf5(
         Path(args.output),
@@ -935,6 +1004,7 @@ def convert(args) -> None:
             vy=vy,
             vz=vz,
             ne=ne,
+            nh=nh,
             dx_m=dx,
             dy_m=dy,
             height_m=height_selected,

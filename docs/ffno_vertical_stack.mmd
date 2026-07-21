@@ -1,0 +1,31 @@
+flowchart TD
+    X["x: [B, C, D, H, W]"] --> PERM["permute/reshape columns<br/>[B, H*W, C, D]"]
+    Z["z_scale"] --> ZCHECK["validate shape<br/>[B,1,D,H,W]"]
+    ZCHECK --> ZPERM["permute/reshape columns<br/>[B, H*W, 1, D]"]
+
+    PERM --> CHUNK["process H*W columns<br/>in chunks of 4"]
+    ZPERM --> CHUNK
+
+    CHUNK --> XI["xi: [-1, C, D]"]
+    CHUNK --> ZI["zi: [-1, 1, D]"]
+    ZI --> ZFEAT["z features<br/>z_scale, z_norm, dz_norm, z_span<br/>[-1, 4, D]"]
+
+    XI --> INPROJ["in_proj<br/>Conv1d(C -> hidden, 1)<br/>GroupNorm<br/>GELU"]
+    ZFEAT --> ZPROJ["z_proj<br/>Conv1d(4 -> hidden, 1)<br/>GELU"]
+    INPROJ --> ADD["in_proj(xi) + z_proj(z_feat)"]
+    ZPROJ --> ADD
+
+    ADD --> MS["LiteMultiScaleVertical<br/>depthwise kernels 3,7,15<br/>pointwise mix"]
+    MS --> RB1["LiteVerticalResidualBlock<br/>k=5 dilation=1"]
+    RB1 --> RB2["LiteVerticalResidualBlock<br/>k=5 dilation=2"]
+    RB2 --> RB3["LiteVerticalResidualBlock<br/>k=5 dilation=4"]
+    RB3 --> RB4["LiteVerticalResidualBlock<br/>k=7 dilation=1"]
+
+    RB4 --> DG["depth_gate<br/>Conv1d(hidden -> hidden, 1)<br/>GELU<br/>Conv1d(hidden -> hidden, 1)<br/>Sigmoid"]
+    RB4 --> GATED["yi * depth_gate(yi)"]
+    DG --> GATED
+    GATED --> OUTPROJ["out_proj<br/>Conv1d(hidden -> C, 1)"]
+    OUTPROJ --> COLLECT["reshape chunks back<br/>[B, H, W, C, D]"]
+    COLLECT --> RESTORE["permute to<br/>[B, C, D, H, W]"]
+    RESTORE --> GN["GroupNorm"]
+    GN --> Y["vertical branch output"]

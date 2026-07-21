@@ -341,9 +341,10 @@ python scripts/convert_muram_fits_to_ffno_hdf5.py \
   --multi3d-mesh-out /mn/stornext/d9/data/harshm/bifrost_data/ar098192/270000/mesh
 ```
 
-The converter reads `lgtg`, `lgr`, `ux`, `uy`, and `uz` FITS files, reverses the
-selected height range so the first depth index is the top of the atmosphere, and
-writes `inputs`, `z_scale`, `dx`, and `dy` in the layout used by
+The converter reads `lgtg`, `lgr`, `ux`, `uy`, and `uz` FITS files, rotates each
+horizontal plane with `[::-1, :].T`, reverses the selected height range so the
+first depth index is the top of the atmosphere, and writes `inputs`, `z_scale`,
+`dx`, and `dy` in the layout used by
 `--fsdppredict`. Electron density is selected automatically in priority order:
 `lgne` is read directly, otherwise `lgp` is passed with temperature to the Witt
 EOS, otherwise the Witt EOS derives it from `lgr`. Conversion fails if none of
@@ -355,9 +356,10 @@ threads; `--show-eos-progress` prints a C++-side progress line without Python
 callbacks. Use `--eos-backend python` only for debugging or if no C++ compiler
 is available.
 The optional `--multi3d-atmos-out` and `--multi3d-mesh-out` outputs write a
-plain Multi3D atmosphere for reference calculations. They contain temperature,
-electron density, gas density, and velocity only, with no magnetic field or
-hydrogen populations.
+Multi3D atmosphere for reference calculations. If the complete `lgn1` through
+`lgn6` FITS set is present, the converter also reads and writes all six hydrogen
+populations; incomplete sets are ignored. The output contains no magnetic
+field.
 
 To run distributed prediction on only this generated file:
 

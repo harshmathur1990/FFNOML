@@ -5,9 +5,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from importlib.util import find_spec
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -212,6 +214,115 @@ class ElectronDensitySourceSelectionTests(unittest.TestCase):
                 self.find_source(Path(tmpdir), "MURaM", "test", "1")
 
 
+@unittest.skipUnless(HAS_NUMPY, "NumPy is required to import the FITS converter")
+class HydrogenPopulationSelectionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, str(SCRIPTS))
+        from convert_muram_fits_to_ffno_hdf5 import (
+            _find_hydrogen_population_paths,
+        )
+
+        cls.find_paths = staticmethod(_find_hydrogen_population_paths)
+
+    def quantity_path(self, folder, level):
+        return Path(folder) / f"BIFROST_en024048_hion_lgn{level}_385.fits"
+
+    def test_complete_lgn1_through_lgn6_set_is_detected_in_level_order(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            expected = tuple(self.quantity_path(tmpdir, level) for level in range(1, 7))
+            for path in expected:
+                path.touch()
+
+            actual = self.find_paths(
+                Path(tmpdir), "BIFROST", "en024048_hion", "385"
+            )
+
+            self.assertEqual(actual, expected)
+
+    def test_incomplete_population_set_is_not_enabled(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for level in range(1, 6):
+                self.quantity_path(tmpdir, level).touch()
+
+            self.assertIsNone(
+                self.find_paths(
+                    Path(tmpdir), "BIFROST", "en024048_hion", "385"
+                )
+            )
+
+
+@unittest.skipUnless(HAS_NUMPY, "NumPy is required for Multi3D writer tests")
+class Multi3dHydrogenWriterTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, str(SCRIPTS))
+        import convert_muram_fits_to_ffno_hdf5 as converter
+
+        cls.converter = converter
+
+    def test_complete_populations_enable_and_fill_multi3d_nh(self):
+        created = []
+
+        class FakeMulti3dAtmos:
+            def __init__(self, _path, nx, ny, nz, **kwargs):
+                self.read_nh = kwargs["read_nh"]
+                shape = (nx, ny, nz)
+                self.ne = np.empty(shape, dtype=np.float32)
+                self.temp = np.empty(shape, dtype=np.float32)
+                self.vx = np.empty(shape, dtype=np.float32)
+                self.vy = np.empty(shape, dtype=np.float32)
+                self.vz = np.empty(shape, dtype=np.float32)
+                self.rho = np.empty(shape, dtype=np.float32)
+                self.nh = np.empty((*shape, 6), dtype=np.float32)
+                created.append(self)
+
+        multi3d_module = types.ModuleType("helita.sim.multi3d")
+        multi3d_module.Multi3dAtmos = FakeMulti3dAtmos
+        sim_module = types.ModuleType("helita.sim")
+        sim_module.multi3d = multi3d_module
+        helita_module = types.ModuleType("helita")
+        helita_module.sim = sim_module
+        fake_modules = {
+            "helita": helita_module,
+            "helita.sim": sim_module,
+            "helita.sim.multi3d": multi3d_module,
+        }
+
+        shape = (2, 3, 2)
+        scalar = np.ones(shape, dtype=np.float32)
+        nh = np.arange(np.prod((*shape, 6)), dtype=np.float32).reshape(
+            *shape, 6
+        )
+        with tempfile.TemporaryDirectory() as tmpdir, mock.patch.dict(
+            sys.modules, fake_modules
+        ), mock.patch.object(
+            self.converter, "_import_astropy_units", return_value=mock.MagicMock()
+        ), mock.patch.object(
+            self.converter,
+            "_convert_values",
+            side_effect=lambda values, _source, _target: values,
+        ):
+            self.converter._write_multi3d_atmosphere(
+                Path(tmpdir) / "atm3d",
+                None,
+                temp=scalar,
+                rho=scalar,
+                vx=scalar,
+                vy=scalar,
+                vz=scalar,
+                ne=scalar,
+                nh=nh,
+                dx_m=1.0,
+                dy_m=1.0,
+                height_m=np.array([1.0, 0.0], dtype=np.float32),
+                overwrite=False,
+            )
+
+        self.assertTrue(created[0].read_nh)
+        np.testing.assert_array_equal(created[0].nh, nh)
+
+
 @unittest.skipUnless(
     HAS_NUMPY and HAS_ASTROPY,
     "NumPy and Astropy are required for FITS converter unit tests",
@@ -315,8 +426,8 @@ class TargetCoordinateTests(unittest.TestCase):
 
         cls.reverse = staticmethod(_reverse_to_target_coordinates)
 
-    def test_depth_is_always_reversed_and_vy_vz_change_sign(self):
-        base = np.array([[[1.0, 2.0, 3.0]]], dtype=np.float32)
+    def test_spatial_planes_rotate_depth_reverses_and_vy_vz_change_sign(self):
+        base = np.arange(1, 13, dtype=np.float32).reshape(2, 3, 2)
         temp, rho, vx, vy, vz, ne, height = self.reverse(
             base,
             base + 10,
@@ -324,16 +435,19 @@ class TargetCoordinateTests(unittest.TestCase):
             base + 30,
             base + 40,
             base + 50,
-            np.array([100.0, 200.0, 300.0]),
+            np.array([100.0, 200.0]),
         )
 
-        np.testing.assert_array_equal(temp, [[[3.0, 2.0, 1.0]]])
-        np.testing.assert_array_equal(rho, [[[13.0, 12.0, 11.0]]])
-        np.testing.assert_array_equal(vx, [[[23.0, 22.0, 21.0]]])
-        np.testing.assert_array_equal(vy, [[[-33.0, -32.0, -31.0]]])
-        np.testing.assert_array_equal(vz, [[[-43.0, -42.0, -41.0]]])
-        np.testing.assert_array_equal(ne, [[[53.0, 52.0, 51.0]]])
-        np.testing.assert_array_equal(height, [300.0, 200.0, 100.0])
+        expected = np.stack(
+            [base[:, :, depth][::-1, :].T for depth in (1, 0)], axis=-1
+        )
+        np.testing.assert_array_equal(temp, expected)
+        np.testing.assert_array_equal(rho, expected + 10)
+        np.testing.assert_array_equal(vx, expected + 20)
+        np.testing.assert_array_equal(vy, -(expected + 30))
+        np.testing.assert_array_equal(vz, -(expected + 40))
+        np.testing.assert_array_equal(ne, expected + 50)
+        np.testing.assert_array_equal(height, [200.0, 100.0])
 
 
 @unittest.skipUnless(

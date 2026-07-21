@@ -1,0 +1,45 @@
+flowchart TD
+    X["x: [B, width, D, H, W]"] --> RES["residual = x"]
+
+    X --> SPEC["SpectralConv2dFull(x, dx, dy)"]
+    DX["dx"] --> SPEC
+    DY["dy"] --> SPEC
+    SPEC --> NS["GroupNorm<br/>GELU<br/>optional spec_dropout"]
+
+    X --> VERT["BalancedVerticalPhysicsStack(x, z_scale)"]
+    Z["z_scale"] --> VERT
+    VERT --> NV["GroupNorm<br/>GELU<br/>optional vertical_dropout"]
+
+    X --> GATE["branch_gate<br/>Conv3d(3w -> w, 1)<br/>GELU<br/>Conv3d(w -> 2w, 1)<br/>Sigmoid"]
+    NS --> GATE
+    NV --> GATE
+    GATE --> SG["spec_gate"]
+    GATE --> VG["vertical_gate"]
+
+    NS --> SMIX["spec_mix = spec * spec_gate"]
+    SG --> SMIX
+    NV --> VMIX["vert_mix = vert * vertical_gate"]
+    VG --> VMIX
+
+    SMIX --> CAT["concat(spec_mix, vert_mix)<br/>[B, 2w, D, H, W]"]
+    VMIX --> CAT
+    CAT --> FUSE["fuse<br/>Conv3d(2w -> 2w, 1)<br/>GELU<br/>Depthwise Conv3d(2w -> 2w, 3)<br/>GELU<br/>Conv3d(2w -> w, 1)"]
+    SMIX --> AVG["0.5 * (spec_mix + vert_mix)"]
+    VMIX --> AVG
+    FUSE --> FADD["fused + average branch mix"]
+    AVG --> FADD
+    FADD --> NF["GroupNorm<br/>GELU"]
+
+    RES --> X1["x1 = residual + res_fused * fused"]
+    NF --> X1
+    X1 --> PW["pw<br/>Conv3d(w -> 2w, 1)<br/>GELU<br/>Conv3d(2w -> w, 1)<br/>GroupNorm"]
+    PW --> X2["x2 = x1 + res_pw * pw"]
+    X1 --> X2
+    X2 --> MLP["PointwiseMLP<br/>Conv3d(w -> 2w, 1)<br/>GELU<br/>Dropout<br/>Conv3d(2w -> w, 1)<br/>GroupNorm<br/>tanh"]
+    MLP --> OUT["out = x2 + res_mlp * mlp"]
+    X2 --> OUT
+
+    MASK["branch_mask optional<br/>spec, vertical, pw, mlp"] -. scales branches when provided .-> SMIX
+    MASK -. scales residual updates when provided .-> X2
+    MASK -. scales residual updates when provided .-> OUT
+    STATS["collect_stats optional"] -. returns layer diagnostics .-> OUT

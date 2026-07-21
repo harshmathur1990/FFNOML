@@ -1,0 +1,14 @@
+flowchart TD
+    X["x: [B, in_channels, D, H, W]"] --> LIFT["lift<br/>Conv3d(in_channels -> width, 1)<br/>GroupNorm<br/>GELU"]
+    Z["z_scale: [B, D, H, W] or [B, 1, D, H, W]"] --> BLOCKS
+    DX["dx"] --> BLOCKS
+    DY["dy"] --> BLOCKS
+    LIFT --> H0["hidden: [B, width, D, H, W]"]
+    H0 --> BLOCKS["repeat n_layers x<br/>FFNOBlock3dBalanced"]
+    BLOCKS --> HEAD1["proj1<br/>Conv3d(width -> 2*width, 1)<br/>GELU"]
+    HEAD1 --> HEAD2["proj2<br/>Conv3d(2*width -> out_channels, 1)"]
+    HEAD2 --> Y["output: [B, out_channels, D, H, W]"]
+
+    TRAIN{"training and<br/>checkpoint_blocks and<br/>not collect_stats?"} -. wraps lift/block/head .-> LIFT
+    TRAIN -. wraps lift/block/head .-> BLOCKS
+    TRAIN -. wraps lift/block/head .-> HEAD1
