@@ -567,8 +567,8 @@ def _reverse_to_target_coordinates(
         _rotate_spatial_dimensions(temp[:, :, ::-1]),
         _rotate_spatial_dimensions(rho[:, :, ::-1]),
         _rotate_spatial_dimensions(vx[:, :, ::-1]),
-        _rotate_spatial_dimensions(-vy[:, :, ::-1]),
-        _rotate_spatial_dimensions(-vz[:, :, ::-1]),
+        _rotate_spatial_dimensions(vy[:, :, ::-1]),
+        _rotate_spatial_dimensions(vz[:, :, ::-1]),
         _rotate_spatial_dimensions(ne[:, :, ::-1]),
         height_m[::-1],
     )
