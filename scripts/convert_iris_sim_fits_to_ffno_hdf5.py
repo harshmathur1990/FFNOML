@@ -133,20 +133,81 @@ def _find_hydrogen_population_paths(
     return paths if all(path.is_file() for path in paths) else None
 
 
-def _parse_slice(start: int | None, end: int | None, size: int, axis_name: str) -> slice:
+def _parse_slice_text(value: str) -> slice:
+    """Parse ``START:STOP[:STEP]`` or ``slice(START, STOP[, STEP])``."""
+    text = value.strip()
+    if text.startswith("slice(") and text.endswith(")"):
+        parts = [part.strip() for part in text[6:-1].split(",")]
+    else:
+        parts = [part.strip() for part in text.split(":")]
+    if len(parts) not in (2, 3):
+        raise argparse.ArgumentTypeError(
+            "slice must be START:STOP[:STEP] or slice(START, STOP[, STEP])"
+        )
+    try:
+        values = [None if part in ("", "None") else int(part) for part in parts]
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"invalid slice {value!r}") from exc
+    if len(values) == 2:
+        values.append(None)
+    return slice(*values)
+
+
+def _parse_slice(
+    start: int | None,
+    end: int | None,
+    size: int,
+    axis_name: str,
+    *,
+    step: int | None = None,
+) -> slice:
     start = 0 if start is None else start
     end = size if end is None else end
-    if not (0 <= start < end <= size):
-        raise ValueError(f"Invalid {axis_name} range {start}:{end} for size {size}")
-    return slice(start, end)
+    step = 1 if step is None else step
+    if not (0 <= start < end <= size) or step <= 0:
+        raise ValueError(
+            f"Invalid {axis_name} slice {start}:{end}:{step} for size {size}"
+        )
+    return slice(start, end, step)
+
+
+def _resolve_slice(
+    requested: slice | None,
+    start: int | None,
+    end: int | None,
+    size: int,
+    axis_name: str,
+) -> slice:
+    """Validate an explicit slice or fall back to legacy start/end options."""
+    if requested is not None:
+        if start is not None or end is not None:
+            raise ValueError(
+                f"--{axis_name}-slice cannot be combined with --start-{axis_name} "
+                f"or --end-{axis_name}"
+            )
+        return _parse_slice(
+            requested.start,
+            requested.stop,
+            size,
+            axis_name,
+            step=requested.step,
+        )
+    return _parse_slice(start, end, size, axis_name)
 
 
 def _height_indices(
     height_m: np.ndarray,
     height_min_m: float,
     height_max_m: float,
+    candidates: np.ndarray | None = None,
 ) -> np.ndarray:
-    indices = np.flatnonzero((height_m >= height_min_m) & (height_m <= height_max_m))
+    if candidates is None:
+        candidates = np.arange(height_m.size)
+    candidates = np.asarray(candidates, dtype=np.intp)
+    selected_heights = height_m[candidates]
+    indices = candidates[
+        (selected_heights >= height_min_m) & (selected_heights <= height_max_m)
+    ]
     if indices.size == 0:
         raise ValueError(
             f"No height points selected by range [{height_min_m}, {height_max_m}] m"
@@ -562,7 +623,7 @@ def _reverse_to_target_coordinates(
     ne: np.ndarray,
     height_m: np.ndarray,
 ) -> tuple[np.ndarray, ...]:
-    """Rotate horizontal planes, reverse depth, and transform velocity signs."""
+    """Rotate horizontal planes and reverse depth for the target coordinates."""
     return (
         _rotate_spatial_dimensions(temp[:, :, ::-1]),
         _rotate_spatial_dimensions(rho[:, :, ::-1]),
@@ -824,9 +885,20 @@ def convert(args) -> None:
             f"Height size {height_m.size} does not match FITS z dimension {nz_full}"
         )
 
-    z_indices = _height_indices(height_m, args.height_min_m, args.height_max_m)
-    x_slice = _parse_slice(args.start_x, args.end_x, nx_full, "x")
-    y_slice = _parse_slice(args.start_y, args.end_y, ny_full, "y")
+    x_slice = _resolve_slice(
+        args.x_slice, args.start_x, args.end_x, nx_full, "x"
+    )
+    y_slice = _resolve_slice(
+        args.y_slice, args.start_y, args.end_y, ny_full, "y"
+    )
+    z_slice = _resolve_slice(args.z_slice, None, None, nz_full, "z")
+    z_candidates = np.arange(nz_full, dtype=np.intp)[z_slice]
+    z_indices = _height_indices(
+        height_m,
+        args.height_min_m,
+        args.height_max_m,
+        candidates=z_candidates,
+    )
 
     args._z_indices = z_indices
     args._x_slice = x_slice
@@ -848,6 +920,8 @@ def convert(args) -> None:
         raise ValueError(
             "Could not infer dx/dy from FITS CDELT1/CDELT2. Pass --dx and --dy in meters."
         )
+    dx *= x_slice.step
+    dy *= y_slice.step
 
     temp = _read_log_quantity(
         folder,
@@ -944,9 +1018,8 @@ def convert(args) -> None:
         electron_density_source = "witt-rho"
 
     height_selected = height_m[z_indices]
-    # The target convention rotates each horizontal plane with [::-1, :].T,
-    # stores index 0 at the top, and points its y and z velocity axes opposite
-    # to the corresponding source axes.
+    # The target convention rotates each horizontal plane with [::-1, :].T and
+    # stores index 0 at the top.
     temp, rho, vx, vy, vz, ne, height_selected = _reverse_to_target_coordinates(
         temp, rho, vx, vy, vz, ne, height_selected
     )
@@ -1025,6 +1098,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--end-x", type=int, default=None)
     parser.add_argument("--start-y", type=int, default=None)
     parser.add_argument("--end-y", type=int, default=None)
+    parser.add_argument(
+        "--x-slice",
+        type=_parse_slice_text,
+        default=None,
+        metavar="START:STOP[:STEP]",
+        help="Optional x-index slice, e.g. 0:504:2 or slice(0,504,2).",
+    )
+    parser.add_argument(
+        "--y-slice",
+        type=_parse_slice_text,
+        default=None,
+        metavar="START:STOP[:STEP]",
+        help="Optional y-index slice, e.g. 0:504:2 or slice(0,504,2).",
+    )
+    parser.add_argument(
+        "--z-slice",
+        type=_parse_slice_text,
+        default=None,
+        metavar="START:STOP[:STEP]",
+        help="Optional z-index slice, e.g. 0:504:2 or slice(0,504,2).",
+    )
     parser.add_argument("--height-min-m", type=float, default=-np.inf)
     parser.add_argument("--height-max-m", type=float, default=np.inf)
     parser.add_argument("--dx", type=float, default=None, help="Horizontal x spacing in meters")

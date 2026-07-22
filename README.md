@@ -330,7 +330,7 @@ For MURaM atmospheres stored as FITS cubes, generate the same solving-set HDF5
 directly with:
 
 ```bash
-python scripts/convert_muram_fits_to_ffno_hdf5.py \
+python scripts/convert_iris_sim_fits_to_ffno_hdf5.py \
   --folder /mn/stornext/d9/data/harshm/bifrost_data/ar098192/atmos \
   --simulation-code MURaM \
   --simulation-name ar098192 \
@@ -360,6 +360,19 @@ Multi3D atmosphere for reference calculations. If the complete `lgn1` through
 `lgn6` FITS set is present, the converter also reads and writes all six hydrogen
 populations; incomplete sets are ignored. The output contains no magnetic
 field.
+
+Each spatial axis can optionally be subsampled with Python-style slice syntax:
+
+```bash
+python scripts/convert_iris_sim_fits_to_ffno_hdf5.py \
+  ... \
+  --x-slice 0:504:2 \
+  --y-slice 'slice(0,504,3)' \
+  --z-slice ::2
+```
+
+The x/y strides are included in the output `dx`/`dy` spacing. `--z-slice` is
+applied before the optional `--height-min-m` and `--height-max-m` filters.
 
 To run distributed prediction on only this generated file:
 

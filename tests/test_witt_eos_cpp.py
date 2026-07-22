@@ -187,7 +187,7 @@ class ElectronDensitySourceSelectionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         sys.path.insert(0, str(SCRIPTS))
-        from convert_muram_fits_to_ffno_hdf5 import _find_electron_density_source
+        from convert_iris_sim_fits_to_ffno_hdf5 import _find_electron_density_source
 
         cls.find_source = staticmethod(_find_electron_density_source)
 
@@ -214,12 +214,54 @@ class ElectronDensitySourceSelectionTests(unittest.TestCase):
                 self.find_source(Path(tmpdir), "MURaM", "test", "1")
 
 
+@unittest.skipUnless(HAS_NUMPY, "NumPy is required for slice selection tests")
+class SpatialSliceSelectionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, str(SCRIPTS))
+        from convert_iris_sim_fits_to_ffno_hdf5 import (
+            _height_indices,
+            _parse_slice_text,
+            _resolve_slice,
+        )
+
+        cls.parse_text = staticmethod(_parse_slice_text)
+        cls.resolve = staticmethod(_resolve_slice)
+        cls.height_indices = staticmethod(_height_indices)
+
+    def test_compact_and_python_slice_syntax_select_the_requested_stride(self):
+        for text in ("0:10:2", "slice(0, 10, 2)"):
+            selected = np.arange(10)[self.resolve(self.parse_text(text), None, None, 10, "x")]
+            np.testing.assert_array_equal(selected, [0, 2, 4, 6, 8])
+
+    def test_open_bounds_allow_every_third_point(self):
+        selected = np.arange(10)[
+            self.resolve(self.parse_text("::3"), None, None, 10, "z")
+        ]
+        np.testing.assert_array_equal(selected, [0, 3, 6, 9])
+
+    def test_explicit_slice_cannot_be_mixed_with_legacy_bounds(self):
+        with self.assertRaises(ValueError):
+            self.resolve(self.parse_text("0:10:2"), 0, None, 10, "x")
+
+    def test_zero_or_negative_steps_are_rejected(self):
+        for text in ("0:10:0", "0:10:-1"):
+            with self.assertRaises(ValueError):
+                self.resolve(self.parse_text(text), None, None, 10, "x")
+
+    def test_z_slice_is_applied_before_height_filter(self):
+        heights = np.arange(8, dtype=np.float64) * 100.0
+        candidates = np.arange(8)[self.resolve(self.parse_text("1:8:2"), None, None, 8, "z")]
+        actual = self.height_indices(heights, 200.0, 600.0, candidates)
+        np.testing.assert_array_equal(actual, [3, 5])
+
+
 @unittest.skipUnless(HAS_NUMPY, "NumPy is required to import the FITS converter")
 class HydrogenPopulationSelectionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         sys.path.insert(0, str(SCRIPTS))
-        from convert_muram_fits_to_ffno_hdf5 import (
+        from convert_iris_sim_fits_to_ffno_hdf5 import (
             _find_hydrogen_population_paths,
         )
 
@@ -257,7 +299,7 @@ class Multi3dHydrogenWriterTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         sys.path.insert(0, str(SCRIPTS))
-        import convert_muram_fits_to_ffno_hdf5 as converter
+        import convert_iris_sim_fits_to_ffno_hdf5 as converter
 
         cls.converter = converter
 
@@ -332,7 +374,7 @@ class FitsHeaderUnitTests(unittest.TestCase):
     def setUpClass(cls):
         sys.path.insert(0, str(SCRIPTS))
         from astropy import units as u
-        from convert_muram_fits_to_ffno_hdf5 import (
+        from convert_iris_sim_fits_to_ffno_hdf5 import (
             _convert_values,
             _unit_scale_from_header,
         )
@@ -422,11 +464,11 @@ class TargetCoordinateTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         sys.path.insert(0, str(SCRIPTS))
-        from convert_muram_fits_to_ffno_hdf5 import _reverse_to_target_coordinates
+        from convert_iris_sim_fits_to_ffno_hdf5 import _reverse_to_target_coordinates
 
         cls.reverse = staticmethod(_reverse_to_target_coordinates)
 
-    def test_spatial_planes_rotate_depth_reverses_and_vy_vz_change_sign(self):
+    def test_spatial_planes_rotate_and_depth_reverses(self):
         base = np.arange(1, 13, dtype=np.float32).reshape(2, 3, 2)
         temp, rho, vx, vy, vz, ne, height = self.reverse(
             base,
@@ -444,8 +486,8 @@ class TargetCoordinateTests(unittest.TestCase):
         np.testing.assert_array_equal(temp, expected)
         np.testing.assert_array_equal(rho, expected + 10)
         np.testing.assert_array_equal(vx, expected + 20)
-        np.testing.assert_array_equal(vy, -(expected + 30))
-        np.testing.assert_array_equal(vz, -(expected + 40))
+        np.testing.assert_array_equal(vy, expected + 30)
+        np.testing.assert_array_equal(vz, expected + 40)
         np.testing.assert_array_equal(ne, expected + 50)
         np.testing.assert_array_equal(height, [200.0, 100.0])
 
@@ -458,7 +500,7 @@ class FFNOHDF5WriterTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         sys.path.insert(0, str(SCRIPTS))
-        from convert_muram_fits_to_ffno_hdf5 import _write_ffno_hdf5
+        from convert_iris_sim_fits_to_ffno_hdf5 import _write_ffno_hdf5
 
         cls.write_hdf5 = staticmethod(_write_ffno_hdf5)
 
