@@ -119,8 +119,15 @@ def ensure_checkpoint_exists():
 
 
 def build_datasets():
+    train_file_exists = os.path.exists(TRAIN_FILE)
+    test_file_exists = os.path.exists(TEST_FILE)
 
-    if not os.path.exists(TRAIN_FILE):
+    print(f"TRAIN_FILE: {TRAIN_FILE}")
+    print(f"TRAIN_FILE exists: {train_file_exists}")
+    print(f"TEST_FILE: {TEST_FILE}")
+    print(f"TEST_FILE exists: {test_file_exists}")
+
+    if not train_file_exists:
 
         multi3d_atmos = load_multi3d_blocks(MULTI3D_TRAIN_DATA)
 
@@ -147,7 +154,7 @@ def build_datasets():
             stat_file=None
         )
 
-    if not os.path.exists(TEST_FILE):
+    if not test_file_exists:
 
         multi3d_atmos = load_multi3d_blocks(MULTI3D_VAL_DATA)
 

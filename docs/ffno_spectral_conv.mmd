@@ -1,0 +1,20 @@
+flowchart TD
+    X["x: [B, C, D, H, W]"] --> IG["input_gate<br/>Conv3d(C -> C, 1)<br/>GELU<br/>Conv3d(C -> C, 1)<br/>Sigmoid"]
+    X --> XG["x * gate"]
+    IG --> XG
+    XG --> FFT["rfft2 over H,W<br/>x_ft: [B, C, D, H, Wf]"]
+
+    DX["dx"] --> KGRID["kx = rfftfreq(W, dx)"]
+    DY["dy"] --> KGRID
+    KGRID --> KFEAT["frequency features<br/>kx, ky, sqrt(kx^2 + ky^2), sign(ky)"]
+    KFEAT --> FMLP["freq_mlp<br/>Linear(4 -> hidden)<br/>GELU<br/>Linear(hidden -> hidden)<br/>GELU<br/>Linear(hidden -> 2)"]
+
+    WR["learned weight_real<br/>[Cin, Cout]"] --> CW["complex spectral weights"]
+    WI["learned weight_imag<br/>[Cin, Cout]"] --> CW
+    FMLP --> CW
+
+    FFT --> EINSUM["complex channel mixing<br/>einsum over Cin"]
+    CW --> EINSUM
+    EINSUM --> IFFT["irfft2 back to H,W"]
+    IFFT --> POST["post<br/>Conv3d(Cout -> 2*Cout, 1)<br/>GELU<br/>Conv3d(2*Cout -> Cout, 1)"]
+    POST --> Y["spectral branch output"]

@@ -1,7 +1,10 @@
-"""Generate a Matplotlib schematic matching the FFNO architecture PNG.
+"""Generate a Matplotlib schematic of the current FFNO3D architecture.
+
+The network is trained to predict log10 NLTE level populations. Inference
+converts those predictions back to linear populations in m^-3.
 
 Run:
-    python generate_ffno_schematic_matplotlib.py
+    py generate_ffno_schematic_matplotlib.py
 
 Outputs:
     ffno_schematic_matplotlib.png
@@ -251,10 +254,10 @@ def draw_axes_near_cube(ax, x, y, s=0.55):
 
 def draw_top_architecture(ax):
     text(ax, 0.17, 9.72, "(a) Overall Architecture", size=11, weight="bold", ha="left")
-    text(ax, 0.78, 9.25, "Input: 3D Atmospheric State\n(6 channels)", size=7, weight="bold")
+    text(ax, 0.78, 9.25, "Input: 3D Atmospheric State\n(6 transformed channels)", size=7, weight="bold")
     cube(ax, 0.42, 7.62, s=0.80, depth=0.18, kind="heat")
     draw_axes_near_cube(ax, 0.42, 7.62, 0.80)
-    text(ax, 0.20, 7.10, "Fields:\n$T,\\,\\rho,\\,n_e,\\,v_x,\\,v_y,\\,v_z$", size=7, ha="left")
+    text(ax, 0.20, 7.10, "Fields:\n$\\log_{10}T,\\,v_x,\\,v_y,\\,v_z,\\,\\log_{10}n_e,\\,\\log_{10}\\rho$", size=6.5, ha="left")
     text(ax, 0.20, 6.55, r"Shape: $(N_z,N_y,N_x,6)$", size=7, ha="left")
 
     rounded_box(ax, (1.86, 7.80), (0.85, 1.02), "Lift Layer\n$(P)$\n\n1x1x1\nConv3D\n+\nGroupNorm\n+\nGELU", fc="#f3f8ff", ec="#2b5c9a", fontsize=6.6, weight="bold")
@@ -272,7 +275,7 @@ def draw_top_architecture(ax):
     rounded_box(ax, (4.12, 8.00), (5.82, 1.22), "", fc=BLUE_FILL, ec="#8bbaf0", lw=0.75, radius=0.06)
     text(ax, 7.02, 9.14, "Spectral Branch (horizontal: x-y)", size=7.0, color=BLUE, weight="bold")
     specs = [
-        ("Input Gate", "1x1x1 Conv3D\n+\nGELU"),
+        ("Input Gate", "Conv3D -> GELU\n-> Conv3D -> sigmoid\nthen multiply input"),
         ("FFT2", "(x, y)\nper depth\n(rfft2)"),
         ("Metric-aware\nFrequency\nEmbedding", r"$k_x,k_y,$" + "\n" + r"$\sqrt{k_x^2+k_y^2},$" + "\n" + r"$\mathrm{sign}(k_y)$"),
         ("Frequency\nMLP", "produces\ncomplex\nweights"),
@@ -315,7 +318,7 @@ def draw_top_architecture(ax):
 
     rounded_box(ax, (10.38, 6.72), (1.55, 2.30), "", fc=ORANGE_FILL, ec=ORANGE_EDGE, lw=0.75, radius=0.06)
     text(ax, 11.15, 8.84, "Gated Fusion", size=7, color=ORANGE, weight="bold")
-    op_box(ax, 10.51, 8.07, 1.29, 0.55, "Branch Gates (from input $v$)", "(1x1x1 Conv3D + $\\sigma$)", "orange", fs=5.4)
+    op_box(ax, 10.51, 8.07, 1.29, 0.55, "Branch Gates", "$[v,v^{spec},v^{vert}]$\nConv3D -> GELU\n-> Conv3D -> $\\sigma$", "orange", fs=4.8)
     op_box(ax, 10.56, 7.60, 0.48, 0.25, r"$g_{spec}$", "", "orange", fs=6.3)
     op_box(ax, 11.42, 7.60, 0.45, 0.25, r"$g_{vert}$", "", "orange", fs=6.3)
     circled_symbol(ax, 10.84, 7.28, r"$\times$")
@@ -329,15 +332,15 @@ def draw_top_architecture(ax):
     arrow(ax, (11.18, 7.02), (11.37, 7.04), lw=0.7)
 
     cube(ax, 12.45, 7.52, s=0.44, depth=0.13, kind="latent")
-    text(ax, 12.60, 8.46, r"$v'$", size=9, weight="bold")
-    rounded_box(ax, (13.22, 7.48), (0.83, 1.06), "Pointwise\nMixing Block\n\n1x1x1 Conv3D\n+ GELU\n\n1x1x1 Conv3D", fc="#f3f8ff", ec="#2b5c9a", fontsize=6.1, weight="bold")
+    text(ax, 12.60, 8.46, r"$v_{l+1}$", size=9, weight="bold")
+    rounded_box(ax, (13.22, 7.48), (0.83, 1.06), "Projection\nHead\n\nConv3D\n$C \\to 2C$\n+ GELU\n$2C \\to N_{levels}$", fc="#f3f8ff", ec="#2b5c9a", fontsize=5.8, weight="bold")
     arrow(ax, (11.93, 7.04), (12.45, 7.76), lw=0.8)
     arrow(ax, (12.91, 7.76), (13.22, 8.02), lw=0.8)
 
-    text(ax, 14.36, 9.20, "Output: 3D Departure\nCoefficient Cube", size=6.8, weight="bold")
+    text(ax, 14.36, 9.20, "Output: $\\log_{10}$ NLTE\nPopulation Cube", size=6.8, weight="bold")
     cube(ax, 14.12, 7.62, s=0.66, depth=0.15, kind="heat")
     draw_axes_near_cube(ax, 14.12, 7.62, 0.66)
-    text(ax, 14.42, 6.62, "Shape:\n$(N_z,N_y,N_x,N_{levels})$", size=6.6)
+    text(ax, 14.42, 6.62, "Shape:\n$(N_z,N_y,N_x,N_{levels})$\n$10^x \\to n^{NLTE}$ [m$^{-3}$]", size=6.2)
     arrow(ax, (14.05, 8.03), (14.12, 8.05), lw=0.8)
 
     circled_symbol(ax, 11.58, 6.34, "+", r=0.085, size=9)
@@ -352,7 +355,7 @@ def draw_spectral_panel(ax):
     rounded_box(ax, (0.15, 2.22), (6.05, 3.05), "", fc="#fbfdff", ec=BLUE_EDGE, lw=0.75, radius=0.05, ls="--")
     text(ax, 3.15, 5.10, "(b) Spectral Branch (horizontal: x-y)", size=7.0, color=BLUE, weight="bold")
     steps = [
-        ("1. Input Gate", "1x1x1 Conv3D\n+ GELU"),
+        ("1. Input Gate", "Conv3D -> GELU\n-> Conv3D -> sigmoid\nthen multiply input"),
         ("2. FFT2 (x, y)", "per depth slice\n(rfft2)"),
         ("3. Metric-aware\nFrequency Embedding", r"$k_x$" + "\n" + r"$k_y$" + "\n" + r"$\sqrt{k_x^2+k_y^2}$" + "\n" + r"$\mathrm{sign}(k_y)$"),
         ("4. Frequency MLP", r"$\to$ Complex Weights" + "\n\n" + r"$(a_r,a_i)$"),
@@ -431,11 +434,11 @@ def draw_vertical_panel(ax):
 def draw_fusion_panel(ax):
     rounded_box(ax, (10.90, 2.22), (4.18, 3.05), "", fc="#fffdf7", ec=ORANGE_EDGE, lw=0.75, radius=0.05, ls="--")
     text(ax, 12.99, 5.10, "(d) Gated Fusion (per FFNO block)", size=7.2, color=ORANGE, weight="bold")
-    text(ax, 11.10, 4.72, "Input $v$", size=5.8, weight="bold")
+    text(ax, 11.10, 4.72, "Inputs $[v,v^{spec},v^{vert}]$", size=5.5, weight="bold")
     cube(ax, 11.08, 4.15, s=0.34, depth=0.13, kind="blue")
     text(ax, 11.17, 3.73, r"$(N_z,N_y,N_x,C)$", size=5.0)
-    op_box(ax, 11.76, 4.17, 0.72, 0.42, "1x1x1 Conv3D", "+ $\\sigma$", "orange", fs=5.1)
-    op_box(ax, 12.80, 4.08, 0.38, 0.28, r"$g_{spec}$", "$\\sigma()$", "orange", fs=5.2)
+    op_box(ax, 11.76, 4.17, 0.72, 0.42, "Gate Network", "Conv3D -> GELU\n-> Conv3D -> $\\sigma$", "orange", fs=4.5)
+    op_box(ax, 12.72, 4.08, 0.54, 0.28, r"$g_{spec},g_{vert}$", "$\\sigma()$", "orange", fs=4.7)
     arrow(ax, (11.44, 4.40), (11.76, 4.38), lw=0.7, ms=6)
     arrow(ax, (12.48, 4.38), (12.80, 4.24), lw=0.7, ms=6)
 
@@ -445,7 +448,7 @@ def draw_fusion_panel(ax):
     cube(ax, 11.08, 2.35, s=0.34, depth=0.13, kind="green")
     circled_symbol(ax, 13.20, 3.32, r"$\times$", r=0.060, size=6.5)
     circled_symbol(ax, 13.47, 3.64, "+", r=0.070, size=8)
-    op_box(ax, 13.82, 3.26, 0.76, 0.70, "Fusion Network", "1x1x1 Conv3D\n-> DW Conv3D (k=3)\n-> 1x1x1 Conv3D\n+ GELU", "orange", fs=4.8)
+    op_box(ax, 13.82, 3.26, 0.76, 0.70, "Fusion Network", "Conv3D -> GELU\n-> DW Conv3D (k=3)\n-> GELU -> Conv3D\n+ branch mean\n+ GN + GELU", "orange", fs=4.3)
     cube(ax, 14.70, 3.25, s=0.30, depth=0.11, kind="latent")
     text(ax, 14.82, 4.23, "Fused\nOutput $v'$", size=5.4, weight="bold")
     text(ax, 14.77, 2.86, r"$(N_z,N_y,N_x,C)$", size=4.6)
@@ -467,7 +470,8 @@ def draw_bottom_panels(ax):
         "- Vertical branch is a strong 1D CNN stack along z with multi-scale and dilated residual blocks.\n"
         "- z-features = { $z$, $\\hat z$, $\\Delta z$, $L_z$ } are encoded and used to modulate vertical processing.\n"
         "- Spectral and vertical branches are adaptively gated per block and fused.\n"
-        "- Each FFNO block has residual connection; followed by pointwise mixing and MLP blocks."
+        "- Each FFNO block applies residual fused, pointwise, and tanh-MLP updates with learned scales.\n"
+        "- A two-layer pointwise projection head maps latent channels to log10 NLTE populations."
     )
     text(ax, 0.28, 1.48, key, size=5.9, ha="left", va="top")
 
@@ -488,18 +492,27 @@ def draw_bottom_panels(ax):
     rounded_box(ax, (10.90, 0.20), (4.18, 1.70), "", fc="#fbfaff", ec="#b9acd6", lw=0.75, radius=0.04)
     text(ax, 11.05, 1.70, "Overall Mapping", size=7.6, color="#5a38a2", weight="bold", ha="left")
     mapping = (
-        r"$\mathcal{G}_{\theta}: [T,\ \rho,\ n_e,\ v_x,\ v_y,\ v_z] \rightarrow \mathbf{b}$"
-        "\n\nPredicts the full 3D cube of departure coefficients\n\n(one channel per atomic level)."
+        r"$\mathcal{G}_{\theta}: [\log_{10}T,\ v_x,\ v_y,\ v_z,$"
+        "\n"
+        r"$\qquad \log_{10}n_e,\ \log_{10}\rho] \rightarrow \log_{10}\mathbf{n}^{\mathrm{NLTE}}$"
+        "\n\nOne channel per atomic level.\n"
+        r"Inference applies $10^x$ and writes $n^{\mathrm{NLTE}}$ [m$^{-3}$]."
     )
-    text(ax, 11.05, 1.43, mapping, size=7.8, ha="left", va="top")
+    text(ax, 11.05, 1.43, mapping, size=6.8, ha="left", va="top")
 
 
 def build_figure(output_prefix="ffno_schematic_matplotlib"):
     # A4 landscape in inches. The coordinate frame uses the same aspect ratio,
     # so saved PNG/PDF outputs are exactly A4 landscape, without later cropping.
+    # The padded limits scale the complete schematic down uniformly and keep the
+    # outer frame clear of PDF renderer/printer boundary clipping.
     fig, ax = plt.subplots(figsize=(11.69, 8.27))
-    ax.set_xlim(0, 15.2)
-    ax.set_ylim(0, 10.75)
+    scale_padding = 0.04
+    x_center, y_center = 15.2 / 2, 10.75 / 2
+    x_half = (15.2 / 2) * (1 + scale_padding)
+    y_half = (10.75 / 2) * (1 + scale_padding)
+    ax.set_xlim(x_center - x_half, x_center + x_half)
+    ax.set_ylim(y_center - y_half, y_center + y_half)
     ax.set_aspect("equal", adjustable="box")
     ax.axis("off")
 
