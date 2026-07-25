@@ -330,16 +330,17 @@ For MURaM atmospheres stored as FITS cubes, generate the same solving-set HDF5
 directly with:
 
 ```bash
-python scripts/convert_iris_sim_fits_to_ffno_hdf5.py \
-  --folder /mn/stornext/d9/data/harshm/bifrost_data/ar098192/atmos \
-  --simulation-code MURaM \
-  --simulation-name ar098192 \
-  --snap 270000 \
-  --output training_FFNO3D_zscale_expand/3D_sim_predict_ar098192_270000.hdf5 \
-  --show-eos-progress \
-  --multi3d-atmos-out /mn/stornext/d9/data/harshm/bifrost_data/ar098192/270000/atm3d \
-  --multi3d-mesh-out /mn/stornext/d9/data/harshm/bifrost_data/ar098192/270000/mesh
+cp scripts/convert_iris_sim_fits_to_ffno_hdf5.example.toml muram-convert.toml
+# Edit muram-convert.toml, then run:
+python scripts/convert_iris_sim_fits_to_ffno_hdf5.py muram-convert.toml
 ```
+
+Every converter setting is read from the TOML file: inputs, x/y/z crop,
+height range, grid spacing, Witt EOS options, outputs, compression,
+overwrite behavior, upsampling, interpolation, and validation. Relative paths
+are resolved from the directory containing the TOML file. The complete,
+commented schema is in
+`scripts/convert_iris_sim_fits_to_ffno_hdf5.example.toml`.
 
 The converter reads `lgtg`, `lgr`, `ux`, `uy`, and `uz` FITS files, rotates each
 horizontal plane with `[::-1, :].T`, reverses the selected height range so the
@@ -350,29 +351,38 @@ first depth index is the top of the atmosphere, and writes `inputs`, `z_scale`,
 EOS, otherwise the Witt EOS derives it from `lgr`. Conversion fails if none of
 these three FITS files exists. The converter finds the repo-local
 `scripts/witt.py` and `scripts/pf_Kurucz.input`
-automatically; use `--witt-path` only when those files live somewhere else. By
+automatically; set `witt_path` in `[eos]` only when those files live somewhere else. By
 default, this uses the C++ full-atmosphere EOS backend and all visible CPU
-threads; `--show-eos-progress` prints a C++-side progress line without Python
-callbacks. Use `--eos-backend python` only for debugging or if no C++ compiler
-is available.
-The optional `--multi3d-atmos-out` and `--multi3d-mesh-out` outputs write a
+threads; `show_progress = true` prints a C++-side progress line without Python
+callbacks. Use `backend = "python"` only for debugging or if no C++ compiler
+is available. The optional `multi3d_atmos` and `multi3d_mesh` outputs write a
 Multi3D atmosphere for reference calculations. If the complete `lgn1` through
 `lgn6` FITS set is present, the converter also reads and writes all six hydrogen
 populations; incomplete sets are ignored. The output contains no magnetic
 field.
 
-Each spatial axis can optionally be subsampled with Python-style slice syntax:
+Each source spatial axis can be cropped or subsampled in `[selection]` with a
+slice string or `start`/`stop`/`step` table. The x/y strides are included in the
+output spacing, and the z selection is applied before the height filter. After
+coordinate rotation, every final axis can be upsampled to a requested physical
+spacing in metres with `[resampling.target_spacing_m]`; its x/y values become
+the written `dx`/`dy`, and z becomes the absolute increment in `z_scale`.
+Factors and target grid sizes remain available as alternatives. Interpolation
+supports `nearest`, `linear`, and natural `cubic`
+spline methods independently per x/y/z direction, with per-channel overrides
+for temperature, density, velocity components, electron density, and hydrogen
+populations. Positive channels are interpolated in log space.
 
-```bash
-python scripts/convert_iris_sim_fits_to_ffno_hdf5.py \
-  ... \
-  --x-slice 0:504:2 \
-  --y-slice 'slice(0,504,3)' \
-  --z-slice ::2
-```
+After interpolation, temperatures below `temperature_floor_k` (3250 K by
+default) are raised to that floor. When electron density is derived from `lgp`
+or `lgr`, the Witt EOS runs only after this step, using the interpolated gas
+pressure or density together with the floored interpolated temperature. A
+direct `lgne` electron-density cube is interpolated as its own channel.
 
-The x/y strides are included in the output `dx`/`dy` spacing. `--z-slice` is
-applied before the optional `--height-min-m` and `--height-max-m` filters.
+Before writing, all channels are checked for finite values; temperature,
+`rho`, and `ne` must be positive. Adjacent-cell continuity checks for `rho` and
+`ne` default to a maximum 3-dex jump in each direction and can be tightened or
+disabled in `[validation.continuity_max_log10_step]`.
 
 To run distributed prediction on only this generated file:
 

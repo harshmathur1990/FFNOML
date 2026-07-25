@@ -17,7 +17,6 @@ Input channels are normalized from FITS BUNIT/CUNIT metadata to:
 
 from __future__ import annotations
 
-import argparse
 import ctypes
 import math
 import multiprocessing as mp
@@ -25,7 +24,9 @@ import os
 import platform
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -33,6 +34,9 @@ import numpy as np
 
 K_BOLTZMANN_CGS = 1.3806488e-16
 _WITT_EOS = None
+_INTERPOLATION_METHODS = {"nearest", "linear", "cubic"}
+_OUTPUT_CHANNELS = ("temperature", "rho", "vx", "vy", "vz", "ne")
+_RESAMPLED_CHANNELS = _OUTPUT_CHANNELS + ("pgas", "hydrogen_populations")
 
 
 def _import_h5py():
@@ -141,13 +145,13 @@ def _parse_slice_text(value: str) -> slice:
     else:
         parts = [part.strip() for part in text.split(":")]
     if len(parts) not in (2, 3):
-        raise argparse.ArgumentTypeError(
+        raise ValueError(
             "slice must be START:STOP[:STEP] or slice(START, STOP[, STEP])"
         )
     try:
         values = [None if part in ("", "None") else int(part) for part in parts]
     except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"invalid slice {value!r}") from exc
+        raise ValueError(f"invalid slice {value!r}") from exc
     if len(values) == 2:
         values.append(None)
     return slice(*values)
@@ -182,8 +186,8 @@ def _resolve_slice(
     if requested is not None:
         if start is not None or end is not None:
             raise ValueError(
-                f"--{axis_name}-slice cannot be combined with --start-{axis_name} "
-                f"or --end-{axis_name}"
+                f"selection.{axis_name} cannot be combined with legacy "
+                f"start_{axis_name}/end_{axis_name} settings"
             )
         return _parse_slice(
             requested.start,
@@ -356,7 +360,7 @@ def _find_pf_path(witt_path: str | None) -> Path:
             return pf_path
     raise FileNotFoundError(
         "Could not find pf_Kurucz.input next to the converter, in ./scripts, "
-        "or in the current directory. Pass --witt-path if it lives elsewhere."
+        "or in the current directory. Set [eos].witt_path if it lives elsewhere."
     )
 
 
@@ -371,7 +375,7 @@ def _import_witt(witt_path: str | None):
         raise SystemExit(
             "Witt EOS mode requires witt.py and pf_Kurucz.input. The converter "
             "looked next to itself, in ./scripts, and in the current directory. "
-            "Pass --witt-path if the files live somewhere else."
+            "Set [eos].witt_path if the files live somewhere else."
         ) from exc
     return witt()
 
@@ -607,6 +611,327 @@ def _validate_positive(name: str, arr: np.ndarray) -> None:
         raise ValueError(f"{name} contains NaN or Inf")
     if np.any(arr <= 0):
         raise ValueError(f"{name} must be positive before log10")
+
+
+def _target_axis_size(size: int, factor: float | None, target: int | None) -> int:
+    if target is not None:
+        target = int(target)
+        if target < size:
+            raise ValueError(
+                f"Resampling target {target} would downsample an axis of size {size}"
+            )
+        return target
+    if factor is None:
+        return size
+    factor = float(factor)
+    if not math.isfinite(factor) or factor < 1.0:
+        raise ValueError(f"Upsampling factors must be finite and >= 1, got {factor}")
+    if size == 1:
+        return 1
+    return int(round((size - 1) * factor)) + 1
+
+
+def _natural_cubic_second_derivatives(
+    coordinates: np.ndarray, values: np.ndarray
+) -> np.ndarray:
+    """Natural-cubic second derivatives for values shaped (n, n_series)."""
+    n = coordinates.size
+    second = np.zeros_like(values, dtype=np.float64)
+    if n <= 2:
+        return second
+
+    h = np.diff(coordinates)
+    diagonal = 2.0 * (h[:-1] + h[1:])
+    lower = h[1:-1]
+    upper = h[1:-1]
+    rhs = 6.0 * (
+        (values[2:] - values[1:-1]) / h[1:, None]
+        - (values[1:-1] - values[:-2]) / h[:-1, None]
+    )
+
+    # Thomas algorithm. The tridiagonal coefficients are shared by all series.
+    c_prime = np.empty(max(0, n - 2), dtype=np.float64)
+    d_prime = np.empty_like(rhs, dtype=np.float64)
+    c_prime[0] = upper[0] / diagonal[0] if n > 3 else 0.0
+    d_prime[0] = rhs[0] / diagonal[0]
+    for row in range(1, n - 2):
+        denominator = diagonal[row] - lower[row - 1] * c_prime[row - 1]
+        c_prime[row] = upper[row] / denominator if row < n - 3 else 0.0
+        d_prime[row] = (rhs[row] - lower[row - 1] * d_prime[row - 1]) / denominator
+
+    second[-2] = d_prime[-1]
+    for row in range(n - 4, -1, -1):
+        second[row + 1] = d_prime[row] - c_prime[row] * second[row + 2]
+    return second
+
+
+def _interpolate_series(
+    coordinates: np.ndarray,
+    target_coordinates: np.ndarray,
+    values: np.ndarray,
+    method: str,
+) -> np.ndarray:
+    """Interpolate a matrix whose first dimension follows coordinates."""
+    if coordinates.size == 1:
+        if target_coordinates.size != 1:
+            raise ValueError("Cannot upsample an axis containing only one point")
+        return values.copy()
+
+    indices = np.searchsorted(coordinates, target_coordinates, side="right") - 1
+    indices = np.clip(indices, 0, coordinates.size - 2)
+    left = coordinates[indices]
+    right = coordinates[indices + 1]
+
+    if method == "nearest":
+        choose_right = (target_coordinates - left) > (right - target_coordinates)
+        nearest = indices + choose_right.astype(np.intp)
+        return values[nearest]
+
+    fraction = ((target_coordinates - left) / (right - left))[:, None]
+    if method == "linear":
+        return values[indices] * (1.0 - fraction) + values[indices + 1] * fraction
+
+    second = _natural_cubic_second_derivatives(coordinates, values)
+    width = (right - left)[:, None]
+    a = (right[:, None] - target_coordinates[:, None]) / width
+    b = (target_coordinates[:, None] - left[:, None]) / width
+    return (
+        a * values[indices]
+        + b * values[indices + 1]
+        + ((a**3 - a) * second[indices] + (b**3 - b) * second[indices + 1])
+        * width**2
+        / 6.0
+    )
+
+
+def _interpolate_axis(
+    values: np.ndarray,
+    coordinates: np.ndarray,
+    target_coordinates: np.ndarray,
+    axis: int,
+    method: str,
+    *,
+    log_space: bool,
+) -> np.ndarray:
+    """Interpolate one cube axis, chunking independent series to bound memory."""
+    if method not in _INTERPOLATION_METHODS:
+        raise ValueError(
+            f"Unknown interpolation method {method!r}; choose nearest, linear, or cubic"
+        )
+    coordinates = np.asarray(coordinates, dtype=np.float64)
+    target_coordinates = np.asarray(target_coordinates, dtype=np.float64)
+    if coordinates.ndim != 1 or coordinates.size != values.shape[axis]:
+        raise ValueError("Interpolation coordinates do not match the selected axis")
+    if np.any(~np.isfinite(coordinates)) or np.any(np.diff(coordinates) == 0):
+        raise ValueError("Interpolation coordinates must be finite and strictly monotonic")
+
+    reversed_axis = coordinates[0] > coordinates[-1]
+    if reversed_axis:
+        coordinates = coordinates[::-1]
+        target_coordinates = target_coordinates[::-1]
+        values = np.flip(values, axis=axis)
+    if np.any(np.diff(coordinates) <= 0):
+        raise ValueError("Interpolation coordinates must be strictly monotonic")
+
+    moved = np.moveaxis(values, axis, 0)
+    original_shape = moved.shape[1:]
+    matrix = moved.reshape(moved.shape[0], -1).astype(np.float64, copy=False)
+    if log_space:
+        _validate_positive("log-space interpolation input", matrix)
+        matrix = np.log10(matrix)
+
+    output = np.empty((target_coordinates.size, matrix.shape[1]), dtype=np.float32)
+    chunk_size = 65536
+    for start in range(0, matrix.shape[1], chunk_size):
+        stop = min(start + chunk_size, matrix.shape[1])
+        result = _interpolate_series(
+            coordinates, target_coordinates, matrix[:, start:stop], method
+        )
+        if log_space:
+            result = 10.0**result
+        output[:, start:stop] = result.astype(np.float32, copy=False)
+
+    reshaped = output.reshape((target_coordinates.size, *original_shape))
+    if reversed_axis:
+        reshaped = reshaped[::-1]
+    return np.moveaxis(reshaped, 0, axis)
+
+
+def _channel_methods(args, channel: str) -> dict[str, str]:
+    methods = dict(args.interpolation_default)
+    methods.update(args.interpolation_channels.get(channel, {}))
+    for axis_name in ("x", "y", "z"):
+        if methods[axis_name] not in _INTERPOLATION_METHODS:
+            raise ValueError(
+                f"Invalid {axis_name} interpolation method for {channel}: "
+                f"{methods[axis_name]!r}"
+            )
+    return methods
+
+
+def _resample_cube(
+    values: np.ndarray,
+    old_coordinates: tuple[np.ndarray, np.ndarray, np.ndarray],
+    new_coordinates: tuple[np.ndarray, np.ndarray, np.ndarray],
+    methods: dict[str, str],
+    *,
+    log_space: bool,
+) -> np.ndarray:
+    result = values
+    for axis, axis_name in enumerate(("x", "y", "z")):
+        if np.array_equal(old_coordinates[axis], new_coordinates[axis]):
+            continue
+        result = _interpolate_axis(
+            result,
+            old_coordinates[axis],
+            new_coordinates[axis],
+            axis,
+            methods[axis_name],
+            log_space=log_space,
+        )
+    return result
+
+
+def _resample_atmosphere(
+    args,
+    fields: dict[str, np.ndarray],
+    height_m: np.ndarray,
+    dx_m: float,
+    dy_m: float,
+) -> tuple[dict[str, np.ndarray], np.ndarray, float, float]:
+    """Upsample all spatial dimensions while preserving the physical extent."""
+    nx, ny, nz = fields["temperature"].shape
+    source_sizes = {"x": nx, "y": ny, "z": nz}
+    old_coordinates = (
+        np.arange(nx, dtype=np.float64) * dx_m,
+        np.arange(ny, dtype=np.float64) * dy_m,
+        np.asarray(height_m, dtype=np.float64),
+    )
+    new_coordinates_list = []
+    for coordinates, axis in zip(old_coordinates, ("x", "y", "z")):
+        target_spacing = args.upsample_target_spacing_m.get(axis)
+        if target_spacing is not None:
+            target_spacing = float(target_spacing)
+            if not math.isfinite(target_spacing) or target_spacing <= 0:
+                raise ValueError(
+                    f"Target spacing for {axis} must be finite and positive"
+                )
+            span = abs(float(coordinates[-1] - coordinates[0]))
+            target_size = int(math.floor(span / target_spacing + 1e-12)) + 1
+            if target_size < source_sizes[axis]:
+                native_mean = span / max(1, source_sizes[axis] - 1)
+                raise ValueError(
+                    f"Target {axis} spacing {target_spacing:g} m would downsample "
+                    f"the axis (mean native spacing {native_mean:g} m)"
+                )
+            direction = 1.0 if coordinates[-1] >= coordinates[0] else -1.0
+            target_coordinates = (
+                coordinates[0]
+                + direction * target_spacing * np.arange(target_size, dtype=np.float64)
+            )
+        else:
+            target_size = _target_axis_size(
+                source_sizes[axis],
+                args.upsample_factors.get(axis),
+                args.upsample_target_shape.get(axis),
+            )
+            target_coordinates = np.linspace(
+                coordinates[0], coordinates[-1], target_size
+            )
+        new_coordinates_list.append(target_coordinates)
+    new_coordinates = tuple(new_coordinates_list)
+    target_sizes = {
+        axis: coordinates.size
+        for axis, coordinates in zip(("x", "y", "z"), new_coordinates)
+    }
+
+    positive_channels = {
+        "temperature", "rho", "ne", "pgas", "hydrogen_populations"
+    }
+    result = {}
+    for channel, values in fields.items():
+        result[channel] = _resample_cube(
+            values,
+            old_coordinates,
+            new_coordinates,
+            _channel_methods(args, channel),
+            log_space=channel in positive_channels,
+        )
+
+    new_dx = dx_m if target_sizes["x"] == 1 else abs(
+        new_coordinates[0][1] - new_coordinates[0][0]
+    )
+    new_dy = dy_m if target_sizes["y"] == 1 else abs(
+        new_coordinates[1][1] - new_coordinates[1][0]
+    )
+    print(
+        "Resampled atmosphere: "
+        f"{(nx, ny, nz)} -> "
+        f"{(target_sizes['x'], target_sizes['y'], target_sizes['z'])}"
+    )
+    return result, new_coordinates[2], float(new_dx), float(new_dy)
+
+
+def _validate_atmosphere(args, fields: dict[str, np.ndarray]) -> None:
+    """Check finiteness, positivity, and configured adjacent-cell continuity."""
+    shapes = {field.shape for field in fields.values()}
+    if len(shapes) != 1:
+        raise ValueError(f"Atmosphere channels have inconsistent shapes: {shapes}")
+    for channel, values in fields.items():
+        if not np.all(np.isfinite(values)):
+            raise ValueError(f"{channel} contains NaN or Inf")
+    for channel in args.positive_channels:
+        if channel not in fields:
+            raise ValueError(f"Unknown positive-validation channel {channel!r}")
+        _validate_positive(channel, fields[channel])
+
+    for channel, thresholds in args.continuity_max_log10_step.items():
+        if channel not in fields:
+            raise ValueError(f"Unknown continuity-validation channel {channel!r}")
+        _validate_positive(channel, fields[channel])
+        logged = np.log10(fields[channel].astype(np.float64, copy=False))
+        for axis, axis_name in enumerate(("x", "y", "z")):
+            if axis_name not in thresholds or logged.shape[axis] < 2:
+                continue
+            threshold = float(thresholds[axis_name])
+            if not math.isfinite(threshold) or threshold <= 0:
+                raise ValueError(
+                    f"Continuity threshold for {channel}.{axis_name} must be positive"
+                )
+            jumps = np.abs(np.diff(logged, axis=axis))
+            maximum = float(jumps.max())
+            if maximum > threshold:
+                location = np.unravel_index(int(jumps.argmax()), jumps.shape)
+                raise ValueError(
+                    f"{channel} is discontinuous along {axis_name}: maximum adjacent "
+                    f"jump is {maximum:.6g} dex at {location}, exceeding {threshold:g} dex"
+                )
+
+
+def _apply_temperature_floor_and_calculate_ne(
+    args, electron_source: str, fields: dict[str, np.ndarray]
+) -> np.ndarray:
+    """Floor final-grid temperature, then derive or select electron density."""
+    temp = fields["temperature"]
+    floor_count = int(np.count_nonzero(temp < args.temperature_floor_k))
+    np.maximum(temp, np.float32(args.temperature_floor_k), out=temp)
+    if floor_count:
+        print(
+            f"Raised {floor_count} interpolated temperature cells to "
+            f"{args.temperature_floor_k:g} K"
+        )
+
+    if electron_source == "lgp":
+        ne = _electron_density_from_witt_pgas(args, temp, fields["pgas"])
+    elif electron_source == "lgr":
+        ne = _electron_density_from_witt_rho(args, temp, fields["rho"])
+    elif electron_source == "lgne":
+        ne = fields["ne"]
+    else:
+        raise ValueError(f"Unknown electron-density source {electron_source!r}")
+    _validate_positive("electron density", ne)
+    fields["ne"] = ne
+    return ne
 
 
 def _rotate_spatial_dimensions(arr: np.ndarray) -> np.ndarray:
@@ -918,7 +1243,8 @@ def convert(args) -> None:
         dy = _maybe_infer_spacing(temp_header, "CDELT2", y_scale)
     if dx is None or dy is None:
         raise ValueError(
-            "Could not infer dx/dy from FITS CDELT1/CDELT2. Pass --dx and --dy in meters."
+            "Could not infer dx/dy from FITS CDELT1/CDELT2. Set [grid].dx_m "
+            "and [grid].dy_m in meters."
         )
     dx *= x_slice.step
     dy *= y_slice.step
@@ -983,7 +1309,11 @@ def convert(args) -> None:
         si_unit="m / s",
         quantity_name="z velocity",
     )
+    _validate_positive("temperature", temp)
+    _validate_positive("density", rho)
 
+    ne = None
+    pgas = None
     if electron_source == "lgne":
         ne = _read_log_quantity(
             folder,
@@ -997,6 +1327,7 @@ def convert(args) -> None:
             si_unit="1 / m3",
             quantity_name="electron density",
         )
+        _validate_positive("electron density", ne)
         electron_density_source = "lgne"
     elif electron_source == "lgp":
         pgas = _read_log_quantity(
@@ -1011,25 +1342,37 @@ def convert(args) -> None:
             si_unit="Pa",
             quantity_name="gas pressure",
         )
-        ne = _electron_density_from_witt_pgas(args, temp, pgas)
+        _validate_positive("gas pressure", pgas)
         electron_density_source = "witt-pgas"
     else:
-        ne = _electron_density_from_witt_rho(args, temp, rho)
         electron_density_source = "witt-rho"
 
     height_selected = height_m[z_indices]
     # The target convention rotates each horizontal plane with [::-1, :].T and
     # stores index 0 at the top.
-    temp, rho, vx, vy, vz, ne, height_selected = _reverse_to_target_coordinates(
-        temp, rho, vx, vy, vz, ne, height_selected
-    )
+    source_fields = {
+        "temperature": temp,
+        "rho": rho,
+        "vx": vx,
+        "vy": vy,
+        "vz": vz,
+    }
+    if ne is not None:
+        source_fields["ne"] = ne
+    if pgas is not None:
+        source_fields["pgas"] = pgas
+    resampling_fields = {
+        channel: _rotate_spatial_dimensions(values[:, :, ::-1])
+        for channel, values in source_fields.items()
+    }
+    height_selected = height_selected[::-1]
     # The horizontal rotation exchanges the x and y axes and their spacing.
     dx, dy = dy, dx
 
     nh = None
     if args.multi3d_atmos_out and hydrogen_population_paths is not None:
         print("Detected lgn1 through lgn6; reading hydrogen populations.")
-        nh = np.empty((*temp.shape, 6), dtype=np.float32)
+        nh = np.empty((*resampling_fields["temperature"].shape, 6), dtype=np.float32)
         for level in range(1, 7):
             population = _read_log_quantity(
                 folder,
@@ -1046,6 +1389,30 @@ def convert(args) -> None:
             nh[..., level - 1] = _rotate_spatial_dimensions(
                 population[:, :, ::-1]
             )
+
+    if nh is not None:
+        resampling_fields["hydrogen_populations"] = nh
+    resampling_fields, height_selected, dx, dy = _resample_atmosphere(
+        args, resampling_fields, height_selected, dx, dy
+    )
+
+    # Apply the temperature floor only on the final interpolated grid. EOS-derived
+    # electron density must use this floored temperature and the interpolated rho
+    # or gas pressure, rather than values calculated on the source grid.
+    ne = _apply_temperature_floor_and_calculate_ne(
+        args, electron_source, resampling_fields
+    )
+
+    fields = {channel: resampling_fields[channel] for channel in _OUTPUT_CHANNELS}
+    _validate_atmosphere(args, fields)
+    temp = fields["temperature"]
+    rho = fields["rho"]
+    vx = fields["vx"]
+    vy = fields["vy"]
+    vz = fields["vz"]
+    ne = fields["ne"]
+    if nh is not None:
+        nh = resampling_fields["hydrogen_populations"]
 
     _write_ffno_hdf5(
         Path(args.output),
@@ -1085,105 +1452,211 @@ def convert(args) -> None:
         )
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Convert MURaM FITS cubes to FFNO prediction HDF5."
+def _check_keys(table: dict[str, Any], allowed: set[str], name: str) -> None:
+    unknown = set(table) - allowed
+    if unknown:
+        raise ValueError(f"Unknown key(s) in [{name}]: {', '.join(sorted(unknown))}")
+
+
+def _config_path(value: Any, base_dir: Path) -> str | None:
+    if value is None:
+        return None
+    path = Path(str(value)).expanduser()
+    if not path.is_absolute():
+        path = base_dir / path
+    return os.fspath(path.resolve())
+
+
+def _configured_slice(selection: dict[str, Any], axis: str) -> slice | None:
+    value = selection.get(axis)
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return _parse_slice_text(value)
+    if not isinstance(value, dict):
+        raise ValueError(f"[selection].{axis} must be a slice string or table")
+    _check_keys(value, {"start", "stop", "step"}, f"selection.{axis}")
+    return slice(value.get("start"), value.get("stop"), value.get("step"))
+
+
+def load_config(config_path: Path) -> SimpleNamespace:
+    """Load every converter setting from a TOML file."""
+    config_path = config_path.expanduser().resolve()
+    with config_path.open("rb") as config_file:
+        config = tomllib.load(config_file)
+    _check_keys(
+        config,
+        {"input", "selection", "grid", "eos", "output", "resampling", "validation"},
+        "root",
     )
-    parser.add_argument("--folder", required=True, help="Directory containing MURaM FITS files")
-    parser.add_argument("--simulation-code", default="MURaM")
-    parser.add_argument("--simulation-name", required=True)
-    parser.add_argument("--snap", required=True)
-    parser.add_argument("--output", required=True)
-    parser.add_argument("--start-x", type=int, default=None)
-    parser.add_argument("--end-x", type=int, default=None)
-    parser.add_argument("--start-y", type=int, default=None)
-    parser.add_argument("--end-y", type=int, default=None)
-    parser.add_argument(
-        "--x-slice",
-        type=_parse_slice_text,
-        default=None,
-        metavar="START:STOP[:STEP]",
-        help="Optional x-index slice, e.g. 0:504:2 or slice(0,504,2).",
+    for required_table in ("input", "output"):
+        if required_table not in config or not isinstance(config[required_table], dict):
+            raise ValueError(f"Configuration requires a [{required_table}] table")
+
+    input_config = config["input"]
+    _check_keys(
+        input_config,
+        {"folder", "simulation_code", "simulation_name", "snap"},
+        "input",
     )
-    parser.add_argument(
-        "--y-slice",
-        type=_parse_slice_text,
-        default=None,
-        metavar="START:STOP[:STEP]",
-        help="Optional y-index slice, e.g. 0:504:2 or slice(0,504,2).",
+    missing = {"folder", "simulation_name", "snap"} - set(input_config)
+    if missing:
+        raise ValueError(f"Missing required [input] key(s): {', '.join(sorted(missing))}")
+
+    selection = config.get("selection", {})
+    _check_keys(selection, {"x", "y", "z", "height_min_m", "height_max_m"}, "selection")
+    grid = config.get("grid", {})
+    _check_keys(grid, {"dx_m", "dy_m"}, "grid")
+    eos = config.get("eos", {})
+    _check_keys(
+        eos,
+        {
+            "witt_path", "backend", "workers", "chunk_size", "pool_chunksize",
+            "start_method", "show_progress",
+        },
+        "eos",
     )
-    parser.add_argument(
-        "--z-slice",
-        type=_parse_slice_text,
-        default=None,
-        metavar="START:STOP[:STEP]",
-        help="Optional z-index slice, e.g. 0:504:2 or slice(0,504,2).",
+    output = config["output"]
+    _check_keys(
+        output,
+        {"hdf5", "multi3d_atmos", "multi3d_mesh", "compression", "overwrite"},
+        "output",
     )
-    parser.add_argument("--height-min-m", type=float, default=-np.inf)
-    parser.add_argument("--height-max-m", type=float, default=np.inf)
-    parser.add_argument("--dx", type=float, default=None, help="Horizontal x spacing in meters")
-    parser.add_argument("--dy", type=float, default=None, help="Horizontal y spacing in meters")
-    parser.add_argument(
-        "--witt-path",
-        default=None,
-        help="Directory containing witt.py and pf_Kurucz.input for Witt EOS modes.",
+    if "hdf5" not in output:
+        raise ValueError("Missing required [output] key: hdf5")
+
+    resampling = config.get("resampling", {})
+    _check_keys(
+        resampling,
+        {"factors", "target_shape", "target_spacing_m", "default", "channels"},
+        "resampling",
     )
-    parser.add_argument(
-        "--show-eos-progress",
-        action="store_true",
-        help="Show progress for the Witt EOS calculation when supported.",
+    factors = dict(resampling.get("factors", {}))
+    targets = dict(resampling.get("target_shape", {}))
+    target_spacing_m = dict(resampling.get("target_spacing_m", {}))
+    _check_keys(factors, {"x", "y", "z"}, "resampling.factors")
+    _check_keys(targets, {"x", "y", "z"}, "resampling.target_shape")
+    _check_keys(
+        target_spacing_m, {"x", "y", "z"}, "resampling.target_spacing_m"
     )
-    parser.add_argument(
-        "--eos-backend",
-        choices=["auto", "cpp", "python"],
-        default="auto",
-        help=(
-            "Backend for Witt electron-density calculations. 'auto' uses "
-            "the C++ full-atmosphere backend when it can be compiled and "
-            "falls back to Python."
-        ),
+    conflicts = (
+        (set(factors) & set(targets))
+        | (set(factors) & set(target_spacing_m))
+        | (set(targets) & set(target_spacing_m))
     )
-    parser.add_argument(
-        "--eos-workers",
-        type=int,
-        default=None,
-        help=(
-            "Worker/thread count for Witt electron-density calculation. "
-            "Default uses all visible CPUs. Use 1 for serial execution."
-        ),
+    if conflicts:
+        raise ValueError(
+            "Specify only one of factor, target_shape, or target_spacing_m "
+            "for each axis: "
+            + ", ".join(sorted(conflicts))
+        )
+    interpolation_default = {"x": "linear", "y": "linear", "z": "linear"}
+    configured_default = dict(resampling.get("default", {}))
+    _check_keys(configured_default, {"x", "y", "z"}, "resampling.default")
+    interpolation_default.update(configured_default)
+    interpolation_channels = {
+        channel: dict(methods)
+        for channel, methods in resampling.get("channels", {}).items()
+    }
+    _check_keys(
+        interpolation_channels, set(_RESAMPLED_CHANNELS), "resampling.channels"
     )
-    parser.add_argument(
-        "--eos-chunk-size",
-        type=int,
-        default=4096,
-        help="Number of cells per worker task for the Python Witt EOS backend.",
+    for channel, methods in interpolation_channels.items():
+        _check_keys(methods, {"x", "y", "z"}, f"resampling.channels.{channel}")
+
+    validation = config.get("validation", {})
+    _check_keys(
+        validation,
+        {"temperature_floor_k", "positive_channels", "continuity_max_log10_step"},
+        "validation",
     )
-    parser.add_argument(
-        "--eos-pool-chunksize",
-        type=int,
-        default=1,
-        help="Number of EOS tasks batched per Python multiprocessing dispatch.",
+    temperature_floor_k = float(validation.get("temperature_floor_k", 3250.0))
+    if not math.isfinite(temperature_floor_k) or temperature_floor_k <= 0:
+        raise ValueError("[validation].temperature_floor_k must be finite and positive")
+    positive_channels = tuple(
+        validation.get("positive_channels", ["temperature", "rho", "ne"])
     )
-    parser.add_argument(
-        "--eos-start-method",
-        choices=mp.get_all_start_methods(),
-        default="fork" if "fork" in mp.get_all_start_methods() else mp.get_start_method(),
-        help="Multiprocessing start method for Python Witt EOS workers.",
+    continuity = {
+        channel: dict(thresholds)
+        for channel, thresholds in validation.get(
+            "continuity_max_log10_step",
+            {
+                "rho": {"x": 3.0, "y": 3.0, "z": 3.0},
+                "ne": {"x": 3.0, "y": 3.0, "z": 3.0},
+            },
+        ).items()
+    }
+    for channel, thresholds in continuity.items():
+        _check_keys(thresholds, {"x", "y", "z"}, f"validation.continuity_max_log10_step.{channel}")
+
+    backend = str(eos.get("backend", "auto"))
+    if backend not in {"auto", "cpp", "python"}:
+        raise ValueError("[eos].backend must be auto, cpp, or python")
+    default_start = "fork" if "fork" in mp.get_all_start_methods() else mp.get_start_method()
+    start_method = str(eos.get("start_method", default_start))
+    if start_method not in mp.get_all_start_methods():
+        raise ValueError(
+            f"Unsupported [eos].start_method {start_method!r}; "
+            f"choose from {mp.get_all_start_methods()}"
+        )
+
+    base_dir = config_path.parent
+    multi3d_atmos = _config_path(output.get("multi3d_atmos"), base_dir)
+    multi3d_mesh = _config_path(output.get("multi3d_mesh"), base_dir)
+    if multi3d_mesh is not None and multi3d_atmos is None:
+        raise ValueError("[output].multi3d_mesh requires [output].multi3d_atmos")
+
+    return SimpleNamespace(
+        folder=_config_path(input_config["folder"], base_dir),
+        simulation_code=str(input_config.get("simulation_code", "MURaM")),
+        simulation_name=str(input_config["simulation_name"]),
+        snap=str(input_config["snap"]),
+        output=_config_path(output["hdf5"], base_dir),
+        start_x=None,
+        end_x=None,
+        start_y=None,
+        end_y=None,
+        x_slice=_configured_slice(selection, "x"),
+        y_slice=_configured_slice(selection, "y"),
+        z_slice=_configured_slice(selection, "z"),
+        height_min_m=float(selection.get("height_min_m", -np.inf)),
+        height_max_m=float(selection.get("height_max_m", np.inf)),
+        dx=None if grid.get("dx_m") is None else float(grid["dx_m"]),
+        dy=None if grid.get("dy_m") is None else float(grid["dy_m"]),
+        witt_path=_config_path(eos.get("witt_path"), base_dir),
+        show_eos_progress=bool(eos.get("show_progress", False)),
+        eos_backend=backend,
+        eos_workers=None if eos.get("workers") is None else int(eos["workers"]),
+        eos_chunk_size=int(eos.get("chunk_size", 4096)),
+        eos_pool_chunksize=int(eos.get("pool_chunksize", 1)),
+        eos_start_method=start_method,
+        multi3d_atmos_out=multi3d_atmos,
+        multi3d_mesh_out=multi3d_mesh,
+        compression=int(output.get("compression", 4)),
+        overwrite=bool(output.get("overwrite", False)),
+        upsample_factors=factors,
+        upsample_target_shape=targets,
+        upsample_target_spacing_m=target_spacing_m,
+        interpolation_default=interpolation_default,
+        interpolation_channels=interpolation_channels,
+        temperature_floor_k=temperature_floor_k,
+        positive_channels=positive_channels,
+        continuity_max_log10_step=continuity,
     )
-    parser.add_argument(
-        "--multi3d-atmos-out",
-        default=None,
-        help="Optional Multi3D atmosphere output path, e.g. ar098192/270000/atm3d.",
-    )
-    parser.add_argument(
-        "--multi3d-mesh-out",
-        default=None,
-        help="Optional Multi3D mesh output path. Used only with --multi3d-atmos-out.",
-    )
-    parser.add_argument("--compression", type=int, default=4)
-    parser.add_argument("--overwrite", action="store_true")
-    return parser.parse_args()
+
+
+def _main(argv: list[str]) -> None:
+    if len(argv) != 2 or argv[1] in {"-h", "--help"}:
+        print(
+            f"Usage: {Path(argv[0]).name} CONFIG.toml\n"
+            "All input, crop, resampling, validation, EOS, and output settings "
+            "are read from CONFIG.toml."
+        )
+        if len(argv) == 2:
+            return
+        raise SystemExit(2)
+    convert(load_config(Path(argv[1])))
 
 
 if __name__ == "__main__":
-    convert(parse_args())
+    _main(sys.argv)

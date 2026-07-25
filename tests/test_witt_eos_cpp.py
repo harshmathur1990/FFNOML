@@ -256,6 +256,206 @@ class SpatialSliceSelectionTests(unittest.TestCase):
         np.testing.assert_array_equal(actual, [3, 5])
 
 
+@unittest.skipUnless(HAS_NUMPY, "NumPy is required for resampling tests")
+class AtmosphereResamplingTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, str(SCRIPTS))
+        import convert_iris_sim_fits_to_ffno_hdf5 as converter
+        from convert_iris_sim_fits_to_ffno_hdf5 import (
+            _interpolate_axis,
+            _resample_atmosphere,
+            _validate_atmosphere,
+        )
+
+        cls.converter = converter
+        cls.interpolate_axis = staticmethod(_interpolate_axis)
+        cls.resample = staticmethod(_resample_atmosphere)
+        cls.validate = staticmethod(_validate_atmosphere)
+
+    def test_linear_and_cubic_interpolation_preserve_linear_profiles(self):
+        values = np.arange(3, dtype=np.float32).reshape(1, 1, 3)
+        source = np.array([2.0, 1.0, 0.0])
+        target = np.linspace(2.0, 0.0, 5)
+        expected = np.linspace(0.0, 2.0, 5).reshape(1, 1, 5)
+        for method in ("linear", "cubic"):
+            actual = self.interpolate_axis(
+                values, source, target, 2, method, log_space=False
+            )
+            np.testing.assert_allclose(actual, expected, atol=1e-6)
+
+    def test_channel_specific_methods_and_all_axis_factors(self):
+        base = np.arange(8, dtype=np.float32).reshape(2, 2, 2)
+        fields = {
+            "temperature": 5000.0 + base,
+            "rho": 10.0 ** (-4.0 + base / 100.0),
+            "vx": base,
+            "vy": base,
+            "vz": base,
+            "ne": 10.0 ** (16.0 + base / 100.0),
+        }
+        args = types.SimpleNamespace(
+            upsample_factors={"x": 2, "y": 2, "z": 2},
+            upsample_target_shape={},
+            upsample_target_spacing_m={},
+            interpolation_default={"x": "nearest", "y": "linear", "z": "linear"},
+            interpolation_channels={"temperature": {"z": "cubic"}},
+        )
+        result, height, dx, dy = self.resample(
+            args, fields, np.array([100.0, 0.0]), 4.0, 6.0
+        )
+        self.assertEqual(result["temperature"].shape, (3, 3, 3))
+        self.assertTrue(np.all(result["rho"] > 0))
+        self.assertTrue(np.all(result["ne"] > 0))
+        np.testing.assert_allclose(height, [100.0, 50.0, 0.0])
+        self.assertEqual(dx, 2.0)
+        self.assertEqual(dy, 3.0)
+
+    def test_target_physical_spacing_is_used_exactly(self):
+        base = np.arange(12, dtype=np.float32).reshape(3, 2, 2)
+        fields = {
+            "temperature": 5000.0 + base,
+            "rho": np.full_like(base, 1e-4),
+            "vx": base,
+            "vy": base,
+            "vz": base,
+            "ne": np.full_like(base, 1e16),
+        }
+        args = types.SimpleNamespace(
+            upsample_factors={},
+            upsample_target_shape={},
+            upsample_target_spacing_m={"x": 2.0, "y": 3.0, "z": 25.0},
+            interpolation_default={"x": "linear", "y": "linear", "z": "linear"},
+            interpolation_channels={},
+        )
+        result, height, dx, dy = self.resample(
+            args, fields, np.array([100.0, 0.0]), 4.0, 6.0
+        )
+
+        self.assertEqual(result["temperature"].shape, (5, 3, 5))
+        self.assertEqual(dx, 2.0)
+        self.assertEqual(dy, 3.0)
+        np.testing.assert_allclose(np.abs(np.diff(height)), 25.0)
+
+    def test_positivity_and_continuity_are_enforced(self):
+        good = np.ones((2, 1, 1), dtype=np.float32)
+        fields = {
+            "temperature": good * 5000,
+            "rho": good * 1e-4,
+            "vx": good,
+            "vy": good,
+            "vz": good,
+            "ne": good * 1e16,
+        }
+        args = types.SimpleNamespace(
+            positive_channels=("temperature", "rho", "ne"),
+            continuity_max_log10_step={"rho": {"x": 1.0}, "ne": {"x": 1.0}},
+        )
+        self.validate(args, fields)
+        fields["rho"] = np.array([1e-4, 1e-8], dtype=np.float32).reshape(2, 1, 1)
+        with self.assertRaisesRegex(ValueError, "discontinuous along x"):
+            self.validate(args, fields)
+        fields["rho"][1] = 0.0
+        with self.assertRaisesRegex(ValueError, "must be positive"):
+            self.validate(args, fields)
+
+    def test_temperature_is_floored_before_eos_uses_interpolated_pgas(self):
+        args = types.SimpleNamespace(temperature_floor_k=3250.0)
+        pgas = np.array([1.0, 2.0], dtype=np.float32)
+        fields = {
+            "temperature": np.array([3000.0, 4000.0], dtype=np.float32),
+            "pgas": pgas,
+        }
+
+        def fake_eos(_args, temperature, pressure):
+            np.testing.assert_array_equal(temperature, [3250.0, 4000.0])
+            self.assertIs(pressure, pgas)
+            return np.array([1e15, 2e15], dtype=np.float32)
+
+        with mock.patch.object(
+            self.converter, "_electron_density_from_witt_pgas", side_effect=fake_eos
+        ) as eos:
+            ne = self.converter._apply_temperature_floor_and_calculate_ne(
+                args, "lgp", fields
+            )
+
+        eos.assert_called_once()
+        np.testing.assert_array_equal(fields["temperature"], [3250.0, 4000.0])
+        self.assertIs(fields["ne"], ne)
+
+
+@unittest.skipUnless(HAS_NUMPY, "NumPy is required for converter config tests")
+class ConverterConfigTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, str(SCRIPTS))
+        from convert_iris_sim_fits_to_ffno_hdf5 import load_config
+
+        cls.load_config = staticmethod(load_config)
+
+    def test_toml_supplies_crop_resampling_channel_methods_and_old_options(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "converter.toml"
+            config_path.write_text(
+                """
+[input]
+folder = "fits"
+simulation_name = "test"
+snap = 42
+
+[selection.x]
+start = 2
+stop = 10
+[selection.y]
+start = 3
+stop = 12
+step = 2
+
+[eos]
+backend = "python"
+workers = 2
+
+[output]
+hdf5 = "result.hdf5"
+overwrite = true
+
+[resampling.target_spacing_m]
+x = 2000.0
+y = 3000.0
+z = 4000.0
+[resampling.default]
+x = "linear"
+y = "linear"
+z = "cubic"
+[resampling.channels.temperature]
+z = "linear"
+[resampling.channels.rho]
+x = "cubic"
+
+[validation]
+positive_channels = ["temperature", "rho", "ne"]
+[validation.continuity_max_log10_step.rho]
+x = 1.0
+y = 1.0
+z = 2.0
+""",
+                encoding="utf-8",
+            )
+            args = self.load_config(config_path)
+
+            self.assertEqual(args.x_slice, slice(2, 10, None))
+            self.assertEqual(args.y_slice, slice(3, 12, 2))
+            self.assertEqual(
+                args.upsample_target_spacing_m,
+                {"x": 2000.0, "y": 3000.0, "z": 4000.0},
+            )
+            self.assertEqual(args.interpolation_channels["rho"]["x"], "cubic")
+            self.assertEqual(args.eos_backend, "python")
+            self.assertEqual(args.eos_workers, 2)
+            self.assertTrue(args.overwrite)
+            self.assertEqual(Path(args.output), (Path(tmpdir) / "result.hdf5").resolve())
+
+
 @unittest.skipUnless(HAS_NUMPY, "NumPy is required to import the FITS converter")
 class HydrogenPopulationSelectionTests(unittest.TestCase):
     @classmethod
