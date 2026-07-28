@@ -111,15 +111,17 @@ z = "cubic"
 temperature_floor_k = 3250.0
 positive_channels = ["temperature", "rho", "ne", "pgas"]
 
-# # Maximum permitted absolute jump between adjacent samples in log10(channel),
-# # measured in dex. Omit this entire hierarchy to use the 3-dex defaults for rho
-# # and ne. Use an empty table to disable continuity thresholds.
-# [validation.continuity_max_log10_step.rho]
-# x = 2.0
-# y = 2.0
-# z = 2.0
+# Maximum permitted relative increase in the steepest absolute log10 gradient
+# (dex/m) from the original grid to the densely resampled grid. For example,
+# 0.25 allows the resampled maximum gradient to be up to 25% larger. Omit this
+# hierarchy to disable continuity comparison. A channel must exist on the
+# original grid, so use pgas (not ne) when ne is derived from pgas by the EOS.
+[validation.continuity_max_relative_increase.rho]
+x = 0.25
+y = 0.25
+z = 0.25
 
-# [validation.continuity_max_log10_step.ne]
-# x = 2.0
-# y = 2.0
-# z = 2.0
+[validation.continuity_max_relative_increase.pgas]
+x = 0.25
+y = 0.25
+z = 0.25

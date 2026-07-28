@@ -799,6 +799,70 @@ def _resample_cube(
     return result
 
 
+def _validate_resampled_continuity(
+    args,
+    source_fields: dict[str, np.ndarray],
+    resampled_fields: dict[str, np.ndarray],
+    old_coordinates: tuple[np.ndarray, np.ndarray, np.ndarray],
+    new_coordinates: tuple[np.ndarray, np.ndarray, np.ndarray],
+) -> None:
+    """Limit increases in the maximum log10 gradient after resampling."""
+    for channel, tolerances in args.continuity_max_relative_increase.items():
+        if channel not in source_fields:
+            raise ValueError(
+                f"Cannot compare continuity for {channel!r}: the channel is not "
+                "available on the original grid"
+            )
+        _validate_positive(channel, source_fields[channel])
+        _validate_positive(channel, resampled_fields[channel])
+        source_log = np.log10(
+            source_fields[channel].astype(np.float64, copy=False)
+        )
+        resampled_log = np.log10(
+            resampled_fields[channel].astype(np.float64, copy=False)
+        )
+        for axis, axis_name in enumerate(("x", "y", "z")):
+            if axis_name not in tolerances or source_log.shape[axis] < 2:
+                continue
+            tolerance = float(tolerances[axis_name])
+            if not math.isfinite(tolerance) or tolerance < 0:
+                raise ValueError(
+                    f"Continuity relative increase for {channel}.{axis_name} "
+                    "must be finite and non-negative"
+                )
+            source_spacing = np.abs(np.diff(old_coordinates[axis]))
+            target_spacing = np.abs(np.diff(new_coordinates[axis]))
+            spacing_shape = [-1 if dim == axis else 1 for dim in range(source_log.ndim)]
+            source_gradient = np.abs(np.diff(source_log, axis=axis)) / source_spacing.reshape(
+                spacing_shape
+            )
+            spacing_shape = [
+                -1 if dim == axis else 1 for dim in range(resampled_log.ndim)
+            ]
+            target_gradient = np.abs(
+                np.diff(resampled_log, axis=axis)
+            ) / target_spacing.reshape(spacing_shape)
+            source_max = float(source_gradient.max())
+            target_max = float(target_gradient.max())
+            allowed = source_max * (1.0 + tolerance)
+            log_scale = max(
+                1.0,
+                float(np.max(np.abs(source_log))),
+                float(np.max(np.abs(resampled_log))),
+            )
+            minimum_spacing = min(source_spacing.min(), target_spacing.min())
+            roundoff = (
+                8.0 * np.finfo(np.float32).eps * log_scale / minimum_spacing
+            )
+            if target_max > allowed + roundoff:
+                raise ValueError(
+                    f"{channel} continuity worsened along {axis_name}: maximum "
+                    f"log10 gradient increased from {source_max:.6g} to "
+                    f"{target_max:.6g} dex/m, exceeding the allowed "
+                    f"{tolerance:.1%} relative increase"
+                )
+
+
 def _resample_atmosphere(
     args,
     fields: dict[str, np.ndarray],
@@ -861,6 +925,9 @@ def _resample_atmosphere(
             _channel_methods(args, channel),
             log_space=channel in args.log_interpolation_channels,
         )
+    _validate_resampled_continuity(
+        args, fields, result, old_coordinates, new_coordinates
+    )
 
     new_dx = dx_m if target_sizes["x"] == 1 else abs(
         new_coordinates[0][1] - new_coordinates[0][0]
@@ -890,29 +957,6 @@ def _validate_atmosphere(args, fields: dict[str, np.ndarray]) -> None:
         if channel not in fields:
             raise ValueError(f"Unknown positive-validation channel {channel!r}")
         _validate_positive(channel, fields[channel])
-
-    for channel, thresholds in args.continuity_max_log10_step.items():
-        if channel not in fields:
-            raise ValueError(f"Unknown continuity-validation channel {channel!r}")
-        _validate_positive(channel, fields[channel])
-        logged = np.log10(fields[channel].astype(np.float64, copy=False))
-        for axis, axis_name in enumerate(("x", "y", "z")):
-            if axis_name not in thresholds or logged.shape[axis] < 2:
-                continue
-            threshold = float(thresholds[axis_name])
-            if not math.isfinite(threshold) or threshold <= 0:
-                raise ValueError(
-                    f"Continuity threshold for {channel}.{axis_name} must be positive"
-                )
-            jumps = np.abs(np.diff(logged, axis=axis))
-            maximum = float(jumps.max())
-            if maximum > threshold:
-                location = np.unravel_index(int(jumps.argmax()), jumps.shape)
-                raise ValueError(
-                    f"{channel} is discontinuous along {axis_name}: maximum adjacent "
-                    f"jump is {maximum:.6g} dex at {location}, exceeding {threshold:g} dex"
-                )
-
 
 def _apply_temperature_floor_and_calculate_ne(
     args, electron_source: str, fields: dict[str, np.ndarray]
@@ -1599,7 +1643,11 @@ def load_config(config_path: Path) -> SimpleNamespace:
     validation = config.get("validation", {})
     _check_keys(
         validation,
-        {"temperature_floor_k", "positive_channels", "continuity_max_log10_step"},
+        {
+            "temperature_floor_k",
+            "positive_channels",
+            "continuity_max_relative_increase",
+        },
         "validation",
     )
     temperature_floor_k = float(validation.get("temperature_floor_k", 3250.0))
@@ -1608,18 +1656,23 @@ def load_config(config_path: Path) -> SimpleNamespace:
     positive_channels = tuple(
         validation.get("positive_channels", ["temperature", "rho", "ne"])
     )
-    continuity = {
-        channel: dict(thresholds)
-        for channel, thresholds in validation.get(
-            "continuity_max_log10_step",
-            {
-                "rho": {"x": 3.0, "y": 3.0, "z": 3.0},
-                "ne": {"x": 3.0, "y": 3.0, "z": 3.0},
-            },
+    continuity_relative_increase = {
+        channel: dict(tolerances)
+        for channel, tolerances in validation.get(
+            "continuity_max_relative_increase", {}
         ).items()
     }
-    for channel, thresholds in continuity.items():
-        _check_keys(thresholds, {"x", "y", "z"}, f"validation.continuity_max_log10_step.{channel}")
+    _check_keys(
+        continuity_relative_increase,
+        set(_RESAMPLED_CHANNELS),
+        "validation.continuity_max_relative_increase",
+    )
+    for channel, tolerances in continuity_relative_increase.items():
+        _check_keys(
+            tolerances,
+            {"x", "y", "z"},
+            f"validation.continuity_max_relative_increase.{channel}",
+        )
 
     backend = str(eos.get("backend", "auto"))
     if backend not in {"auto", "cpp", "python"}:
@@ -1674,7 +1727,7 @@ def load_config(config_path: Path) -> SimpleNamespace:
         log_interpolation_channels=frozenset(log_interpolation_channels),
         temperature_floor_k=temperature_floor_k,
         positive_channels=positive_channels,
-        continuity_max_log10_step=continuity,
+        continuity_max_relative_increase=continuity_relative_increase,
     )
 
 

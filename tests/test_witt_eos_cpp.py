@@ -303,6 +303,7 @@ class AtmosphereResamplingTests(unittest.TestCase):
             log_interpolation_channels={
                 "temperature", "rho", "ne", "pgas", "hydrogen_populations"
             },
+            continuity_max_relative_increase={},
         )
         result, height, dx, dy = self.resample(
             args, fields, np.array([100.0, 0.0]), 4.0, 6.0
@@ -331,6 +332,7 @@ class AtmosphereResamplingTests(unittest.TestCase):
             interpolation_default={"x": "linear", "y": "linear", "z": "linear"},
             interpolation_channels={},
             log_interpolation_channels={"pgas"},
+            continuity_max_relative_increase={"pgas": {"x": 0.0}},
         )
 
         result, _, _, _ = self.resample(
@@ -339,6 +341,10 @@ class AtmosphereResamplingTests(unittest.TestCase):
         np.testing.assert_allclose(result["pgas"][:, 0, 0], [1.0, 10.0, 100.0])
 
         args.log_interpolation_channels = set()
+        with self.assertRaisesRegex(ValueError, "continuity worsened along x"):
+            self.resample(args, fields, np.array([0.0]), 1.0, 1.0)
+
+        args.continuity_max_relative_increase = {}
         result, _, _, _ = self.resample(
             args, fields, np.array([0.0]), 1.0, 1.0
         )
@@ -363,6 +369,7 @@ class AtmosphereResamplingTests(unittest.TestCase):
             log_interpolation_channels={
                 "temperature", "rho", "ne", "pgas", "hydrogen_populations"
             },
+            continuity_max_relative_increase={},
         )
         result, height, dx, dy = self.resample(
             args, fields, np.array([100.0, 0.0]), 4.0, 6.0
@@ -387,12 +394,8 @@ class AtmosphereResamplingTests(unittest.TestCase):
         }
         args = types.SimpleNamespace(
             positive_channels=("temperature", "rho", "ne", "pgas"),
-            continuity_max_log10_step={"rho": {"x": 1.0}, "ne": {"x": 1.0}},
         )
         self.validate(args, fields)
-        fields["rho"] = np.array([1e-4, 1e-8], dtype=np.float32).reshape(2, 1, 1)
-        with self.assertRaisesRegex(ValueError, "discontinuous along x"):
-            self.validate(args, fields)
         fields["rho"][1] = 0.0
         with self.assertRaisesRegex(ValueError, "must be positive"):
             self.validate(args, fields)
@@ -474,10 +477,10 @@ pgas = false
 
 [validation]
 positive_channels = ["temperature", "rho", "ne"]
-[validation.continuity_max_log10_step.rho]
-x = 1.0
-y = 1.0
-z = 2.0
+[validation.continuity_max_relative_increase.rho]
+x = 0.1
+y = 0.1
+z = 0.2
 """,
                 encoding="utf-8",
             )
@@ -492,6 +495,9 @@ z = 2.0
             self.assertEqual(args.interpolation_channels["rho"]["x"], "cubic")
             self.assertNotIn("pgas", args.log_interpolation_channels)
             self.assertIn("rho", args.log_interpolation_channels)
+            self.assertEqual(
+                args.continuity_max_relative_increase["rho"]["z"], 0.2
+            )
             self.assertEqual(args.eos_backend, "python")
             self.assertEqual(args.eos_workers, 2)
             self.assertTrue(args.overwrite)
