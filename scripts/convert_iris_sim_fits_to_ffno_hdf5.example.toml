@@ -1,6 +1,6 @@
 # Paths are resolved relative to this configuration file.
 [input]
-folder = "/path/to/muram/atmos"
+folder = "/mn/stornext/d9/data/harshm/bifrost_data/ar098192/atmos"
 simulation_code = "MURaM"
 simulation_name = "ar098192"
 snap = 270000
@@ -11,21 +11,21 @@ snap = 270000
 height_min_m = -1300000.0
 height_max_m = 8000000.0
 
-[selection.x]
-start = 0
-stop = 504
-step = 1
+# [selection.x]
+# start = 0
+# stop = 504
+# step = 1
 
-[selection.y]
-start = 0
-stop = 504
-step = 1
+# [selection.y]
+# start = 0
+# stop = 504
+# step = 1
 
-[selection.z]
-step = 1
+# [selection.z]
+# step = 1
 
 # Omit dx_m/dy_m to infer them from FITS CDELT1/CDELT2 and CUNIT1/CUNIT2.
-[grid]
+# [grid]
 # dx_m = 16000.0
 # dy_m = 16000.0
 
@@ -38,20 +38,31 @@ pool_chunksize = 1
 show_progress = true
 
 [output]
-hdf5 = "../training_FFNO3D_zscale_expand/3D_sim_predict_ar098192_270000.hdf5"
+hdf5 = "../training_FFNO3D_zscale_expand_lognlte/3D_sim_predict_ar098192_270000.hdf5"
 # multi3d_atmos = "/path/to/270000/atm3d"
 # multi3d_mesh = "/path/to/270000/mesh"
 compression = 4
 overwrite = false
+
+# By default, temperature, rho, ne, pgas, and hydrogen_populations are
+# interpolated in log10 space. Override individual channels here; false selects
+# ordinary value-space interpolation. Log-space interpolation requires every
+# source value in that channel to be positive.
+[resampling.log_space]
+pgas = true
+rho = true
+ne = true
+hydrogen_populations = true
+temperature = true
 
 # Preferred: give the requested physical grid spacing directly in metres. The
 # written dx and dy equal these x/y values, and the new height grid has the
 # requested absolute z increment. If the domain is not exactly divisible by a
 # spacing, the final remainder shorter than one grid cell is omitted.
 [resampling.target_spacing_m]
-x = 96.0
-y = 96.0
-z = 16.0
+x = 96000.0
+y = 96000.0
+z = 16000.0
 
 # Alternatively, use factors OR target_shape for a given axis. A factor of 2
 # changes n points into 2*(n-1)+1 points and preserves both domain endpoints.
@@ -72,11 +83,10 @@ x = "cubic"
 y = "cubic"
 z = "cubic"
 
-# Per-channel values override only the listed default directions. Temperature,
-# rho, ne, and hydrogen populations are interpolated in log10 space so they
-# remain positive. Available channels: temperature, rho, pgas, vx, vy, vz, ne,
-# and hydrogen_populations. Interpolated pgas/rho and the floored interpolated
-# temperature are used when electron density must be derived with the Witt EOS.
+# Per-channel values override only the listed default directions. Available
+# channels: temperature, rho, pgas, vx, vy, vz, ne, and hydrogen_populations.
+# Interpolated pgas/rho and the floored interpolated temperature are used when
+# electron density must be derived with the Witt EOS.
 # [resampling.channels.temperature]
 # x = "cubic"
 # y = "cubic"
@@ -99,7 +109,7 @@ z = "cubic"
 
 [validation]
 temperature_floor_k = 3250.0
-positive_channels = ["temperature", "rho", "ne"]
+positive_channels = ["temperature", "rho", "ne", "pgas"]
 
 # # Maximum permitted absolute jump between adjacent samples in log10(channel),
 # # measured in dex. Omit this entire hierarchy to use the 3-dex defaults for rho

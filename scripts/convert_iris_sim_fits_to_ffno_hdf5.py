@@ -37,6 +37,13 @@ _WITT_EOS = None
 _INTERPOLATION_METHODS = {"nearest", "linear", "cubic"}
 _OUTPUT_CHANNELS = ("temperature", "rho", "vx", "vy", "vz", "ne")
 _RESAMPLED_CHANNELS = _OUTPUT_CHANNELS + ("pgas", "hydrogen_populations")
+_DEFAULT_LOG_INTERPOLATED_CHANNELS = {
+    "temperature",
+    "rho",
+    "ne",
+    "pgas",
+    "hydrogen_populations",
+}
 
 
 def _import_h5py():
@@ -845,9 +852,6 @@ def _resample_atmosphere(
         for axis, coordinates in zip(("x", "y", "z"), new_coordinates)
     }
 
-    positive_channels = {
-        "temperature", "rho", "ne", "pgas", "hydrogen_populations"
-    }
     result = {}
     for channel, values in fields.items():
         result[channel] = _resample_cube(
@@ -855,7 +859,7 @@ def _resample_atmosphere(
             old_coordinates,
             new_coordinates,
             _channel_methods(args, channel),
-            log_space=channel in positive_channels,
+            log_space=channel in args.log_interpolation_channels,
         )
 
     new_dx = dx_m if target_sizes["x"] == 1 else abs(
@@ -1528,7 +1532,14 @@ def load_config(config_path: Path) -> SimpleNamespace:
     resampling = config.get("resampling", {})
     _check_keys(
         resampling,
-        {"factors", "target_shape", "target_spacing_m", "default", "channels"},
+        {
+            "factors",
+            "target_shape",
+            "target_spacing_m",
+            "default",
+            "channels",
+            "log_space",
+        },
         "resampling",
     )
     factors = dict(resampling.get("factors", {}))
@@ -1563,6 +1574,22 @@ def load_config(config_path: Path) -> SimpleNamespace:
     )
     for channel, methods in interpolation_channels.items():
         _check_keys(methods, {"x", "y", "z"}, f"resampling.channels.{channel}")
+    configured_log_space = dict(resampling.get("log_space", {}))
+    _check_keys(
+        configured_log_space,
+        set(_RESAMPLED_CHANNELS),
+        "resampling.log_space",
+    )
+    log_interpolation_channels = set(_DEFAULT_LOG_INTERPOLATED_CHANNELS)
+    for channel, enabled in configured_log_space.items():
+        if not isinstance(enabled, bool):
+            raise ValueError(
+                f"[resampling.log_space].{channel} must be true or false"
+            )
+        if enabled:
+            log_interpolation_channels.add(channel)
+        else:
+            log_interpolation_channels.discard(channel)
 
     validation = config.get("validation", {})
     _check_keys(
@@ -1639,6 +1666,7 @@ def load_config(config_path: Path) -> SimpleNamespace:
         upsample_target_spacing_m=target_spacing_m,
         interpolation_default=interpolation_default,
         interpolation_channels=interpolation_channels,
+        log_interpolation_channels=frozenset(log_interpolation_channels),
         temperature_floor_k=temperature_floor_k,
         positive_channels=positive_channels,
         continuity_max_log10_step=continuity,

@@ -300,6 +300,9 @@ class AtmosphereResamplingTests(unittest.TestCase):
             upsample_target_spacing_m={},
             interpolation_default={"x": "nearest", "y": "linear", "z": "linear"},
             interpolation_channels={"temperature": {"z": "cubic"}},
+            log_interpolation_channels={
+                "temperature", "rho", "ne", "pgas", "hydrogen_populations"
+            },
         )
         result, height, dx, dy = self.resample(
             args, fields, np.array([100.0, 0.0]), 4.0, 6.0
@@ -310,6 +313,36 @@ class AtmosphereResamplingTests(unittest.TestCase):
         np.testing.assert_allclose(height, [100.0, 50.0, 0.0])
         self.assertEqual(dx, 2.0)
         self.assertEqual(dy, 3.0)
+
+    def test_pgas_is_interpolated_in_log_space(self):
+        ones = np.ones((2, 1, 1), dtype=np.float32)
+        fields = {
+            "temperature": ones * 5000.0,
+            "rho": ones * 1e-4,
+            "vx": np.zeros_like(ones),
+            "vy": np.zeros_like(ones),
+            "vz": np.zeros_like(ones),
+            "pgas": np.array([1.0, 100.0], dtype=np.float32).reshape(2, 1, 1),
+        }
+        args = types.SimpleNamespace(
+            upsample_factors={"x": 2},
+            upsample_target_shape={},
+            upsample_target_spacing_m={},
+            interpolation_default={"x": "linear", "y": "linear", "z": "linear"},
+            interpolation_channels={},
+            log_interpolation_channels={"pgas"},
+        )
+
+        result, _, _, _ = self.resample(
+            args, fields, np.array([0.0]), 1.0, 1.0
+        )
+        np.testing.assert_allclose(result["pgas"][:, 0, 0], [1.0, 10.0, 100.0])
+
+        args.log_interpolation_channels = set()
+        result, _, _, _ = self.resample(
+            args, fields, np.array([0.0]), 1.0, 1.0
+        )
+        np.testing.assert_allclose(result["pgas"][:, 0, 0], [1.0, 50.5, 100.0])
 
     def test_target_physical_spacing_is_used_exactly(self):
         base = np.arange(12, dtype=np.float32).reshape(3, 2, 2)
@@ -327,6 +360,9 @@ class AtmosphereResamplingTests(unittest.TestCase):
             upsample_target_spacing_m={"x": 2.0, "y": 3.0, "z": 25.0},
             interpolation_default={"x": "linear", "y": "linear", "z": "linear"},
             interpolation_channels={},
+            log_interpolation_channels={
+                "temperature", "rho", "ne", "pgas", "hydrogen_populations"
+            },
         )
         result, height, dx, dy = self.resample(
             args, fields, np.array([100.0, 0.0]), 4.0, 6.0
@@ -431,6 +467,8 @@ z = "cubic"
 z = "linear"
 [resampling.channels.rho]
 x = "cubic"
+[resampling.log_space]
+pgas = false
 
 [validation]
 positive_channels = ["temperature", "rho", "ne"]
@@ -450,6 +488,8 @@ z = 2.0
                 {"x": 2000.0, "y": 3000.0, "z": 4000.0},
             )
             self.assertEqual(args.interpolation_channels["rho"]["x"], "cubic")
+            self.assertNotIn("pgas", args.log_interpolation_channels)
+            self.assertIn("rho", args.log_interpolation_channels)
             self.assertEqual(args.eos_backend, "python")
             self.assertEqual(args.eos_workers, 2)
             self.assertTrue(args.overwrite)
