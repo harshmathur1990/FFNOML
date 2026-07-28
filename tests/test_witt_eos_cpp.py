@@ -382,9 +382,11 @@ class AtmosphereResamplingTests(unittest.TestCase):
             "vy": good,
             "vz": good,
             "ne": good * 1e16,
+            "pgas": good * 1e4,
+            "hydrogen_populations": np.ones((2, 1, 1, 6), dtype=np.float32),
         }
         args = types.SimpleNamespace(
-            positive_channels=("temperature", "rho", "ne"),
+            positive_channels=("temperature", "rho", "ne", "pgas"),
             continuity_max_log10_step={"rho": {"x": 1.0}, "ne": {"x": 1.0}},
         )
         self.validate(args, fields)

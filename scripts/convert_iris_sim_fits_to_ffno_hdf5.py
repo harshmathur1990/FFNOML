@@ -878,9 +878,11 @@ def _resample_atmosphere(
 
 def _validate_atmosphere(args, fields: dict[str, np.ndarray]) -> None:
     """Check finiteness, positivity, and configured adjacent-cell continuity."""
-    shapes = {field.shape for field in fields.values()}
-    if len(shapes) != 1:
-        raise ValueError(f"Atmosphere channels have inconsistent shapes: {shapes}")
+    spatial_shapes = {field.shape[:3] for field in fields.values()}
+    if len(spatial_shapes) != 1:
+        raise ValueError(
+            f"Atmosphere channels have inconsistent spatial shapes: {spatial_shapes}"
+        )
     for channel, values in fields.items():
         if not np.all(np.isfinite(values)):
             raise ValueError(f"{channel} contains NaN or Inf")
@@ -1407,8 +1409,11 @@ def convert(args) -> None:
         args, electron_source, resampling_fields
     )
 
+    # Validate the complete final-grid atmosphere before narrowing it to the six
+    # FFNO input channels. This keeps internal EOS inputs such as pgas available
+    # to configurable positivity and continuity checks.
+    _validate_atmosphere(args, resampling_fields)
     fields = {channel: resampling_fields[channel] for channel in _OUTPUT_CHANNELS}
-    _validate_atmosphere(args, fields)
     temp = fields["temperature"]
     rho = fields["rho"]
     vx = fields["vx"]
