@@ -873,7 +873,7 @@ def make_line_core_intensity_compare_plots():
 
         for column, source, title in (
             (first_column, "ml", "ML"),
-            (first_column + 1, "bifrost", "Bifrost"),
+            (first_column + 1, "bifrost", "Multi3D"),
         ):
             intensity = data[source]
             extent = (
