@@ -1,12 +1,12 @@
 #!/bin/bash
 #SBATCH --job-name=FNOML_train_julia
 #SBATCH --partition=accel
-#SBATCH --nodes=8
+#SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=4
 #SBATCH --mem-per-gpu=40G
 #SBATCH --cpus-per-task=32
-#SBATCH --time=1-00:00:00
+#SBATCH --time=0-01:00:00
 #SBATCH --account=nn2834k
 #SBATCH --output=slurm-%j.out
 #SBATCH --error=slurm-%j.err
