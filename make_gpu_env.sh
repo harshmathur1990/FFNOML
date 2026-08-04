@@ -24,7 +24,7 @@ source /cluster/home/harshm/loadnvidia.sh
 #module load NRIS/GPU
 #module load PyTorch/2.10.0
 
-repository_dir=${FNOML_REPO_DIR:-/cluster/work/projects/nn2834k/harshm/FFNOML}
+repository_dir=${FNOML_REPO_DIR:-/cluster/work/projects/nn2834k/harshm/FFNOMLcopy}
 cd "${repository_dir}"
 
 # Keep the Julia environment and downloaded packages on persistent shared
@@ -45,14 +45,14 @@ echo "Start: $(date)"
 
 # This runs once in the batch shell before any srun workers are launched, so
 # multiple ranks never write the Julia environment concurrently. Muspel is
-# deliberately tracked from the requested Git SSH repository rather than from
-# the General registry. Base.Threads is part of Julia and needs no Pkg.add.
+# deliberately installed from the existing shared cluster checkout rather than
+# cloned from Git. Base.Threads is part of Julia and needs no Pkg.add.
 julia --project="${JULIA_PROJECT}" --startup-file=no -e '
 using Pkg
 
 project = ENV["JULIA_PROJECT"]
 Pkg.activate(project)
-Pkg.add(PackageSpec(url="git@github.com:harshmathur1990/Muspel.jl.git"))
+Pkg.develop(path="/cluster/work/projects/nn2834k/harshm/Muspel.jl")
 Pkg.add([
     "StaticArrays",
     "AtomicData",
