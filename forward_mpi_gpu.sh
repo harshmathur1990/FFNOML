@@ -38,6 +38,7 @@ trap record_slurm_termination TERM INT
 
 export JULIA_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 export OMP_NUM_THREADS=1
+export HYDROGEN_SE_WAVELENGTH_STRIDE=${HYDROGEN_SE_WAVELENGTH_STRIDE:-1}
 export NCCL_DEBUG=${NCCL_DEBUG:-ERROR}
 export HSA_FORCE_FINE_GRAIN_PCIE=1
 export FI_MR_CACHE_MONITOR=userfaultfd
@@ -61,5 +62,7 @@ srun --ntasks="${SLURM_NTASKS}" \
     --cpu-bind=cores \
     julia --threads="${JULIA_NUM_THREADS}" Forward.jl \
         --mpi \
+        --population-consistency-mode hydrogen-se-3d \
+        --hydrogen-se-wavelength-stride "${HYDROGEN_SE_WAVELENGTH_STRIDE}" \
         --fsdp-launcher "${repository_dir}/forward_fsdppredict.sh" \
         "$@"

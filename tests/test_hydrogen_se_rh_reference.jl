@@ -56,61 +56,74 @@ end
 
 @testset "RH scattering fixed point" begin
     nz = 5
+    x = [0.0]
+    y = [0.0]
     z = collect(range(0.0, 8.0e5; length=nz))
-    extinction = fill(2.0e-6, nz)
-    scattering = fill(3.0e-7, nz)
-    true_emissivity = collect(range(1.0e-3, 1.8e-3; length=nz)) .* extinction
+    extinction = fill(2.0e-6, nz, 1, 1)
+    scattering = fill(3.0e-7, nz, 1, 1)
+    true_emissivity = reshape(
+        collect(range(1.0e-3, 1.8e-3; length=nz)), nz, 1, 1,
+    ) .* extinction
     mus = [0.211324865405187, 0.788675134594813]
     weights = [0.5, 0.5]
-    arrays = [zeros(nz) for _ in 1:7]
-    mean_intensity, source, trial, downward, upward, ray_extinction, check_j = arrays
+    azimuths = [π / 4, 3π / 4, 5π / 4, 7π / 4]
+    azimuth_weights = fill(0.25, 4)
+    arrays = [zeros(nz, 1, 1) for _ in 1:4]
+    mean_intensity, source, trial, intensity = arrays
+    check_j = zeros(nz, 1, 1)
 
-    iterations, residual = hse_formal_mean_intensity_scattering!(
+    iterations, residual = hse_formal_mean_intensity_scattering_3d!(
         mean_intensity,
+        x,
+        y,
         z,
         extinction,
         true_emissivity,
         scattering,
         mus,
         weights,
+        azimuths,
+        azimuth_weights,
         source,
         trial,
-        downward,
-        upward,
-        ray_extinction;
+        intensity;
         max_iterations=200,
         tolerance=1e-8,
     )
     @. source = (true_emissivity + scattering * mean_intensity) / extinction
-    hse_formal_mean_intensity!(
+    hse_formal_mean_intensity_3d!(
         check_j,
+        x,
+        y,
         z,
         extinction,
         source,
         mus,
         weights,
-        downward,
-        upward,
-        ray_extinction,
+        azimuths,
+        azimuth_weights,
+        intensity,
     )
     @test iterations > 1
     @test residual <= 1e-8
     @test hse_maximum_relative_radiation_change(check_j, mean_intensity) <= 1e-8
 
     fill!(scattering, 0.0)
-    iterations, residual = hse_formal_mean_intensity_scattering!(
+    iterations, residual = hse_formal_mean_intensity_scattering_3d!(
         mean_intensity,
+        x,
+        y,
         z,
         extinction,
         true_emissivity,
         scattering,
         mus,
         weights,
+        azimuths,
+        azimuth_weights,
         source,
         trial,
-        downward,
-        upward,
-        ray_extinction,
+        intensity,
     )
     @test iterations == 1
     @test residual == 0.0

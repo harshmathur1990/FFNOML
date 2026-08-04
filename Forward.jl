@@ -9,7 +9,7 @@
 #   - Two synthesis modes:
 #       (A) "ml"     : NLTE populations read directly from the ML prediction
 #       (B) "bifrost": NLTE populations read from Multi3D out_pop (and remapped)
-#   - Optional ML consistency iteration, either charge-only or preferred 1.5D
+#   - Optional ML consistency iteration, either charge-only or 3D
 #     hydrogen statistical equilibrium followed by charge conservation
 #   - Optional MPI x-slab decomposition for synthesis and both consistency modes
 #     with a single rank-0-owned distributed FFNoML launcher
@@ -56,7 +56,7 @@ const ELECTRON_DENSITY_INPUT_CHANNEL = 5
 const DEFAULT_POPULATION_CONSISTENCY_MODE = :charge_only
 const DEFAULT_HYDROGEN_SE_RELAXATION = 1.0
 const DEFAULT_HYDROGEN_SE_WAVELENGTH_STRIDE = 1
-const CONSISTENCY_CACHE_FORMAT_VERSION = 4
+const CONSISTENCY_CACHE_FORMAT_VERSION = 5
 
 function atom_tag(atom_names)
     return join(atom_names, "_")
@@ -670,7 +670,7 @@ function inspect_consistency_result(
                          hydrogen_source.mtime;
                          atol=1e-6,
                      )
-        if mode == :hydrogen_se_1p5d
+        if mode == :hydrogen_se_3d
             compatible = compatible && isapprox(
                 Float64(hdf_attribute(attrs, "hydrogen_se_relaxation", -1.0)),
                 Float64(hydrogen_se_relaxation);
@@ -1056,6 +1056,78 @@ function call_fsdppredict_collective!(
 end
 
 
+function hydrogen_se_update_3d_parallel(
+    atmos::Atmosphere3D,
+    nlte_h,
+    atom,
+    atom_file::String,
+    voigt_itp;
+    parallel::ForwardParallelContext,
+    global_nx::Int,
+    kwargs...,
+)
+    parallel.enabled || return hydrogen_se_update_3d(
+        atmos, nlte_h, atom, atom_file, voigt_itp; kwargs...,
+    )
+
+    # A 3D characteristic may cross an MPI x-slab boundary.  Gather the volume
+    # for the formal solution instead of silently treating rank boundaries as
+    # physical/periodic boundaries.  The corrected populations are scattered
+    # back before the distributed charge-conservation update continues.
+    global_x = parallel_gather_x(atmos.x, parallel; dimension=1)
+    atmosphere_fields = (
+        :temperature,
+        :velocity_x,
+        :velocity_y,
+        :velocity_z,
+        :electron_density,
+        :hydrogen1_density,
+        :proton_density,
+    )
+    global_fields = map(
+        field -> parallel_gather_x(getfield(atmos, field), parallel),
+        atmosphere_fields,
+    )
+    global_populations = parallel_gather_x(nlte_h, parallel; dimension=3)
+
+    root_result = parallel_root_call(parallel) do
+        global_atmosphere = Atmosphere3D(
+            global_nx,
+            atmos.ny,
+            atmos.nz,
+            global_x,
+            copy(atmos.y),
+            copy(atmos.z),
+            global_fields...,
+        )
+        hydrogen_se_update_3d(
+            global_atmosphere,
+            global_populations,
+            atom,
+            atom_file,
+            voigt_itp;
+            kwargs...,
+        )
+    end
+
+    corrected_chunks = if parallel_isroot(parallel)
+        corrected = root_result[1]
+        [
+            Array(@view corrected[:, :, parallel_partition(global_nx, rank, parallel.size), :])
+            for rank in 0:parallel.size-1
+        ]
+    else
+        nothing
+    end
+    local_corrected = parallel_scatter_objects(corrected_chunks, parallel)
+    diagnostics = parallel_bcast(
+        parallel_isroot(parallel) ? (root_result[2], root_result[3]) : nothing,
+        parallel,
+    )
+    return local_corrected, diagnostics[1], diagnostics[2]
+end
+
+
 function predict_with_charge_conservation(
     cfg,
     atmos::Atmosphere3D;
@@ -1073,7 +1145,7 @@ function predict_with_charge_conservation(
 )
     max_iterations > 0 || error("Charge-conservation max iterations must be positive")
     tolerance > 0 || error("Charge-conservation tolerance must be positive")
-    consistency_mode in (:charge_only, :hydrogen_se_1p5d) || error(
+    consistency_mode in (:charge_only, :hydrogen_se_3d) || error(
         "Unknown population consistency mode: $(consistency_mode)"
     )
 
@@ -1171,23 +1243,23 @@ function predict_with_charge_conservation(
     parallel_barrier(parallel)
 
     hse_setup_start = time()
-    if consistency_mode == :hydrogen_se_1p5d
+    if consistency_mode == :hydrogen_se_3d
         set_diagnostic_context!(diagnostics; phase="hydrogen_se_setup")
         parallel_println(
             parallel,
             "Preparing hydrogen SE Voigt and RH background-continuum data...",
         )
     end
-    voigt_itp = if consistency_mode == :hydrogen_se_1p5d
+    voigt_itp = if consistency_mode == :hydrogen_se_3d
         a = LinRange(Float32(cfg.voigt.a_min), Float32(cfg.voigt.a_max), cfg.voigt.a_n)
         v = LinRange(Float32(cfg.voigt.v_min), Float32(cfg.voigt.v_max), cfg.voigt.v_n)
         create_voigt_itp(a, v)
     else
         nothing
     end
-    hse_background_data = consistency_mode == :hydrogen_se_1p5d ?
+    hse_background_data = consistency_mode == :hydrogen_se_3d ?
                           hse_background_continuum_data() : nothing
-    if consistency_mode == :hydrogen_se_1p5d
+    if consistency_mode == :hydrogen_se_3d
         hse_setup_seconds = time() - hse_setup_start
         parallel_println(
             parallel,
@@ -1292,15 +1364,15 @@ function predict_with_charge_conservation(
         se_seconds = 0.0
         scattering_iterations = 0
         scattering_residual = 0.0
-        if consistency_mode == :hydrogen_se_1p5d
+        if consistency_mode == :hydrogen_se_3d
             set_diagnostic_context!(diagnostics; phase="hydrogen_statistical_equilibrium")
             parallel_println(
                 parallel,
-                "  solving hydrogen SE for $(global_nx * atmos.ny) columns " *
-                "across $(parallel.size) MPI rank(s)...",
+                "  solving 3D hydrogen SE on $(global_nx)×$(atmos.ny)×$(atmos.nz) cells...",
             )
             se_start = time()
-            corrected_h, se_residual, scattering_diagnostics = hydrogen_se_update_1p5d(
+            corrected_h, se_residual, scattering_diagnostics =
+                hydrogen_se_update_3d_parallel(
                 atmos,
                 nlte_h,
                 hydrogen_atom,
@@ -1309,6 +1381,8 @@ function predict_with_charge_conservation(
                 relaxation=hydrogen_se_relaxation,
                 wavelength_stride=hydrogen_se_wavelength_stride,
                 background_data=hse_background_data,
+                parallel=parallel,
+                global_nx=global_nx,
             )
             population_correction = maximum_relative_change(corrected_h, nlte_h)
             scattering_iterations = scattering_diagnostics.max_iterations
@@ -1334,7 +1408,7 @@ function predict_with_charge_conservation(
         scattering_iterations = Int(parallel_allreduce_max(scattering_iterations, parallel))
         scattering_residual = parallel_allreduce_max(scattering_residual, parallel)
         relative_change = parallel_allreduce_max(relative_change, parallel)
-        if consistency_mode == :hydrogen_se_1p5d
+        if consistency_mode == :hydrogen_se_3d
             parallel_println(parallel, "  max hydrogen SE residual           = $(se_residual)")
             parallel_println(
                 parallel,
@@ -1374,7 +1448,7 @@ function predict_with_charge_conservation(
         io_start = time()
         global_ne = parallel_gather_x(new_ne, parallel)
         global_ffno_hydrogen = parallel_gather_x(previous_ffno_hydrogen, parallel)
-        global_corrected_hydrogen = consistency_mode == :hydrogen_se_1p5d ?
+        global_corrected_hydrogen = consistency_mode == :hydrogen_se_3d ?
                                     parallel_gather_x(nlte_h, parallel) : nothing
         parallel_root_call(parallel) do
             write_consistency_checkpoint!(
@@ -2225,13 +2299,13 @@ Options:
   --charge-conservation-tolerance VALUE
       Maximum relative electron-density residual (default: 1e-4).
   --population-consistency-mode MODE
-      Population update mode: charge-only (default) or hydrogen-se-1p5d.
-      The latter performs a vertical-column formal solution and hydrogen
+      Population update mode: charge-only (default) or hydrogen-se-3d.
+      The latter performs a full-volume 3D formal solution and hydrogen
       statistical-equilibrium correction before charge conservation.
   --hydrogen-se-relaxation VALUE
       Fraction of the SE population correction to apply, in (0, 1] (default: 1).
   --hydrogen-se-wavelength-stride N
-      Use every Nth transition wavelength in hydrogen-se-1p5d (default: 1).
+      Use every Nth transition wavelength in hydrogen-se-3d (default: 1).
   --fsdp-nproc-per-node N
       Processes passed to torchrun for fsdppredict (default: 4).
   --fsdp-launcher PATH
@@ -2258,11 +2332,11 @@ end
 function parse_population_consistency_mode(value::AbstractString)
     normalized = lowercase(replace(value, "_" => "-"))
     normalized == "charge-only" && return :charge_only
-    normalized in ("preferred", "hydrogen-se", "hydrogen-se-1p5d") &&
-        return :hydrogen_se_1p5d
+    normalized in ("preferred", "hydrogen-se", "hydrogen-se-3d") &&
+        return :hydrogen_se_3d
     error(
         "Unknown population consistency mode $(value). " *
-        "Use charge-only or hydrogen-se-1p5d."
+        "Use charge-only or hydrogen-se-3d."
     )
 end
 

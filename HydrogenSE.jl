@@ -1,18 +1,19 @@
 """
 Hydrogen statistical-equilibrium correction used by Forward.jl.
 
-This is a 1.5D, complete-redistribution solver: each vertical column is
-independent, but all depths in a column are coupled by the formal solution.
+This is a 3D, complete-redistribution solver.  The formal solution follows
+inclined characteristics through the full Cartesian atmosphere, with periodic
+horizontal boundaries and zero/thermalized upper/lower vertical boundaries.
 All three velocity components enter bound-bound rates through their projection
-onto an azimuthal ray quadrature; the rays still sample only the local column.
+onto the 3D angular quadrature.
 It computes bound-bound and bound-free radiative rates, CE/CI/Omega electron
 collision rates, and solves the stationary hydrogen rate equations subject to
 hydrogen-particle conservation. Charge conservation remains in Forward.jl,
 where non-hydrogen ions are evaluated in LTE.
 
 This is intentionally a separate option from the inexpensive charge-only
-fixed-point iteration. It is not a full 3D MALI solver and does not implement
-PRD; PRD transitions are treated in CRD.
+fixed-point iteration.  It uses ordinary Lambda iteration for background
+scattering and does not implement PRD; PRD transitions are treated in CRD.
 """
 
 const HSE_H_PLANCK = 6.62607015e-34
@@ -81,7 +82,7 @@ function load_hydrogen_se_collisions(atom_file::String, atom)
             kind = Symbol(uppercase(rate_data["type"]))
             kind in (:CE, :CI, :OMEGA) || error(
                 "Unsupported hydrogen collision type $(rate_data["type"]) in $(atom_file). " *
-                "The hydrogen-se-1p5d solver currently supports CE, CI, and Omega."
+                "The hydrogen-se-3d solver currently supports CE, CI, and Omega."
             )
             temperature = Float64.(rate_data["temperature"]["value"])
             coefficient = Float64.(rate_data["data"]["value"])
@@ -132,61 +133,165 @@ function hse_subsample_grid(values, stride::Int)
 end
 
 
-function hse_formal_mean_intensity!(
+function hse_periodic_bracket(axis, coordinate)
+    n = length(axis)
+    n > 0 || error("A horizontal Hydrogen SE coordinate axis is empty")
+    n == 1 && return 1, 1, 0.0
+    all(diff(axis) .> 0) || error("Hydrogen SE horizontal axes must be increasing")
+
+    # The atmosphere coordinates are cell centres.  The missing interval from
+    # the last centre back to the first therefore has the representative grid
+    # spacing at the two periodic edges.
+    edge_spacing = 0.5 * ((axis[2] - axis[1]) + (axis[end] - axis[end - 1]))
+    period = axis[end] - axis[1] + edge_spacing
+    wrapped = mod(coordinate - axis[1], period) + axis[1]
+    if wrapped >= axis[end]
+        fraction = (wrapped - axis[end]) / (axis[1] + period - axis[end])
+        return n, 1, fraction
+    end
+    lower = searchsortedlast(axis, wrapped)
+    lower = clamp(lower, 1, n - 1)
+    fraction = (wrapped - axis[lower]) / (axis[lower + 1] - axis[lower])
+    return lower, lower + 1, fraction
+end
+
+
+function hse_bilinear_periodic(plane, x, y, x_coordinate, y_coordinate)
+    x0, x1, tx = hse_periodic_bracket(x, x_coordinate)
+    y0, y1, ty = hse_periodic_bracket(y, y_coordinate)
+    lower = muladd(tx, plane[y0, x1] - plane[y0, x0], plane[y0, x0])
+    upper = muladd(tx, plane[y1, x1] - plane[y1, x0], plane[y1, x0])
+    return muladd(ty, upper - lower, lower)
+end
+
+
+function hse_linear_characteristic(intensity_upwind, source_upwind, source_local, optical_depth)
+    optical_depth <= 0 && return intensity_upwind
+    if optical_depth < 1e-3
+        # Series forms avoid cancellation in the linear-source weights.
+        dt = optical_depth
+        attenuation = exp(-dt)
+        weight_local = dt / 2 - dt^2 / 6 + dt^3 / 24
+        weight_upwind = dt / 2 - dt^2 / 3 + dt^3 / 8
+    else
+        dt = optical_depth
+        attenuation = exp(-dt)
+        weight_local = (dt - 1 + attenuation) / dt
+        weight_upwind = (1 - (dt + 1) * attenuation) / dt
+    end
+    return intensity_upwind * attenuation +
+           weight_upwind * source_upwind + weight_local * source_local
+end
+
+
+"""Solve one 3D ordinate using horizontal-plane characteristics.
+
+The horizontal footprint on the preceding z plane is bilinearly interpolated
+with periodic x/y wrapping.  This is the long-horizontal-characteristic case
+used by 3D short-characteristic solvers when an inclined ray crosses one or
+more vertical cell walls before reaching the preceding horizontal plane.
+"""
+function hse_formal_direction_3d!(
+    intensity,
+    x,
+    y,
+    z,
+    extinction,
+    source,
+    mux,
+    muy,
+    muz,
+)
+    abs(muz) > eps(Float64) || error("Hydrogen SE rays may not be exactly horizontal")
+    size(intensity) == size(extinction) == size(source) || error(
+        "Hydrogen SE 3D formal-solution arrays differ in shape"
+    )
+    nz, ny, nx = size(extinction)
+    (length(x), length(y), length(z)) == (nx, ny, nz) || error(
+        "Hydrogen SE coordinates and atmosphere shape differ"
+    )
+    all(diff(z) .!= 0) && (all(diff(z) .> 0) || all(diff(z) .< 0)) || error(
+        "Hydrogen SE vertical coordinates must be strictly monotonic"
+    )
+
+    step = muz * (z[end] - z[1]) > 0 ? 1 : -1
+    first_plane = step > 0 ? 1 : nz
+    last_plane = step > 0 ? nz : 1
+    # z is a geometrical height: upward rays enter through a thermalized lower
+    # boundary, downward rays through a dark upper boundary.
+    if muz > 0
+        @views intensity[first_plane, :, :] .= source[first_plane, :, :]
+    else
+        @views fill!(intensity[first_plane, :, :], 0.0)
+    end
+
+    for k in (first_plane + step):step:last_plane
+        previous = k - step
+        dz = z[k] - z[previous]
+        distance = abs(dz / muz)
+        x_shift = mux / muz * dz
+        y_shift = muy / muz * dz
+        @views begin
+            previous_intensity = intensity[previous, :, :]
+            previous_extinction = extinction[previous, :, :]
+            previous_source = source[previous, :, :]
+            for ix in 1:nx, iy in 1:ny
+                upstream_x = x[ix] - x_shift
+                upstream_y = y[iy] - y_shift
+                intensity_upwind = hse_bilinear_periodic(
+                    previous_intensity, x, y, upstream_x, upstream_y,
+                )
+                extinction_upwind = hse_bilinear_periodic(
+                    previous_extinction, x, y, upstream_x, upstream_y,
+                )
+                source_upwind = hse_bilinear_periodic(
+                    previous_source, x, y, upstream_x, upstream_y,
+                )
+                optical_depth = 0.5 * (
+                    extinction_upwind + extinction[k, iy, ix]
+                ) * distance
+                intensity[k, iy, ix] = hse_linear_characteristic(
+                    intensity_upwind,
+                    source_upwind,
+                    source[k, iy, ix],
+                    optical_depth,
+                )
+            end
+        end
+    end
+    return intensity
+end
+
+
+function hse_formal_mean_intensity_3d!(
     mean_intensity,
+    x,
+    y,
     z,
     extinction,
     source,
     mus,
     weights,
-    downward,
-    upward,
-    ray_extinction,
+    azimuths,
+    azimuth_weights,
+    intensity,
 )
     fill!(mean_intensity, 0.0)
-    for ray in eachindex(mus)
-        ray_extinction .= extinction ./ mus[ray]
-        Muspel.piecewise_1D_linear!(
-            z,
-            ray_extinction,
-            source,
-            downward;
-            to_end=true,
-            initial_condition=:zero,
-        )
-        Muspel.piecewise_1D_linear!(
-            z,
-            ray_extinction,
-            source,
-            upward;
-            to_end=false,
-            initial_condition=:source,
-        )
-        @. mean_intensity += 0.5 * weights[ray] * (downward + upward)
+    for ray in eachindex(mus), azimuth_index in eachindex(azimuths)
+        mu = mus[ray]
+        transverse = sqrt(max(0.0, 1 - mu^2))
+        mux = transverse * cos(azimuths[azimuth_index])
+        muy = transverse * sin(azimuths[azimuth_index])
+        angular_weight = 0.5 * weights[ray] * azimuth_weights[azimuth_index]
+        for direction in (-1.0, 1.0)
+            hse_formal_direction_3d!(
+                intensity, x, y, z, extinction, source,
+                direction * mux, direction * muy, direction * mu,
+            )
+            @. mean_intensity += angular_weight * intensity
+        end
     end
     return mean_intensity
-end
-
-
-function hse_formal_direction!(
-    intensity,
-    z,
-    extinction,
-    source,
-    mu,
-    ray_extinction;
-    to_end::Bool,
-)
-    ray_extinction .= extinction ./ mu
-    Muspel.piecewise_1D_linear!(
-        z,
-        ray_extinction,
-        source,
-        intensity;
-        to_end=to_end,
-        initial_condition=to_end ? :zero : :source,
-    )
-    return intensity
 end
 
 
@@ -245,19 +350,21 @@ function hse_maximum_relative_radiation_change(new_values, old_values)
 end
 
 
-function hse_formal_mean_intensity_scattering!(
+function hse_formal_mean_intensity_scattering_3d!(
     mean_intensity,
+    x,
+    y,
     z,
     extinction,
     true_emissivity,
     scattering,
     mus,
     weights,
+    azimuths,
+    azimuth_weights,
     source,
     trial_mean_intensity,
-    downward,
-    upward,
-    ray_extinction;
+    intensity;
     max_iterations::Int=HSE_SCATTERING_MAX_ITERATIONS,
     tolerance::Real=HSE_SCATTERING_TOLERANCE,
 )
@@ -265,39 +372,23 @@ function hse_formal_mean_intensity_scattering!(
     tolerance > 0 || error("Background-scattering tolerance must be positive")
     @. mean_intensity = true_emissivity / max(extinction - scattering, 1e-30)
 
-    # With no scattering this is one ordinary formal solution, not a fixed-point
-    # problem. Besides avoiding a redundant pass, this is a useful exact limit
-    # for comparison with RH's sca_c == 0 path.
     if all(iszero, scattering)
         @. source = true_emissivity / extinction
-        hse_formal_mean_intensity!(
-            mean_intensity,
-            z,
-            extinction,
-            source,
-            mus,
-            weights,
-            downward,
-            upward,
-            ray_extinction,
+        hse_formal_mean_intensity_3d!(
+            mean_intensity, x, y, z, extinction, source,
+            mus, weights, azimuths, azimuth_weights, intensity,
         )
         return 1, 0.0
     end
+
     residual = Inf
     iterations = 0
     for iteration in 1:max_iterations
         iterations = iteration
         @. source = (true_emissivity + scattering * mean_intensity) / extinction
-        hse_formal_mean_intensity!(
-            trial_mean_intensity,
-            z,
-            extinction,
-            source,
-            mus,
-            weights,
-            downward,
-            upward,
-            ray_extinction,
+        hse_formal_mean_intensity_3d!(
+            trial_mean_intensity, x, y, z, extinction, source,
+            mus, weights, azimuths, azimuth_weights, intensity,
         )
         residual = hse_maximum_relative_radiation_change(
             trial_mean_intensity,
@@ -307,7 +398,7 @@ function hse_formal_mean_intensity_scattering!(
         residual <= tolerance && break
     end
     residual <= tolerance || error(
-        "Background-scattering iteration did not converge: residual=$(residual), " *
+        "3D background-scattering iteration did not converge: residual=$(residual), " *
         "iterations=$(iterations), tolerance=$(tolerance)"
     )
     return iterations, residual
@@ -327,9 +418,19 @@ function hse_line_indices(atom, line)
 end
 
 
-function hse_add_bound_bound_rates!(
+function hse_cross_section(continuum, wavelength)
+    wavelengths = continuum.λ
+    wavelength < minimum(wavelengths) && return 0.0
+    wavelength > maximum(wavelengths) && return 0.0
+    return hse_interp_clamped(wavelength, wavelengths, continuum.σ)
+end
+
+
+function hse_add_bound_bound_rates_3d!(
     rates,
     atom,
+    x,
+    y,
     z,
     temperature,
     ne,
@@ -347,25 +448,24 @@ function hse_add_bound_bound_rates!(
     background_data;
     wavelength_stride::Int,
 )
-    nz = length(z)
-    extinction = zeros(Float64, nz)
-    emissivity = zeros(Float64, nz)
-    source = zeros(Float64, nz)
-    downward = zeros(Float64, nz)
-    upward = zeros(Float64, nz)
-    ray_extinction = zeros(Float64, nz)
-    profile = zeros(Float64, nz)
-    background_absorption = zeros(Float64, nz)
-    background_emissivity = zeros(Float64, nz)
-    background_scattering = zeros(Float64, nz)
-    profile_integral = zeros(Float64, nz)
-    j_integral = zeros(Float64, nz)
-    wavelength_profile_integral = zeros(Float64, nz)
-    wavelength_j_integral = zeros(Float64, nz)
-    mean_intensity = zeros(Float64, nz)
-    trial_mean_intensity = zeros(Float64, nz)
-    doppler_width = zeros(Float64, nz)
-    broadening = zeros(Float64, nz)
+    volume_shape = size(temperature)
+    work() = zeros(Float64, volume_shape)
+    extinction = work()
+    emissivity = work()
+    source = work()
+    intensity = work()
+    profile = work()
+    background_absorption = work()
+    background_emissivity = work()
+    background_scattering = work()
+    profile_integral = work()
+    j_integral = work()
+    wavelength_profile_integral = work()
+    wavelength_j_integral = work()
+    mean_intensity = work()
+    trial_mean_intensity = work()
+    doppler_width = work()
+    broadening = work()
     max_scattering_iterations = 0
     max_scattering_residual = 0.0
 
@@ -375,36 +475,25 @@ function hse_add_bound_bound_rates!(
         wavelength_weights = hse_trapezoid_weights(wavelengths)
         fill!(profile_integral, 0.0)
         fill!(j_integral, 0.0)
-
-        for depth in 1:nz
-            doppler_width[depth] = Muspel.doppler_width(
-                line.λ0,
-                line.mass,
-                temperature[depth],
+        for cell in CartesianIndices(temperature)
+            doppler_width[cell] = Muspel.doppler_width(
+                line.λ0, line.mass, temperature[cell],
             )
-            broadening[depth] = Muspel.calc_broadening(
-                line.γ,
-                temperature[depth],
-                ne[depth],
-                neutral_h[depth],
+            broadening[cell] = Muspel.calc_broadening(
+                line.γ, temperature[cell], ne[cell], neutral_h[cell],
             )
         end
 
         gamma_energy = HSE_H_PLANCK * HSE_C_LIGHT / (4π * line.λ0 * 1e-9)
         for wavelength_index in eachindex(wavelengths)
             λ = wavelengths[wavelength_index]
-            for depth in 1:nz
-                background_absorption[depth], background_emissivity[depth],
-                background_scattering[depth] =
-                    hse_background_continuum(
-                    λ,
-                    temperature[depth],
-                    ne[depth],
-                    neutral_h[depth],
-                    proton_h[depth],
+            for cell in CartesianIndices(temperature)
+                background_absorption[cell], background_emissivity[cell],
+                background_scattering[cell] = hse_background_continuum(
+                    λ, temperature[cell], ne[cell], neutral_h[cell], proton_h[cell],
                     background_data,
                 )
-                mean_intensity[depth] = Muspel.blackbody_λ(λ, temperature[depth])
+                mean_intensity[cell] = Muspel.blackbody_λ(λ, temperature[cell])
             end
 
             scattering_residual = Inf
@@ -415,123 +504,99 @@ function hse_add_bound_bound_rates!(
                 fill!(wavelength_profile_integral, 0.0)
                 fill!(wavelength_j_integral, 0.0)
 
-                for ray in eachindex(mus)
+                for ray in eachindex(mus), azimuth_index in eachindex(azimuths)
                     mu = mus[ray]
                     transverse = sqrt(max(0.0, 1 - mu^2))
-                    for azimuth_index in eachindex(azimuths)
-                        azimuth = azimuths[azimuth_index]
-                        horizontal_x = transverse * cos(azimuth)
-                        horizontal_y = transverse * sin(azimuth)
-                        angular_weight = 0.5 * ray_weights[ray] *
-                                         azimuth_weights[azimuth_index]
-
-                        # The two directions are antipodal. Muspel's convention
-                        # uses a negative projection for integration toward the
-                        # end of the height array and a positive projection for
-                        # integration toward its beginning.
-                        for direction in (-1.0, 1.0)
-                            for depth in 1:nz
-                                projected_velocity = direction * (
-                                    mu * velocity_z[depth] +
-                                    horizontal_x * velocity_x[depth] +
-                                    horizontal_y * velocity_y[depth]
-                                )
-                                damping = Muspel.damping(
-                                    broadening[depth],
-                                    λ,
-                                    doppler_width[depth],
-                                )
-                                profile_velocity = (
-                                    λ - line.λ0 +
-                                    line.λ0 * projected_velocity / HSE_C_LIGHT
-                                ) / doppler_width[depth]
-                                profile[depth] = real(
-                                    voigt_itp(damping, abs(profile_velocity))
-                                ) / (sqrt(π) * doppler_width[depth])
-                                line_factor = gamma_energy * profile[depth]
-                                line_extinction = line_factor * (
-                                    populations[depth, lower] * line.Blu -
-                                    populations[depth, upper] * line.Bul
-                                ) * 1e9
-                                line_emissivity = line_factor *
-                                                  populations[depth, upper] *
-                                                  line.Aul * 1e-3
-                                extinction[depth] = max(
-                                    background_absorption[depth] +
-                                    background_scattering[depth] + line_extinction,
-                                    1e-30,
-                                )
-                                emissivity[depth] = max(
-                                    background_emissivity[depth] + line_emissivity,
-                                    0.0,
-                                )
-                                source[depth] = (
-                                    emissivity[depth] +
-                                    background_scattering[depth] * mean_intensity[depth]
-                                ) / extinction[depth]
-                            end
-
-                            intensity = direction < 0 ? downward : upward
-                            hse_formal_direction!(
-                                intensity,
-                                z,
-                                extinction,
-                                source,
-                                mu,
-                                ray_extinction;
-                                to_end=direction < 0,
+                    horizontal_x = transverse * cos(azimuths[azimuth_index])
+                    horizontal_y = transverse * sin(azimuths[azimuth_index])
+                    angular_weight = 0.5 * ray_weights[ray] *
+                                     azimuth_weights[azimuth_index]
+                    for direction in (-1.0, 1.0)
+                        mux = direction * horizontal_x
+                        muy = direction * horizontal_y
+                        muz = direction * mu
+                        for cell in CartesianIndices(temperature)
+                            projected_velocity = mux * velocity_x[cell] +
+                                                 muy * velocity_y[cell] +
+                                                 muz * velocity_z[cell]
+                            damping = Muspel.damping(
+                                broadening[cell], λ, doppler_width[cell],
                             )
-                            integration_weight = wavelength_weights[wavelength_index] *
-                                                 angular_weight
-                            @. trial_mean_intensity += angular_weight * intensity
-                            @. wavelength_profile_integral += integration_weight * profile
-                            @. wavelength_j_integral += integration_weight * profile * intensity
+                            profile_velocity = (
+                                λ - line.λ0 +
+                                line.λ0 * projected_velocity / HSE_C_LIGHT
+                            ) / doppler_width[cell]
+                            profile[cell] = real(
+                                voigt_itp(damping, abs(profile_velocity))
+                            ) / (sqrt(π) * doppler_width[cell])
+                            line_factor = gamma_energy * profile[cell]
+                            line_extinction = line_factor * (
+                                populations[cell, lower] * line.Blu -
+                                populations[cell, upper] * line.Bul
+                            ) * 1e9
+                            line_emissivity = line_factor * populations[cell, upper] *
+                                              line.Aul * 1e-3
+                            extinction[cell] = max(
+                                background_absorption[cell] +
+                                background_scattering[cell] + line_extinction,
+                                1e-30,
+                            )
+                            emissivity[cell] = max(
+                                background_emissivity[cell] + line_emissivity,
+                                0.0,
+                            )
+                            source[cell] = (
+                                emissivity[cell] +
+                                background_scattering[cell] * mean_intensity[cell]
+                            ) / extinction[cell]
                         end
+                        hse_formal_direction_3d!(
+                            intensity, x, y, z, extinction, source, mux, muy, muz,
+                        )
+                        integration_weight = wavelength_weights[wavelength_index] *
+                                             angular_weight
+                        @. trial_mean_intensity += angular_weight * intensity
+                        @. wavelength_profile_integral += integration_weight * profile
+                        @. wavelength_j_integral += integration_weight * profile * intensity
                     end
                 end
 
                 scattering_residual = hse_maximum_relative_radiation_change(
-                    trial_mean_intensity,
-                    mean_intensity,
+                    trial_mean_intensity, mean_intensity,
                 )
                 mean_intensity .= trial_mean_intensity
                 scattering_residual <= HSE_SCATTERING_TOLERANCE && break
             end
             scattering_residual <= HSE_SCATTERING_TOLERANCE || error(
-                "Line background-scattering iteration did not converge for λ=$(λ) nm: " *
+                "3D line background-scattering iteration did not converge for λ=$(λ) nm: " *
                 "residual=$(scattering_residual), iterations=$(scattering_iterations)"
             )
             profile_integral .+= wavelength_profile_integral
             j_integral .+= wavelength_j_integral
             max_scattering_iterations = max(
-                max_scattering_iterations,
-                scattering_iterations,
+                max_scattering_iterations, scattering_iterations,
             )
             max_scattering_residual = max(max_scattering_residual, scattering_residual)
         end
 
-        for depth in 1:nz
-            jbar_per_nm = j_integral[depth] / max(profile_integral[depth], eps(Float64))
-            jbar_per_m = jbar_per_nm * 1e12 # kW m^-2 nm^-1 -> W m^-3
-            rates[lower, upper, depth] += line.Blu * jbar_per_m
-            rates[upper, lower, depth] += line.Aul + line.Bul * jbar_per_m
+        for cell in CartesianIndices(temperature)
+            jbar_per_nm = j_integral[cell] /
+                          max(profile_integral[cell], eps(Float64))
+            jbar_per_m = jbar_per_nm * 1e12
+            k, iy, ix = Tuple(cell)
+            rates[lower, upper, k, iy, ix] += line.Blu * jbar_per_m
+            rates[upper, lower, k, iy, ix] += line.Aul + line.Bul * jbar_per_m
         end
     end
     return max_scattering_iterations, max_scattering_residual
 end
 
 
-function hse_cross_section(continuum, wavelength)
-    wavelengths = continuum.λ
-    wavelength < minimum(wavelengths) && return 0.0
-    wavelength > maximum(wavelengths) && return 0.0
-    return hse_interp_clamped(wavelength, wavelengths, continuum.σ)
-end
-
-
-function hse_add_bound_free_rates!(
+function hse_add_bound_free_rates_3d!(
     rates,
     atom,
+    x,
+    y,
     z,
     temperature,
     ne,
@@ -541,23 +606,26 @@ function hse_add_bound_free_rates!(
     nstar,
     mus,
     ray_weights,
+    azimuths,
+    azimuth_weights,
     background_data;
     wavelength_stride::Int,
 )
     isempty(atom.continua) && return 0, 0.0
-    all_wavelengths = sort(unique(vcat([Float64.(continuum.λ) for continuum in atom.continua]...)))
+    all_wavelengths = sort(unique(vcat(
+        [Float64.(continuum.λ) for continuum in atom.continua]...,
+    )))
     wavelengths = hse_subsample_grid(all_wavelengths, wavelength_stride)
     wavelength_weights = hse_trapezoid_weights(wavelengths)
-    nz = length(z)
-    extinction = zeros(Float64, nz)
-    emissivity = zeros(Float64, nz)
-    source = zeros(Float64, nz)
-    mean_intensity = zeros(Float64, nz)
-    trial_mean_intensity = zeros(Float64, nz)
-    scattering = zeros(Float64, nz)
-    downward = zeros(Float64, nz)
-    upward = zeros(Float64, nz)
-    ray_extinction = zeros(Float64, nz)
+    volume_shape = size(temperature)
+    work() = zeros(Float64, volume_shape)
+    extinction = work()
+    emissivity = work()
+    source = work()
+    mean_intensity = work()
+    trial_mean_intensity = work()
+    scattering = work()
+    intensity = work()
     max_scattering_iterations = 0
     max_scattering_residual = 0.0
 
@@ -568,72 +636,65 @@ function hse_add_bound_free_rates!(
         cross_sections = [hse_cross_section(continuum, λ) for continuum in atom.continua]
         all(iszero, cross_sections) && continue
 
-        for depth in 1:nz
+        for cell in CartesianIndices(temperature)
             background_absorption, background_emissivity, background_scattering =
                 hse_background_continuum(
-                λ,
-                temperature[depth],
-                ne[depth],
-                neutral_h[depth],
-                proton_h[depth],
-                background_data,
-            )
+                    λ, temperature[cell], ne[cell], neutral_h[cell], proton_h[cell],
+                    background_data,
+                )
             total_extinction = background_absorption + background_scattering
             total_emissivity = background_emissivity
-            scattering[depth] = background_scattering
-            exponential = exp(-HSE_H_PLANCK * HSE_C_LIGHT /
-                              (λ_m * HSE_K_BOLTZMANN * temperature[depth]))
-
+            scattering[cell] = background_scattering
+            exponential = exp(
+                -HSE_H_PLANCK * HSE_C_LIGHT /
+                (λ_m * HSE_K_BOLTZMANN * temperature[cell]),
+            )
             for (continuum_index, continuum) in enumerate(atom.continua)
                 cross_section = cross_sections[continuum_index]
                 cross_section == 0 && continue
                 lower = continuum.lo
                 upper = continuum.up
-                gij = nstar[depth, lower] / max(nstar[depth, upper], eps(Float64)) * exponential
+                gij = nstar[cell, lower] /
+                      max(nstar[cell, upper], eps(Float64)) * exponential
                 total_extinction += cross_section * (
-                    populations[depth, lower] - populations[depth, upper] * gij
+                    populations[cell, lower] - populations[cell, upper] * gij
                 )
-                total_emissivity += populations[depth, upper] * gij * cross_section *
+                total_emissivity += populations[cell, upper] * gij * cross_section *
                                     planck_numerator * 1e-12
             end
-            extinction[depth] = max(total_extinction, 1e-30)
-            emissivity[depth] = max(total_emissivity, 0.0)
-            source[depth] = emissivity[depth] / extinction[depth]
+            extinction[cell] = max(total_extinction, 1e-30)
+            emissivity[cell] = max(total_emissivity, 0.0)
         end
 
         scattering_iterations, scattering_residual =
-            hse_formal_mean_intensity_scattering!(
-            mean_intensity,
-            z,
-            extinction,
-            emissivity,
-            scattering,
-            mus,
-            ray_weights,
-            source,
-            trial_mean_intensity,
-            downward,
-            upward,
-            ray_extinction,
-        )
+            hse_formal_mean_intensity_scattering_3d!(
+                mean_intensity, x, y, z, extinction, emissivity, scattering,
+                mus, ray_weights, azimuths, azimuth_weights,
+                source, trial_mean_intensity, intensity,
+            )
         max_scattering_iterations = max(max_scattering_iterations, scattering_iterations)
         max_scattering_residual = max(max_scattering_residual, scattering_residual)
         integration_width_m = wavelength_weights[wavelength_index] * 1e-9
-        for depth in 1:nz
-            j_per_m = mean_intensity[depth] * 1e12
-            exponential = exp(-HSE_H_PLANCK * HSE_C_LIGHT /
-                              (λ_m * HSE_K_BOLTZMANN * temperature[depth]))
+        for cell in CartesianIndices(temperature)
+            j_per_m = mean_intensity[cell] * 1e12
+            exponential = exp(
+                -HSE_H_PLANCK * HSE_C_LIGHT /
+                (λ_m * HSE_K_BOLTZMANN * temperature[cell]),
+            )
             photon_factor = 4π * λ_m * integration_width_m /
                             (HSE_H_PLANCK * HSE_C_LIGHT)
+            k, iy, ix = Tuple(cell)
             for (continuum_index, continuum) in enumerate(atom.continua)
                 cross_section = cross_sections[continuum_index]
                 cross_section == 0 && continue
                 lower = continuum.lo
                 upper = continuum.up
-                gij = nstar[depth, lower] / max(nstar[depth, upper], eps(Float64)) * exponential
-                rates[lower, upper, depth] += cross_section * j_per_m * photon_factor
-                rates[upper, lower, depth] += cross_section * gij *
-                                              (planck_numerator + j_per_m) * photon_factor
+                gij = nstar[cell, lower] /
+                      max(nstar[cell, upper], eps(Float64)) * exponential
+                rates[lower, upper, k, iy, ix] +=
+                    cross_section * j_per_m * photon_factor
+                rates[upper, lower, k, iy, ix] += cross_section * gij *
+                    (planck_numerator + j_per_m) * photon_factor
             end
         end
     end
@@ -641,40 +702,40 @@ function hse_add_bound_free_rates!(
 end
 
 
-function hse_add_collisional_rates!(rates, collisions, atom, temperature, ne, nstar)
+function hse_add_collisional_rates_3d!(rates, collisions, atom, temperature, ne, nstar)
     omega_constant = HSE_E_RYDBERG / sqrt(HSE_M_ELECTRON) * π * HSE_R_BOHR^2 *
                      sqrt(8 / (π * HSE_K_BOLTZMANN))
     for collision in collisions
         lower = collision.lower
         upper = collision.upper
         energy_difference = atom.χ[upper] - atom.χ[lower]
-        for depth in eachindex(temperature)
+        for cell in CartesianIndices(temperature)
             coefficient = max(
                 hse_interp_clamped(
-                    temperature[depth],
-                    collision.temperature,
-                    collision.coefficient,
+                    temperature[cell], collision.temperature, collision.coefficient,
                 ),
                 0.0,
             )
             if collision.kind == :CE
-                downward = coefficient * ne[depth] * atom.g[lower] / atom.g[upper] *
-                           sqrt(temperature[depth])
-                upward = downward * nstar[depth, upper] /
-                         max(nstar[depth, lower], eps(Float64))
+                downward = coefficient * ne[cell] * atom.g[lower] / atom.g[upper] *
+                           sqrt(temperature[cell])
+                upward = downward * nstar[cell, upper] /
+                         max(nstar[cell, lower], eps(Float64))
             elseif collision.kind == :CI
-                upward = coefficient * ne[depth] * sqrt(temperature[depth]) *
-                         exp(-energy_difference / (HSE_K_BOLTZMANN * temperature[depth]))
-                downward = upward * nstar[depth, lower] /
-                           max(nstar[depth, upper], eps(Float64))
-            else # Omega
-                downward = omega_constant * ne[depth] * coefficient /
-                           (atom.g[upper] * sqrt(temperature[depth]))
-                upward = downward * nstar[depth, upper] /
-                         max(nstar[depth, lower], eps(Float64))
+                upward = coefficient * ne[cell] * sqrt(temperature[cell]) *
+                         exp(-energy_difference /
+                             (HSE_K_BOLTZMANN * temperature[cell]))
+                downward = upward * nstar[cell, lower] /
+                           max(nstar[cell, upper], eps(Float64))
+            else
+                downward = omega_constant * ne[cell] * coefficient /
+                           (atom.g[upper] * sqrt(temperature[cell]))
+                upward = downward * nstar[cell, upper] /
+                         max(nstar[cell, lower], eps(Float64))
             end
-            rates[lower, upper, depth] += upward
-            rates[upper, lower, depth] += downward
+            k, iy, ix = Tuple(cell)
+            rates[lower, upper, k, iy, ix] += upward
+            rates[upper, lower, k, iy, ix] += downward
         end
     end
     return rates
@@ -728,7 +789,7 @@ function hse_rate_residual(rates, populations)
 end
 
 
-function hydrogen_se_update_1p5d(
+function hydrogen_se_update_3d(
     atmos::Atmosphere3D,
     nlte_h,
     atom,
@@ -743,6 +804,7 @@ function hydrogen_se_update_1p5d(
     background_data=nothing,
 )
     0 < relaxation <= 1 || error("Hydrogen SE relaxation must be in (0, 1]")
+    wavelength_stride > 0 || error("Hydrogen SE wavelength stride must be positive")
     length(mus) == length(ray_weights) || error("Hydrogen SE ray arrays differ in length")
     length(azimuths) == length(azimuth_weights) || error(
         "Hydrogen SE azimuth arrays differ in length"
@@ -752,12 +814,17 @@ function hydrogen_se_update_1p5d(
     all(>=(0), azimuth_weights) || error(
         "Hydrogen SE azimuth weights must be non-negative"
     )
-    isapprox(sum(ray_weights), 1.0; atol=1e-12) || error("Hydrogen SE ray weights must sum to one")
+    isapprox(sum(ray_weights), 1.0; atol=1e-12) || error(
+        "Hydrogen SE ray weights must sum to one"
+    )
     isapprox(sum(azimuth_weights), 1.0; atol=1e-12) || error(
         "Hydrogen SE azimuth weights must sum to one"
     )
     size(nlte_h)[1:3] == size(atmos.temperature) || error(
         "Hydrogen SE population and atmosphere shapes differ"
+    )
+    size(nlte_h, 4) == atom.nlevels || error(
+        "Hydrogen SE population level count differs from the atomic model"
     )
 
     collisions = load_hydrogen_se_collisions(atom_file, atom)
@@ -766,105 +833,69 @@ function hydrogen_se_update_1p5d(
     ray_weights_float = Float64.(ray_weights)
     azimuths_float = Float64.(azimuths)
     azimuth_weights_float = Float64.(azimuth_weights)
-    corrected = similar(nlte_h)
-    residuals = zeros(Float64, atmos.ny, atmos.nx)
-    scattering_iterations = zeros(Int, atmos.ny, atmos.nx)
-    scattering_residuals = zeros(Float64, atmos.ny, atmos.nx)
+    x = Float64.(atmos.x)
+    y = Float64.(atmos.y)
     z = Float64.(atmos.z)
-    total_hydrogen = atmos.hydrogen1_density .+ atmos.proton_density
-
-    column_count = atmos.nx * atmos.ny
-    # Flattening exposes every independent 1.5D column to Julia's scheduler,
-    # even when an MPI rank owns fewer x positions than Julia threads.
-    Threads.@threads for column in 1:column_count
-        x = div(column - 1, atmos.ny) + 1
-        y = mod(column - 1, atmos.ny) + 1
-        temperature = Float64.(@view atmos.temperature[:, y, x])
-        ne = Float64.(@view atmos.electron_density[:, y, x])
-        velocity_x = Float64.(@view atmos.velocity_x[:, y, x])
-        velocity_y = Float64.(@view atmos.velocity_y[:, y, x])
-        velocity_z = Float64.(@view atmos.velocity_z[:, y, x])
-        populations = Float64.(@view nlte_h[:, y, x, :])
-        n_h_total = Float64.(@view total_hydrogen[:, y, x])
-        neutral_h = vec(sum(populations[:, atom.stage .== 1]; dims=2))
-        proton_h = vec(sum(populations[:, atom.stage .> 1]; dims=2))
-        nstar = zeros(Float64, atmos.nz, atom.nlevels)
-        for depth in 1:atmos.nz
-            nstar[depth, :] .= Muspel.saha_boltzmann(
-                atom,
-                temperature[depth],
-                ne[depth],
-                1.0,
-            )
-        end
-
-        rates = zeros(Float64, atom.nlevels, atom.nlevels, atmos.nz)
-        bb_scattering_iterations, bb_scattering_residual = hse_add_bound_bound_rates!(
-            rates,
-            atom,
-            z,
-            temperature,
-            ne,
-            neutral_h,
-            proton_h,
-            velocity_x,
-            velocity_y,
-            velocity_z,
-            populations,
-            voigt_itp,
-            mus_float,
-            ray_weights_float,
-            azimuths_float,
-            azimuth_weights_float,
-            background_data;
-            wavelength_stride=wavelength_stride,
-        )
-        bf_scattering_iterations, bf_scattering_residual = hse_add_bound_free_rates!(
-            rates,
-            atom,
-            z,
-            temperature,
-            ne,
-            neutral_h,
-            proton_h,
-            populations,
-            nstar,
-            mus_float,
-            ray_weights_float,
-            background_data;
-            wavelength_stride=wavelength_stride,
-        )
-        hse_add_collisional_rates!(rates, collisions, atom, temperature, ne, nstar)
-
-        column_residual = 0.0
-        for depth in 1:atmos.nz
-            solved = hse_solve_rate_matrix(
-                @view(rates[:, :, depth]),
-                @view(populations[depth, :]),
-                n_h_total[depth],
-            )
-            solved .= (1 - relaxation) .* populations[depth, :] .+ relaxation .* solved
-            solved .*= n_h_total[depth] / max(sum(solved), eps(Float64))
-            corrected[depth, y, x, :] .= solved
-            column_residual = max(
-                column_residual,
-                hse_rate_residual(@view(rates[:, :, depth]), solved),
-            )
-        end
-        residuals[y, x] = column_residual
-        scattering_iterations[y, x] = max(
-            bb_scattering_iterations,
-            bf_scattering_iterations,
-        )
-        scattering_residuals[y, x] = max(
-            bb_scattering_residual,
-            bf_scattering_residual,
+    temperature = Float64.(atmos.temperature)
+    ne = Float64.(atmos.electron_density)
+    velocity_x = Float64.(atmos.velocity_x)
+    velocity_y = Float64.(atmos.velocity_y)
+    velocity_z = Float64.(atmos.velocity_z)
+    populations = Float64.(nlte_h)
+    total_hydrogen = Float64.(atmos.hydrogen1_density .+ atmos.proton_density)
+    neutral_h = dropdims(
+        sum(populations[:, :, :, atom.stage .== 1]; dims=4);
+        dims=4,
+    )
+    proton_h = dropdims(
+        sum(populations[:, :, :, atom.stage .> 1]; dims=4);
+        dims=4,
+    )
+    nstar = zeros(Float64, atmos.nz, atmos.ny, atmos.nx, atom.nlevels)
+    for cell in CartesianIndices(temperature)
+        nstar[cell, :] .= Muspel.saha_boltzmann(
+            atom, temperature[cell], ne[cell], 1.0,
         )
     end
 
+    rates = zeros(
+        Float64, atom.nlevels, atom.nlevels, atmos.nz, atmos.ny, atmos.nx,
+    )
+    bb_scattering_iterations, bb_scattering_residual =
+        hse_add_bound_bound_rates_3d!(
+            rates, atom, x, y, z, temperature, ne, neutral_h, proton_h,
+            velocity_x, velocity_y, velocity_z, populations, voigt_itp,
+            mus_float, ray_weights_float, azimuths_float, azimuth_weights_float,
+            background_data;
+            wavelength_stride=wavelength_stride,
+        )
+    bf_scattering_iterations, bf_scattering_residual =
+        hse_add_bound_free_rates_3d!(
+            rates, atom, x, y, z, temperature, ne, neutral_h, proton_h,
+            populations, nstar, mus_float, ray_weights_float,
+            azimuths_float, azimuth_weights_float, background_data;
+            wavelength_stride=wavelength_stride,
+        )
+    hse_add_collisional_rates_3d!(rates, collisions, atom, temperature, ne, nstar)
+
+    corrected = similar(nlte_h)
+    residuals = zeros(Float64, size(temperature))
+    cells = collect(CartesianIndices(temperature))
+    Threads.@threads for cell_index in eachindex(cells)
+        cell = cells[cell_index]
+        k, iy, ix = Tuple(cell)
+        local_rates = @view rates[:, :, k, iy, ix]
+        initial = @view populations[k, iy, ix, :]
+        solved = hse_solve_rate_matrix(local_rates, initial, total_hydrogen[cell])
+        solved .= (1 - relaxation) .* initial .+ relaxation .* solved
+        solved .*= total_hydrogen[cell] / max(sum(solved), eps(Float64))
+        corrected[k, iy, ix, :] .= solved
+        residuals[cell] = hse_rate_residual(local_rates, solved)
+    end
+
     return corrected, maximum(residuals), (
-        max_iterations=maximum(scattering_iterations),
-        max_residual=maximum(scattering_residuals),
+        max_iterations=max(bb_scattering_iterations, bf_scattering_iterations),
+        max_residual=max(bb_scattering_residual, bf_scattering_residual),
         tolerance=HSE_SCATTERING_TOLERANCE,
     )
 end
