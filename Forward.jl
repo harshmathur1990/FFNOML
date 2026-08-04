@@ -79,6 +79,52 @@ import config
 
 model_dir = config.MODEL_DIR.rstrip("/")
 for item in config.MULTI3D_PRED_DATA:
+    forward = item.get("FORWARD", True)
+    if not isinstance(forward, bool):
+        raise TypeError(
+            f'MULTI3D_PRED_DATA[{item.get("NAME", "<unnamed>")!r}]["FORWARD"] '
+            "must be True or False"
+        )
+    if not forward:
+        continue
+
+    nonlte_ne = item.get("NONLTE_NE")
+    if nonlte_ne is not None and not isinstance(nonlte_ne, bool):
+        raise TypeError(
+            f'MULTI3D_PRED_DATA[{item.get("NAME", "<unnamed>")!r}]["NONLTE_NE"] '
+            "must be True, False, or None"
+        )
+
+    max_iterations = item.get("CHARGE_CONSERVATION_MAX_ITERATIONS")
+    if max_iterations is not None and (
+        not isinstance(max_iterations, int)
+        or isinstance(max_iterations, bool)
+        or max_iterations < 0
+    ):
+        raise TypeError(
+            f'MULTI3D_PRED_DATA[{item.get("NAME", "<unnamed>")!r}]'
+            '["CHARGE_CONSERVATION_MAX_ITERATIONS"] must be a non-negative '
+            "integer or None"
+        )
+
+    consistency_mode = item.get("POPULATION_CONSISTENCY_MODE")
+    if consistency_mode is not None and not isinstance(consistency_mode, str):
+        raise TypeError(
+            f'MULTI3D_PRED_DATA[{item.get("NAME", "<unnamed>")!r}]'
+            '["POPULATION_CONSISTENCY_MODE"] must be a string or None'
+        )
+
+    wavelength_stride = item.get("HYDROGEN_SE_WAVELENGTH_STRIDE")
+    if wavelength_stride is not None and (
+        not isinstance(wavelength_stride, int)
+        or isinstance(wavelength_stride, bool)
+        or wavelength_stride <= 0
+    ):
+        raise TypeError(
+            f'MULTI3D_PRED_DATA[{item.get("NAME", "<unnamed>")!r}]'
+            '["HYDROGEN_SE_WAVELENGTH_STRIDE"] must be a positive integer or None'
+        )
+
     print("\\t".join([
         item["NAME"],
         item.get("SIM_NAME", "_".join(item["NAME"].split("_")[:-1])),
@@ -88,6 +134,10 @@ for item in config.MULTI3D_PRED_DATA:
         item.get("TRAIN_DIR", model_dir).rstrip("/"),
         config.MODEL,
         config.MODEL_FILE,
+        "auto" if nonlte_ne is None else str(nonlte_ne).lower(),
+        "auto" if max_iterations is None else str(max_iterations),
+        "auto" if consistency_mode is None else consistency_mode,
+        "auto" if wavelength_stride is None else str(wavelength_stride),
     ]))
 """
 
@@ -99,8 +149,17 @@ for item in config.MULTI3D_PRED_DATA:
     for line in split(chomp(output), "\n")
         isempty(line) && continue
         fields = split(line, "\t")
-        length(fields) == 8 || error("Unexpected config.py output: $(line)")
-        name, sim_name, snap, mesh_file, atmos_file, train_dir, model, model_file = fields
+        length(fields) == 12 || error("Unexpected config.py output: $(line)")
+        name, sim_name, snap, mesh_file, atmos_file, train_dir, model, model_file,
+            nonlte_ne_value, max_iterations_value, consistency_mode_value,
+            wavelength_stride_value = fields
+        nonlte_ne = nonlte_ne_value == "auto" ? nothing : nonlte_ne_value == "true"
+        max_iterations = max_iterations_value == "auto" ?
+                         nothing : parse(Int, max_iterations_value)
+        consistency_mode = consistency_mode_value == "auto" ?
+                           nothing : consistency_mode_value
+        wavelength_stride = wavelength_stride_value == "auto" ?
+                            nothing : parse(Int, wavelength_stride_value)
         push!(
             pred_data,
             (
@@ -112,6 +171,10 @@ for item in config.MULTI3D_PRED_DATA:
                 train_dir = train_dir,
                 model = model,
                 model_file = model_file,
+                nonlte_ne = nonlte_ne,
+                charge_conservation_max_iterations = max_iterations,
+                population_consistency_mode = consistency_mode,
+                hydrogen_se_wavelength_stride = wavelength_stride,
             ),
         )
     end
@@ -2259,9 +2322,37 @@ function run_all(
         parallel_isroot(parallel) ? load_multi3d_pred_data() : nothing,
         parallel,
     )
-    isempty(pred_data) && error("config.py MULTI3D_PRED_DATA is empty")
+    isempty(pred_data) && error(
+        "config.py MULTI3D_PRED_DATA has no entries enabled for Forward.jl"
+    )
 
     for (idx, pred) in enumerate(pred_data)
+        configured_max_iterations = pred.charge_conservation_max_iterations
+        dataset_max_iterations = if pred.nonlte_ne === false
+            0
+        elseif configured_max_iterations !== nothing
+            configured_max_iterations
+        elseif pred.nonlte_ne === nothing
+            charge_conservation_max_iterations
+        elseif pred.nonlte_ne
+            charge_conservation_max_iterations > 0 || error(
+                "$(pred.name) has NONLTE_NE=True in config.py, but no non-LTE " *
+                "electron-density iterations were requested. Pass " *
+                "--charge-conservation-max-iterations N with N > 0."
+            )
+            charge_conservation_max_iterations
+        end
+        pred.nonlte_ne === true && dataset_max_iterations == 0 && error(
+            "$(pred.name) has NONLTE_NE=True in config.py, but its effective " *
+            "CHARGE_CONSERVATION_MAX_ITERATIONS is zero."
+        )
+
+        dataset_consistency_mode = pred.population_consistency_mode === nothing ?
+            population_consistency_mode :
+            parse_population_consistency_mode(pred.population_consistency_mode)
+        dataset_wavelength_stride = pred.hydrogen_se_wavelength_stride === nothing ?
+            hydrogen_se_wavelength_stride : pred.hydrogen_se_wavelength_stride
+
         parallel_println(parallel, "")
         parallel_println(parallel, "============================================================")
         parallel_println(
@@ -2273,12 +2364,12 @@ function run_all(
         cfg = build_config(pred)
         main(
             cfg;
-            charge_conservation_max_iterations=charge_conservation_max_iterations,
+            charge_conservation_max_iterations=dataset_max_iterations,
             charge_conservation_tolerance=charge_conservation_tolerance,
             fsdp_nproc_per_node=fsdp_nproc_per_node,
-            population_consistency_mode=population_consistency_mode,
+            population_consistency_mode=dataset_consistency_mode,
             hydrogen_se_relaxation=hydrogen_se_relaxation,
-            hydrogen_se_wavelength_stride=hydrogen_se_wavelength_stride,
+            hydrogen_se_wavelength_stride=dataset_wavelength_stride,
             parallel=parallel,
             fsdp_launcher=fsdp_launcher,
             diagnostics=diagnostics,

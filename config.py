@@ -181,50 +181,102 @@ PRED_EAGLE7_DIR = "/mn/stornext/d9/data/harshm/"
 PRED_DIR = PRED_EAGLE7_DIR
 
 MULTI3D_PRED_DATA = [
+    # Forward.jl-specific per-atmosphere controls:
+    #   "FORWARD": False skips the entry (default: True).
+    #   "NONLTE_NE": True requires electron-density consistency iterations,
+    #   False forces one-shot synthesis, and None/omitted follows the global
+    #   --charge-conservation-max-iterations command-line option.
+    #   The remaining None values follow their command-line/default settings;
+    #   set them per atmosphere to override those settings in Forward.jl.
     {
         "MULTI3D_ATMOS": PRED_DIR + "bifrost_data/en024048_hion/385/atm3d",
         "MESH":  PRED_DIR + "bifrost_data/en024048_hion/385/mesh",
-        "NAME": "en024048_hion_385"
+        "NAME": "en024048_hion_385",
+        "FORWARD": False,
+        "NONLTE_NE": None,
+        "CHARGE_CONSERVATION_MAX_ITERATIONS": None,
+        "POPULATION_CONSISTENCY_MODE": None,
+        "HYDROGEN_SE_WAVELENGTH_STRIDE": None,
     },
     {
         "MULTI3D_ATMOS": PRED_DIR + "bifrost_data/nw012023/1050/atm3d",
         "MESH":  PRED_DIR + "bifrost_data/nw012023/1050/mesh",
-        "NAME": "nw012023_1050"
+        "NAME": "nw012023_1050",
+        "FORWARD": False,
+        "NONLTE_NE": None,
+        "CHARGE_CONSERVATION_MAX_ITERATIONS": None,
+        "POPULATION_CONSISTENCY_MODE": None,
+        "HYDROGEN_SE_WAVELENGTH_STRIDE": None,
     },
     {
         "MULTI3D_ATMOS": PRED_DIR + "bifrost_data/ch024031_by200bz005/450/atm3d",
         "MESH":  PRED_DIR + "bifrost_data/ch024031_by200bz005/450/mesh",
-        "NAME": "ch024031_by200bz005_450"
+        "NAME": "ch024031_by200bz005_450",
+        "FORWARD": False,
+        "NONLTE_NE": None,
+        "CHARGE_CONSERVATION_MAX_ITERATIONS": None,
+        "POPULATION_CONSISTENCY_MODE": None,
+        "HYDROGEN_SE_WAVELENGTH_STRIDE": None,
     },
     {
         "MULTI3D_ATMOS": PRED_DIR + "bifrost_data/en024031_by100_helium/109/atm3d",
         "MESH":  PRED_DIR + "bifrost_data/en024031_by100_helium/109/mesh",
-        "NAME": "en024031_by100_helium_109"
+        "NAME": "en024031_by100_helium_109",
+        "FORWARD": False,
+        "NONLTE_NE": None,
+        "CHARGE_CONSERVATION_MAX_ITERATIONS": None,
+        "POPULATION_CONSISTENCY_MODE": None,
+        "HYDROGEN_SE_WAVELENGTH_STRIDE": None,
     },
     {
         "MULTI3D_ATMOS": PRED_DIR + "bifrost_data/en024048_hion_504/385/atm3d",
         "MESH":  PRED_DIR + "bifrost_data/en024048_hion_504/385/mesh",
-        "NAME": "en024048_hion_504_385"
+        "NAME": "en024048_hion_504_385",
+        "FORWARD": False,
+        "NONLTE_NE": None,
+        "CHARGE_CONSERVATION_MAX_ITERATIONS": None,
+        "POPULATION_CONSISTENCY_MODE": None,
+        "HYDROGEN_SE_WAVELENGTH_STRIDE": None,
     },
     {
         "MULTI3D_ATMOS": PRED_DIR + "bifrost_data/nw012023_512/1050/atm3d",
         "MESH":  PRED_DIR + "bifrost_data/nw012023_512/1050/mesh",
-        "NAME": "nw012023_512_1050"
+        "NAME": "nw012023_512_1050",
+        "FORWARD": False,
+        "NONLTE_NE": None,
+        "CHARGE_CONSERVATION_MAX_ITERATIONS": None,
+        "POPULATION_CONSISTENCY_MODE": None,
+        "HYDROGEN_SE_WAVELENGTH_STRIDE": None,
     },
     {
         "MULTI3D_ATMOS": PRED_DIR + "bifrost_data/ch024031_by200bz005_768/450/atm3d",
         "MESH":  PRED_DIR + "bifrost_data/ch024031_by200bz005_768/450/mesh",
-        "NAME": "ch024031_by200bz005_768_450"
+        "NAME": "ch024031_by200bz005_768_450",
+        "FORWARD": False,
+        "NONLTE_NE": None,
+        "CHARGE_CONSERVATION_MAX_ITERATIONS": None,
+        "POPULATION_CONSISTENCY_MODE": None,
+        "HYDROGEN_SE_WAVELENGTH_STRIDE": None,
     },
     {
         "MULTI3D_ATMOS": PRED_DIR + "bifrost_data/en024031_by100_helium_768/109/atm3d",
         "MESH":  PRED_DIR + "bifrost_data/en024031_by100_helium_768/109/mesh",
-        "NAME": "en024031_by100_helium_768_109"
+        "NAME": "en024031_by100_helium_768_109",
+        "FORWARD": False,
+        "NONLTE_NE": None,
+        "CHARGE_CONSERVATION_MAX_ITERATIONS": None,
+        "POPULATION_CONSISTENCY_MODE": None,
+        "HYDROGEN_SE_WAVELENGTH_STRIDE": None,
     },
     {
         "MULTI3D_ATMOS": PRED_DIR + "bifrost_data/ar098192/270000/atm3d",
         "MESH":  PRED_DIR + "bifrost_data/ar098192/270000/mesh",
-        "NAME": "ar098192_270000"
+        "NAME": "ar098192_270000",
+        "FORWARD": True,
+        "NONLTE_NE": True,
+        "CHARGE_CONSERVATION_MAX_ITERATIONS": 10,
+        "POPULATION_CONSISTENCY_MODE": "hydrogen-se-3d",
+        "HYDROGEN_SE_WAVELENGTH_STRIDE": 1,
     }
 ]
 

@@ -559,6 +559,35 @@ Set `FORWARD_ATOMS` near the top of `Forward.jl` to choose which atoms to synthe
 
 `Forward.jl` skips atom outputs already present in the intensity HDF5. In Bifrost mode, if a required active-atom population folder or `out_pop` file is missing, it skips that atmosphere and prints the dataset/snapshot that could not run.
 
+Each `MULTI3D_PRED_DATA` entry in `config.py` can also control Forward synthesis:
+
+```python
+{
+    "NAME": "en024048_hion_385",
+    "MESH": ".../mesh",
+    "MULTI3D_ATMOS": ".../atm3d",
+    "FORWARD": True,
+    "NONLTE_NE": True,
+    "CHARGE_CONSERVATION_MAX_ITERATIONS": 10,
+    "POPULATION_CONSISTENCY_MODE": "hydrogen-se-3d",
+    "HYDROGEN_SE_WAVELENGTH_STRIDE": 2,
+}
+```
+
+`FORWARD=False` excludes that atmosphere from `Forward.jl` without affecting
+Python prediction commands. `NONLTE_NE=True` requires non-LTE electron-density
+consistency and therefore also requires
+`--charge-conservation-max-iterations N` with `N > 0`. `NONLTE_NE=False` forces
+one-shot synthesis for that atmosphere even when the global iteration option is
+present. Omitting `NONLTE_NE` (or setting it to `None`) preserves the previous
+behavior and follows the global command-line option. Both keys are optional.
+
+`CHARGE_CONSERVATION_MAX_ITERATIONS`, `POPULATION_CONSISTENCY_MODE`, and
+`HYDROGEN_SE_WAVELENGTH_STRIDE` provide per-atmosphere versions of the matching
+Forward command-line options. A value set in the atmosphere entry takes
+precedence over the command line. Set a key to `None` or omit it to use the
+command-line value (and ultimately its normal default).
+
 In ML mode, charge-conserving inference can be enabled with a maximum number of
 fixed-point iterations:
 
