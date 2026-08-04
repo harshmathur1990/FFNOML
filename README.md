@@ -315,6 +315,17 @@ torchrun \
 
 Use this mode when the full prediction volume is too large for the single-process or tiled `--predict` path. Existing final prediction files are still not overwritten.
 
+For a named prediction, both paths can be overridden without changing
+`config.py`. This is used by `Forward.jl` so electron-density consistency runs
+operate on a copy instead of changing the original solving set:
+
+```bash
+torchrun --nproc_per_node=4 pipeline.py --fsdppredict \
+  --predname ar098192_270000 \
+  --solve-h5 /path/to/working-solving-set.hdf5 \
+  --prediction-output /path/to/working-populations.hdf5
+```
+
 ### Solving-Set HDF5 Layout
 
 The intermediate solving input written by `build_solving_set_ffno` contains:
@@ -547,6 +558,217 @@ For ML mode, `Forward.jl` reads `output_3D_sim_s5_<NAME>_<MODEL>_<FORWARD_ATOMS>
 Set `FORWARD_ATOMS` near the top of `Forward.jl` to choose which atoms to synthesize, for example `["H"]`, `["CA"]`, or `["H", "CA"]`. The generated intensity filename uses that selection as its atom tag.
 
 `Forward.jl` skips atom outputs already present in the intensity HDF5. In Bifrost mode, if a required active-atom population folder or `out_pop` file is missing, it skips that atmosphere and prints the dataset/snapshot that could not run.
+
+In ML mode, charge-conserving inference can be enabled with a maximum number of
+fixed-point iterations:
+
+```bash
+julia Forward.jl --charge-conservation-max-iterations 10
+```
+
+Each iteration launches `pipeline.py --fsdppredict`, reads the predicted
+non-LTE hydrogen populations, recomputes electron density from charge neutrality
+(hydrogen in non-LTE and all background elements in LTE), writes `log10(ne)` to
+channel 5 of a method-specific working/result HDF5, and repeats. The original
+solving-set and population-prediction HDF5 files are never opened for writing by
+the consistency loop. The loop stops when the
+maximum relative electron-density residual is at most `1e-4`, or at the supplied
+iteration limit. Hydrogen must be included in `FORWARD_ATOMS`. Use
+`--charge-conservation-tolerance VALUE` to change the tolerance and
+`--fsdp-nproc-per-node N` to change the `torchrun` process count. Omitting the
+maximum-iteration option keeps the existing one-shot behavior.
+
+Two population-consistency modes are available. The existing default is the
+inexpensive charge-only update:
+
+```bash
+julia Forward.jl \
+  --charge-conservation-max-iterations 10 \
+  --population-consistency-mode charge-only
+```
+
+The preferred statistical-equilibrium correction is selected with:
+
+```bash
+julia Forward.jl \
+  --charge-conservation-max-iterations 10 \
+  --population-consistency-mode hydrogen-se-1p5d
+```
+
+`hydrogen-se-1p5d` uses FFNoML populations as the initial state, solves the
+radiative transfer equation independently in every vertical column, computes
+bound-bound and bound-free radiative rates, adds the hydrogen atom file's
+CE/CI/Omega electron-collision rates, solves the stationary hydrogen rate
+equations with hydrogen-particle conservation, and then imposes charge
+conservation. The corrected electron density is fed to the next FFNoML call.
+Convergence requires the electron-density residual, SE residual, and relative
+FFNoML-to-SE population correction all to meet the requested tolerance.
+
+Every method writes a separate result next to the original solving set:
+
+```text
+nonlte_electron_density_<NAME>_<MODEL>_<ATOMS>_<METHOD>.hdf5
+```
+
+The file begins as a copy of the original solving set and contains:
+
+- `initial_electron_density` and the latest `electron_density`, in m^-3 with
+  dimensions `(z,y,x)`;
+- `nlte_populations`, including the SE-corrected hydrogen populations in
+  `hydrogen-se-1p5d` mode;
+- `last_ffno_hydrogen_populations`, preserving the uncorrected FFNoML state for
+  an accurate population delta after restart;
+- `iteration_history/` datasets for the iteration number, electron-density and
+  population deltas, SE residual/correction, background-scattering iteration
+  count/residual, density/population ranges,
+  per-hydrogen-level deltas/ranges, and all phase timings;
+- file attributes including `method`, `converged`, `iterations_completed`,
+  `convergence_iteration`, tolerance, HSE settings, final residuals, timestamps,
+  and fingerprints of the source solving set, hydrogen atom, and model
+  checkpoint.
+
+When iteration is requested again, `Forward.jl` checks this file first. A
+converged result that meets the newly requested tolerance is loaded directly
+and FFNoML is skipped. An unconverged result, or a result that met only a looser
+tolerance, resumes from its latest electron density and appends up to the newly
+requested number of additional iterations. If the source solving set, hydrogen
+atom, model checkpoint, method, or HSE numerical settings changed, the old file
+is moved to a `.stale-TIMESTAMP` name and a fresh result is started.
+
+This mode is substantially more expensive than `charge-only`. It is a stationary
+1.5D CRD correction, not full 3D MALI: horizontal radiation transport is omitted,
+but vertical and horizontal velocities are projected onto an azimuthal ray
+quadrature when calculating bound-bound profiles and radiative rates. Horizontal
+velocities therefore Doppler-shift the local column's rays without importing
+atmospheric structure from neighboring columns. Atom transitions marked PRD are
+treated in CRD. Background H-minus, hydrogen free-free, H2-plus,
+Thomson, and neutral-hydrogen Rayleigh processes are included. Following RH,
+true continuum absorption has thermal emissivity while continuum scattering is
+iterated as `eta_scat = chi_scat J`; it is not folded into a Planck source.
+LTE background-metal bound-free opacity is also included as true absorption.
+The compact corrector still omits background bound-bound line haze and the
+H2/H2-minus and helium Rayleigh terms for which its atmosphere currently has no
+molecular/helium populations. `--hydrogen-se-relaxation VALUE`
+damps population updates. `--hydrogen-se-wavelength-stride N` reduces cost by
+sampling every Nth transition wavelength; the default `1` uses every wavelength.
+
+### MPI Forward Synthesis
+
+`Forward.jl` can distribute the horizontal x dimension over MPI ranks for the
+original synthesis path, `charge-only`, and `hydrogen-se-1p5d`:
+
+```bash
+srun --ntasks=32 \
+  julia --threads=8 Forward.jl --mpi
+```
+
+The atmosphere is read once on MPI rank 0 and distributed with `MPI.Scatterv!`.
+Each rank retains only its local x slab, reads only that slab from the FFNoML
+prediction HDF5, and uses Julia threads over the flattened set of local `(x,y)`
+columns. This lets a rank use all of its threads even when its local x count is
+smaller than `--threads`; synthesis keeps one reusable radiative-transfer buffer
+per Julia worker thread. Intensities are gathered in rank/x order for the final
+serial HDF5 write. In the consistency modes,
+electron-density and population residuals use a global MPI maximum reduction.
+The charge-only cell calculations and the 1.5D SE column calculations therefore
+run on every MPI rank. Rank 0 gathers electron-density slabs and, only for the
+preferred mode, corrected hydrogen slabs for each durable checkpoint. The full
+population dataset is copied directly between HDF5 files rather than gathered
+through rank-0 memory.
+
+MPI mode requires MPI.jl. On a Cray/Slurm system, configure MPI.jl against the
+loaded system MPI before launching the job, then restart Julia:
+
+```bash
+julia -e 'import Pkg; Pkg.add(["MPI", "MPIPreferences"])'
+julia -e 'using MPIPreferences; MPIPreferences.use_system_binary(mpiexec="srun", vendor="cray")'
+```
+
+The supplied [`forward_mpi_gpu.sh`](forward_mpi_gpu.sh) is an eight-node Slurm
+template combining four MPI ranks per node with 64 Julia threads per rank. This
+uses all 256 CPU cores on each node and binds every rank to its assigned cores.
+Adjust its resource directives to the atmosphere size and cluster policy.
+
+Distributed FFNoML inference is deliberately not launched by every MPI rank.
+Pass a launcher executable with `--fsdp-launcher`; only MPI rank 0 invokes it,
+and every rank waits at an MPI collective until it succeeds:
+
+```bash
+sbatch forward_mpi_gpu.sh \
+  --max-iterations 10 \
+  --population-consistency-mode hydrogen-se-1p5d
+```
+
+[`forward_fsdppredict.sh`](forward_fsdppredict.sh) implements the launcher
+contract `PATH PREDICTION_NAME SOLVE_H5 PREDICTION_OUTPUT`. It creates one
+overlapping Slurm step with one `torchrun` launcher per
+node and one worker per GPU, matching `predict_gpu.sh`. Set `FORWARD_TORCHRUN`,
+`FORWARD_REPO_DIR`, or `FORWARD_MASTER_PORT` when the cluster defaults differ.
+The Julia ranks never launch independent `torchrun` jobs and never read the
+prediction file until the coordinated GPU step has completed.
+
+### Progress, resource monitoring, and crash diagnostics
+
+`Forward.jl` keeps the Slurm stdout readable: only MPI rank 0 prints the main
+progress. A normal consistency iteration reports the FFNoML population change
+(starting with `n/a` on iteration 1), the electron-density residual and range,
+the hydrogen SE residual and FFNoML-to-SE correction in preferred mode, and a
+compact timing split for FFNoML, prediction reading, SE, charge conservation,
+HDF5 I/O, and the whole iteration. Atmosphere distribution, each atom's
+synthesis progress/time, output gathering, and completion are also reported.
+The Slurm template writes these streams to `forward-JOBID.out` and
+`forward-JOBID.err`.
+
+Detailed information goes to a diagnostics directory instead of stdout. Its
+default name is `forward-diagnostics-slurm-JOBID`; the Slurm template sets the
+absolute path in `FORWARD_DIAGNOSTICS_DIR` and prints it at startup. It can be
+overridden through the environment so Julia and the Slurm termination handler
+write to the same place:
+
+```bash
+FORWARD_DIAGNOSTICS_DIR=/cluster/work/projects/nn2834k/harshm/my-forward-debug \
+sbatch forward_mpi_gpu.sh \
+  --resource-monitor-interval 15 \
+  --max-iterations 10 \
+  --population-consistency-mode hydrogen-se-1p5d
+```
+
+The directory contains one set of files per MPI rank:
+
+- `events-rank-NNNN.log` records timestamped phase transitions and timings. For
+  every consistency iteration it includes global overall and per-hydrogen-level
+  population changes/minima/maxima, SE metrics, electron-density metrics, the
+  local x slab, and phase timings.
+- `resources-rank-NNNN.csv` is sampled every 30 seconds by default and at major
+  phase boundaries. It contains process RSS and peak RSS, Julia live GC bytes,
+  aggregate process CPU percentage, one-minute node load, available/total node
+  memory, Julia thread count, Slurm CPUs per task, and Linux CPU affinity. A
+  fully busy 64-thread rank can read near 6400% CPU because this is aggregate
+  process CPU, not a value normalized to one allocation.
+- `failure-rank-NNNN.log` is created on a caught failure and records the current
+  dataset, iteration, phase, resource snapshot, exception, and full Julia stack
+  trace. In MPI mode the message is flushed before the communicator is aborted,
+  avoiding ranks hanging indefinitely after a collective failure.
+
+Set `--resource-monitor-interval 0` or `--no-resource-monitor` to disable timed
+sampling; phase-boundary resource snapshots remain enabled. Diagnostics files
+are flushed after every record so useful data normally survives a Julia error.
+An operating-system OOM kill, node loss, or `SIGKILL` cannot be caught by Julia.
+For that case the Slurm template requests a two-minute termination warning and
+writes `slurm-termination.log` when Slurm delivers `TERM`/`INT`. The scheduler is
+still authoritative; while a job runs and after it finishes, useful checks are:
+
+```bash
+sstat -j "${SLURM_JOB_ID}.batch" --format=JobID,AveCPU,MaxRSS,AveRSS
+sacct -j "${SLURM_JOB_ID}" --format=JobID,State,ExitCode,Elapsed,AllocCPUS,MaxRSS
+```
+
+Before expensive work begins, the program checks required atmosphere, mesh,
+atom, solving-set/prediction, and launcher files, launcher executability, and
+the output directory. Prediction populations are checked for non-finite or
+negative values on every iteration; electron-density writes reject non-finite
+or non-positive values. The active phase in the failure log identifies which
+preflight, FFNoML, SE, charge, synthesis, collective, or HDF5 operation failed.
 
 ## Caveats
 

@@ -39,8 +39,8 @@ show_progress = true
 
 [output]
 hdf5 = "../training_FFNO3D_zscale_expand_lognlte/3D_sim_predict_ar098192_270000.hdf5"
-multi3d_atmos = "/mn/stornext/d9/data/harshm/bifrost_data/ar098192/27000/atm3d"
-multi3d_mesh = "/mn/stornext/d9/data/harshm/bifrost_data/ar098192/27000/mesh"
+multi3d_atmos = "/mn/stornext/d9/data/harshm/bifrost_data/ar098192/270000/atm3d"
+multi3d_mesh = "/mn/stornext/d9/data/harshm/bifrost_data/ar098192/270000/mesh"
 # compression = 4
 overwrite = false
 

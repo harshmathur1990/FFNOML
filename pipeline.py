@@ -45,6 +45,23 @@ def parse_args():
             "--fsdppredict, this can also name an already-built solving HDF5."
         ),
     )
+    parser.add_argument(
+        "--solve-h5",
+        default=None,
+        help=(
+            "Override the solving-set HDF5 for --predict/--fsdppredict. "
+            "Requires --predname and is primarily used by Forward.jl's "
+            "non-LTE electron-density iteration."
+        ),
+    )
+    parser.add_argument(
+        "--prediction-output",
+        default=None,
+        help=(
+            "Override the population prediction HDF5 for --predict/--fsdppredict. "
+            "Requires --predname."
+        ),
+    )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--bestpath", action="store_true")
     parser.add_argument("--expand", action="store_true")
@@ -351,8 +368,17 @@ def build_prediction_solving_sets(prediction_name=None):
         )
 
 
-def run_predictions(*, distributed_full=False, prediction_name=None):
+def run_predictions(
+    *,
+    distributed_full=False,
+    prediction_name=None,
+    solve_h5=None,
+    prediction_output=None,
+):
     ensure_checkpoint_exists()
+
+    if (solve_h5 is not None or prediction_output is not None) and prediction_name is None:
+        raise ValueError("--solve-h5 and --prediction-output require --predname")
 
     if distributed_full:
         init_distributed_prediction()
@@ -362,9 +388,17 @@ def run_predictions(*, distributed_full=False, prediction_name=None):
         allow_prebuilt=True,
     ):
 
-        PREDICT_FILE = MODEL_DIR + f"3D_sim_predict_{PRED_ATMOS['NAME']}.hdf5"
+        PREDICT_FILE = (
+            os.path.abspath(solve_h5)
+            if solve_h5 is not None
+            else MODEL_DIR + f"3D_sim_predict_{PRED_ATMOS['NAME']}.hdf5"
+        )
 
-        OUTPUT_FILE = prediction_output_file(PRED_ATMOS["NAME"])
+        OUTPUT_FILE = (
+            os.path.abspath(prediction_output)
+            if prediction_output is not None
+            else prediction_output_file(PRED_ATMOS["NAME"])
+        )
 
         DIAGNOSTIC_PATH = prediction_diagnostic_file(PRED_ATMOS["NAME"])
 
@@ -693,11 +727,20 @@ if __name__ == "__main__":
 
         elif args.predict:
             validate_runtime_device()
-            run_predictions(prediction_name=args.predname)
+            run_predictions(
+                prediction_name=args.predname,
+                solve_h5=args.solve_h5,
+                prediction_output=args.prediction_output,
+            )
 
         elif args.fsdppredict:
             validate_runtime_device()
-            run_predictions(distributed_full=True, prediction_name=args.predname)
+            run_predictions(
+                distributed_full=True,
+                prediction_name=args.predname,
+                solve_h5=args.solve_h5,
+                prediction_output=args.prediction_output,
+            )
 
         elif args.inspectfreqgate:
             validate_runtime_device()
