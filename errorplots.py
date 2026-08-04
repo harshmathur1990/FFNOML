@@ -462,6 +462,7 @@ def plot_departure_coefficient_error_assessment(
         residual_ax.grid(True, alpha=0.2)
 
         coefficient_ax.set_xscale("log")
+        coefficient_ax.set_yscale("log")
         coefficient_ax.set_title(
             f"{title} coefficient distribution", fontsize=14
         )
@@ -824,9 +825,6 @@ def main():
 
     for dataset in build_plot_jobs():
         make_snapshot_plot(dataset, output_dir=MODEL_DIR, show=args.show)
-        make_lte_population_comparison_plot(
-            dataset, output_dir=MODEL_DIR, show=args.show
-        )
 
 
 if __name__ == "__main__":
