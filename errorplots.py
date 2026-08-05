@@ -208,8 +208,6 @@ def plot_departure_coefficient_scatter_by_height(
         raise ValueError(
             f"Expected {nlevels} level names, got {len(level_names)}"
         )
-    if coefficient_bins < 2:
-        raise ValueError("coefficient_bins must be at least 2 for the KDE grid")
     if max_points_per_level is not None and max_points_per_level <= 0:
         raise ValueError("max_points_per_level must be positive or None")
 
@@ -388,6 +386,8 @@ def plot_departure_coefficient_error_assessment(
         raise ValueError(
             f"Expected {nlevels} level names, got {len(level_names)}"
         )
+    if coefficient_bins < 2:
+        raise ValueError("coefficient_bins must be at least 2 for the KDE grid")
     z_km = z_axis * 1e3
     regions = (
         (z_km < 750, r"$z < 750$ km", "#482878"),
