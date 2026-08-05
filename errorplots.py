@@ -828,7 +828,7 @@ def make_snapshot_plot(dataset, output_dir, show=False):
     if show:
         plt.show()
     else:
-        plt.close(fig)
+        # plt.close(fig)
         plt.close(scatter_fig)
         plt.close(assessment_fig)
 
