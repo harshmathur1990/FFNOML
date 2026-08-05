@@ -358,10 +358,10 @@ def plot_departure_coefficient_error_assessment(
     """Plot height-binned residual and coefficient distributions per level.
 
     The top row shows relative errors in percent and the bottom row shows the
-    corresponding true departure-coefficient KDEs on logarithmic x and
-    density axes. The KDEs are evaluated in log10(coefficient) space so that
-    smoothing is appropriate for the logarithmic x axis. Cells are grouped
-    into the physical-height ranges
+    corresponding true departure-coefficient KDEs on logarithmic x and y
+    axes. The KDEs are evaluated in log10(coefficient) space and scaled so
+    that each curve integrates to its region's absolute sample count. Cells
+    are grouped into the physical-height ranges
     requested for the comparison: below 750 km, 750--1200 km, 1200--2500 km,
     2500--5000 km, and 5000 km and above.
     """
@@ -404,7 +404,7 @@ def plot_departure_coefficient_error_assessment(
         squeeze=False,
         constrained_layout=True,
     )
-    maximum_coefficient_density = 0.0
+    has_coefficient_kde = False
     kde_rng = np.random.default_rng(0)
 
     for ilevel in range(nlevels):
@@ -448,6 +448,7 @@ def plot_departure_coefficient_error_assessment(
 
             actual = actual[np.isfinite(actual) & (actual > 0)]
             if actual.size > 1 and log_grid is not None:
+                actual_count = actual.size
                 log_actual = np.log10(actual)
                 # gaussian_kde scales as N_data * N_grid.  A fixed-seed
                 # subsample keeps large snapshots tractable and reproducible.
@@ -471,16 +472,15 @@ def plot_departure_coefficient_error_assessment(
                     density /= (
                         log_actual.size * bandwidth * np.sqrt(2.0 * np.pi)
                     )
+                    count_density = density * actual_count
                     coefficient_ax.plot(
                         10.0**log_grid,
-                        density,
+                        count_density,
                         color=color,
                         linewidth=1.8,
                         label=f"Actual: {label}",
                     )
-                    maximum_coefficient_density = max(
-                        maximum_coefficient_density, density.max(initial=0)
-                    )
+                    has_coefficient_kde = True
 
         residual_ax.axvline(0, color="0.25", linestyle="--", lw=1)
         residual_ax.set_xlim(*residual_range)
@@ -498,19 +498,44 @@ def plot_departure_coefficient_error_assessment(
         coefficient_ax.tick_params(axis="both", which="both", labelsize=11)
         coefficient_ax.grid(True, which="both", alpha=0.2)
 
-    # Use an identical density range on every coefficient panel. Equal limits
-    # on equal-sized log axes also give them identical tick locations/labels.
-    if maximum_coefficient_density > 0:
+    # Cover every coefficient curve using the smallest automatically chosen
+    # lower limit and the largest automatically chosen upper limit.
+    if has_coefficient_kde:
+        populated_coefficient_axes = [
+            coefficient_ax
+            for coefficient_ax in axes[1, :]
+            if coefficient_ax.lines
+        ]
+        individual_ylims = np.asarray(
+            [
+                coefficient_ax.get_ylim()
+                for coefficient_ax in populated_coefficient_axes
+            ]
+        )
         coefficient_ylim = (
-            maximum_coefficient_density * 1e-4,
-            maximum_coefficient_density * 1.5,
+            individual_ylims[:, 0].min(),
+            individual_ylims[:, 1].max(),
         )
         for coefficient_ax in axes[1, :]:
             coefficient_ax.set_ylim(*coefficient_ylim)
+
+        # Resolve the logarithmic ticks once, then explicitly reuse both the
+        # locations and formatters so every panel displays the same labels.
+        fig.canvas.draw()
+        reference_ax = axes[1, 0]
+        major_ticks = reference_ax.get_yticks(minor=False)
+        minor_ticks = reference_ax.get_yticks(minor=True)
+        major_formatter = copy.copy(reference_ax.yaxis.get_major_formatter())
+        minor_formatter = copy.copy(reference_ax.yaxis.get_minor_formatter())
+        for coefficient_ax in axes[1, :]:
+            coefficient_ax.yaxis.set_major_locator(FixedLocator(major_ticks))
+            coefficient_ax.yaxis.set_minor_locator(FixedLocator(minor_ticks))
+            coefficient_ax.yaxis.set_major_formatter(copy.copy(major_formatter))
+            coefficient_ax.yaxis.set_minor_formatter(copy.copy(minor_formatter))
             coefficient_ax.tick_params(axis="y", which="both", labelleft=True)
 
     axes[0, 0].set_ylabel("Density", fontsize=13)
-    axes[1, 0].set_ylabel(r"Probability density (dex$^{-1}$)", fontsize=13)
+    axes[1, 0].set_ylabel(r"Count density (dex$^{-1}$)", fontsize=13)
     axes[0, -1].legend(loc="upper right", fontsize=10)
     axes[1, -1].legend(loc="upper right", fontsize=10)
 
