@@ -358,10 +358,9 @@ def plot_departure_coefficient_error_assessment(
     """Plot height-binned residual and coefficient distributions per level.
 
     The top row shows relative errors in percent and the bottom row shows the
-    corresponding true departure-coefficient KDEs on logarithmic x and y
-    axes. The KDEs are evaluated in log10(coefficient) space and converted to
-    expected counts per KDE-grid bin, like a smoothly interpolated histogram.
-    Cells are grouped into the physical-height ranges
+    corresponding true departure-coefficient count histograms with a
+    logarithmic x axis and a linear y axis. The histograms use unfilled step
+    outlines. Cells are grouped into the physical-height ranges
     requested for the comparison: below 750 km, 750--1200 km, 1200--2500 km,
     2500--5000 km, and 5000 km and above.
     """
@@ -386,8 +385,8 @@ def plot_departure_coefficient_error_assessment(
         raise ValueError(
             f"Expected {nlevels} level names, got {len(level_names)}"
         )
-    if coefficient_bins < 2:
-        raise ValueError("coefficient_bins must be at least 2 for the KDE grid")
+    if coefficient_bins < 1:
+        raise ValueError("coefficient_bins must be positive")
     z_km = z_axis * 1e3
     regions = (
         (z_km < 750, r"$z < 750$ km", "#482878"),
@@ -406,8 +405,7 @@ def plot_departure_coefficient_error_assessment(
         squeeze=False,
         constrained_layout=True,
     )
-    has_coefficient_kde = False
-    kde_rng = np.random.default_rng(0)
+    has_coefficient_histogram = False
 
     for ilevel in range(nlevels):
         residual_ax = axes[0, ilevel]
@@ -417,15 +415,14 @@ def plot_departure_coefficient_error_assessment(
         positive_actual = true[ilevel][
             np.isfinite(true[ilevel]) & (true[ilevel] > 0)
         ]
-        log_grid = None
+        log_bins = None
         if positive_actual.size:
             log_min = np.log10(positive_actual.min())
             log_max = np.log10(positive_actual.max())
             if np.isclose(log_min, log_max):
                 log_min -= 0.5
                 log_max += 0.5
-            log_grid = np.linspace(log_min, log_max, coefficient_bins)
-            log_bin_width = log_grid[1] - log_grid[0]
+            log_bins = np.logspace(log_min, log_max, coefficient_bins + 1)
 
         for height_mask, label, color in regions:
             actual = true[ilevel, height_mask, :, :].ravel()
@@ -450,43 +447,17 @@ def plot_departure_coefficient_error_assessment(
                 )
 
             actual = actual[np.isfinite(actual) & (actual > 0)]
-            if actual.size > 1 and log_grid is not None:
-                actual_count = actual.size
-                log_actual = np.log10(actual)
-                # gaussian_kde scales as N_data * N_grid.  A fixed-seed
-                # subsample keeps large snapshots tractable and reproducible.
-                if log_actual.size > 50_000:
-                    sample_indices = kde_rng.choice(
-                        log_actual.size, size=50_000, replace=False
-                    )
-                    log_actual = log_actual[sample_indices]
-
-                sample_std = np.std(log_actual, ddof=1)
-                bandwidth = sample_std * log_actual.size ** (-1.0 / 5.0)
-                if bandwidth > np.finfo(np.float64).eps:
-                    density = np.zeros_like(log_grid)
-                    for start in range(0, log_actual.size, 5_000):
-                        sample_chunk = log_actual[start : start + 5_000]
-                        offsets = (
-                            log_grid[:, np.newaxis]
-                            - sample_chunk[np.newaxis, :]
-                        ) / bandwidth
-                        density += np.exp(-0.5 * offsets**2).sum(axis=1)
-                    density /= (
-                        log_actual.size * bandwidth * np.sqrt(2.0 * np.pi)
-                    )
-                    # Convert density per dex to the expected number of
-                    # samples in one KDE-grid bin (a smoothed histogram).
-                    smoothed_counts = density * actual_count * log_bin_width
-                    smoothed_counts[smoothed_counts < 1.0] = np.nan
-                    coefficient_ax.plot(
-                        10.0**log_grid,
-                        smoothed_counts,
-                        color=color,
-                        linewidth=1.8,
-                        label=f"Actual: {label}",
-                    )
-                    has_coefficient_kde = True
+            if actual.size and log_bins is not None:
+                counts, _ = np.histogram(actual, bins=log_bins)
+                coefficient_ax.stairs(
+                    counts,
+                    log_bins,
+                    color=color,
+                    linewidth=1.4,
+                    fill=False,
+                    label=f"Actual: {label}",
+                )
+                has_coefficient_histogram = True
 
         residual_ax.axvline(0, color="0.25", linestyle="--", lw=1)
         residual_ax.set_xlim(*residual_range)
@@ -496,7 +467,6 @@ def plot_departure_coefficient_error_assessment(
         residual_ax.grid(True, alpha=0.2)
 
         coefficient_ax.set_xscale("log")
-        coefficient_ax.set_yscale("log")
         coefficient_ax.set_title(
             f"{title} coefficient distribution", fontsize=14
         )
@@ -504,13 +474,12 @@ def plot_departure_coefficient_error_assessment(
         coefficient_ax.tick_params(axis="both", which="both", labelsize=11)
         coefficient_ax.grid(True, which="both", alpha=0.2)
 
-    # Counts below one are hidden, so use one as the common lower limit and
-    # the largest automatically chosen upper limit across populated panels.
-    if has_coefficient_kde:
+    # Use the smallest and largest automatic limits across populated panels.
+    if has_coefficient_histogram:
         populated_coefficient_axes = [
             coefficient_ax
             for coefficient_ax in axes[1, :]
-            if coefficient_ax.lines
+            if coefficient_ax.has_data()
         ]
         individual_ylims = np.asarray(
             [
@@ -518,12 +487,15 @@ def plot_departure_coefficient_error_assessment(
                 for coefficient_ax in populated_coefficient_axes
             ]
         )
-        coefficient_ylim = (1.0, individual_ylims[:, 1].max())
+        coefficient_ylim = (
+            individual_ylims[:, 0].min(),
+            individual_ylims[:, 1].max(),
+        )
         for coefficient_ax in axes[1, :]:
             coefficient_ax.set_ylim(*coefficient_ylim)
 
-        # Resolve the logarithmic ticks once, then explicitly reuse both the
-        # locations and formatters so every panel displays the same labels.
+        # Resolve the ticks once, then explicitly reuse both the locations and
+        # formatters so every panel displays the same labels.
         fig.canvas.draw()
         reference_ax = axes[1, 0]
         major_ticks = reference_ax.get_yticks(minor=False)
@@ -538,7 +510,7 @@ def plot_departure_coefficient_error_assessment(
             coefficient_ax.tick_params(axis="y", which="both", labelleft=True)
 
     axes[0, 0].set_ylabel("Density", fontsize=13)
-    axes[1, 0].set_ylabel("Estimated count per bin", fontsize=13)
+    axes[1, 0].set_ylabel("Count", fontsize=13)
     axes[0, -1].legend(loc="upper right", fontsize=10)
     axes[1, -1].legend(loc="upper right", fontsize=10)
 
