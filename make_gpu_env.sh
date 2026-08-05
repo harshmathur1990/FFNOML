@@ -20,7 +20,6 @@ module -q restore
 module list
 
 source /cluster/home/harshm/loadnvidia.sh
-module load Julia/1.12.2
 
 repository_dir=${FNOML_REPO_DIR:-/cluster/work/projects/nn2834k/harshm/FFNOMLcopy}
 cd "${repository_dir}"
@@ -63,7 +62,7 @@ Pkg.add([
 ])
 Pkg.instantiate()
 using MPIPreferences
-MPIPreferences.use_system_binary(mpiexec="srun", vendor="cray")
+MPIPreferences.use_system_binary(mpiexec="srun", abi="OpenMPI")
 Pkg.precompile()
 '
 
