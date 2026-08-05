@@ -449,7 +449,7 @@ def plot_departure_coefficient_error_assessment(
                     actual,
                     bins=log_bins,
                     bottom=0.8,
-                    histtype="stepfilled",
+                    # histtype="stepfilled",
                     color=color,
                     linewidth=1.4,
                     alpha=0.28,
