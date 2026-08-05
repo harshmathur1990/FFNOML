@@ -208,6 +208,8 @@ def plot_departure_coefficient_scatter_by_height(
         raise ValueError(
             f"Expected {nlevels} level names, got {len(level_names)}"
         )
+    if coefficient_bins < 2:
+        raise ValueError("coefficient_bins must be at least 2 for the KDE grid")
     if max_points_per_level is not None and max_points_per_level <= 0:
         raise ValueError("max_points_per_level must be positive or None")
 
@@ -359,9 +361,9 @@ def plot_departure_coefficient_error_assessment(
 
     The top row shows relative errors in percent and the bottom row shows the
     corresponding true departure-coefficient KDEs on logarithmic x and y
-    axes. The KDEs are evaluated in log10(coefficient) space and scaled so
-    that each curve integrates to its region's absolute sample count. Cells
-    are grouped into the physical-height ranges
+    axes. The KDEs are evaluated in log10(coefficient) space and converted to
+    expected counts per KDE-grid bin, like a smoothly interpolated histogram.
+    Cells are grouped into the physical-height ranges
     requested for the comparison: below 750 km, 750--1200 km, 1200--2500 km,
     2500--5000 km, and 5000 km and above.
     """
@@ -423,6 +425,7 @@ def plot_departure_coefficient_error_assessment(
                 log_min -= 0.5
                 log_max += 0.5
             log_grid = np.linspace(log_min, log_max, coefficient_bins)
+            log_bin_width = log_grid[1] - log_grid[0]
 
         for height_mask, label, color in regions:
             actual = true[ilevel, height_mask, :, :].ravel()
@@ -472,10 +475,13 @@ def plot_departure_coefficient_error_assessment(
                     density /= (
                         log_actual.size * bandwidth * np.sqrt(2.0 * np.pi)
                     )
-                    count_density = density * actual_count
+                    # Convert density per dex to the expected number of
+                    # samples in one KDE-grid bin (a smoothed histogram).
+                    smoothed_counts = density * actual_count * log_bin_width
+                    smoothed_counts[smoothed_counts < 1.0] = np.nan
                     coefficient_ax.plot(
                         10.0**log_grid,
-                        count_density,
+                        smoothed_counts,
                         color=color,
                         linewidth=1.8,
                         label=f"Actual: {label}",
@@ -498,8 +504,8 @@ def plot_departure_coefficient_error_assessment(
         coefficient_ax.tick_params(axis="both", which="both", labelsize=11)
         coefficient_ax.grid(True, which="both", alpha=0.2)
 
-    # Cover every coefficient curve using the smallest automatically chosen
-    # lower limit and the largest automatically chosen upper limit.
+    # Counts below one are hidden, so use one as the common lower limit and
+    # the largest automatically chosen upper limit across populated panels.
     if has_coefficient_kde:
         populated_coefficient_axes = [
             coefficient_ax
@@ -512,10 +518,7 @@ def plot_departure_coefficient_error_assessment(
                 for coefficient_ax in populated_coefficient_axes
             ]
         )
-        coefficient_ylim = (
-            individual_ylims[:, 0].min(),
-            individual_ylims[:, 1].max(),
-        )
+        coefficient_ylim = (1.0, individual_ylims[:, 1].max())
         for coefficient_ax in axes[1, :]:
             coefficient_ax.set_ylim(*coefficient_ylim)
 
@@ -535,7 +538,7 @@ def plot_departure_coefficient_error_assessment(
             coefficient_ax.tick_params(axis="y", which="both", labelleft=True)
 
     axes[0, 0].set_ylabel("Density", fontsize=13)
-    axes[1, 0].set_ylabel(r"Count density (dex$^{-1}$)", fontsize=13)
+    axes[1, 0].set_ylabel("Estimated count per bin", fontsize=13)
     axes[0, -1].legend(loc="upper right", fontsize=10)
     axes[1, -1].legend(loc="upper right", fontsize=10)
 
