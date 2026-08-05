@@ -17,12 +17,10 @@ set -o nounset
 set -o pipefail
 
 module -q restore
-module load Julia/1.12.2
 module list
 
 source /cluster/home/harshm/loadnvidia.sh
-#module load NRIS/GPU
-#module load PyTorch/2.10.0
+module load Julia/1.12.2
 
 repository_dir=${FNOML_REPO_DIR:-/cluster/work/projects/nn2834k/harshm/FFNOMLcopy}
 cd "${repository_dir}"
