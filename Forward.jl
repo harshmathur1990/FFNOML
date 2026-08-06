@@ -57,6 +57,7 @@ const DEFAULT_POPULATION_CONSISTENCY_MODE = :charge_only
 const DEFAULT_HYDROGEN_SE_RELAXATION = 1.0
 const DEFAULT_HYDROGEN_SE_WAVELENGTH_STRIDE = 1
 const CONSISTENCY_CACHE_FORMAT_VERSION = 5
+const DEFAULT_ATOM_DIR = "/cluster/work/projects/nn2834k/harshm/multi3d/input/atoms"
 
 function atom_tag(atom_names)
     return join(atom_names, "_")
@@ -184,11 +185,12 @@ end
 
 function all_atom_configs(pred)
     snapshot_dir = dirname(pred.mesh_file)
+    atom_dir = get(ENV, "FNOML_ATOM_DIR", DEFAULT_ATOM_DIR)
 
     return [
         (
             name = "H",
-            atom_file = "/mn/stornext/u3/harshm/Documents/WorkRepo/multi3d/input/atoms/atom.h6_tiago2.yaml",
+            atom_file = joinpath(atom_dir, "atom.h6_tiago2.yaml"),
             pops_file = joinpath(snapshot_dir, "H", "out_pop"),
             nlevels = 6,
             line_index = 5,
@@ -197,7 +199,7 @@ function all_atom_configs(pred)
         ),
         (
             name = "CA",
-            atom_file = "/mn/stornext/u3/harshm/Documents/WorkRepo/multi3d/input/atoms/atom.ca2.yaml",
+            atom_file = joinpath(atom_dir, "atom.ca2.yaml"),
             pops_file = joinpath(snapshot_dir, "CA", "out_pop"),
             nlevels = 6,
             line_index = 5,
@@ -2010,7 +2012,10 @@ function preflight_forward_config(
         end
         missing = unique(filter(path -> !isfile(path), required_files))
         isempty(missing) || error(
-            "Forward preflight found missing required files:\n  " * join(missing, "\n  ")
+            "Forward preflight found missing required files:\n  " *
+            join(missing, "\n  ") *
+            "\nPrediction data roots are controlled by FNOML_PRED_DIR; " *
+            "atom YAML files by FNOML_ATOM_DIR."
         )
         fsdp_launcher === nothing || isexecutable(fsdp_launcher) || error(
             "FFNoML launcher is not executable: $(fsdp_launcher)"
@@ -2597,7 +2602,9 @@ function run_forward_cli(options)
 end
 
 
-options = parse_forward_args(ARGS)
-if options !== nothing
-    run_forward_cli(options)
+if abspath(PROGRAM_FILE) == abspath(@__FILE__)
+    options = parse_forward_args(ARGS)
+    if options !== nothing
+        run_forward_cli(options)
+    end
 end

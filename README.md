@@ -717,6 +717,31 @@ The supplied [`forward_mpi_gpu.sh`](forward_mpi_gpu.sh) is an eight-node Slurm
 template combining four MPI ranks per node with 64 Julia threads per rank. This
 uses all 256 CPU cores on each node and binds every rank to its assigned cores.
 Adjust its resource directives to the atmosphere size and cluster policy.
+It defaults prediction data and Multi3D atom files to Olivia project storage.
+Set `FNOML_PRED_DIR` (the directory containing `bifrost_data`) and
+`FNOML_ATOM_DIR` (the directory containing the atom YAML files) to use another
+filesystem. `FNOML_PROJECT_STORAGE_ROOT` changes both Olivia-derived defaults
+at once.
+
+Before submitting a long Slurm job, run the login-shell startup check from the
+repository directory:
+
+```bash
+source /cluster/home/harshm/loadnvidia.sh
+export JULIA_PROJECT=/cluster/work/projects/nn2834k/harshm/julia-envs/fnoml-forward-julia-1.12.2
+export JULIA_DEPOT_PATH=/cluster/work/projects/nn2834k/harshm/julia-depot-1.12.2
+export FNOML_PRED_DIR=/cluster/work/projects/nn2834k/harshm
+export FNOML_ATOM_DIR=/cluster/work/projects/nn2834k/harshm/multi3d/input/atoms
+cd /cluster/work/projects/nn2834k/harshm/FFNOMLcopy
+julia --project="${JULIA_PROJECT}" --threads=1 forward_startup_check.jl
+```
+
+This loads the same Julia packages and source modules as `Forward.jl`, reads
+the enabled prediction configuration, and performs its file, output-directory,
+launcher, and HDF5-structure preflight. It exits before atmosphere loading,
+MPI initialization, FFNoML inference, statistical equilibrium, or synthesis.
+`SUCCESS` at the end means the job can pass the same startup and preflight
+stage in Slurm; it does not validate compute-node networking or GPU execution.
 
 Distributed FFNoML inference is deliberately not launched by every MPI rank.
 Pass a launcher executable with `--fsdp-launcher`; only MPI rank 0 invokes it,

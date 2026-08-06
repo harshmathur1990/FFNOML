@@ -177,8 +177,14 @@ levels = [ATOM_CONFIG[a]["levels"]   for a in ACTIVE_ATOMS]
 PRED_OLIVIA_DIR = "/cluster/work/projects/nn2834k/harshm/"
 PRED_EAGLE7_DIR = "/mn/stornext/d9/data/harshm/"
 
-# PRED_DIR = PRED_OLIVIA_DIR
-PRED_DIR = PRED_EAGLE7_DIR
+# Forward/prediction jobs run on more than one cluster.  Keep the data root out
+# of the source configuration so an Olivia job never silently selects Eagle's
+# /mn/stornext mount.  The trailing separator preserves the existing path
+# construction below.
+PRED_DIR = os.path.join(
+    os.environ.get("FNOML_PRED_DIR", PRED_OLIVIA_DIR),
+    "",
+)
 
 MULTI3D_PRED_DATA = [
     # Forward.jl-specific per-atmosphere controls:

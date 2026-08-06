@@ -25,6 +25,12 @@ source /cluster/home/harshm/loadnvidia.sh
 repository_dir=${FORWARD_REPO_DIR:-/cluster/work/projects/nn2834k/harshm/FFNOML}
 cd "${repository_dir}"
 
+# config.py and Forward.jl use these roots.  Defaults point at Olivia project
+# storage; override them when the same checkout is submitted on another site.
+project_storage_root=${FNOML_PROJECT_STORAGE_ROOT:-/cluster/work/projects/nn2834k/harshm}
+export FNOML_PRED_DIR="${FNOML_PRED_DIR:-${project_storage_root}}"
+export FNOML_ATOM_DIR="${FNOML_ATOM_DIR:-${project_storage_root}/multi3d/input/atoms}"
+
 export FORWARD_DIAGNOSTICS_DIR=${FORWARD_DIAGNOSTICS_DIR:-${repository_dir}/forward-diagnostics-slurm-${SLURM_JOB_ID}}
 mkdir -p "${FORWARD_DIAGNOSTICS_DIR}"
 
