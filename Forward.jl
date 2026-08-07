@@ -629,7 +629,7 @@ function replace_hdf_dataset!(parent, name::String, values)
 end
 
 
-function source_file_signature(path::String)
+function source_file_signature(path::AbstractString)
     info = stat(path)
     return (path=abspath(path), size=Int64(info.size), mtime=Float64(info.mtime))
 end
@@ -1208,6 +1208,7 @@ function predict_with_charge_conservation(
     fsdp_launcher::Union{Nothing,String}=nothing,
     diagnostics::Union{Nothing,ForwardDiagnostics}=nothing,
 )
+    set_diagnostic_context!(diagnostics; phase="consistency_setup")
     max_iterations > 0 || error("Charge-conservation max iterations must be positive")
     tolerance > 0 || error("Charge-conservation tolerance must be positive")
     consistency_mode in (:charge_only, :hydrogen_se_3d) || error(
