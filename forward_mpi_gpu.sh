@@ -45,6 +45,9 @@ trap record_slurm_termination TERM INT
 export JULIA_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 export OMP_NUM_THREADS=1
 export HYDROGEN_SE_WAVELENGTH_STRIDE=${HYDROGEN_SE_WAVELENGTH_STRIDE:-1}
+# Preserve the batch allocation's GPU count before the CPU-only Julia step is
+# created with --gres=none.  Step-local SLURM_GPUS_ON_NODE may then be unset.
+export FORWARD_GPUS_PER_NODE="${FORWARD_GPUS_PER_NODE:-${SLURM_GPUS_ON_NODE}}"
 export NCCL_DEBUG=${NCCL_DEBUG:-ERROR}
 export HSA_FORCE_FINE_GRAIN_PCIE=1
 export FI_MR_CACHE_MONITOR=userfaultfd
@@ -66,6 +69,7 @@ export NCCL_PROTO=^LL128
 # ranks wait at an MPI collective until that one distributed torchrun finishes.
 srun --ntasks="${SLURM_NTASKS}" \
     --cpu-bind=cores \
+    --gres=none \
     julia --threads="${JULIA_NUM_THREADS}" Forward.jl \
         --mpi \
         --population-consistency-mode hydrogen-se-3d \

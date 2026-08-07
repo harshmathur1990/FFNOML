@@ -23,6 +23,7 @@ if [[ ${1:-} == "--node-worker" ]]; then
     torchrun_path=${FORWARD_TORCHRUN:-/cluster/home/harshm/nvidiaenv/bin/torchrun}
 
     cd "${repository_dir}"
+    echo "torchrun node worker: host=$(hostname) node_rank=${SLURM_PROCID} CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
     exec "${torchrun_path}" \
         --nnodes="${node_count}" \
         --nproc_per_node="${gpu_count}" \
@@ -46,7 +47,11 @@ prediction_output=$(realpath -m "$3")
 : "${SLURM_JOB_ID:?forward_fsdppredict.sh must run inside a Slurm allocation}"
 : "${SLURM_JOB_NODELIST:?SLURM_JOB_NODELIST is not set}"
 : "${SLURM_NNODES:?SLURM_NNODES is not set}"
-: "${SLURM_GPUS_ON_NODE:?SLURM_GPUS_ON_NODE is not set}"
+: "${FORWARD_GPUS_PER_NODE:?FORWARD_GPUS_PER_NODE is not set}"
+[[ ${FORWARD_GPUS_PER_NODE} =~ ^[1-9][0-9]*$ ]] || {
+    echo "FORWARD_GPUS_PER_NODE must be a positive integer, got: ${FORWARD_GPUS_PER_NODE}" >&2
+    exit 2
+}
 
 master_address=$(scontrol show hostnames "${SLURM_JOB_NODELIST}" | head -n 1)
 master_port=${FORWARD_MASTER_PORT:-29501}
@@ -66,7 +71,7 @@ srun --overlap \
     --nodes="${SLURM_NNODES}" \
     --ntasks="${SLURM_NNODES}" \
     --ntasks-per-node=1 \
-    --gpus-per-node="${SLURM_GPUS_ON_NODE}" \
+    --gpus-per-node="${FORWARD_GPUS_PER_NODE}" \
     "${script_path}" --node-worker \
     "${prediction_name}" \
     "${solve_h5}" \
@@ -74,5 +79,5 @@ srun --overlap \
     "${master_address}" \
     "${master_port}" \
     "${SLURM_NNODES}" \
-    "${SLURM_GPUS_ON_NODE}" \
+    "${FORWARD_GPUS_PER_NODE}" \
     "${rendezvous_id}"
