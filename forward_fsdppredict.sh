@@ -55,8 +55,11 @@ rendezvous_id="${SLURM_JOB_ID}-${prediction_name}-$$"
 echo "Launching coordinated FFNoML prediction '${prediction_name}' on ${SLURM_NNODES} nodes"
 echo "torchrun rendezvous: ${master_address}:${master_port}"
 
+# These tasks are torchrun launchers, not MPI ranks.  Explicitly disable the
+# inherited Slurm MPI plugin so the nested step does not wait on a PMIx fence.
 srun --overlap \
     --kill-on-bad-exit=1 \
+    --mpi=none \
     --nodes="${SLURM_NNODES}" \
     --ntasks="${SLURM_NNODES}" \
     --ntasks-per-node=1 \
