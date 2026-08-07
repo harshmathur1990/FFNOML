@@ -353,7 +353,7 @@ def plot_departure_coefficient_error_assessment(
     figsize=None,
     residual_range=(-50, 50),
     residual_bins=100,
-    coefficient_bins=80,
+    coefficient_bins=1000,
 ):
     """Plot height-binned residual and coefficient distributions per level.
 
