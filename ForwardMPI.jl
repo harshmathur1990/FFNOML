@@ -96,8 +96,21 @@ function parallel_root_call(operation, context::ForwardParallelContext)
             )
         end
     end
-    status = parallel_bcast(status, context)
-    status.success || error("MPI rank-0 operation failed:\n$(status.message)")
+
+    # Use a fixed-width collective for control flow. Broadcasting the
+    # serialized status object immediately before another serialized broadcast
+    # allowed a delayed rank to receive the following payload (for example the
+    # atmosphere-shape tuple) as the status value. Allreduce provides an
+    # unambiguous, same-type synchronization point on every rank.
+    local_success = parallel_isroot(context) && !status.success ? Int32(0) : Int32(1)
+    operation_succeeded = MPI.Allreduce(local_success, MPI.MIN, context.comm) == Int32(1)
+    if !operation_succeeded
+        message = parallel_bcast(
+            parallel_isroot(context) ? status.message : "",
+            context,
+        )
+        error("MPI rank-0 operation failed:\n$(message)")
+    end
     return value
 end
 
