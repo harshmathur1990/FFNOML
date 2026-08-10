@@ -22,11 +22,13 @@ ENV["GKSwstype"] = "100"     # file / offscreen
 ENV["GKS_WSTYPE"] = "100"    # some setups use this spelling
 
 function forward_startup_log(stage)
+    slurm_rank = get(ENV, "SLURM_PROCID", "?")
+    local_rank = get(ENV, "SLURM_LOCALID", "?")
     println(
         stderr,
         "[Forward startup] host=$(gethostname()) " *
-        "slurm_rank=$(get(ENV, \"SLURM_PROCID\", \"?\")) " *
-        "local_rank=$(get(ENV, \"SLURM_LOCALID\", \"?\")) stage=$(stage)",
+        "slurm_rank=$(slurm_rank) " *
+        "local_rank=$(local_rank) stage=$(stage)",
     )
     flush(stderr)
 end
