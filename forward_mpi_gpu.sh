@@ -4,6 +4,9 @@
 #SBATCH --nodes=8
 #SBATCH --ntasks-per-node=4
 #SBATCH --gpus-per-node=4
+# gpu-1-102 failed to configure the Slingshot interconnect for job 1751001.
+# Remove this temporary exclusion after the node has been returned to service.
+#SBATCH --exclude=gpu-1-102
 #SBATCH --cpus-per-task=64
 #SBATCH --mem-per-gpu=120G
 #SBATCH --time=0-02:00:00

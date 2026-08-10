@@ -21,6 +21,11 @@ if [[ ${1:-} == "--node-worker" ]]; then
     gpu_count=$8
     rendezvous_id=$9
     torchrun_path=${FORWARD_TORCHRUN:-/cluster/home/harshm/nvidiaenv/bin/torchrun}
+    rendezvous_join_timeout=${FORWARD_RDZV_JOIN_TIMEOUT:-120}
+    [[ ${rendezvous_join_timeout} =~ ^[1-9][0-9]*$ ]] || {
+        echo "FORWARD_RDZV_JOIN_TIMEOUT must be a positive integer, got: ${rendezvous_join_timeout}" >&2
+        exit 2
+    }
 
     cd "${repository_dir}"
     echo "torchrun node worker: host=$(hostname) node_rank=${SLURM_PROCID} CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
@@ -31,6 +36,7 @@ if [[ ${1:-} == "--node-worker" ]]; then
         --rdzv_id="${rendezvous_id}" \
         --rdzv_backend=c10d \
         --rdzv_endpoint="${master_address}:${master_port}" \
+        --rdzv_conf="join_timeout=${rendezvous_join_timeout}" \
         pipeline.py --fsdppredict --predname "${prediction_name}" \
         --solve-h5 "${solve_h5}" \
         --prediction-output "${prediction_output}"
