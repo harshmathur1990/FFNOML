@@ -1226,10 +1226,36 @@ function predict_with_charge_conservation(
     hydrogen_level_range = hydrogen_level_first:(
         hydrogen_level_first + cfg.atoms[hydrogen_cfg_index].nlevels - 1
     )
+    parallel_println(parallel, "Consistency setup: loading the hydrogen atom model...")
+    hydrogen_atom_start = time()
+    diagnostic_checkpoint!(diagnostics, "consistency_hydrogen_atom_read_start")
     hydrogen_atom = Muspel.read_atom(cfg.atoms[hydrogen_cfg_index].atom_file)
+    diagnostic_checkpoint!(
+        diagnostics,
+        "consistency_hydrogen_atom_read_complete";
+        seconds=time() - hydrogen_atom_start,
+        levels=hydrogen_atom.nlevels,
+    )
+
+    parallel_println(parallel, "Consistency setup: loading background atom models...")
+    background_atoms_start = time()
+    diagnostic_checkpoint!(diagnostics, "consistency_background_atoms_read_start")
     background_atoms = charge_conservation_background_atoms()
+    diagnostic_checkpoint!(
+        diagnostics,
+        "consistency_background_atoms_read_complete";
+        seconds=time() - background_atoms_start,
+        atoms=length(background_atoms),
+    )
     result_h5 = consistency_result_path(cfg, consistency_mode)
     work_prediction_h5 = consistency_prediction_work_path(result_h5)
+    parallel_println(parallel, "Consistency setup: checking checkpoint compatibility...")
+    diagnostic_checkpoint!(
+        diagnostics,
+        "consistency_cache_check_start";
+        path=result_h5,
+    )
+    cache_check_start = time()
     cache_state = parallel_root_call(parallel) do
         prepare_consistency_result!(
             result_h5,
@@ -1244,6 +1270,14 @@ function predict_with_charge_conservation(
         parallel_isroot(parallel) ? cache_state : nothing,
         parallel,
     )
+    diagnostic_checkpoint!(
+        diagnostics,
+        "consistency_cache_check_complete";
+        seconds=time() - cache_check_start,
+        compatible=cache_state.compatible,
+        converged=cache_state.converged,
+        iterations=cache_state.iterations,
+    )
     parallel_println(parallel, "Electron-density result: $(result_h5)")
     diagnostic_event!(
         diagnostics,
@@ -1255,7 +1289,20 @@ function predict_with_charge_conservation(
         reason=cache_state.reason,
     )
 
+    parallel_println(parallel, "Consistency setup: constructing fixed hydrogen-density array...")
+    fixed_hydrogen_start = time()
+    diagnostic_checkpoint!(
+        diagnostics,
+        "consistency_fixed_hydrogen_density_start";
+        local_size=size(atmos.hydrogen1_density),
+    )
     fixed_hydrogen_density = atmos.hydrogen1_density .+ atmos.proton_density
+    diagnostic_checkpoint!(
+        diagnostics,
+        "consistency_fixed_hydrogen_density_complete";
+        seconds=time() - fixed_hydrogen_start,
+        local_mib=sizeof(eltype(fixed_hydrogen_density)) * length(fixed_hydrogen_density) / 2.0^20,
+    )
 
     if cache_state.converged
         set_diagnostic_context!(diagnostics; phase="consistency_cache_hit")
@@ -1287,6 +1334,16 @@ function predict_with_charge_conservation(
         return cached_populations
     end
 
+    parallel_println(parallel, "Consistency setup: reading the starting electron density...")
+    input_read_start = time()
+    diagnostic_checkpoint!(
+        diagnostics,
+        "consistency_input_density_read_start";
+        source=cache_state.iterations > 0 ? "checkpoint" : "solving_set",
+        path=result_h5,
+        x_first=first(x_range),
+        x_last=last(x_range),
+    )
     input_ne = if cache_state.iterations > 0
         read_consistency_electron_density(result_h5; x_range=x_range)
     else
@@ -1297,16 +1354,95 @@ function predict_with_charge_conservation(
             x_range=x_range,
         )
     end
+    diagnostic_checkpoint!(
+        diagnostics,
+        "consistency_input_density_read_complete";
+        seconds=time() - input_read_start,
+        local_size=size(input_ne),
+        local_mib=sizeof(eltype(input_ne)) * length(input_ne) / 2.0^20,
+    )
+    parallel_println(
+        parallel,
+        "Consistency setup: starting electron density read in " *
+        "$(round(time() - input_read_start; digits=2)) s; updating local atmosphere...",
+    )
+    atmosphere_update_start = time()
     atmos.electron_density .= input_ne
+    diagnostic_checkpoint!(
+        diagnostics,
+        "consistency_atmosphere_density_update_complete";
+        seconds=time() - atmosphere_update_start,
+    )
 
     # Persist the untouched starting density once. On resume, also force the
     # copied solving-set input to agree with the last durable checkpoint.
-    global_input_ne = parallel_gather_x(input_ne, parallel)
+    parallel_println(
+        parallel,
+        "Consistency setup: gathering electron density from $(parallel.size) MPI ranks...",
+    )
+    gather_start = time()
+    global_input_ne = parallel_gather_x(
+        input_ne,
+        parallel;
+        diagnostics=diagnostics,
+        label="initial_electron_density",
+    )
+    diagnostic_checkpoint!(
+        diagnostics,
+        "consistency_input_density_gather_complete";
+        seconds=time() - gather_start,
+        global_size=parallel_isroot(parallel) ? size(global_input_ne) : nothing,
+    )
+    parallel_println(
+        parallel,
+        "Consistency setup: electron-density gather completed in " *
+        "$(round(time() - gather_start; digits=2)) s; writing checkpoint...",
+    )
     parallel_root_call(parallel) do
+        initial_write_start = time()
+        diagnostic_checkpoint!(
+            diagnostics,
+            "consistency_initial_density_write_start";
+            path=result_h5,
+            global_size=size(global_input_ne),
+        )
         write_initial_consistency_state!(result_h5, global_input_ne)
+        diagnostic_checkpoint!(
+            diagnostics,
+            "consistency_initial_density_write_complete";
+            seconds=time() - initial_write_start,
+            path=result_h5,
+        )
+
+        solving_write_start = time()
+        diagnostic_checkpoint!(
+            diagnostics,
+            "consistency_solving_density_write_start";
+            path=result_h5,
+        )
         write_solving_electron_density!(result_h5, global_input_ne)
+        diagnostic_checkpoint!(
+            diagnostics,
+            "consistency_solving_density_write_complete";
+            seconds=time() - solving_write_start,
+            path=result_h5,
+        )
     end
+    diagnostic_checkpoint!(diagnostics, "consistency_initial_checkpoint_write_complete")
+    parallel_println(parallel, "Consistency setup: checkpoint written; entering MPI barrier...")
+    barrier_start = time()
+    diagnostic_checkpoint!(diagnostics, "consistency_initial_barrier_start")
     parallel_barrier(parallel)
+    diagnostic_checkpoint!(
+        diagnostics,
+        "consistency_initial_barrier_complete";
+        seconds=time() - barrier_start,
+    )
+    parallel_println(
+        parallel,
+        "Consistency setup: all MPI ranks passed the barrier in " *
+        "$(round(time() - barrier_start; digits=2)) s.",
+    )
 
     hse_setup_start = time()
     if consistency_mode == :hydrogen_se_3d
@@ -1316,6 +1452,9 @@ function predict_with_charge_conservation(
             "Preparing hydrogen SE Voigt and RH background-continuum data...",
         )
     end
+    voigt_setup_start = time()
+    consistency_mode == :hydrogen_se_3d &&
+        diagnostic_checkpoint!(diagnostics, "hydrogen_se_voigt_setup_start")
     voigt_itp = if consistency_mode == :hydrogen_se_3d
         a = LinRange(Float32(cfg.voigt.a_min), Float32(cfg.voigt.a_max), cfg.voigt.a_n)
         v = LinRange(Float32(cfg.voigt.v_min), Float32(cfg.voigt.v_max), cfg.voigt.v_n)
@@ -1323,8 +1462,30 @@ function predict_with_charge_conservation(
     else
         nothing
     end
+    if consistency_mode == :hydrogen_se_3d
+        diagnostic_checkpoint!(
+            diagnostics,
+            "hydrogen_se_voigt_setup_complete";
+            seconds=time() - voigt_setup_start,
+        )
+        parallel_println(
+            parallel,
+            "Hydrogen SE setup: Voigt interpolation prepared; loading background continua...",
+        )
+    end
+    background_setup_start = time()
+    consistency_mode == :hydrogen_se_3d &&
+        diagnostic_checkpoint!(diagnostics, "hydrogen_se_background_setup_start")
     hse_background_data = consistency_mode == :hydrogen_se_3d ?
                           hse_background_continuum_data() : nothing
+    if consistency_mode == :hydrogen_se_3d
+        diagnostic_checkpoint!(
+            diagnostics,
+            "hydrogen_se_background_setup_complete";
+            seconds=time() - background_setup_start,
+            background_atoms=length(hse_background_data.atoms),
+        )
+    end
     if consistency_mode == :hydrogen_se_3d
         hse_setup_seconds = time() - hse_setup_start
         parallel_println(

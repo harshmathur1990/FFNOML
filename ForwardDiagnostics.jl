@@ -25,6 +25,7 @@ end
 diagnostic_event!(::Nothing, event::AbstractString; kwargs...) = nothing
 set_diagnostic_context!(::Nothing; kwargs...) = nothing
 write_resource_snapshot!(::Nothing) = nothing
+diagnostic_checkpoint!(::Nothing, event::AbstractString; kwargs...) = nothing
 record_diagnostic_failure!(::Nothing, exception, backtrace) = nothing
 
 
@@ -190,6 +191,18 @@ function diagnostic_event!(
             flush(io)
         end
     end
+    return nothing
+end
+
+
+"""Write a durable event and an accompanying resource sample at a phase boundary."""
+function diagnostic_checkpoint!(
+    diagnostics::ForwardDiagnostics,
+    event::AbstractString;
+    values...,
+)
+    diagnostic_event!(diagnostics, event; values...)
+    write_resource_snapshot!(diagnostics)
     return nothing
 end
 
