@@ -21,6 +21,17 @@
 ENV["GKSwstype"] = "100"     # file / offscreen
 ENV["GKS_WSTYPE"] = "100"    # some setups use this spelling
 
+function forward_startup_log(stage)
+    println(
+        stderr,
+        "[Forward startup] host=$(gethostname()) " *
+        "slurm_rank=$(get(ENV, \"SLURM_PROCID\", \"?\")) " *
+        "local_rank=$(get(ENV, \"SLURM_LOCALID\", \"?\")) stage=$(stage)",
+    )
+    flush(stderr)
+end
+
+forward_startup_log("loading Julia packages")
 using Muspel
 using StaticArrays
 using AtomicData
@@ -28,13 +39,12 @@ using HDF5
 using ProgressMeter
 using Base.Threads
 using Interpolations
-using Plots
-gr()                         # ensure GR backend
-default(show=false)
+forward_startup_log("Julia packages loaded")
 
 include("ForwardMPI.jl")
 include("ForwardDiagnostics.jl")
 include("HydrogenSE.jl")
+forward_startup_log("source files loaded")
 
 
 # ============================================================

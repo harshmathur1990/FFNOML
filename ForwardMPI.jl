@@ -31,7 +31,11 @@ function initialize_parallel_context(enable_mpi::Bool)
     )
 
     owns_mpi = !MPI.Initialized()
-    owns_mpi && MPI.Init()
+    if owns_mpi
+        forward_startup_log("entering MPI.Init")
+        MPI.Init()
+        forward_startup_log("MPI.Init complete")
+    end
     comm = MPI.COMM_WORLD
     return ForwardParallelContext(
         true,

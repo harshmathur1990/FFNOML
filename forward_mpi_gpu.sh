@@ -8,6 +8,7 @@
 # gpu-1-37 failed to contribute its local task to the PMIx startup fence for
 # job 1792315, leaving every other node waiting for it. Remove these temporary
 # exclusions after the nodes have been returned to service.
+#SBATCH --exclude=gpu-1-37,gpu-1-102
 #SBATCH --cpus-per-task=64
 #SBATCH --mem-per-gpu=120G
 #SBATCH --time=0-02:00:00
@@ -32,6 +33,24 @@ module list
 
 repository_dir=${FORWARD_REPO_DIR:-/cluster/work/projects/nn2834k/harshm/FFNOMLcopy}
 cd "${repository_dir}"
+
+# Do not spend time entering a PMIx fence when a node already known to have a
+# broken Slingshot/PMIx startup path slips into the allocation. The SBATCH
+# exclusion above should prevent this; this guard makes a copied or overridden
+# submission fail immediately and explain why.
+while IFS= read -r allocated_node; do
+    case "${allocated_node}" in
+        gpu-1-37|gpu-1-102)
+            echo "Refusing allocation containing quarantined node ${allocated_node}" >&2
+            exit 1
+            ;;
+    esac
+done < <(scontrol show hostnames "${SLURM_JOB_NODELIST}")
+
+# Use the environment prepared by make_gpu_env.sh instead of whichever global
+# Julia environment happens to be active in the submitting shell.
+export JULIA_PROJECT=${FNOML_JULIA_PROJECT:-/cluster/work/projects/nn2834k/harshm/julia-envs/fnoml-forward-julia-1.12.2}
+export JULIA_DEPOT_PATH=${FNOML_JULIA_DEPOT:-/cluster/work/projects/nn2834k/harshm/julia-depot-1.12.2}
 
 # config.py and Forward.jl use these roots.  Defaults point at Olivia project
 # storage; override them when the same checkout is submitted on another site.
@@ -88,7 +107,8 @@ srun --mpi=pmix \
     --ntasks="${SLURM_NTASKS}" \
     --cpu-bind=cores \
     --gres=none \
-    julia --threads="${JULIA_NUM_THREADS}" Forward.jl \
+    julia --project="${JULIA_PROJECT}" --startup-file=no \
+        --threads="${JULIA_NUM_THREADS}" Forward.jl \
         --mpi \
         --population-consistency-mode hydrogen-se-3d \
         --hydrogen-se-wavelength-stride "${HYDROGEN_SE_WAVELENGTH_STRIDE}" \
