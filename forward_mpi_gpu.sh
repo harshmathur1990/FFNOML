@@ -5,8 +5,9 @@
 #SBATCH --ntasks-per-node=4
 #SBATCH --gpus-per-node=4
 # gpu-1-102 failed to configure the Slingshot interconnect for job 1751001.
-# Remove this temporary exclusion after the node has been returned to service.
-#SBATCH --exclude=gpu-1-102
+# gpu-1-37 failed to contribute its local task to the PMIx startup fence for
+# job 1792315, leaving every other node waiting for it. Remove these temporary
+# exclusions after the nodes have been returned to service.
 #SBATCH --cpus-per-task=64
 #SBATCH --mem-per-gpu=120G
 #SBATCH --time=0-02:00:00
@@ -21,11 +22,15 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-module -q restore
-module list
+# Start from Olivia's default module environment instead of restoring a
+# potentially stale user collection. loadnvidia.sh must load a mutually
+# compatible CUDA/NCCL/Python stack; list the result after setup so compiler
+# and library version conflicts are visible in the job log.
+module --quiet reset
 source /cluster/home/harshm/loadnvidia.sh
+module list
 
-repository_dir=${FORWARD_REPO_DIR:-/cluster/work/projects/nn2834k/harshm/FFNOML}
+repository_dir=${FORWARD_REPO_DIR:-/cluster/work/projects/nn2834k/harshm/FFNOMLcopy}
 cd "${repository_dir}"
 
 # config.py and Forward.jl use these roots.  Defaults point at Olivia project
@@ -67,10 +72,20 @@ export NCCL_SOCKET_IFNAME=hsn0,hsn1,hsn2,hsn3
 export FI_CXI_RX_MATCH_MODE=hybrid
 export NCCL_PROTO=^LL128
 
+# Sigma2's multi-node OpenMPI configuration for Olivia. Force OpenMPI through
+# libfabric's CXI provider so it uses Slingshot and cannot silently fall back
+# to TCP if the fabric cannot be initialized on a rank.
+export FI_PROVIDER=cxi
+export OMPI_MCA_pml=cm
+export OMPI_MCA_mtl=ofi
+export OMPI_MCA_mtl_ofi_av=table
+export PRTE_MCA_ras_base_launch_orted_on_hn=1
+
 # MPI ranks perform CPU/SE/synthesis work. During each FFNoML call, MPI rank 0
 # creates one overlapping Slurm GPU step via forward_fsdppredict.sh; all Julia
 # ranks wait at an MPI collective until that one distributed torchrun finishes.
-srun --ntasks="${SLURM_NTASKS}" \
+srun --mpi=pmix \
+    --ntasks="${SLURM_NTASKS}" \
     --cpu-bind=cores \
     --gres=none \
     julia --threads="${JULIA_NUM_THREADS}" Forward.jl \
