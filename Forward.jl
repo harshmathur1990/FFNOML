@@ -494,6 +494,9 @@ function charge_conservation_electron_density(
     background_atoms,
     ;
     total_hydrogen_density=nothing,
+    progress_callback=nothing,
+    progress_interval_s::Real=30.0,
+    progress_chunk_elements::Int=10_000,
 )
     size(input_ne) == size(atmos.temperature) || error(
         "Electron-density shape $(size(input_ne)) does not match atmosphere shape $(size(atmos.temperature))"
@@ -501,6 +504,8 @@ function charge_conservation_electron_density(
     size(nlte_h)[1:3] == size(input_ne) || error(
         "Hydrogen-population shape $(size(nlte_h)[1:3]) does not match electron-density shape $(size(input_ne))"
     )
+    progress_interval_s > 0 || error("Charge progress interval must be positive")
+    progress_chunk_elements > 0 || error("Charge progress chunk size must be positive")
 
     hydrogen_density = total_hydrogen_density === nothing ?
                        atmos.hydrogen1_density .+ atmos.proton_density :
@@ -508,28 +513,76 @@ function charge_conservation_electron_density(
     hydrogen_charge = hydrogen_positive_charge(nlte_h, hydrogen_atom)
     output_ne = similar(input_ne)
 
-    Threads.@threads for index in eachindex(output_ne)
-        temperature = Float64(atmos.temperature[index])
-        ne = max(Float64(input_ne[index]), eps(Float64))
-        n_h = Float64(hydrogen_density[index])
-        total_charge = Float64(hydrogen_charge[index])
+    total_elements = length(output_ne)
+    completed_elements = Threads.Atomic{Int}(0)
+    progress_start = time()
+    last_progress_time = Ref(progress_start)
+    progress_lock = ReentrantLock()
 
-        for item in background_atoms
-            populations = Muspel.saha_boltzmann(
-                item.atom,
-                temperature,
-                ne,
-                item.abundance * n_h,
-            )
-            for level in 1:item.atom.nlevels
-                total_charge += (item.atom.stage[level] - 1) * populations[level]
+    Threads.@threads :dynamic for chunk_first in 1:progress_chunk_elements:total_elements
+        chunk_last = min(chunk_first + progress_chunk_elements - 1, total_elements)
+        for index in chunk_first:chunk_last
+            temperature = Float64(atmos.temperature[index])
+            ne = max(Float64(input_ne[index]), eps(Float64))
+            n_h = Float64(hydrogen_density[index])
+            total_charge = Float64(hydrogen_charge[index])
+
+            for item in background_atoms
+                populations = Muspel.saha_boltzmann(
+                    item.atom,
+                    temperature,
+                    ne,
+                    item.abundance * n_h,
+                )
+                for level in 1:item.atom.nlevels
+                    total_charge += (item.atom.stage[level] - 1) * populations[level]
+                end
             end
+
+            output_ne[index] = total_charge
         end
 
-        output_ne[index] = total_charge
+        chunk_elements = chunk_last - chunk_first + 1
+        completed = Threads.atomic_add!(completed_elements, chunk_elements) + chunk_elements
+        if progress_callback !== nothing
+            now = time()
+            if completed == total_elements || now - last_progress_time[] >= progress_interval_s
+                lock(progress_lock) do
+                    now = time()
+                    completed = completed_elements[]
+                    if completed == total_elements ||
+                       now - last_progress_time[] >= progress_interval_s
+                        elapsed_s = now - progress_start
+                        fraction = completed / total_elements
+                        cells_per_second = completed / max(elapsed_s, eps(Float64))
+                        eta_s = fraction > 0 ? elapsed_s * (1 - fraction) / fraction : Inf
+                        progress_callback((;
+                            completed,
+                            total=total_elements,
+                            fraction,
+                            elapsed_s,
+                            eta_s,
+                            cells_per_second,
+                        ))
+                        last_progress_time[] = now
+                    end
+                end
+            end
+        end
     end
 
     return output_ne
+end
+
+
+function compact_duration(seconds::Real)
+    isfinite(seconds) || return "unknown"
+    total_seconds = max(0, round(Int, seconds))
+    hours, remainder = divrem(total_seconds, 3600)
+    minutes, seconds_part = divrem(remainder, 60)
+    hours > 0 && return "$(hours)h $(minutes)m $(seconds_part)s"
+    minutes > 0 && return "$(minutes)m $(seconds_part)s"
+    return "$(seconds_part)s"
 end
 
 
@@ -1807,6 +1860,37 @@ function predict_with_charge_conservation(
         end
         set_diagnostic_context!(diagnostics; phase="charge_conservation")
         charge_start = time()
+        diagnostic_checkpoint!(
+            diagnostics,
+            "charge_conservation_start";
+            local_cells=length(input_ne),
+            background_atoms=length(background_atoms),
+        )
+        charge_progress = if parallel_isroot(parallel)
+            progress -> begin
+                percentage = round(100 * progress.fraction; digits=1)
+                rate_mcells = round(progress.cells_per_second / 1e6; digits=3)
+                parallel_println(
+                    parallel,
+                    "  charge conservation: $(percentage)% | " *
+                    "elapsed $(compact_duration(progress.elapsed_s)) | " *
+                    "ETA $(compact_duration(progress.eta_s)) | " *
+                    "$(rate_mcells) million cells/s",
+                )
+                diagnostic_event!(
+                    diagnostics,
+                    "charge_conservation_progress";
+                    percentage=percentage,
+                    completed_local_cells=progress.completed,
+                    total_local_cells=progress.total,
+                    elapsed_s=progress.elapsed_s,
+                    eta_s=progress.eta_s,
+                    cells_per_second=progress.cells_per_second,
+                )
+            end
+        else
+            nothing
+        end
         update_atmosphere_hydrogen_densities!(atmos, nlte_h, hydrogen_atom)
         new_ne = charge_conservation_electron_density(
             atmos,
@@ -1815,9 +1899,15 @@ function predict_with_charge_conservation(
             hydrogen_atom,
             background_atoms,
             total_hydrogen_density=fixed_hydrogen_density,
+            progress_callback=charge_progress,
         )
         relative_change = maximum_relative_change(new_ne, input_ne)
         charge_seconds = time() - charge_start
+        diagnostic_checkpoint!(
+            diagnostics,
+            "charge_conservation_complete";
+            seconds=charge_seconds,
+        )
         se_residual = parallel_allreduce_max(se_residual, parallel)
         population_correction = parallel_allreduce_max(population_correction, parallel)
         scattering_iterations = Int(parallel_allreduce_max(scattering_iterations, parallel))

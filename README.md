@@ -767,7 +767,11 @@ progress. A normal consistency iteration reports the FFNoML population change
 (starting with `n/a` on iteration 1), the electron-density residual and range,
 the hydrogen SE residual and FFNoML-to-SE correction in preferred mode, and a
 compact timing split for FFNoML, prediction reading, SE, charge conservation,
-HDF5 I/O, and the whole iteration. Atmosphere distribution, each atom's
+HDF5 I/O, and the whole iteration. During the cell-heavy charge-conservation
+phase, rank 0 reports percentage complete, elapsed time, estimated remaining
+time, and processing rate every 30 seconds. The estimate follows rank 0's local
+x slab, which is one of the largest rank partitions and therefore approximates
+the completion time of the full distributed phase. Atmosphere distribution, each atom's
 synthesis progress/time, output gathering, and completion are also reported.
 The Slurm template writes these streams to `forward-JOBID.out` and
 `forward-JOBID.err`.
