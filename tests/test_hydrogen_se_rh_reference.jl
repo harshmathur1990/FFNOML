@@ -59,6 +59,26 @@ end
     @test metal_absorption >= absorption
     @test metal_emissivity == metal_absorption * planck
     @test metal_scattering == scattering
+
+    hse_configure_background_continuum_tables!(
+        background,
+        reshape([5000.0, 8000.0], 2, 1, 1),
+        reshape([1.0e15, 1.0e18], 2, 1, 1),
+    )
+    opacity_table = hse_background_opacity_table(background, wavelength)
+    table_absorption, table_emissivity, table_scattering, table_planck =
+        hse_background_continuum(
+            opacity_table,
+            temperature,
+            electron_density,
+            neutral_hydrogen,
+            proton_hydrogen,
+        )
+    @test table_absorption + table_scattering ≈
+          metal_absorption + metal_scattering rtol=5e-4
+    @test table_emissivity == table_absorption * table_planck
+    @test table_scattering ≈ metal_scattering rtol=2eps(Float64)
+    @test hse_background_opacity_table(background, wavelength) === opacity_table
 end
 
 @testset "RH scattering fixed point" begin

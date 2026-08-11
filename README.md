@@ -673,6 +673,12 @@ Thomson, and neutral-hydrogen Rayleigh processes are included. Following RH,
 true continuum absorption has thermal emissivity while continuum scattering is
 iterated as `eta_scat = chi_scat J`; it is not folded into a Planck source.
 LTE background-metal bound-free opacity is also included as true absorption.
+As in Multi3D, transport reuses precomputed periodic interpolation stencils
+within each height sweep instead of searching the horizontal axes for every
+cell and field. Continuum coefficients use Muspel's 100-point log-temperature
+and log-electron-density interpolation tables, cached per wavelength and
+invalidated automatically if a later consistency iteration leaves their
+thermodynamic range.
 The compact corrector still omits background bound-bound line haze and the
 H2/H2-minus and helium Rayleigh terms for which its atmosphere currently has no
 molecular/helium populations. `--hydrogen-se-relaxation VALUE`

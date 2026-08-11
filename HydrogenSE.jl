@@ -35,6 +35,7 @@ function hse_muspel_units()
             number_density=Muspel.Unitful.uparse("m^-3"),
             wavelength=Muspel.Unitful.uparse("nm"),
             inverse_length=Muspel.Unitful.uparse("m^-1"),
+            area=Muspel.Unitful.uparse("m^2"),
         )
         HSE_MUSPEL_UNITS[] = units
     end
@@ -102,9 +103,20 @@ struct HydrogenSECollision
 end
 
 
-struct HSEBackgroundContinuumData{A,I}
+mutable struct HSEBackgroundContinuumData{A,I}
     atoms::A
     bound_free_interpolants::I
+    opacity_tables::Dict{Float64,Any}
+    log_temperature::Any
+    log_electron_density::Any
+    table_points::Int
+end
+
+
+struct HSEBackgroundOpacityTable{I}
+    total_extinction::I
+    rayleigh_cross_section::Float64
+    thomson_cross_section::Float64
 end
 
 
@@ -118,7 +130,91 @@ function hse_background_continuum_data()
         atom.element == :H || push!(atoms, atom)
     end
     interpolants = Muspel.get_atoms_bf_interpolant(atoms)
-    return HSEBackgroundContinuumData(atoms, interpolants)
+    return HSEBackgroundContinuumData(
+        atoms,
+        interpolants,
+        Dict{Float64,Any}(),
+        nothing,
+        nothing,
+        100,
+    )
+end
+
+
+function hse_table_range(minimum_value, maximum_value, points::Int)
+    points >= 4 || error("Hydrogen SE opacity tables need at least four points")
+    minimum_value > 0 || error(
+        "Hydrogen SE opacity tables require positive thermodynamic values"
+    )
+    lower = log10(Float64(minimum_value))
+    upper = log10(Float64(maximum_value))
+    padding = max(0.02 * (upper - lower), 1e-3)
+    return LinRange(lower - padding, upper + padding, points)
+end
+
+
+function hse_range_contains(range, minimum_value, maximum_value)
+    range === nothing && return false
+    minimum_value > 0 || return false
+    return first(range) <= log10(Float64(minimum_value)) &&
+           last(range) >= log10(Float64(maximum_value))
+end
+
+
+function hse_configure_background_continuum_tables!(
+    data::HSEBackgroundContinuumData,
+    temperature,
+    electron_density,
+)
+    temperature_minimum, temperature_maximum = extrema(temperature)
+    electron_minimum, electron_maximum = extrema(electron_density)
+    if hse_range_contains(
+           data.log_temperature, temperature_minimum, temperature_maximum,
+       ) && hse_range_contains(
+           data.log_electron_density, electron_minimum, electron_maximum,
+       )
+        return data
+    end
+    data.log_temperature = hse_table_range(
+        temperature_minimum, temperature_maximum, data.table_points,
+    )
+    data.log_electron_density = hse_table_range(
+        electron_minimum, electron_maximum, data.table_points,
+    )
+    empty!(data.opacity_tables)
+    return data
+end
+
+
+function hse_background_opacity_table(
+    data::HSEBackgroundContinuumData,
+    wavelength::Real,
+)
+    data.log_temperature === nothing && error(
+        "Hydrogen SE background opacity tables were not configured"
+    )
+    λ = Float64(wavelength)
+    return get!(data.opacity_tables, λ) do
+        total_extinction = Muspel.create_σ_itp_NLTE(
+            λ,
+            data.log_temperature,
+            data.log_electron_density,
+            data.atoms,
+            data.bound_free_interpolants,
+        )
+        units = hse_muspel_units()
+        rayleigh_cross_section = Muspel.Unitful.ustrip(
+            Muspel.Unitful.uconvert(
+                units.area,
+                Muspel.σ_rayleigh_h(λ * units.wavelength),
+            ),
+        )
+        HSEBackgroundOpacityTable(
+            total_extinction,
+            Float64(rayleigh_cross_section),
+            Float64(Muspel.σ_THOMSON),
+        )
+    end
 end
 
 
@@ -200,20 +296,46 @@ function hse_subsample_grid(values, stride::Int)
 end
 
 
-function hse_periodic_bracket(axis, coordinate)
+struct HSEPeriodicAxis{A,T}
+    coordinates::A
+    period::T
+end
+
+
+function hse_periodic_axis(axis)
     n = length(axis)
     n > 0 || error("A horizontal Hydrogen SE coordinate axis is empty")
-    n == 1 && return 1, 1, 0.0
-    all(diff(axis) .> 0) || error("Hydrogen SE horizontal axes must be increasing")
+    if n > 1
+        @inbounds for index in 2:n
+            axis[index] > axis[index - 1] || error(
+                "Hydrogen SE horizontal axes must be increasing"
+            )
+        end
+    end
 
     # The atmosphere coordinates are cell centres.  The missing interval from
     # the last centre back to the first therefore has the representative grid
     # spacing at the two periodic edges.
-    edge_spacing = 0.5 * ((axis[2] - axis[1]) + (axis[end] - axis[end - 1]))
-    period = axis[end] - axis[1] + edge_spacing
-    wrapped = mod(coordinate - axis[1], period) + axis[1]
+    period = if n == 1
+        one(float(axis[1]))
+    else
+        edge_spacing = 0.5 * (
+            (axis[2] - axis[1]) + (axis[end] - axis[end - 1])
+        )
+        axis[end] - axis[1] + edge_spacing
+    end
+    return HSEPeriodicAxis(axis, period)
+end
+
+
+@inline function hse_periodic_bracket(periodic_axis::HSEPeriodicAxis, coordinate)
+    axis = periodic_axis.coordinates
+    n = length(axis)
+    n == 1 && return 1, 1, 0.0
+    wrapped = mod(coordinate - axis[1], periodic_axis.period) + axis[1]
     if wrapped >= axis[end]
-        fraction = (wrapped - axis[end]) / (axis[1] + period - axis[end])
+        fraction = (wrapped - axis[end]) /
+                   (axis[1] + periodic_axis.period - axis[end])
         return n, 1, fraction
     end
     lower = searchsortedlast(axis, wrapped)
@@ -223,12 +345,36 @@ function hse_periodic_bracket(axis, coordinate)
 end
 
 
+function hse_periodic_bracket(axis, coordinate)
+    return hse_periodic_bracket(hse_periodic_axis(axis), coordinate)
+end
+
+
 function hse_bilinear_periodic(plane, x, y, x_coordinate, y_coordinate)
-    x0, x1, tx = hse_periodic_bracket(x, x_coordinate)
-    y0, y1, ty = hse_periodic_bracket(y, y_coordinate)
+    x0, x1, tx = hse_periodic_bracket(hse_periodic_axis(x), x_coordinate)
+    y0, y1, ty = hse_periodic_bracket(hse_periodic_axis(y), y_coordinate)
     lower = muladd(tx, plane[y0, x1] - plane[y0, x0], plane[y0, x0])
     upper = muladd(tx, plane[y1, x1] - plane[y1, x0], plane[y1, x0])
     return muladd(ty, upper - lower, lower)
+end
+
+
+@inline function hse_bilinear_mapped(plane, x0, x1, tx, y0, y1, ty)
+    lower = muladd(tx, plane[y0, x1] - plane[y0, x0], plane[y0, x0])
+    upper = muladd(tx, plane[y1, x1] - plane[y1, x0], plane[y1, x0])
+    return muladd(ty, upper - lower, lower)
+end
+
+
+function hse_fill_periodic_map!(lower, upper, fraction, periodic_axis, shift)
+    axis = periodic_axis.coordinates
+    @inbounds for index in eachindex(axis)
+        lower[index], upper[index], fraction[index] = hse_periodic_bracket(
+            periodic_axis,
+            axis[index] - shift,
+        )
+    end
+    return nothing
 end
 
 
@@ -280,6 +426,14 @@ function hse_formal_direction_3d!(
     all(diff(z) .!= 0) && (all(diff(z) .> 0) || all(diff(z) .< 0)) || error(
         "Hydrogen SE vertical coordinates must be strictly monotonic"
     )
+    periodic_x = hse_periodic_axis(x)
+    periodic_y = hse_periodic_axis(y)
+    x_lower = Vector{Int}(undef, nx)
+    x_upper = Vector{Int}(undef, nx)
+    x_fraction = Vector{Float64}(undef, nx)
+    y_lower = Vector{Int}(undef, ny)
+    y_upper = Vector{Int}(undef, ny)
+    y_fraction = Vector{Float64}(undef, ny)
 
     step = muz * (z[end] - z[1]) > 0 ? 1 : -1
     first_plane = step > 0 ? 1 : nz
@@ -298,6 +452,12 @@ function hse_formal_direction_3d!(
         distance = abs(dz / muz)
         x_shift = mux / muz * dz
         y_shift = muy / muz * dz
+        hse_fill_periodic_map!(
+            x_lower, x_upper, x_fraction, periodic_x, x_shift,
+        )
+        hse_fill_periodic_map!(
+            y_lower, y_upper, y_fraction, periodic_y, y_shift,
+        )
         @views begin
             previous_intensity = intensity[previous, :, :]
             previous_extinction = extinction[previous, :, :]
@@ -307,27 +467,33 @@ function hse_formal_direction_3d!(
             # independent. Threads share the full periodic x/y planes; this
             # introduces no horizontal subdomain boundary or halo approximation.
             Threads.@threads :static for ix in 1:nx
-                for iy in 1:ny
-                    upstream_x = x[ix] - x_shift
-                    upstream_y = y[iy] - y_shift
-                    intensity_upwind = hse_bilinear_periodic(
-                        previous_intensity, x, y, upstream_x, upstream_y,
-                    )
-                    extinction_upwind = hse_bilinear_periodic(
-                        previous_extinction, x, y, upstream_x, upstream_y,
-                    )
-                    source_upwind = hse_bilinear_periodic(
-                        previous_source, x, y, upstream_x, upstream_y,
-                    )
-                    optical_depth = 0.5 * (
-                        extinction_upwind + extinction[k, iy, ix]
-                    ) * distance
-                    intensity[k, iy, ix] = hse_linear_characteristic(
-                        intensity_upwind,
-                        source_upwind,
-                        source[k, iy, ix],
-                        optical_depth,
-                    )
+                @inbounds begin
+                    x0 = x_lower[ix]
+                    x1 = x_upper[ix]
+                    tx = x_fraction[ix]
+                    for iy in 1:ny
+                        y0 = y_lower[iy]
+                        y1 = y_upper[iy]
+                        ty = y_fraction[iy]
+                        intensity_upwind = hse_bilinear_mapped(
+                            previous_intensity, x0, x1, tx, y0, y1, ty,
+                        )
+                        extinction_upwind = hse_bilinear_mapped(
+                            previous_extinction, x0, x1, tx, y0, y1, ty,
+                        )
+                        source_upwind = hse_bilinear_mapped(
+                            previous_source, x0, x1, tx, y0, y1, ty,
+                        )
+                        optical_depth = 0.5 * (
+                            extinction_upwind + extinction[k, iy, ix]
+                        ) * distance
+                        intensity[k, iy, ix] = hse_linear_characteristic(
+                            intensity_upwind,
+                            source_upwind,
+                            source[k, iy, ix],
+                            optical_depth,
+                        )
+                    end
                 end
             end
         end
@@ -429,6 +595,60 @@ function hse_background_continuum(
     # The χ_scat J term is added and iterated by the formal-solution helpers;
     # scattering is not thermalized into χ_scat Bλ.
     return absorption, thermal_emissivity, scattering
+end
+
+
+function hse_fill_background_continuum!(
+    absorption,
+    thermal_emissivity,
+    scattering,
+    initial_mean_intensity,
+    temperature,
+    electron_density,
+    neutral_hydrogen,
+    proton_hydrogen,
+    table::HSEBackgroundOpacityTable,
+)
+    Threads.@threads :static for k in axes(temperature, 1)
+        @inbounds for ix in axes(temperature, 3), iy in axes(temperature, 2)
+            cell = CartesianIndex(k, iy, ix)
+            absorption_value, emissivity_value, scattering_value, planck =
+                hse_background_continuum(
+                    table,
+                    temperature[cell],
+                    electron_density[cell],
+                    neutral_hydrogen[cell],
+                    proton_hydrogen[cell],
+                )
+            absorption[cell] = absorption_value
+            thermal_emissivity[cell] = emissivity_value
+            scattering[cell] = scattering_value
+            initial_mean_intensity[cell] = planck
+        end
+    end
+    return nothing
+end
+
+
+@inline function hse_background_continuum(
+    table::HSEBackgroundOpacityTable,
+    temperature::AbstractFloat,
+    electron_density::AbstractFloat,
+    neutral_hydrogen::AbstractFloat,
+    proton_hydrogen::AbstractFloat,
+)
+    total_extinction = Muspel.α_cont(
+        table.total_extinction,
+        temperature,
+        electron_density,
+        neutral_hydrogen,
+        proton_hydrogen,
+    )
+    scattering = table.thomson_cross_section * electron_density +
+                 table.rayleigh_cross_section * neutral_hydrogen
+    absorption = max(total_extinction - scattering, 0.0)
+    planck = Muspel.blackbody_λ(table.total_extinction.λ, temperature)
+    return absorption, absorption * planck, scattering, planck
 end
 
 
@@ -614,17 +834,18 @@ function hse_add_bound_bound_rates_3d!(
             length(wavelengths), wavelength_parallel,
         )
             λ = wavelengths[wavelength_index]
-            Threads.@threads :static for k in axes(temperature, 1)
-                for ix in axes(temperature, 3), iy in axes(temperature, 2)
-                    cell = CartesianIndex(k, iy, ix)
-                    background_absorption[cell], background_emissivity[cell],
-                    background_scattering[cell] = hse_background_continuum(
-                        λ, temperature[cell], ne[cell], neutral_h[cell], proton_h[cell],
-                        background_data,
-                    )
-                    mean_intensity[cell] = Muspel.blackbody_λ(λ, temperature[cell])
-                end
-            end
+            background_table = hse_background_opacity_table(background_data, λ)
+            hse_fill_background_continuum!(
+                background_absorption,
+                background_emissivity,
+                background_scattering,
+                mean_intensity,
+                temperature,
+                ne,
+                neutral_h,
+                proton_h,
+                background_table,
+            )
 
             scattering_residual = Inf
             scattering_iterations = 0
@@ -784,17 +1005,24 @@ function hse_add_bound_free_rates_3d!(
         cross_sections = [hse_cross_section(continuum, λ) for continuum in atom.continua]
         all(iszero, cross_sections) && continue
 
+        background_table = hse_background_opacity_table(background_data, λ)
+        hse_fill_background_continuum!(
+            extinction,
+            emissivity,
+            scattering,
+            mean_intensity,
+            temperature,
+            ne,
+            neutral_h,
+            proton_h,
+            background_table,
+        )
+
         Threads.@threads :static for k in axes(temperature, 1)
             for ix in axes(temperature, 3), iy in axes(temperature, 2)
                 cell = CartesianIndex(k, iy, ix)
-                background_absorption, background_emissivity, background_scattering =
-                    hse_background_continuum(
-                        λ, temperature[cell], ne[cell], neutral_h[cell], proton_h[cell],
-                        background_data,
-                    )
-                total_extinction = background_absorption + background_scattering
-                total_emissivity = background_emissivity
-                scattering[cell] = background_scattering
+                total_extinction = extinction[cell] + scattering[cell]
+                total_emissivity = emissivity[cell]
                 exponential = exp(
                     -HSE_H_PLANCK * HSE_C_LIGHT /
                     (λ_m * HSE_K_BOLTZMANN * temperature[cell]),
@@ -1007,6 +1235,7 @@ function hydrogen_se_update_3d(
     velocity_y = Float64.(atmos.velocity_y)
     velocity_z = Float64.(atmos.velocity_z)
     populations = Float64.(nlte_h)
+    hse_configure_background_continuum_tables!(background_data, temperature, ne)
     total_hydrogen = Float64.(atmos.hydrogen1_density .+ atmos.proton_density)
     neutral_h = dropdims(
         sum(populations[:, :, :, atom.stage .== 1]; dims=4);
