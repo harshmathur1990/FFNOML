@@ -750,7 +750,15 @@ overlapping Slurm step with one `torchrun` launcher per
 node and one worker per GPU, matching `predict_gpu.sh`. Set `FORWARD_TORCHRUN`,
 `FORWARD_REPO_DIR`, or `FORWARD_MASTER_PORT` when the cluster defaults differ.
 The Julia ranks never launch independent `torchrun` jobs and never read the
-prediction file until the coordinated GPU step has completed.
+prediction file until the coordinated GPU step has completed. While that step
+runs, each non-root Julia rank blocks on a small TCP control connection to rank
+0 instead of holding an outer MPI collective open alongside NCCL. Rank 0 sends
+one success or failure message when the launcher returns, so there is no polling
+loop or shared-filesystem marker. The socket wait has no timeout by default;
+Slurm's job wall-time remains the overall limit because valid prediction time
+depends on atmosphere size. Set `FORWARD_FSDP_STATUS_TIMEOUT` to a positive
+number of seconds to add a per-launch timeout. MPI resumes only after every rank
+has received the launcher status.
 
 ### Progress, resource monitoring, and crash diagnostics
 

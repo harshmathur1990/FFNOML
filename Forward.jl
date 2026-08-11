@@ -41,6 +41,8 @@ using HDF5
 using ProgressMeter
 using Base.Threads
 using Interpolations
+using Serialization
+using Sockets
 forward_startup_log("Julia packages loaded")
 
 include("ForwardMPI.jl")
@@ -1115,8 +1117,9 @@ function call_fsdppredict_collective!(
     launcher::Union{Nothing,String},
     solve_h5::String=cfg.solve_h5,
     pred_h5::String=cfg.pred_h5,
+    diagnostics=nothing,
 )
-    parallel_root_call(context) do
+    if !context.enabled
         call_fsdppredict!(
             cfg;
             nproc_per_node=nproc_per_node,
@@ -1124,11 +1127,153 @@ function call_fsdppredict_collective!(
             solve_h5=solve_h5,
             pred_h5=pred_h5,
         )
+        return nothing
     end
-    # In particular, this keeps non-root ranks from opening the prediction
-    # file before the distributed torchrun job and parallel filesystem have
-    # completed the rank-0 write.
+
+    # Do not leave the non-root Julia ranks inside an MPI collective while
+    # rank 0 runs the overlapping Slurm/NCCL step. On Slingshot this can leave
+    # the outer MPI collective permanently wedged even after Slurm reports the
+    # nested step as COMPLETED. Establish a tiny TCP control channel before
+    # the launch; non-root ranks then block on a socket read without polling or
+    # keeping an MPI request active. MPI resumes only after rank 0 sends the
+    # launcher result to every peer.
+    timeout_seconds = tryparse(
+        Float64,
+        get(ENV, "FORWARD_FSDP_STATUS_TIMEOUT", "0"),
+    )
+    timeout_seconds === nothing && error(
+        "FORWARD_FSDP_STATUS_TIMEOUT must be a number of seconds"
+    )
+    timeout_seconds >= 0 || error(
+        "FORWARD_FSDP_STATUS_TIMEOUT must be zero (disabled) or positive"
+    )
+
+    diagnostic_checkpoint!(diagnostics, "fsdppredict_control_setup_start")
+    server = parallel_isroot(context) ? listen(ip"0.0.0.0", 0) : nothing
+    endpoint = parallel_bcast(
+        if parallel_isroot(context)
+            _, port = getsockname(server)
+            (gethostname(), Int(port))
+        else
+            nothing
+        end,
+        context,
+    )
+    peer_sockets = TCPSocket[]
+    control_socket = nothing
+    if parallel_isroot(context)
+        peer_ranks = Set{Int}()
+        for _ in 1:(context.size - 1)
+            socket = accept(server)
+            peer_rank = Int(read(socket, Int32))
+            peer_rank in peer_ranks && error(
+                "Duplicate FFNoML control connection from MPI rank $(peer_rank)"
+            )
+            push!(peer_ranks, peer_rank)
+            push!(peer_sockets, socket)
+        end
+        close(server)
+    else
+        control_socket = connect(endpoint[1], endpoint[2])
+        write(control_socket, Int32(context.rank))
+        flush(control_socket)
+    end
+
+    diagnostic_checkpoint!(diagnostics, "fsdppredict_prelaunch_barrier_start")
     parallel_barrier(context)
+    diagnostic_checkpoint!(diagnostics, "fsdppredict_prelaunch_barrier_complete")
+    diagnostic_checkpoint!(
+        diagnostics,
+        "fsdppredict_control_setup_complete";
+        host=endpoint[1],
+        port=endpoint[2],
+    )
+
+    success = true
+    message = ""
+    if parallel_isroot(context)
+        launch_start = time()
+        diagnostic_checkpoint!(diagnostics, "fsdppredict_launcher_start")
+        try
+            call_fsdppredict!(
+                cfg;
+                nproc_per_node=nproc_per_node,
+                launcher=launcher,
+                solve_h5=solve_h5,
+                pred_h5=pred_h5,
+            )
+        catch exception
+            success = false
+            message = sprint(showerror, exception, catch_backtrace())
+        end
+        launch_seconds = time() - launch_start
+        diagnostic_checkpoint!(
+            diagnostics,
+            "fsdppredict_launcher_returned";
+            seconds=launch_seconds,
+            success=success,
+            prediction=abspath(pred_h5),
+        )
+        parallel_println(
+            context,
+            "FFNoML launcher returned after " *
+            "$(round(launch_seconds; digits=2)) s; notifying MPI ranks...",
+        )
+
+        for socket in peer_sockets
+            serialize(socket, (success=success, message=message))
+            flush(socket)
+            close(socket)
+        end
+    else
+        diagnostic_checkpoint!(diagnostics, "fsdppredict_status_wait_start")
+        wait_start = time()
+        timed_out = Ref(false)
+        timeout_timer = if timeout_seconds > 0
+            Timer(timeout_seconds) do _
+                timed_out[] = true
+                close(control_socket)
+            end
+        else
+            nothing
+        end
+        try
+            status = deserialize(control_socket)
+            success = status.success
+            message = status.message
+        catch exception
+            if timed_out[]
+                error(
+                    "Timed out after $(timeout_seconds) s waiting for rank-0 " *
+                    "FFNoML launcher status"
+                )
+            end
+            error(
+                "Lost the rank-0 FFNoML control connection: " *
+                sprint(showerror, exception)
+            )
+        finally
+            timeout_timer === nothing || close(timeout_timer)
+            isopen(control_socket) && close(control_socket)
+        end
+        diagnostic_checkpoint!(
+            diagnostics,
+            "fsdppredict_status_received";
+            seconds=time() - wait_start,
+            success=success,
+        )
+    end
+
+    # At this point the nested Slurm/NCCL step has returned and no outer rank
+    # has had an MPI request outstanding during it. Every non-root rank has
+    # been woken by rank 0 rather than by a polling loop. This barrier verifies
+    # that the communicator is usable before prediction-file reads begin.
+    diagnostic_checkpoint!(diagnostics, "fsdppredict_postlaunch_barrier_start")
+    parallel_barrier(context)
+    diagnostic_checkpoint!(diagnostics, "fsdppredict_postlaunch_barrier_complete")
+
+    success || error("MPI rank-0 FFNoML launcher failed:\n$(message)")
+    parallel_println(context, "FFNoML prediction complete; all MPI ranks resumed.")
     return nothing
 end
 
@@ -1577,6 +1722,7 @@ function predict_with_charge_conservation(
             launcher=fsdp_launcher,
             solve_h5=result_h5,
             pred_h5=work_prediction_h5,
+            diagnostics=diagnostics,
         )
         prediction_seconds = time() - prediction_start
 
