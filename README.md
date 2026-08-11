@@ -569,7 +569,7 @@ Each `MULTI3D_PRED_DATA` entry in `config.py` can also control Forward synthesis
     "FORWARD": True,
     "NONLTE_NE": True,
     "CHARGE_CONSERVATION_MAX_ITERATIONS": 10,
-    "POPULATION_CONSISTENCY_MODE": "hydrogen-se-3d",
+    "POPULATION_CONSISTENCY_MODE": "charge-only",
     "HYDROGEN_SE_WAVELENGTH_STRIDE": 2,
 }
 ```

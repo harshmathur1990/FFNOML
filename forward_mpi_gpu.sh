@@ -103,9 +103,8 @@ export OMPI_MCA_mtl=ofi
 export OMPI_MCA_mtl_ofi_av=table
 export PRTE_MCA_ras_base_launch_orted_on_hn=1
 
-# MPI ranks perform CPU/SE/synthesis work. There is one Julia rank per node so
-# each full-volume SE wavelength worker can use every CPU on that node. During
-# each FFNoML call, MPI rank 0 creates one overlapping Slurm GPU step via
+# MPI ranks perform charge-consistency and synthesis work. During each FFNoML
+# call, MPI rank 0 creates one overlapping Slurm GPU step via
 # forward_fsdppredict.sh; all Julia ranks wait until torchrun finishes.
 srun --mpi=pmix \
     --ntasks="${SLURM_NTASKS}" \
@@ -114,7 +113,7 @@ srun --mpi=pmix \
     julia --project="${JULIA_PROJECT}" --startup-file=no \
         --threads="${JULIA_NUM_THREADS}" Forward.jl \
         --mpi \
-        --population-consistency-mode hydrogen-se-3d \
+        --population-consistency-mode charge-only \
         --hydrogen-se-wavelength-stride "${HYDROGEN_SE_WAVELENGTH_STRIDE}" \
         --fsdp-launcher "${repository_dir}/forward_fsdppredict.sh" \
         "$@"
