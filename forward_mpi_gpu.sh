@@ -6,9 +6,9 @@
 # step still launches four GPU workers per node.
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=4
-# Allocate a Slingshot VNI shared by the outer Julia and nested torchrun job
-# steps, plus per-node VNI support for their local launchers.
-#SBATCH --network=single_node_vni,job_vni
+# Allocate one Slingshot VNI shared by the outer Julia and nested torchrun job
+# steps. The nested launcher must not request a second step-specific VNI.
+#SBATCH --network=job_vni
 # gpu-1-102 failed to configure the Slingshot interconnect for job 1751001.
 # gpu-1-37 failed to contribute its local task to the PMIx startup fence for
 # job 1792315, leaving every other node waiting for it. Remove these temporary

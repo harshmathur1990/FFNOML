@@ -74,9 +74,9 @@ echo "torchrun launcher CPUs/node: ${launcher_cpus_per_node}"
 
 # These tasks are torchrun launchers, not MPI ranks.  Explicitly disable the
 # inherited Slurm MPI plugin so the nested step does not wait on a PMIx fence.
-# Use the job-level Slingshot VNI allocated by forward_mpi_gpu.sh so this
-# overlapping step can coexist with and communicate independently of the
-# outer Julia step.
+# Do not ask Slurm to configure a second VNI for this overlapping launcher
+# step. forward_mpi_gpu.sh allocates a shared job VNI; the torch/NCCL children
+# use that existing authorization for their Slingshot traffic.
 # Also discard the outer Julia rank's all-core CPU mask. Explicitly request the
 # smaller CPU slice used successfully by the old four-ranks-per-node layout;
 # otherwise srun inherits SLURM_CPUS_PER_TASK=256 and each nested launcher asks
@@ -86,7 +86,7 @@ srun --overlap \
     --exact \
     --kill-on-bad-exit=1 \
     --mpi=none \
-    --network=single_node_vni,job_vni \
+    --network=no_vni \
     --cpu-bind=none \
     --cpus-per-task="${launcher_cpus_per_node}" \
     --nodes="${SLURM_NNODES}" \
