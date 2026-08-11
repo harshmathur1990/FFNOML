@@ -62,18 +62,29 @@ prediction_output=$(realpath -m "$3")
 master_address=$(scontrol show hostnames "${SLURM_JOB_NODELIST}" | head -n 1)
 master_port=${FORWARD_MASTER_PORT:-29501}
 rendezvous_id="${SLURM_JOB_ID}-${prediction_name}-$$"
+launcher_cpus_per_node=${FORWARD_FSDP_LAUNCHER_CPUS_PER_NODE:-64}
+[[ ${launcher_cpus_per_node} =~ ^[1-9][0-9]*$ ]] || {
+    echo "FORWARD_FSDP_LAUNCHER_CPUS_PER_NODE must be a positive integer, got: ${launcher_cpus_per_node}" >&2
+    exit 2
+}
 
 echo "Launching coordinated FFNoML prediction '${prediction_name}' on ${SLURM_NNODES} nodes"
 echo "torchrun rendezvous: ${master_address}:${master_port}"
+echo "torchrun launcher CPUs/node: ${launcher_cpus_per_node}"
 
 # These tasks are torchrun launchers, not MPI ranks.  Explicitly disable the
 # inherited Slurm MPI plugin so the nested step does not wait on a PMIx fence.
-# Also discard the outer Julia rank's all-core CPU mask: this step has one
-# launcher per node, and torchrun manages its four child GPU workers itself.
+# Also discard the outer Julia rank's all-core CPU mask. Explicitly request the
+# smaller CPU slice used successfully by the old four-ranks-per-node layout;
+# otherwise srun inherits SLURM_CPUS_PER_TASK=256 and each nested launcher asks
+# for the entire node. --exact keeps the overlapping step to these CPUs plus
+# its GPUs while the Julia ranks wait at their collective.
 srun --overlap \
+    --exact \
     --kill-on-bad-exit=1 \
     --mpi=none \
     --cpu-bind=none \
+    --cpus-per-task="${launcher_cpus_per_node}" \
     --nodes="${SLURM_NNODES}" \
     --ntasks="${SLURM_NNODES}" \
     --ntasks-per-node=1 \
