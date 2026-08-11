@@ -2,11 +2,13 @@
 #SBATCH --job-name=FNOML_forward
 #SBATCH --partition=accel
 #SBATCH --nodes=8
-# One full-volume Hydrogen-SE rank per node. Wavelengths are distributed over
-# nodes and its cell-local work is split into height slabs over all node CPUs.
-# The overlapping torchrun step still launches four GPU workers per node.
+# One Julia charge-consistency coordinator per node. The overlapping torchrun
+# step still launches four GPU workers per node.
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=4
+# Allocate a Slingshot VNI shared by the outer Julia and nested torchrun job
+# steps, plus per-node VNI support for their local launchers.
+#SBATCH --network=single_node_vni,job_vni
 # gpu-1-102 failed to configure the Slingshot interconnect for job 1751001.
 # gpu-1-37 failed to contribute its local task to the PMIx startup fence for
 # job 1792315, leaving every other node waiting for it. Remove these temporary
