@@ -1147,61 +1147,91 @@ function hydrogen_se_update_3d_parallel(
         atmos, nlte_h, atom, atom_file, voigt_itp; kwargs...,
     )
 
-    # A 3D characteristic may cross an MPI x-slab boundary.  Gather the volume
-    # for the formal solution instead of silently treating rank boundaries as
-    # physical/periodic boundaries.  The corrected populations are scattered
-    # back before the distributed charge-conservation update continues.
-    global_x = parallel_gather_x(atmos.x, parallel; dimension=1)
-    atmosphere_fields = (
-        :temperature,
-        :velocity_x,
-        :velocity_y,
-        :velocity_z,
-        :electron_density,
-        :hydrogen1_density,
-        :proton_density,
-    )
-    global_fields = map(
-        field -> parallel_gather_x(getfield(atmos, field), parallel),
-        atmosphere_fields,
-    )
-    global_populations = parallel_gather_x(nlte_h, parallel; dimension=3)
-
-    root_result = parallel_root_call(parallel) do
-        global_atmosphere = Atmosphere3D(
-            global_nx,
-            atmos.ny,
-            atmos.nz,
-            global_x,
-            copy(atmos.y),
-            copy(atmos.z),
-            global_fields...,
+    # A characteristic needs complete horizontal planes.  Keep x/y intact on
+    # one rank per node, divide wavelengths across those node leaders, and use
+    # Julia threads to divide cell-local work into height slabs.  This avoids
+    # treating an x/y rank boundary as a physical boundary while allowing all
+    # allocated nodes to participate in the expensive SE rates.
+    leaders = initialize_node_leader_context(parallel)
+    try
+        global_x = parallel_gather_x_to_node_leaders(
+            atmos.x, parallel, leaders; dimension=1, label="hydrogen_se_x",
         )
-        hydrogen_se_update_3d(
-            global_atmosphere,
-            global_populations,
-            atom,
-            atom_file,
-            voigt_itp;
-            kwargs...,
+        atmosphere_fields = (
+            :temperature,
+            :velocity_x,
+            :velocity_y,
+            :velocity_z,
+            :electron_density,
+            :hydrogen1_density,
+            :proton_density,
         )
-    end
+        global_fields = map(atmosphere_fields) do field
+            parallel_gather_x_to_node_leaders(
+                getfield(atmos, field),
+                parallel,
+                leaders;
+                dimension=3,
+                label="hydrogen_se_$(field)",
+            )
+        end
+        global_populations = parallel_gather_x_to_node_leaders(
+            nlte_h,
+            parallel,
+            leaders;
+            dimension=3,
+            label="hydrogen_se_populations",
+        )
 
-    corrected_chunks = if parallel_isroot(parallel)
-        corrected = root_result[1]
-        [
-            Array(@view corrected[:, :, parallel_partition(global_nx, rank, parallel.size), :])
-            for rank in 0:parallel.size-1
-        ]
-    else
-        nothing
+        leader_result = if leaders.isleader
+            leaders.rank == 0 && println(
+                "Hydrogen SE parallel layout: $(leaders.size) wavelength ranks, " *
+                "$(Threads.nthreads()) height threads/rank",
+            )
+            wavelength_parallel = HSEWavelengthParallelContext(
+                leaders.size > 1,
+                leaders.rank,
+                leaders.size,
+                leaders.comm,
+            )
+            global_atmosphere = Atmosphere3D(
+                global_nx,
+                atmos.ny,
+                atmos.nz,
+                global_x,
+                copy(atmos.y),
+                copy(atmos.z),
+                global_fields...,
+            )
+            hydrogen_se_update_3d(
+                global_atmosphere,
+                global_populations,
+                atom,
+                atom_file,
+                voigt_itp;
+                kwargs...,
+                wavelength_parallel=wavelength_parallel,
+            )
+        else
+            nothing
+        end
+
+        global_corrected = leaders.isleader && leaders.rank == 0 ?
+                           leader_result[1] : nothing
+        local_corrected = parallel_scatter_x_from_node_leader(
+            global_corrected,
+            nlte_h,
+            parallel;
+            dimension=3,
+        )
+        diagnostics = parallel_bcast(
+            parallel_isroot(parallel) ? (leader_result[2], leader_result[3]) : nothing,
+            parallel,
+        )
+        return local_corrected, diagnostics[1], diagnostics[2]
+    finally
+        finalize_node_leader_context(leaders)
     end
-    local_corrected = parallel_scatter_objects(corrected_chunks, parallel)
-    diagnostics = parallel_bcast(
-        parallel_isroot(parallel) ? (root_result[2], root_result[3]) : nothing,
-        parallel,
-    )
-    return local_corrected, diagnostics[1], diagnostics[2]
 end
 
 

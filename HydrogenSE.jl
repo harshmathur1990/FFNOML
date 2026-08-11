@@ -24,9 +24,73 @@ const HSE_R_BOHR = 5.29177210544e-11
 const HSE_E_RYDBERG = 2.1798723611035e-18
 const HSE_SCATTERING_MAX_ITERATIONS = 50
 const HSE_SCATTERING_TOLERANCE = 1e-4
-const HSE_NUMBER_DENSITY_UNIT = Muspel.Unitful.uparse("m^-3")
-const HSE_WAVELENGTH_UNIT = Muspel.Unitful.uparse("nm")
-const HSE_INVERSE_LENGTH_UNIT = Muspel.Unitful.uparse("m^-1")
+const HSE_MPI_CHUNK_ELEMENTS = 500_000_000
+const HSE_MUSPEL_UNITS = Ref{Any}(nothing)
+
+
+function hse_muspel_units()
+    units = HSE_MUSPEL_UNITS[]
+    if units === nothing
+        units = (
+            number_density=Muspel.Unitful.uparse("m^-3"),
+            wavelength=Muspel.Unitful.uparse("nm"),
+            inverse_length=Muspel.Unitful.uparse("m^-1"),
+        )
+        HSE_MUSPEL_UNITS[] = units
+    end
+    return units
+end
+
+
+struct HSEWavelengthParallelContext
+    enabled::Bool
+    rank::Int
+    size::Int
+    comm::Any
+end
+
+
+hse_serial_wavelength_context() = HSEWavelengthParallelContext(false, 0, 1, nothing)
+
+
+hse_owned_wavelength_indices(count::Int, context::HSEWavelengthParallelContext) =
+    context.enabled ? ((context.rank + 1):context.size:count) : (1:count)
+
+
+hse_owned_height_indices(count::Int, context::HSEWavelengthParallelContext) =
+    context.enabled ? parallel_partition(count, context.rank, context.size) : (1:count)
+
+
+function hse_mpi_chunks(values)
+    return (
+        @view(vec(values)[first:min(first + HSE_MPI_CHUNK_ELEMENTS - 1, length(values))])
+        for first in 1:HSE_MPI_CHUNK_ELEMENTS:length(values)
+    )
+end
+
+
+function hse_allreduce_sum!(values, context::HSEWavelengthParallelContext)
+    context.enabled || return values
+    for chunk in hse_mpi_chunks(values)
+        MPI.Allreduce!(chunk, MPI.SUM, context.comm)
+    end
+    return values
+end
+
+
+function hse_allreduce_max(value::Real, context::HSEWavelengthParallelContext)
+    context.enabled || return value
+    return MPI.Allreduce(Float64(value), MPI.MAX, context.comm)
+end
+
+
+function hse_reduce_sum_root!(values, context::HSEWavelengthParallelContext)
+    context.enabled || return values
+    for chunk in hse_mpi_chunks(values)
+        MPI.Reduce!(chunk, MPI.SUM, context.comm; root=0)
+    end
+    return context.rank == 0 ? values : nothing
+end
 
 
 struct HydrogenSECollision
@@ -238,27 +302,33 @@ function hse_formal_direction_3d!(
             previous_intensity = intensity[previous, :, :]
             previous_extinction = extinction[previous, :, :]
             previous_source = source[previous, :, :]
-            for ix in 1:nx, iy in 1:ny
-                upstream_x = x[ix] - x_shift
-                upstream_y = y[iy] - y_shift
-                intensity_upwind = hse_bilinear_periodic(
-                    previous_intensity, x, y, upstream_x, upstream_y,
-                )
-                extinction_upwind = hse_bilinear_periodic(
-                    previous_extinction, x, y, upstream_x, upstream_y,
-                )
-                source_upwind = hse_bilinear_periodic(
-                    previous_source, x, y, upstream_x, upstream_y,
-                )
-                optical_depth = 0.5 * (
-                    extinction_upwind + extinction[k, iy, ix]
-                ) * distance
-                intensity[k, iy, ix] = hse_linear_characteristic(
-                    intensity_upwind,
-                    source_upwind,
-                    source[k, iy, ix],
-                    optical_depth,
-                )
+            # Height planes remain causally ordered, but once the preceding
+            # complete plane is available every destination pixel is
+            # independent. Threads share the full periodic x/y planes; this
+            # introduces no horizontal subdomain boundary or halo approximation.
+            Threads.@threads :static for ix in 1:nx
+                for iy in 1:ny
+                    upstream_x = x[ix] - x_shift
+                    upstream_y = y[iy] - y_shift
+                    intensity_upwind = hse_bilinear_periodic(
+                        previous_intensity, x, y, upstream_x, upstream_y,
+                    )
+                    extinction_upwind = hse_bilinear_periodic(
+                        previous_extinction, x, y, upstream_x, upstream_y,
+                    )
+                    source_upwind = hse_bilinear_periodic(
+                        previous_source, x, y, upstream_x, upstream_y,
+                    )
+                    optical_depth = 0.5 * (
+                        extinction_upwind + extinction[k, iy, ix]
+                    ) * distance
+                    intensity[k, iy, ix] = hse_linear_characteristic(
+                        intensity_upwind,
+                        source_upwind,
+                        source[k, iy, ix],
+                        optical_depth,
+                    )
+                end
             end
         end
     end
@@ -321,14 +391,15 @@ function hse_background_continuum(
         # Muspel 0.2.5 returns their sum.  Recover the same Thomson and neutral-
         # hydrogen Rayleigh terms used internally so scattering remains
         # explicit in the RH-style source-function iteration below.
+        units = hse_muspel_units()
         scattering_quantity =
-            Muspel.α_thomson(Float64(ne) * HSE_NUMBER_DENSITY_UNIT) +
+            Muspel.α_thomson(Float64(ne) * units.number_density) +
             Muspel.α_rayleigh_h(
-                Float64(λ) * HSE_WAVELENGTH_UNIT,
-                Float64(neutral_h) * HSE_NUMBER_DENSITY_UNIT,
+                Float64(λ) * units.wavelength,
+                Float64(neutral_h) * units.number_density,
             )
         scattering_value = Muspel.Unitful.ustrip(
-            Muspel.Unitful.uconvert(HSE_INVERSE_LENGTH_UNIT, scattering_quantity),
+            Muspel.Unitful.uconvert(units.inverse_length, scattering_quantity),
         )
         Float64(continuum) - scattering_value, scattering_value
     end
@@ -362,13 +433,41 @@ end
 
 
 function hse_maximum_relative_radiation_change(new_values, old_values)
-    scale_floor = max(maximum(abs, new_values), maximum(abs, old_values), 1e-30) * 1e-12
-    change = 0.0
-    @inbounds for index in eachindex(new_values, old_values)
-        denominator = max(abs(new_values[index]), abs(old_values[index]), scale_floor)
-        change = max(change, abs(new_values[index] - old_values[index]) / denominator)
+    thread_scales = zeros(Float64, Threads.maxthreadid())
+    Threads.@threads :static for k in axes(new_values, 1)
+        scale = 0.0
+        @inbounds for ix in axes(new_values, 3), iy in axes(new_values, 2)
+            scale = max(
+                scale,
+                abs(new_values[k, iy, ix]),
+                abs(old_values[k, iy, ix]),
+            )
+        end
+        thread_scales[Threads.threadid()] = max(
+            thread_scales[Threads.threadid()], scale,
+        )
     end
-    return change
+    scale_floor = max(maximum(thread_scales), 1e-30) * 1e-12
+
+    thread_changes = zeros(Float64, Threads.maxthreadid())
+    Threads.@threads :static for k in axes(new_values, 1)
+        change = 0.0
+        @inbounds for ix in axes(new_values, 3), iy in axes(new_values, 2)
+            denominator = max(
+                abs(new_values[k, iy, ix]),
+                abs(old_values[k, iy, ix]),
+                scale_floor,
+            )
+            change = max(
+                change,
+                abs(new_values[k, iy, ix] - old_values[k, iy, ix]) / denominator,
+            )
+        end
+        thread_changes[Threads.threadid()] = max(
+            thread_changes[Threads.threadid()], change,
+        )
+    end
+    return maximum(thread_changes)
 end
 
 
@@ -469,6 +568,7 @@ function hse_add_bound_bound_rates_3d!(
     azimuth_weights,
     background_data;
     wavelength_stride::Int,
+    wavelength_parallel::HSEWavelengthParallelContext=hse_serial_wavelength_context(),
 )
     volume_shape = size(temperature)
     work() = zeros(Float64, volume_shape)
@@ -497,25 +597,33 @@ function hse_add_bound_bound_rates_3d!(
         wavelength_weights = hse_trapezoid_weights(wavelengths)
         fill!(profile_integral, 0.0)
         fill!(j_integral, 0.0)
-        for cell in CartesianIndices(temperature)
-            doppler_width[cell] = Muspel.doppler_width(
-                line.λ0, line.mass, temperature[cell],
-            )
-            broadening[cell] = Muspel.calc_broadening(
-                line.γ, temperature[cell], ne[cell], neutral_h[cell],
-            )
+        Threads.@threads :static for k in axes(temperature, 1)
+            for ix in axes(temperature, 3), iy in axes(temperature, 2)
+                cell = CartesianIndex(k, iy, ix)
+                doppler_width[cell] = Muspel.doppler_width(
+                    line.λ0, line.mass, temperature[cell],
+                )
+                broadening[cell] = Muspel.calc_broadening(
+                    line.γ, temperature[cell], ne[cell], neutral_h[cell],
+                )
+            end
         end
 
         gamma_energy = HSE_H_PLANCK * HSE_C_LIGHT / (4π * line.λ0 * 1e-9)
-        for wavelength_index in eachindex(wavelengths)
+        for wavelength_index in hse_owned_wavelength_indices(
+            length(wavelengths), wavelength_parallel,
+        )
             λ = wavelengths[wavelength_index]
-            for cell in CartesianIndices(temperature)
-                background_absorption[cell], background_emissivity[cell],
-                background_scattering[cell] = hse_background_continuum(
-                    λ, temperature[cell], ne[cell], neutral_h[cell], proton_h[cell],
-                    background_data,
-                )
-                mean_intensity[cell] = Muspel.blackbody_λ(λ, temperature[cell])
+            Threads.@threads :static for k in axes(temperature, 1)
+                for ix in axes(temperature, 3), iy in axes(temperature, 2)
+                    cell = CartesianIndex(k, iy, ix)
+                    background_absorption[cell], background_emissivity[cell],
+                    background_scattering[cell] = hse_background_continuum(
+                        λ, temperature[cell], ne[cell], neutral_h[cell], proton_h[cell],
+                        background_data,
+                    )
+                    mean_intensity[cell] = Muspel.blackbody_λ(λ, temperature[cell])
+                end
             end
 
             scattering_residual = Inf
@@ -537,40 +645,44 @@ function hse_add_bound_bound_rates_3d!(
                         mux = direction * horizontal_x
                         muy = direction * horizontal_y
                         muz = direction * mu
-                        for cell in CartesianIndices(temperature)
-                            projected_velocity = mux * velocity_x[cell] +
-                                                 muy * velocity_y[cell] +
-                                                 muz * velocity_z[cell]
-                            damping = Muspel.damping(
-                                broadening[cell], λ, doppler_width[cell],
-                            )
-                            profile_velocity = (
-                                λ - line.λ0 +
-                                line.λ0 * projected_velocity / HSE_C_LIGHT
-                            ) / doppler_width[cell]
-                            profile[cell] = real(
-                                voigt_itp(damping, abs(profile_velocity))
-                            ) / (sqrt(π) * doppler_width[cell])
-                            line_factor = gamma_energy * profile[cell]
-                            line_extinction = line_factor * (
-                                populations[cell, lower] * line.Blu -
-                                populations[cell, upper] * line.Bul
-                            ) * 1e9
-                            line_emissivity = line_factor * populations[cell, upper] *
-                                              line.Aul * 1e-3
-                            extinction[cell] = max(
-                                background_absorption[cell] +
-                                background_scattering[cell] + line_extinction,
-                                1e-30,
-                            )
-                            emissivity[cell] = max(
-                                background_emissivity[cell] + line_emissivity,
-                                0.0,
-                            )
-                            source[cell] = (
-                                emissivity[cell] +
-                                background_scattering[cell] * mean_intensity[cell]
-                            ) / extinction[cell]
+                        Threads.@threads :static for k in axes(temperature, 1)
+                            for ix in axes(temperature, 3), iy in axes(temperature, 2)
+                                cell = CartesianIndex(k, iy, ix)
+                                projected_velocity = mux * velocity_x[cell] +
+                                                     muy * velocity_y[cell] +
+                                                     muz * velocity_z[cell]
+                                damping = Muspel.damping(
+                                    broadening[cell], λ, doppler_width[cell],
+                                )
+                                profile_velocity = (
+                                    λ - line.λ0 +
+                                    line.λ0 * projected_velocity / HSE_C_LIGHT
+                                ) / doppler_width[cell]
+                                profile[cell] = real(
+                                    voigt_itp(damping, abs(profile_velocity))
+                                ) / (sqrt(π) * doppler_width[cell])
+                                line_factor = gamma_energy * profile[cell]
+                                line_extinction = line_factor * (
+                                    populations[cell, lower] * line.Blu -
+                                    populations[cell, upper] * line.Bul
+                                ) * 1e9
+                                line_emissivity = line_factor *
+                                                  populations[cell, upper] *
+                                                  line.Aul * 1e-3
+                                extinction[cell] = max(
+                                    background_absorption[cell] +
+                                    background_scattering[cell] + line_extinction,
+                                    1e-30,
+                                )
+                                emissivity[cell] = max(
+                                    background_emissivity[cell] + line_emissivity,
+                                    0.0,
+                                )
+                                source[cell] = (
+                                    emissivity[cell] +
+                                    background_scattering[cell] * mean_intensity[cell]
+                                ) / extinction[cell]
+                            end
                         end
                         hse_formal_direction_3d!(
                             intensity, x, y, z, extinction, source, mux, muy, muz,
@@ -601,13 +713,24 @@ function hse_add_bound_bound_rates_3d!(
             max_scattering_residual = max(max_scattering_residual, scattering_residual)
         end
 
-        for cell in CartesianIndices(temperature)
-            jbar_per_nm = j_integral[cell] /
-                          max(profile_integral[cell], eps(Float64))
-            jbar_per_m = jbar_per_nm * 1e12
-            k, iy, ix = Tuple(cell)
-            rates[lower, upper, k, iy, ix] += line.Blu * jbar_per_m
-            rates[upper, lower, k, iy, ix] += line.Aul + line.Bul * jbar_per_m
+        hse_allreduce_sum!(profile_integral, wavelength_parallel)
+        hse_allreduce_sum!(j_integral, wavelength_parallel)
+        max_scattering_iterations = round(Int, hse_allreduce_max(
+            max_scattering_iterations, wavelength_parallel,
+        ))
+        max_scattering_residual = hse_allreduce_max(
+            max_scattering_residual, wavelength_parallel,
+        )
+
+        Threads.@threads :static for k in axes(temperature, 1)
+            for ix in axes(temperature, 3), iy in axes(temperature, 2)
+                cell = CartesianIndex(k, iy, ix)
+                jbar_per_nm = j_integral[cell] /
+                              max(profile_integral[cell], eps(Float64))
+                jbar_per_m = jbar_per_nm * 1e12
+                rates[lower, upper, k, iy, ix] += line.Blu * jbar_per_m
+                rates[upper, lower, k, iy, ix] += line.Aul + line.Bul * jbar_per_m
+            end
         end
     end
     return max_scattering_iterations, max_scattering_residual
@@ -632,6 +755,7 @@ function hse_add_bound_free_rates_3d!(
     azimuth_weights,
     background_data;
     wavelength_stride::Int,
+    wavelength_parallel::HSEWavelengthParallelContext=hse_serial_wavelength_context(),
 )
     isempty(atom.continua) && return 0, 0.0
     all_wavelengths = sort(unique(vcat(
@@ -651,41 +775,46 @@ function hse_add_bound_free_rates_3d!(
     max_scattering_iterations = 0
     max_scattering_residual = 0.0
 
-    for wavelength_index in eachindex(wavelengths)
+    for wavelength_index in hse_owned_wavelength_indices(
+        length(wavelengths), wavelength_parallel,
+    )
         λ = wavelengths[wavelength_index]
         λ_m = λ * 1e-9
         planck_numerator = 2 * HSE_H_PLANCK * HSE_C_LIGHT^2 / λ_m^5
         cross_sections = [hse_cross_section(continuum, λ) for continuum in atom.continua]
         all(iszero, cross_sections) && continue
 
-        for cell in CartesianIndices(temperature)
-            background_absorption, background_emissivity, background_scattering =
-                hse_background_continuum(
-                    λ, temperature[cell], ne[cell], neutral_h[cell], proton_h[cell],
-                    background_data,
+        Threads.@threads :static for k in axes(temperature, 1)
+            for ix in axes(temperature, 3), iy in axes(temperature, 2)
+                cell = CartesianIndex(k, iy, ix)
+                background_absorption, background_emissivity, background_scattering =
+                    hse_background_continuum(
+                        λ, temperature[cell], ne[cell], neutral_h[cell], proton_h[cell],
+                        background_data,
+                    )
+                total_extinction = background_absorption + background_scattering
+                total_emissivity = background_emissivity
+                scattering[cell] = background_scattering
+                exponential = exp(
+                    -HSE_H_PLANCK * HSE_C_LIGHT /
+                    (λ_m * HSE_K_BOLTZMANN * temperature[cell]),
                 )
-            total_extinction = background_absorption + background_scattering
-            total_emissivity = background_emissivity
-            scattering[cell] = background_scattering
-            exponential = exp(
-                -HSE_H_PLANCK * HSE_C_LIGHT /
-                (λ_m * HSE_K_BOLTZMANN * temperature[cell]),
-            )
-            for (continuum_index, continuum) in enumerate(atom.continua)
-                cross_section = cross_sections[continuum_index]
-                cross_section == 0 && continue
-                lower = continuum.lo
-                upper = continuum.up
-                gij = nstar[cell, lower] /
-                      max(nstar[cell, upper], eps(Float64)) * exponential
-                total_extinction += cross_section * (
-                    populations[cell, lower] - populations[cell, upper] * gij
-                )
-                total_emissivity += populations[cell, upper] * gij * cross_section *
-                                    planck_numerator * 1e-12
+                for (continuum_index, continuum) in enumerate(atom.continua)
+                    cross_section = cross_sections[continuum_index]
+                    cross_section == 0 && continue
+                    lower = continuum.lo
+                    upper = continuum.up
+                    gij = nstar[cell, lower] /
+                          max(nstar[cell, upper], eps(Float64)) * exponential
+                    total_extinction += cross_section * (
+                        populations[cell, lower] - populations[cell, upper] * gij
+                    )
+                    total_emissivity += populations[cell, upper] * gij * cross_section *
+                                        planck_numerator * 1e-12
+                end
+                extinction[cell] = max(total_extinction, 1e-30)
+                emissivity[cell] = max(total_emissivity, 0.0)
             end
-            extinction[cell] = max(total_extinction, 1e-30)
-            emissivity[cell] = max(total_emissivity, 0.0)
         end
 
         scattering_iterations, scattering_residual =
@@ -697,29 +826,37 @@ function hse_add_bound_free_rates_3d!(
         max_scattering_iterations = max(max_scattering_iterations, scattering_iterations)
         max_scattering_residual = max(max_scattering_residual, scattering_residual)
         integration_width_m = wavelength_weights[wavelength_index] * 1e-9
-        for cell in CartesianIndices(temperature)
-            j_per_m = mean_intensity[cell] * 1e12
-            exponential = exp(
-                -HSE_H_PLANCK * HSE_C_LIGHT /
-                (λ_m * HSE_K_BOLTZMANN * temperature[cell]),
-            )
-            photon_factor = 4π * λ_m * integration_width_m /
-                            (HSE_H_PLANCK * HSE_C_LIGHT)
-            k, iy, ix = Tuple(cell)
-            for (continuum_index, continuum) in enumerate(atom.continua)
-                cross_section = cross_sections[continuum_index]
-                cross_section == 0 && continue
-                lower = continuum.lo
-                upper = continuum.up
-                gij = nstar[cell, lower] /
-                      max(nstar[cell, upper], eps(Float64)) * exponential
-                rates[lower, upper, k, iy, ix] +=
-                    cross_section * j_per_m * photon_factor
-                rates[upper, lower, k, iy, ix] += cross_section * gij *
-                    (planck_numerator + j_per_m) * photon_factor
+        Threads.@threads :static for k in axes(temperature, 1)
+            for ix in axes(temperature, 3), iy in axes(temperature, 2)
+                cell = CartesianIndex(k, iy, ix)
+                j_per_m = mean_intensity[cell] * 1e12
+                exponential = exp(
+                    -HSE_H_PLANCK * HSE_C_LIGHT /
+                    (λ_m * HSE_K_BOLTZMANN * temperature[cell]),
+                )
+                photon_factor = 4π * λ_m * integration_width_m /
+                                (HSE_H_PLANCK * HSE_C_LIGHT)
+                for (continuum_index, continuum) in enumerate(atom.continua)
+                    cross_section = cross_sections[continuum_index]
+                    cross_section == 0 && continue
+                    lower = continuum.lo
+                    upper = continuum.up
+                    gij = nstar[cell, lower] /
+                          max(nstar[cell, upper], eps(Float64)) * exponential
+                    rates[lower, upper, k, iy, ix] +=
+                        cross_section * j_per_m * photon_factor
+                    rates[upper, lower, k, iy, ix] += cross_section * gij *
+                        (planck_numerator + j_per_m) * photon_factor
+                end
             end
         end
     end
+    max_scattering_iterations = round(Int, hse_allreduce_max(
+        max_scattering_iterations, wavelength_parallel,
+    ))
+    max_scattering_residual = hse_allreduce_max(
+        max_scattering_residual, wavelength_parallel,
+    )
     return max_scattering_iterations, max_scattering_residual
 end
 
@@ -731,33 +868,35 @@ function hse_add_collisional_rates_3d!(rates, collisions, atom, temperature, ne,
         lower = collision.lower
         upper = collision.upper
         energy_difference = atom.χ[upper] - atom.χ[lower]
-        for cell in CartesianIndices(temperature)
-            coefficient = max(
-                hse_interp_clamped(
-                    temperature[cell], collision.temperature, collision.coefficient,
-                ),
-                0.0,
-            )
-            if collision.kind == :CE
-                downward = coefficient * ne[cell] * atom.g[lower] / atom.g[upper] *
-                           sqrt(temperature[cell])
-                upward = downward * nstar[cell, upper] /
-                         max(nstar[cell, lower], eps(Float64))
-            elseif collision.kind == :CI
-                upward = coefficient * ne[cell] * sqrt(temperature[cell]) *
-                         exp(-energy_difference /
-                             (HSE_K_BOLTZMANN * temperature[cell]))
-                downward = upward * nstar[cell, lower] /
-                           max(nstar[cell, upper], eps(Float64))
-            else
-                downward = omega_constant * ne[cell] * coefficient /
-                           (atom.g[upper] * sqrt(temperature[cell]))
-                upward = downward * nstar[cell, upper] /
-                         max(nstar[cell, lower], eps(Float64))
+        Threads.@threads :static for k in axes(temperature, 1)
+            for ix in axes(temperature, 3), iy in axes(temperature, 2)
+                cell = CartesianIndex(k, iy, ix)
+                coefficient = max(
+                    hse_interp_clamped(
+                        temperature[cell], collision.temperature, collision.coefficient,
+                    ),
+                    0.0,
+                )
+                if collision.kind == :CE
+                    downward = coefficient * ne[cell] * atom.g[lower] / atom.g[upper] *
+                               sqrt(temperature[cell])
+                    upward = downward * nstar[cell, upper] /
+                             max(nstar[cell, lower], eps(Float64))
+                elseif collision.kind == :CI
+                    upward = coefficient * ne[cell] * sqrt(temperature[cell]) *
+                             exp(-energy_difference /
+                                 (HSE_K_BOLTZMANN * temperature[cell]))
+                    downward = upward * nstar[cell, lower] /
+                               max(nstar[cell, upper], eps(Float64))
+                else
+                    downward = omega_constant * ne[cell] * coefficient /
+                               (atom.g[upper] * sqrt(temperature[cell]))
+                    upward = downward * nstar[cell, upper] /
+                             max(nstar[cell, lower], eps(Float64))
+                end
+                rates[lower, upper, k, iy, ix] += upward
+                rates[upper, lower, k, iy, ix] += downward
             end
-            k, iy, ix = Tuple(cell)
-            rates[lower, upper, k, iy, ix] += upward
-            rates[upper, lower, k, iy, ix] += downward
         end
     end
     return rates
@@ -824,6 +963,7 @@ function hydrogen_se_update_3d(
     azimuths=(π / 4, 3π / 4, 5π / 4, 7π / 4),
     azimuth_weights=(0.25, 0.25, 0.25, 0.25),
     background_data=nothing,
+    wavelength_parallel::HSEWavelengthParallelContext=hse_serial_wavelength_context(),
 )
     0 < relaxation <= 1 || error("Hydrogen SE relaxation must be in (0, 1]")
     wavelength_stride > 0 || error("Hydrogen SE wavelength stride must be positive")
@@ -849,6 +989,9 @@ function hydrogen_se_update_3d(
         "Hydrogen SE population level count differs from the atomic model"
     )
 
+    # Initialize the Muspel 0.2.5 compatibility units before background
+    # continuum calls enter height-threaded loops.
+    hse_muspel_units()
     collisions = load_hydrogen_se_collisions(atom_file, atom)
     background_data === nothing && (background_data = hse_background_continuum_data())
     mus_float = Float64.(mus)
@@ -874,10 +1017,13 @@ function hydrogen_se_update_3d(
         dims=4,
     )
     nstar = zeros(Float64, atmos.nz, atmos.ny, atmos.nx, atom.nlevels)
-    for cell in CartesianIndices(temperature)
-        nstar[cell, :] .= Muspel.saha_boltzmann(
-            atom, temperature[cell], ne[cell], 1.0,
-        )
+    Threads.@threads :static for k in axes(temperature, 1)
+        for ix in axes(temperature, 3), iy in axes(temperature, 2)
+            cell = CartesianIndex(k, iy, ix)
+            nstar[cell, :] .= Muspel.saha_boltzmann(
+                atom, temperature[cell], ne[cell], 1.0,
+            )
+        end
     end
 
     rates = zeros(
@@ -890,32 +1036,46 @@ function hydrogen_se_update_3d(
             mus_float, ray_weights_float, azimuths_float, azimuth_weights_float,
             background_data;
             wavelength_stride=wavelength_stride,
+            wavelength_parallel=wavelength_parallel,
         )
+    if wavelength_parallel.enabled
+        Threads.@threads :static for k in axes(temperature, 1)
+            @views rates[:, :, k, :, :] ./= wavelength_parallel.size
+        end
+    end
     bf_scattering_iterations, bf_scattering_residual =
         hse_add_bound_free_rates_3d!(
             rates, atom, x, y, z, temperature, ne, neutral_h, proton_h,
             populations, nstar, mus_float, ray_weights_float,
             azimuths_float, azimuth_weights_float, background_data;
             wavelength_stride=wavelength_stride,
+            wavelength_parallel=wavelength_parallel,
         )
+    hse_allreduce_sum!(rates, wavelength_parallel)
     hse_add_collisional_rates_3d!(rates, collisions, atom, temperature, ne, nstar)
 
-    corrected = similar(nlte_h)
+    corrected = zeros(eltype(nlte_h), size(nlte_h))
     residuals = zeros(Float64, size(temperature))
-    cells = collect(CartesianIndices(temperature))
-    Threads.@threads for cell_index in eachindex(cells)
-        cell = cells[cell_index]
-        k, iy, ix = Tuple(cell)
-        local_rates = @view rates[:, :, k, iy, ix]
-        initial = @view populations[k, iy, ix, :]
-        solved = hse_solve_rate_matrix(local_rates, initial, total_hydrogen[cell])
-        solved .= (1 - relaxation) .* initial .+ relaxation .* solved
-        solved .*= total_hydrogen[cell] / max(sum(solved), eps(Float64))
-        corrected[k, iy, ix, :] .= solved
-        residuals[cell] = hse_rate_residual(local_rates, solved)
+    owned_heights = collect(hse_owned_height_indices(
+        size(temperature, 1), wavelength_parallel,
+    ))
+    Threads.@threads :static for height_index in eachindex(owned_heights)
+        k = owned_heights[height_index]
+        for ix in axes(temperature, 3), iy in axes(temperature, 2)
+            cell = CartesianIndex(k, iy, ix)
+            local_rates = @view rates[:, :, k, iy, ix]
+            initial = @view populations[k, iy, ix, :]
+            solved = hse_solve_rate_matrix(local_rates, initial, total_hydrogen[cell])
+            solved .= (1 - relaxation) .* initial .+ relaxation .* solved
+            solved .*= total_hydrogen[cell] / max(sum(solved), eps(Float64))
+            corrected[k, iy, ix, :] .= solved
+            residuals[cell] = hse_rate_residual(local_rates, solved)
+        end
     end
+    corrected_root = hse_reduce_sum_root!(corrected, wavelength_parallel)
+    maximum_residual = hse_allreduce_max(maximum(residuals), wavelength_parallel)
 
-    return corrected, maximum(residuals), (
+    return corrected_root, maximum_residual, (
         max_iterations=max(bb_scattering_iterations, bf_scattering_iterations),
         max_residual=max(bb_scattering_residual, bf_scattering_residual),
         tolerance=HSE_SCATTERING_TOLERANCE,

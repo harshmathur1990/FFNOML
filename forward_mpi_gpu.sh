@@ -2,14 +2,17 @@
 #SBATCH --job-name=FNOML_forward
 #SBATCH --partition=accel
 #SBATCH --nodes=8
-#SBATCH --ntasks-per-node=4
+# One full-volume Hydrogen-SE rank per node. Wavelengths are distributed over
+# nodes and its cell-local work is split into height slabs over all node CPUs.
+# The overlapping torchrun step still launches four GPU workers per node.
+#SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=4
 # gpu-1-102 failed to configure the Slingshot interconnect for job 1751001.
 # gpu-1-37 failed to contribute its local task to the PMIx startup fence for
 # job 1792315, leaving every other node waiting for it. Remove these temporary
 # exclusions after the nodes have been returned to service.
 #SBATCH --exclude=gpu-1-37,gpu-1-102
-#SBATCH --cpus-per-task=64
+#SBATCH --cpus-per-task=256
 #SBATCH --mem-per-gpu=120G
 #SBATCH --time=0-02:00:00
 # Ask Slurm to warn the batch shell two minutes before termination so it can
@@ -100,9 +103,10 @@ export OMPI_MCA_mtl=ofi
 export OMPI_MCA_mtl_ofi_av=table
 export PRTE_MCA_ras_base_launch_orted_on_hn=1
 
-# MPI ranks perform CPU/SE/synthesis work. During each FFNoML call, MPI rank 0
-# creates one overlapping Slurm GPU step via forward_fsdppredict.sh; all Julia
-# ranks wait at an MPI collective until that one distributed torchrun finishes.
+# MPI ranks perform CPU/SE/synthesis work. There is one Julia rank per node so
+# each full-volume SE wavelength worker can use every CPU on that node. During
+# each FFNoML call, MPI rank 0 creates one overlapping Slurm GPU step via
+# forward_fsdppredict.sh; all Julia ranks wait until torchrun finishes.
 srun --mpi=pmix \
     --ntasks="${SLURM_NTASKS}" \
     --cpu-bind=cores \

@@ -68,7 +68,7 @@ echo "torchrun rendezvous: ${master_address}:${master_port}"
 
 # These tasks are torchrun launchers, not MPI ranks.  Explicitly disable the
 # inherited Slurm MPI plugin so the nested step does not wait on a PMIx fence.
-# Also discard the outer four-ranks-per-node CPU masks: this step has one
+# Also discard the outer Julia rank's all-core CPU mask: this step has one
 # launcher per node, and torchrun manages its four child GPU workers itself.
 srun --overlap \
     --kill-on-bad-exit=1 \

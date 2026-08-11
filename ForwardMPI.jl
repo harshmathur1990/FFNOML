@@ -21,6 +21,15 @@ struct ForwardParallelContext
 end
 
 
+struct ForwardNodeLeaderContext
+    isleader::Bool
+    rank::Int
+    size::Int
+    comm::Any
+    node_comm::Any
+end
+
+
 serial_parallel_context() = ForwardParallelContext(false, 0, 1, 0, nothing, false)
 
 
@@ -63,6 +72,52 @@ end
 
 
 parallel_isroot(context::ForwardParallelContext) = context.rank == context.root
+
+
+function initialize_node_leader_context(context::ForwardParallelContext)
+    context.enabled || return ForwardNodeLeaderContext(true, 0, 1, nothing, nothing)
+    node_comm = MPI.Comm_split_type(
+        context.comm,
+        MPI.COMM_TYPE_SHARED,
+        context.rank,
+    )
+    isleader = MPI.Comm_rank(node_comm) == 0
+    leader_comm = MPI.Comm_split(
+        context.comm,
+        isleader ? 0 : nothing,
+        context.rank,
+    )
+    return ForwardNodeLeaderContext(
+        isleader,
+        isleader ? MPI.Comm_rank(leader_comm) : -1,
+        isleader ? MPI.Comm_size(leader_comm) : 0,
+        leader_comm,
+        node_comm,
+    )
+end
+
+
+function finalize_node_leader_context(context::ForwardNodeLeaderContext)
+    context.comm !== nothing && context.comm != MPI.COMM_NULL && MPI.free(context.comm)
+    context.node_comm !== nothing && MPI.free(context.node_comm)
+    return nothing
+end
+
+
+function parallel_large_chunks(values; chunk_elements::Int=500_000_000)
+    return (
+        @view(vec(values)[first:min(first + chunk_elements - 1, length(values))])
+        for first in 1:chunk_elements:length(values)
+    )
+end
+
+
+function parallel_bcast_large!(values, comm; root::Int=0)
+    for chunk in parallel_large_chunks(values)
+        MPI.Bcast!(chunk, comm; root=root)
+    end
+    return values
+end
 
 
 function parallel_println(context::ForwardParallelContext, values...)
@@ -266,6 +321,77 @@ function parallel_gather_x(
         global_size=size(result),
     )
     return result
+end
+
+
+"""Gather an x-slab array once, then replicate the full volume to one rank per node."""
+function parallel_gather_x_to_node_leaders(
+    local_values,
+    context::ForwardParallelContext,
+    leaders::ForwardNodeLeaderContext;
+    dimension::Int=3,
+    diagnostics=nothing,
+    label::AbstractString="x_values",
+)
+    context.enabled || return local_values
+    global_values = parallel_gather_x(
+        local_values,
+        context;
+        dimension=dimension,
+        diagnostics=diagnostics,
+        label=label,
+    )
+    leaders.isleader || return nothing
+    leaders.rank == 0 || (global_values = nothing)
+
+    dimensions = leaders.rank == 0 ? collect(Int, size(global_values)) :
+                 Vector{Int}(undef, ndims(local_values))
+    MPI.Bcast!(dimensions, leaders.comm; root=0)
+    if leaders.rank != 0
+        global_values = Array{eltype(local_values)}(undef, Tuple(dimensions))
+    end
+    parallel_bcast_large!(global_values, leaders.comm; root=0)
+    return global_values
+end
+
+
+"""Scatter a leader-root full volume back to the world's original x slabs."""
+function parallel_scatter_x_from_node_leader(
+    global_values,
+    local_template,
+    context::ForwardParallelContext;
+    dimension::Int=3,
+)
+    context.enabled || return global_values
+    nd = ndims(local_template)
+    1 <= dimension <= nd || throw(ArgumentError(
+        "scatter dimension $(dimension) is outside a $(nd)-dimensional array"
+    ))
+    permutation = (
+        (axis for axis in 1:nd if axis != dimension)...,
+        dimension,
+    )
+    local_x_count = size(local_template, dimension)
+    x_counts = MPI.Allgather(local_x_count, context.comm)
+    leading_dimensions = Tuple(
+        size(local_template, axis) for axis in 1:nd if axis != dimension
+    )
+    leading_count = prod(leading_dimensions)
+    local_permuted = Array{eltype(local_template)}(
+        undef,
+        leading_dimensions...,
+        local_x_count,
+    )
+
+    send_buffer = if parallel_isroot(context)
+        packed = Array(PermutedDimsArray(global_values, permutation))
+        MPI.VBuffer(vec(packed), leading_count .* x_counts)
+    else
+        nothing
+    end
+    MPI.Scatterv!(send_buffer, vec(local_permuted), context.comm; root=context.root)
+    dimension == nd && return local_permuted
+    return permutedims(local_permuted, invperm(collect(permutation)))
 end
 
 

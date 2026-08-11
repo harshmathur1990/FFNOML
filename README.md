@@ -665,11 +665,9 @@ atom, model checkpoint, method, or HSE numerical settings changed, the old file
 is moved to a `.stale-TIMESTAMP` name and a fresh result is started.
 
 This mode is substantially more expensive than `charge-only`. It is a stationary
-1.5D CRD correction, not full 3D MALI: horizontal radiation transport is omitted,
-but vertical and horizontal velocities are projected onto an azimuthal ray
-quadrature when calculating bound-bound profiles and radiative rates. Horizontal
-velocities therefore Doppler-shift the local column's rays without importing
-atmospheric structure from neighboring columns. Atom transitions marked PRD are
+3D CRD correction with periodic horizontal boundaries and inclined
+characteristics through the complete x/y planes. All velocity components are
+projected onto the azimuthal ray quadrature. Atom transitions marked PRD are
 treated in CRD. Background H-minus, hydrogen free-free, H2-plus,
 Thomson, and neutral-hydrogen Rayleigh processes are included. Following RH,
 true continuum absorption has thermal emissivity while continuum scattering is
@@ -683,8 +681,8 @@ sampling every Nth transition wavelength; the default `1` uses every wavelength.
 
 ### MPI Forward Synthesis
 
-`Forward.jl` can distribute the horizontal x dimension over MPI ranks for the
-original synthesis path, `charge-only`, and `hydrogen-se-1p5d`:
+`Forward.jl` distributes the horizontal x dimension over MPI ranks for input,
+the original synthesis path, and `charge-only`:
 
 ```bash
 srun --ntasks=32 \
@@ -699,11 +697,17 @@ smaller than `--threads`; synthesis keeps one reusable radiative-transfer buffer
 per Julia worker thread. Intensities are gathered in rank/x order for the final
 serial HDF5 write. In the consistency modes,
 electron-density and population residuals use a global MPI maximum reduction.
-The charge-only cell calculations and the 1.5D SE column calculations therefore
-run on every MPI rank. Rank 0 gathers electron-density slabs and, only for the
-preferred mode, corrected hydrogen slabs for each durable checkpoint. The full
-population dataset is copied directly between HDF5 files rather than gathered
-through rank-0 memory.
+The 3D hydrogen-SE stage cannot treat x/y slab boundaries as physical transfer
+boundaries. It therefore gathers complete horizontal planes onto one Julia rank
+per node, distributes wavelengths over those node ranks, and threads cell-local
+work in height slabs. Height planes in each characteristic remain causally
+ordered, while the independent destination pixels of each complete x/y plane
+are evaluated by all node threads. Radiative rates are summed across the
+wavelength ranks;
+the final rate-matrix solves are divided by height and reduced before corrected
+populations are scattered back to the synthesis x slabs. Rank 0 gathers
+electron-density slabs for durable checkpoints. The full population dataset is
+copied directly between HDF5 files rather than gathered through rank-0 memory.
 
 MPI mode requires MPI.jl. On a Cray/Slurm system, configure MPI.jl against the
 loaded system MPI before launching the job, then restart Julia:
@@ -714,8 +718,9 @@ julia -e 'using MPIPreferences; MPIPreferences.use_system_binary(mpiexec="srun",
 ```
 
 The supplied [`forward_mpi_gpu.sh`](forward_mpi_gpu.sh) is an eight-node Slurm
-template combining four MPI ranks per node with 64 Julia threads per rank. This
-uses all 256 CPU cores on each node and binds every rank to its assigned cores.
+template using one wavelength MPI rank per node with 256 Julia threads. This
+gives the full-volume SE worker access to all 256 CPU cores on its node while
+the separate torchrun step continues to launch four GPU workers per node.
 Adjust its resource directives to the atmosphere size and cluster policy.
 It defaults prediction data and Multi3D atom files to Olivia project storage.
 Set `FNOML_PRED_DIR` (the directory containing `bifrost_data`) and
