@@ -155,121 +155,114 @@ function parallel_gather_x(
     label::AbstractString="x_values",
 )
     context.enabled || return local_values
+    1 <= dimension <= ndims(local_values) || throw(ArgumentError(
+        "gather dimension $(dimension) is outside a $(ndims(local_values))-dimensional array"
+    ))
 
-    if dimension == ndims(local_values)
-        local_copy_start = time()
-        diagnostic_checkpoint!(
-            diagnostics,
-            "mpi_gather_x_local_copy_start";
-            label=label,
-            local_size=size(local_values),
-            dimension=dimension,
-        )
-        local_array = Array(local_values)
-        diagnostic_checkpoint!(
-            diagnostics,
-            "mpi_gather_x_local_copy_complete";
-            label=label,
-            seconds=time() - local_copy_start,
-            local_size=size(local_array),
-            local_mib=sizeof(eltype(local_array)) * length(local_array) / 2.0^20,
-        )
-
-        counts_start = time()
-        diagnostic_checkpoint!(
-            diagnostics,
-            "mpi_gather_x_counts_start";
-            label=label,
-            local_x_count=size(local_array, dimension),
-        )
-        x_counts = MPI.gather(size(local_array, dimension), context.comm; root=context.root)
-        diagnostic_checkpoint!(
-            diagnostics,
-            "mpi_gather_x_counts_complete";
-            label=label,
-            seconds=time() - counts_start,
-            local_x_count=size(local_array, dimension),
-        )
-
-        leading_count = prod(size(local_array)[1:end-1])
-        if parallel_isroot(context)
-            global_size = (size(local_array)[1:end-1]..., sum(x_counts))
-            diagnostic_checkpoint!(
-                diagnostics,
-                "mpi_gather_x_root_allocation_start";
-                label=label,
-                global_size=global_size,
-                global_mib=sizeof(eltype(local_array)) * prod(global_size) / 2.0^20,
-            )
-        end
-        allocation_start = time()
-        global_values = parallel_isroot(context) ? Array{eltype(local_array)}(
-            undef,
-            size(local_array)[1:end-1]...,
-            sum(x_counts),
-        ) : nothing
-        if parallel_isroot(context)
-            diagnostic_checkpoint!(
-                diagnostics,
-                "mpi_gather_x_root_allocation_complete";
-                label=label,
-                seconds=time() - allocation_start,
-                global_size=size(global_values),
-            )
-        end
-        receive_buffer = parallel_isroot(context) ?
-                         MPI.VBuffer(vec(global_values), leading_count .* x_counts) : nothing
-
-        payload_start = time()
-        diagnostic_checkpoint!(
-            diagnostics,
-            "mpi_gather_x_payload_start";
-            label=label,
-            local_elements=length(local_array),
-        )
-        MPI.Gatherv!(vec(local_array), receive_buffer, context.comm; root=context.root)
-        diagnostic_checkpoint!(
-            diagnostics,
-            "mpi_gather_x_payload_complete";
-            label=label,
-            seconds=time() - payload_start,
-            local_elements=length(local_array),
-        )
-        return global_values
-    end
-
-    # Corrected population arrays have levels after the x dimension and are
-    # therefore not contiguous x slabs in Julia memory. They are gathered as
-    # objects only once, for the final serial prediction-HDF5 write.
+    # MPI.gather(::Array) serializes Julia objects.  Apart from being expensive
+    # for the population volumes, that path is not reliable across all Julia
+    # and MPI.jl combinations (Julia 1.12 can fail while deserializing a type).
+    # Move the distributed dimension to the end so each rank contributes one
+    # contiguous, typed buffer to Gatherv!, then restore the original order.
+    permutation = (
+        (axis for axis in 1:ndims(local_values) if axis != dimension)...,
+        dimension,
+    )
     diagnostic_checkpoint!(
         diagnostics,
-        "mpi_gather_x_objects_start";
+        "mpi_gather_x_local_copy_start";
         label=label,
         local_size=size(local_values),
         dimension=dimension,
     )
-    object_gather_start = time()
-    chunks = MPI.gather(Array(local_values), context.comm; root=context.root)
+    local_copy_start = time()
+    local_array = Array(PermutedDimsArray(local_values, permutation))
     diagnostic_checkpoint!(
         diagnostics,
-        "mpi_gather_x_objects_complete";
+        "mpi_gather_x_local_copy_complete";
         label=label,
-        seconds=time() - object_gather_start,
+        seconds=time() - local_copy_start,
+        local_size=size(local_array),
+        local_mib=sizeof(eltype(local_array)) * length(local_array) / 2.0^20,
+    )
+
+    counts_start = time()
+    diagnostic_checkpoint!(
+        diagnostics,
+        "mpi_gather_x_counts_start";
+        label=label,
+        local_x_count=size(local_array, ndims(local_array)),
+    )
+    x_counts = MPI.gather(
+        size(local_array, ndims(local_array)),
+        context.comm;
+        root=context.root,
+    )
+    diagnostic_checkpoint!(
+        diagnostics,
+        "mpi_gather_x_counts_complete";
+        label=label,
+        seconds=time() - counts_start,
+        local_x_count=size(local_array, ndims(local_array)),
+    )
+
+    leading_count = prod(size(local_array)[1:end-1])
+    global_permuted = if parallel_isroot(context)
+        global_size = (size(local_array)[1:end-1]..., sum(x_counts))
+        diagnostic_checkpoint!(
+            diagnostics,
+            "mpi_gather_x_root_allocation_start";
+            label=label,
+            global_size=global_size,
+            global_mib=sizeof(eltype(local_array)) * prod(global_size) / 2.0^20,
+        )
+        allocation_start = time()
+        values = Array{eltype(local_array)}(undef, global_size)
+        diagnostic_checkpoint!(
+            diagnostics,
+            "mpi_gather_x_root_allocation_complete";
+            label=label,
+            seconds=time() - allocation_start,
+            global_size=size(values),
+        )
+        values
+    else
+        nothing
+    end
+    receive_buffer = parallel_isroot(context) ?
+                     MPI.VBuffer(vec(global_permuted), leading_count .* x_counts) : nothing
+
+    payload_start = time()
+    diagnostic_checkpoint!(
+        diagnostics,
+        "mpi_gather_x_payload_start";
+        label=label,
+        local_elements=length(local_array),
+    )
+    MPI.Gatherv!(vec(local_array), receive_buffer, context.comm; root=context.root)
+    diagnostic_checkpoint!(
+        diagnostics,
+        "mpi_gather_x_payload_complete";
+        label=label,
+        seconds=time() - payload_start,
+        local_elements=length(local_array),
     )
     parallel_isroot(context) || return nothing
-    concatenate_start = time()
+    dimension == ndims(local_values) && return global_permuted
+
+    restore_start = time()
     diagnostic_checkpoint!(
         diagnostics,
-        "mpi_gather_x_concatenate_start";
+        "mpi_gather_x_restore_dimensions_start";
         label=label,
-        chunks=length(chunks),
+        permutation=permutation,
     )
-    result = cat(chunks...; dims=dimension)
+    result = permutedims(global_permuted, invperm(collect(permutation)))
     diagnostic_checkpoint!(
         diagnostics,
-        "mpi_gather_x_concatenate_complete";
+        "mpi_gather_x_restore_dimensions_complete";
         label=label,
-        seconds=time() - concatenate_start,
+        seconds=time() - restore_start,
         global_size=size(result),
     )
     return result
