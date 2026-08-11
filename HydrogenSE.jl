@@ -24,6 +24,9 @@ const HSE_R_BOHR = 5.29177210544e-11
 const HSE_E_RYDBERG = 2.1798723611035e-18
 const HSE_SCATTERING_MAX_ITERATIONS = 50
 const HSE_SCATTERING_TOLERANCE = 1e-4
+const HSE_NUMBER_DENSITY_UNIT = Muspel.Unitful.uparse("m^-3")
+const HSE_WAVELENGTH_UNIT = Muspel.Unitful.uparse("nm")
+const HSE_INVERSE_LENGTH_UNIT = Muspel.Unitful.uparse("m^-1")
 
 
 struct HydrogenSECollision
@@ -303,13 +306,32 @@ function hse_background_continuum(
     proton_h,
     background_data::Union{Nothing,HSEBackgroundContinuumData}=nothing,
 )
-    absorption, scattering = Muspel.α_cont_no_itp(
+    continuum = Muspel.α_cont_no_itp(
         Float64(λ),
         Float64(temperature),
         Float64(ne),
         Float64(neutral_h),
         Float64(proton_h),
     )
+    absorption, scattering = if continuum isa Tuple
+        # Muspel versions newer than 0.2.5 return thermal absorption and
+        # scattering separately.
+        continuum
+    else
+        # Muspel 0.2.5 returns their sum.  Recover the same Thomson and neutral-
+        # hydrogen Rayleigh terms used internally so scattering remains
+        # explicit in the RH-style source-function iteration below.
+        scattering_quantity =
+            Muspel.α_thomson(Float64(ne) * HSE_NUMBER_DENSITY_UNIT) +
+            Muspel.α_rayleigh_h(
+                Float64(λ) * HSE_WAVELENGTH_UNIT,
+                Float64(neutral_h) * HSE_NUMBER_DENSITY_UNIT,
+            )
+        scattering_value = Muspel.Unitful.ustrip(
+            Muspel.Unitful.uconvert(HSE_INVERSE_LENGTH_UNIT, scattering_quantity),
+        )
+        Float64(continuum) - scattering_value, scattering_value
+    end
 
     # RH background.c treats LTE metal bound-free opacity as true absorption.
     # Muspel's no-interpolation continuum deliberately omits it, so add the

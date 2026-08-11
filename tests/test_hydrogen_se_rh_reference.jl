@@ -16,7 +16,7 @@ end
 
     # RH/background.c keeps absorption and scattering separate, and
     # RH/rhf1d/formal.c adds sca_c * J to the emissivity in the formal solve.
-    expected_absorption, expected_scattering = Muspel.α_cont_no_itp(
+    raw_continuum = Muspel.α_cont_no_itp(
         wavelength,
         temperature,
         electron_density,
@@ -31,8 +31,15 @@ end
         proton_hydrogen,
     )
     planck = Muspel.blackbody_λ(wavelength, temperature)
-    @test absorption == expected_absorption
-    @test scattering == expected_scattering
+    if raw_continuum isa Tuple
+        expected_absorption, expected_scattering = raw_continuum
+        @test absorption == expected_absorption
+        @test scattering == expected_scattering
+    else
+        # Muspel 0.2.5 combines thermal and scattering extinction.
+        @test absorption + scattering ≈ raw_continuum rtol=2eps(Float64)
+        @test scattering >= 0
+    end
     @test thermal_emissivity == absorption * planck
 
     trial_j = 0.37 * planck
