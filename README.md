@@ -414,6 +414,8 @@ The file contains:
 
 - `nlte_populations`: `[nx, ny, D, Cout]`
 - `z_scale`: `[D, nx, ny]`
+- `electron_density`: `[nx, ny, D]` in m^-3 when the solving HDF5 contains a
+  `gpu_charge_model` request from Forward.jl charge-only mode
 
 Current attributes include:
 
@@ -607,6 +609,19 @@ iteration limit. Hydrogen must be included in `FORWARD_ATOMS`. Use
 `--fsdp-nproc-per-node N` to change the `torchrun` process count. Omitting the
 maximum-iteration option keeps the existing one-shot behavior.
 
+In `charge-only` mode, every distributed torch worker evaluates the same
+Saha-Boltzmann equations directly on its GPU slab immediately after FFNoML
+prediction. Julia exports the fixed hydrogen density and compact background
+atomic data (energies, statistical weights, stages, and abundances) into the
+working solving HDF5. GPU arithmetic is Float64 for the Saha calculation and
+the final electron density is stored as Float32, matching the CPU reference
+path. This is a direct calculation, not a lookup-table approximation. The
+prediction HDF5 carries the resulting `electron_density` back to the Julia MPI
+ranks. On every iteration, every Julia rank recomputes 64 deterministic sample
+cells with the original Muspel CPU routine; the run aborts if the global maximum
+sampled relative error exceeds `5e-5`. `hydrogen-se-1p5d` retains the CPU charge calculation because its
+hydrogen populations are corrected after FFNoML has returned.
+
 Two population-consistency modes are available. The existing default is the
 inexpensive charge-only update:
 
@@ -767,11 +782,14 @@ progress. A normal consistency iteration reports the FFNoML population change
 (starting with `n/a` on iteration 1), the electron-density residual and range,
 the hydrogen SE residual and FFNoML-to-SE correction in preferred mode, and a
 compact timing split for FFNoML, prediction reading, SE, charge conservation,
-HDF5 I/O, and the whole iteration. During the cell-heavy charge-conservation
-phase, rank 0 reports percentage complete, elapsed time, estimated remaining
-time, and processing rate every 30 seconds. The estimate follows rank 0's local
-x slab, which is one of the largest rank partitions and therefore approximates
-the completion time of the full distributed phase. Atmosphere distribution, each atom's
+HDF5 I/O, and the whole iteration. When the CPU charge path is used after a
+hydrogen-SE correction, rank 0 reports percentage complete, elapsed time,
+estimated remaining time, and processing rate every 30 seconds. The estimate
+follows rank 0's local x slab, which is one of the largest rank partitions and
+therefore approximates the completion time of the full distributed phase.
+Progress accounting uses small 100-cell work chunks so updates remain timely
+even when each cell is expensive. Charge-only mode instead reports the direct
+GPU Saha stage's total duration. Atmosphere distribution, each atom's
 synthesis progress/time, output gathering, and completion are also reported.
 The Slurm template writes these streams to `forward-JOBID.out` and
 `forward-JOBID.err`.

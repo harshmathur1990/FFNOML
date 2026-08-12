@@ -16,6 +16,9 @@
 #SBATCH --exclude=gpu-1-37,gpu-1-102
 #SBATCH --cpus-per-task=256
 #SBATCH --mem-per-gpu=120G
+# Full-volume hydrogen SE and its CPU charge fallback can take several hours.
+# This is only a template default; override it at submission time with
+# `sbatch --time=... forward_mpi_gpu.sh ...` when the selected mode needs longer.
 #SBATCH --time=0-02:00:00
 # Ask Slurm to warn the batch shell two minutes before termination so it can
 # leave a marker even when Julia cannot catch an external kill or node failure.

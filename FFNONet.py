@@ -15,6 +15,7 @@
 import sys
 import os
 import json
+import time
 import numpy as np
 import h5py
 import torch
@@ -116,6 +117,167 @@ def _compute_log_nlte_populations(nlte, eps=1e-30):
 
 def invert_log_population(pred_log):
     return torch.pow(10.0, pred_log)
+
+
+def _read_direct_gpu_charge_model(h5_file, h0, h1, *, depth, nx, ny):
+    """Read the compact Julia-exported Saha model for one distributed x slab."""
+    if "gpu_charge_model" not in h5_file:
+        return None
+
+    group = h5_file["gpu_charge_model"]
+    required = (
+        "fixed_hydrogen_density",
+        "atom_offsets",
+        "energies_joule",
+        "statistical_weights",
+        "stages",
+        "abundances",
+        "hydrogen_prediction_indices",
+        "hydrogen_stages",
+    )
+    missing = [name for name in required if name not in group]
+    if missing:
+        raise KeyError(f"Incomplete gpu_charge_model; missing: {', '.join(missing)}")
+
+    fixed_hydrogen = group["fixed_hydrogen_density"]
+    if fixed_hydrogen.shape != (nx, ny, depth):
+        raise ValueError(
+            "gpu_charge_model/fixed_hydrogen_density must have h5py shape "
+            f"{(nx, ny, depth)}, got {fixed_hydrogen.shape}"
+        )
+
+    return {
+        "fixed_hydrogen_density": np.transpose(
+            fixed_hydrogen[h0:h1, :, :],
+            (2, 0, 1),
+        ).astype(np.float64, copy=False),
+        "atom_offsets": group["atom_offsets"][...].astype(np.int64, copy=False),
+        "energies_joule": group["energies_joule"][...].astype(np.float64, copy=False),
+        "statistical_weights": group["statistical_weights"][...].astype(np.float64, copy=False),
+        "stages": group["stages"][...].astype(np.int64, copy=False),
+        "abundances": group["abundances"][...].astype(np.float64, copy=False),
+        "hydrogen_prediction_indices": group["hydrogen_prediction_indices"][...].astype(
+            np.int64,
+            copy=False,
+        ),
+        "hydrogen_stages": group["hydrogen_stages"][...].astype(np.int64, copy=False),
+        "saha_const_u": float(group.attrs["saha_const_u"]),
+        "boltzmann_constant": float(group.attrs["boltzmann_constant"]),
+    }
+
+
+@torch.no_grad()
+def direct_saha_charge_electron_density_gpu(
+    *,
+    temperature,
+    input_electron_density,
+    predicted_populations,
+    charge_model,
+):
+    """
+    Evaluate Muspel's Saha-Boltzmann charge equation directly on the GPU.
+
+    All arithmetic is float64 to match Forward.jl's CPU reference path. The
+    routine computes each atom's mean charge directly and never materializes
+    the individual LTE population arrays retained by the generic CPU API.
+    """
+    if not temperature.is_cuda:
+        raise RuntimeError("Direct Saha charge calculation requires a CUDA tensor")
+    if temperature.shape != input_electron_density.shape:
+        raise ValueError("Temperature and input electron-density shapes differ")
+
+    device = temperature.device
+    temperature = temperature.to(dtype=torch.float64)
+    input_electron_density = input_electron_density.to(dtype=torch.float64)
+    fixed_hydrogen = torch.as_tensor(
+        charge_model["fixed_hydrogen_density"],
+        dtype=torch.float64,
+        device=device,
+    )
+    if fixed_hydrogen.shape != temperature.shape:
+        raise ValueError(
+            "Fixed hydrogen-density shape does not match the local atmosphere: "
+            f"{tuple(fixed_hydrogen.shape)} != {tuple(temperature.shape)}"
+        )
+
+    hydrogen_indices = torch.as_tensor(
+        charge_model["hydrogen_prediction_indices"],
+        dtype=torch.long,
+        device=device,
+    )
+    hydrogen_stages = torch.as_tensor(
+        charge_model["hydrogen_stages"],
+        dtype=torch.float64,
+        device=device,
+    )
+    if hydrogen_indices.numel() != hydrogen_stages.numel():
+        raise ValueError("Hydrogen prediction indices and stages have different lengths")
+    if int(hydrogen_indices.max().item()) >= predicted_populations.shape[1]:
+        raise ValueError("Hydrogen prediction index exceeds the model output channels")
+
+    # Forward.jl accumulates the non-LTE hydrogen charge in the Float32
+    # population element type before promoting it for the background sum.
+    hydrogen_populations = predicted_populations[0, hydrogen_indices].to(torch.float32)
+    hydrogen_charge = torch.sum(
+        hydrogen_populations
+        * (hydrogen_stages.to(torch.float32) - 1.0)[:, None, None, None],
+        dim=0,
+    ).to(torch.float64)
+    total_charge = hydrogen_charge
+
+    atom_offsets = charge_model["atom_offsets"]
+    energies = charge_model["energies_joule"]
+    weights = charge_model["statistical_weights"]
+    stages = charge_model["stages"]
+    abundances = charge_model["abundances"]
+    if len(atom_offsets) != len(abundances) + 1:
+        raise ValueError("GPU charge atom offsets are inconsistent with abundances")
+
+    kT = float(charge_model["boltzmann_constant"]) * temperature
+    saha_factor = (
+        (float(charge_model["saha_const_u"]) / temperature) ** 1.5
+        * input_electron_density
+        / 2.0
+    )
+
+    for atom_index, abundance in enumerate(abundances):
+        first = int(atom_offsets[atom_index])
+        stop = int(atom_offsets[atom_index + 1])
+        if stop <= first:
+            raise ValueError(f"GPU charge atom {atom_index} has no energy levels")
+
+        ground_energy = float(energies[first])
+        ground_weight = float(weights[first])
+        ground_stage = int(stages[first])
+        relative_total = torch.ones_like(temperature)
+        charge_weighted_total = torch.full_like(
+            temperature,
+            float(ground_stage - 1),
+        )
+
+        for level in range(first + 1, stop):
+            stage_delta = int(stages[level]) - ground_stage
+            relative_population = (
+                float(weights[level])
+                / ground_weight
+                * torch.exp(-(float(energies[level]) - ground_energy) / kT)
+            )
+            # Match Muspel.saha_boltzmann!: one division per ion-stage step.
+            for _ in range(stage_delta):
+                relative_population = relative_population / saha_factor
+            relative_total = relative_total + relative_population
+            charge_weighted_total = charge_weighted_total + (
+                (int(stages[level]) - 1) * relative_population
+            )
+
+        mean_charge = charge_weighted_total / relative_total
+        total_charge = total_charge + float(abundance) * fixed_hydrogen * mean_charge
+
+    if not bool(torch.isfinite(total_charge).all().item()):
+        raise RuntimeError("Direct GPU Saha calculation produced non-finite electron density")
+    if not bool((total_charge > 0).all().item()):
+        raise RuntimeError("Direct GPU Saha calculation produced non-positive electron density")
+    return total_charge
 
 
 @torch.no_grad()
@@ -2225,6 +2387,14 @@ def ffno_predict_populations_distributed_full(
         z_scale = f["z_scale"][:, :, h0:h1, :]
         dx = f["dx"][...]
         dy = f["dy"][...]
+        charge_model = _read_direct_gpu_charge_model(
+            f,
+            h0,
+            h1,
+            depth=D,
+            nx=nx,
+            ny=ny,
+        )
 
     X = torch.from_numpy(X.astype(np.float32, copy=False)).to(device)
     z_scale = torch.from_numpy(z_scale.astype(np.float32, copy=False)).to(device)
@@ -2233,6 +2403,12 @@ def ffno_predict_populations_distributed_full(
 
     mean_X_t = torch.from_numpy(mean_X).float()[None, :, None, None, None].to(device)
     std_X_t = torch.from_numpy(std_X).float()[None, :, None, None, None].to(device)
+    if charge_model is not None:
+        charge_temperature = torch.pow(10.0, X[0, 0].to(torch.float64))
+        charge_input_ne = torch.pow(10.0, X[0, 4].to(torch.float64))
+    else:
+        charge_temperature = None
+        charge_input_ne = None
     X = (X - mean_X_t) / std_X_t
 
     debug_progress("full prediction", "start")
@@ -2320,20 +2496,69 @@ def ffno_predict_populations_distributed_full(
     std_Y_t = torch.from_numpy(std_Y).float()[None, :, None, None, None].to(device)
     pred_log = pred_log * std_Y_t + mean_Y_t
 
-    dep = invert_log_population(pred_log).float().cpu().numpy()
+    predicted_populations = invert_log_population(pred_log).float()
+    if charge_model is not None:
+        if rank == 0:
+            print("Direct GPU Saha charge conservation: starting...", flush=True)
+        charge_start = time.monotonic()
+        debug_progress("full prediction", "direct GPU Saha charge start")
+        gpu_electron_density = direct_saha_charge_electron_density_gpu(
+            temperature=charge_temperature,
+            input_electron_density=charge_input_ne,
+            predicted_populations=predicted_populations,
+            charge_model=charge_model,
+        )
+        torch.cuda.synchronize(torch.device(device))
+        charge_seconds = time.monotonic() - charge_start
+        debug_progress("full prediction", "direct GPU Saha charge complete")
+        if rank == 0:
+            print(
+                "Direct GPU Saha charge conservation completed in "
+                f"{charge_seconds:.2f} s per distributed slab.",
+                flush=True,
+            )
+        electron_density_local = (
+            gpu_electron_density.to(torch.float32)
+            .permute(1, 2, 0)
+            .contiguous()
+            .cpu()
+            .numpy()
+            .astype(np.float32, copy=False)
+        )
+        del gpu_electron_density, charge_temperature, charge_input_ne
+    else:
+        electron_density_local = None
+
+    dep = predicted_populations.cpu().numpy()
     dep = np.transpose(dep, (0, 3, 4, 2, 1)).astype(np.float32, copy=False)[0]
     z_local = z_scale[0].detach().cpu().numpy().astype(np.float32, copy=False)
 
     gathered_dep = [None for _ in range(world_size)] if rank == 0 else None
     gathered_z = [None for _ in range(world_size)] if rank == 0 else None
+    gathered_electron_density = (
+        [None for _ in range(world_size)]
+        if rank == 0 and electron_density_local is not None
+        else None
+    )
     dist.gather_object(dep, gathered_dep, dst=0)
     dist.gather_object(z_local, gathered_z, dst=0)
+    if electron_density_local is not None:
+        dist.gather_object(
+            electron_density_local,
+            gathered_electron_density,
+            dst=0,
+        )
 
     dist.barrier()
 
     if rank == 0:
         dep_full = np.concatenate(gathered_dep, axis=0)
         z_full = np.concatenate(gathered_z, axis=1)
+        electron_density_full = (
+            np.concatenate(gathered_electron_density, axis=0)
+            if gathered_electron_density is not None
+            else None
+        )
         debug_progress(
             "full prediction",
             f"dep range: {float(dep_full.min())} {float(dep_full.max())}",
@@ -2349,6 +2574,14 @@ def ffno_predict_populations_distributed_full(
                 "z_scale",
                 data=z_full
             )
+            if electron_density_full is not None:
+                ne_dataset = f.create_dataset(
+                    "electron_density",
+                    data=electron_density_full,
+                )
+                ne_dataset.attrs["units"] = "m^-3"
+                ne_dataset.attrs["dimensions"] = "x,y,z"
+                ne_dataset.attrs["method"] = "direct_saha_boltzmann_gpu"
             if "val_loss" in ckpt:
                 f.attrs["val_loss"] = float(ckpt["val_loss"])
             f.attrs["epoch"] = int(ckpt.get("epoch", -1))

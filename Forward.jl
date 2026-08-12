@@ -70,6 +70,8 @@ const ELECTRON_DENSITY_INPUT_CHANNEL = 5
 const DEFAULT_POPULATION_CONSISTENCY_MODE = :charge_only
 const DEFAULT_HYDROGEN_SE_RELAXATION = 1.0
 const DEFAULT_HYDROGEN_SE_WAVELENGTH_STRIDE = 1
+const GPU_CHARGE_VALIDATION_SAMPLES = 64
+const GPU_CHARGE_VALIDATION_TOLERANCE = 5e-5
 const CONSISTENCY_CACHE_FORMAT_VERSION = 5
 const DEFAULT_ATOM_DIR = "/cluster/work/projects/nn2834k/harshm/multi3d/input/atoms"
 
@@ -496,7 +498,7 @@ function charge_conservation_electron_density(
     total_hydrogen_density=nothing,
     progress_callback=nothing,
     progress_interval_s::Real=30.0,
-    progress_chunk_elements::Int=10_000,
+    progress_chunk_elements::Int=100,
 )
     size(input_ne) == size(atmos.temperature) || error(
         "Electron-density shape $(size(input_ne)) does not match atmosphere shape $(size(atmos.temperature))"
@@ -993,6 +995,123 @@ function write_initial_consistency_state!(result_h5::String, electron_density)
         end
     end
     return nothing
+end
+
+
+function write_gpu_charge_model!(
+    result_h5::String,
+    fixed_hydrogen_density,
+    background_atoms,
+    hydrogen_atom,
+    hydrogen_level_range,
+)
+    atom_offsets = Int32[0]
+    energies = Float64[]
+    statistical_weights = Float64[]
+    stages = Int32[]
+    abundances = Float64[]
+    for item in background_atoms
+        append!(energies, Float64.(item.atom.χ))
+        append!(statistical_weights, Float64.(item.atom.g))
+        append!(stages, Int32.(item.atom.stage))
+        push!(atom_offsets, Int32(length(energies)))
+        push!(abundances, Float64(item.abundance))
+    end
+
+    h5open(result_h5, "r+") do file
+        "gpu_charge_model" in keys(file) && delete_object(file, "gpu_charge_model")
+        group = create_group(file, "gpu_charge_model")
+        # HDF5.jl reverses multidimensional datasets relative to h5py. The
+        # Julia (z,y,x) array is therefore visible to Python as (x,y,z), which
+        # lets every torch rank read its own x slab directly.
+        group["fixed_hydrogen_density"] = fixed_hydrogen_density
+        group["atom_offsets"] = atom_offsets
+        group["energies_joule"] = energies
+        group["statistical_weights"] = statistical_weights
+        group["stages"] = stages
+        group["abundances"] = abundances
+        group["hydrogen_prediction_indices"] = Int32.(collect(hydrogen_level_range) .- 1)
+        group["hydrogen_stages"] = collect(Int32, hydrogen_atom.stage)
+        attributes(group)["saha_const_u"] = Float64(Muspel.saha_const_u)
+        attributes(group)["boltzmann_constant"] = Float64(Muspel.k_B_u)
+        attributes(group)["formula"] = "direct_saha_boltzmann_v1"
+    end
+    return nothing
+end
+
+
+function read_gpu_charge_electron_density(
+    prediction_h5::String;
+    x_range=nothing,
+)
+    h5open(prediction_h5, "r") do file
+        "electron_density" in keys(file) || error(
+            "Distributed prediction did not produce GPU charge-conservation " *
+            "electron_density in $(prediction_h5)"
+        )
+        dataset = file["electron_density"]
+        values = x_range === nothing ? read(dataset) : dataset[:, :, x_range]
+        return values
+    end
+end
+
+
+function validate_gpu_charge_samples(
+    gpu_electron_density,
+    atmos::Atmosphere3D,
+    input_electron_density,
+    nlte_h,
+    hydrogen_atom,
+    background_atoms,
+    fixed_hydrogen_density;
+    sample_count::Int=64,
+)
+    sample_count > 0 || error("GPU charge validation sample count must be positive")
+    size(gpu_electron_density) == size(input_electron_density) || error(
+        "GPU charge validation electron-density shapes differ"
+    )
+    indices = unique(round.(Int, range(1, length(gpu_electron_density); length=min(
+        sample_count,
+        length(gpu_electron_density),
+    ))))
+    cartesian = CartesianIndices(gpu_electron_density)
+    maximum_error = 0.0
+
+    for linear_index in indices
+        cell = cartesian[linear_index]
+        # Keep this scalar reference deliberately close to the original CPU
+        # implementation while avoiding allocation of a full validation cube.
+        hydrogen_charge = zero(eltype(nlte_h))
+        for level in 1:hydrogen_atom.nlevels
+            ion_charge = hydrogen_atom.stage[level] - 1
+            ion_charge == 0 && continue
+            hydrogen_charge += ion_charge * nlte_h[cell.I..., level]
+        end
+        temperature = Float64(atmos.temperature[cell])
+        input_ne = max(Float64(input_electron_density[cell]), eps(Float64))
+        n_h = Float64(fixed_hydrogen_density[cell])
+        reference = Float64(hydrogen_charge)
+        for item in background_atoms
+            populations = Muspel.saha_boltzmann(
+                item.atom,
+                temperature,
+                input_ne,
+                item.abundance * n_h,
+            )
+            for level in 1:item.atom.nlevels
+                reference += (item.atom.stage[level] - 1) * populations[level]
+            end
+        end
+        # The CPU production path assigns its Float64 sum into a Float32 array.
+        reference_float = convert(eltype(input_electron_density), reference)
+        gpu_value = gpu_electron_density[cell]
+        denominator = max(abs(Float64(reference_float)), abs(Float64(gpu_value)), eps(Float64))
+        maximum_error = max(
+            maximum_error,
+            abs(Float64(reference_float) - Float64(gpu_value)) / denominator,
+        )
+    end
+    return maximum_error
 end
 
 
@@ -1627,6 +1746,16 @@ function predict_with_charge_conservation(
         diagnostics=diagnostics,
         label="initial_electron_density",
     )
+    global_fixed_hydrogen_density = if consistency_mode == :charge_only
+        parallel_gather_x(
+            fixed_hydrogen_density,
+            parallel;
+            diagnostics=diagnostics,
+            label="fixed_hydrogen_density",
+        )
+    else
+        nothing
+    end
     diagnostic_checkpoint!(
         diagnostics,
         "consistency_input_density_gather_complete";
@@ -1647,6 +1776,15 @@ function predict_with_charge_conservation(
             global_size=size(global_input_ne),
         )
         write_initial_consistency_state!(result_h5, global_input_ne)
+        if consistency_mode == :charge_only
+            write_gpu_charge_model!(
+                result_h5,
+                global_fixed_hydrogen_density,
+                background_atoms,
+                hydrogen_atom,
+                hydrogen_level_range,
+            )
+        end
         diagnostic_checkpoint!(
             diagnostics,
             "consistency_initial_density_write_complete";
@@ -1865,8 +2003,9 @@ function predict_with_charge_conservation(
             "charge_conservation_start";
             local_cells=length(input_ne),
             background_atoms=length(background_atoms),
+            backend=consistency_mode == :charge_only ? "gpu" : "cpu",
         )
-        charge_progress = if parallel_isroot(parallel)
+        charge_progress = if consistency_mode != :charge_only && parallel_isroot(parallel)
             progress -> begin
                 percentage = round(100 * progress.fraction; digits=1)
                 rate_mcells = round(progress.cells_per_second / 1e6; digits=3)
@@ -1892,21 +2031,67 @@ function predict_with_charge_conservation(
             nothing
         end
         update_atmosphere_hydrogen_densities!(atmos, nlte_h, hydrogen_atom)
-        new_ne = charge_conservation_electron_density(
-            atmos,
-            input_ne,
-            nlte_h,
-            hydrogen_atom,
-            background_atoms,
-            total_hydrogen_density=fixed_hydrogen_density,
-            progress_callback=charge_progress,
-        )
+        new_ne = if consistency_mode == :charge_only
+            gpu_ne = read_gpu_charge_electron_density(
+                work_prediction_h5;
+                x_range=x_range,
+            )
+            size(gpu_ne) == size(input_ne) || error(
+                "GPU charge electron-density shape $(size(gpu_ne)) does not " *
+                "match local atmosphere shape $(size(input_ne))"
+            )
+            gpu_ne
+        else
+            charge_conservation_electron_density(
+                atmos,
+                input_ne,
+                nlte_h,
+                hydrogen_atom,
+                background_atoms,
+                total_hydrogen_density=fixed_hydrogen_density,
+                progress_callback=charge_progress,
+            )
+        end
+        if consistency_mode == :charge_only
+            local_gpu_validation_error = validate_gpu_charge_samples(
+                new_ne,
+                atmos,
+                input_ne,
+                nlte_h,
+                hydrogen_atom,
+                background_atoms,
+                fixed_hydrogen_density;
+                sample_count=GPU_CHARGE_VALIDATION_SAMPLES,
+            )
+            gpu_validation_error = parallel_allreduce_max(
+                local_gpu_validation_error,
+                parallel,
+            )
+            diagnostic_event!(
+                diagnostics,
+                "gpu_charge_validation_complete";
+                samples_per_rank=GPU_CHARGE_VALIDATION_SAMPLES,
+                maximum_relative_error=gpu_validation_error,
+                tolerance=GPU_CHARGE_VALIDATION_TOLERANCE,
+            )
+            gpu_validation_error <= GPU_CHARGE_VALIDATION_TOLERANCE || error(
+                "Direct GPU Saha charge validation failed: maximum sampled " *
+                "relative error $(gpu_validation_error) exceeds " *
+                "$(GPU_CHARGE_VALIDATION_TOLERANCE)"
+            )
+            parallel_println(
+                parallel,
+                "  direct GPU Saha validation: max sampled relative error = " *
+                "$(gpu_validation_error)",
+            )
+        end
         relative_change = maximum_relative_change(new_ne, input_ne)
         charge_seconds = time() - charge_start
         diagnostic_checkpoint!(
             diagnostics,
             "charge_conservation_complete";
             seconds=charge_seconds,
+            backend=consistency_mode == :charge_only ? "gpu" : "cpu",
         )
         se_residual = parallel_allreduce_max(se_residual, parallel)
         population_correction = parallel_allreduce_max(population_correction, parallel)
