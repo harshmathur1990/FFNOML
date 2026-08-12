@@ -789,7 +789,13 @@ follows rank 0's local x slab, which is one of the largest rank partitions and
 therefore approximates the completion time of the full distributed phase.
 Progress accounting uses small 100-cell work chunks so updates remain timely
 even when each cell is expensive. Charge-only mode instead reports the direct
-GPU Saha stage's total duration. Atmosphere distribution, each atom's
+GPU Saha stage's total duration. Before that GPU charge calculation, the six
+predicted hydrogen levels are rescaled independently in every cell so that
+their sum equals the fixed total hydrogen density from the atmosphere. The
+relative distribution predicted by FFNoML is preserved. Stdout reports the
+raw predicted-sum/fixed-density range and the applied scale-factor range, and
+the same values are stored as attributes on the prediction HDF5 file.
+Atmosphere distribution, each atom's
 synthesis progress/time, output gathering, and completion are also reported.
 The Slurm template writes these streams to `forward-JOBID.out` and
 `forward-JOBID.err`.

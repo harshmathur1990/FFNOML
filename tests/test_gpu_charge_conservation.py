@@ -43,6 +43,18 @@ class DirectGpuChargeTests(unittest.TestCase):
         self.assertIn('"electron_density",', self.python_source)
         self.assertIn('"direct_saha_boltzmann_gpu"', self.python_source)
 
+    def test_hydrogen_is_particle_normalized_before_gpu_charge(self):
+        self.assertIn("def normalize_hydrogen_populations_gpu(", self.python_source)
+        self.assertIn("predicted_total = hydrogen_populations.sum(dim=0)", self.python_source)
+        self.assertIn("scale = fixed_hydrogen / predicted_total", self.python_source)
+        self.assertLess(
+            self.python_source.index(
+                "hydrogen_normalization_stats = normalize_hydrogen_populations_gpu("
+            ),
+            self.python_source.index("gpu_electron_density = direct_saha_charge_electron_density_gpu("),
+        )
+        self.assertIn('f.attrs["hydrogen_particle_normalized"] = 1', self.python_source)
+
     def test_runtime_compares_gpu_results_with_muspel_samples(self):
         self.assertIn("validate_gpu_charge_samples(", self.julia_source)
         self.assertIn("GPU_CHARGE_VALIDATION_SAMPLES = 64", self.julia_source)

@@ -167,6 +167,65 @@ def _read_direct_gpu_charge_model(h5_file, h0, h1, *, depth, nx, ny):
 
 
 @torch.no_grad()
+def normalize_hydrogen_populations_gpu(*, predicted_populations, charge_model):
+    """Enforce hydrogen particle conservation independently in every cell.
+
+    FFNoML still predicts the relative distribution over the hydrogen levels.
+    This projection only fixes their sum to the atmosphere's prescribed total
+    hydrogen density; it does not alter the model architecture or checkpoint.
+    """
+    device = predicted_populations.device
+    hydrogen_indices = torch.as_tensor(
+        charge_model["hydrogen_prediction_indices"],
+        dtype=torch.long,
+        device=device,
+    )
+    if hydrogen_indices.numel() == 0:
+        raise ValueError("GPU charge model contains no hydrogen prediction indices")
+    if int(hydrogen_indices.max().item()) >= predicted_populations.shape[1]:
+        raise ValueError("Hydrogen prediction index exceeds the model output channels")
+
+    fixed_hydrogen = torch.as_tensor(
+        charge_model["fixed_hydrogen_density"],
+        dtype=torch.float64,
+        device=device,
+    )
+    hydrogen_populations = predicted_populations[0, hydrogen_indices].to(torch.float64)
+    if tuple(hydrogen_populations.shape[1:]) != tuple(fixed_hydrogen.shape):
+        raise ValueError(
+            "Hydrogen-population and fixed-density shapes differ: "
+            f"{tuple(hydrogen_populations.shape[1:])} != {tuple(fixed_hydrogen.shape)}"
+        )
+    if not bool(torch.isfinite(hydrogen_populations).all().item()):
+        raise RuntimeError("FFNoML produced non-finite hydrogen populations")
+    if not bool((hydrogen_populations >= 0).all().item()):
+        raise RuntimeError("FFNoML produced negative hydrogen populations")
+    if not bool(torch.isfinite(fixed_hydrogen).all().item()):
+        raise RuntimeError("Fixed hydrogen density contains non-finite values")
+    if not bool((fixed_hydrogen > 0).all().item()):
+        raise RuntimeError("Fixed hydrogen density contains non-positive values")
+
+    predicted_total = hydrogen_populations.sum(dim=0)
+    if not bool((predicted_total > 0).all().item()):
+        raise RuntimeError("FFNoML hydrogen populations sum to zero in at least one cell")
+
+    raw_sum_ratio = predicted_total / fixed_hydrogen
+    scale = fixed_hydrogen / predicted_total
+    normalized = (hydrogen_populations * scale.unsqueeze(0)).to(
+        predicted_populations.dtype
+    )
+    predicted_populations[0, hydrogen_indices] = normalized
+
+    # These are reduced over all torch ranks by the caller before reporting.
+    return {
+        "raw_sum_ratio_min": raw_sum_ratio.min(),
+        "raw_sum_ratio_max": raw_sum_ratio.max(),
+        "scale_min": scale.min(),
+        "scale_max": scale.max(),
+    }
+
+
+@torch.no_grad()
 def direct_saha_charge_electron_density_gpu(
     *,
     temperature,
@@ -2497,11 +2556,29 @@ def ffno_predict_populations_distributed_full(
     pred_log = pred_log * std_Y_t + mean_Y_t
 
     predicted_populations = invert_log_population(pred_log).float()
+    hydrogen_normalization_stats = None
     if charge_model is not None:
         if rank == 0:
             print("Direct GPU Saha charge conservation: starting...", flush=True)
         charge_start = time.monotonic()
         debug_progress("full prediction", "direct GPU Saha charge start")
+        hydrogen_normalization_stats = normalize_hydrogen_populations_gpu(
+            predicted_populations=predicted_populations,
+            charge_model=charge_model,
+        )
+        for name, value in hydrogen_normalization_stats.items():
+            operation = dist.ReduceOp.MIN if name.endswith("_min") else dist.ReduceOp.MAX
+            dist.all_reduce(value, op=operation)
+        if rank == 0:
+            print(
+                "Hydrogen particle normalization: raw sum/fixed nH range "
+                f"[{hydrogen_normalization_stats['raw_sum_ratio_min'].item():.6e}, "
+                f"{hydrogen_normalization_stats['raw_sum_ratio_max'].item():.6e}]; "
+                "applied scale range "
+                f"[{hydrogen_normalization_stats['scale_min'].item():.6e}, "
+                f"{hydrogen_normalization_stats['scale_max'].item():.6e}]",
+                flush=True,
+            )
         gpu_electron_density = direct_saha_charge_electron_density_gpu(
             temperature=charge_temperature,
             input_electron_density=charge_input_ne,
@@ -2582,6 +2659,10 @@ def ffno_predict_populations_distributed_full(
                 ne_dataset.attrs["units"] = "m^-3"
                 ne_dataset.attrs["dimensions"] = "x,y,z"
                 ne_dataset.attrs["method"] = "direct_saha_boltzmann_gpu"
+            if hydrogen_normalization_stats is not None:
+                f.attrs["hydrogen_particle_normalized"] = 1
+                for name, value in hydrogen_normalization_stats.items():
+                    f.attrs[f"hydrogen_normalization_{name}"] = float(value.item())
             if "val_loss" in ckpt:
                 f.attrs["val_loss"] = float(ckpt["val_loss"])
             f.attrs["epoch"] = int(ckpt.get("epoch", -1))
