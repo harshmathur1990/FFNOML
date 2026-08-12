@@ -679,6 +679,15 @@ requested number of additional iterations. If the source solving set, hydrogen
 atom, model checkpoint, method, or HSE numerical settings changed, the old file
 is moved to a `.stale-TIMESTAMP` name and a fresh result is started.
 
+Each consistency generation is published atomically. Rank 0 copies the last
+complete result to a same-directory staging file, applies all population,
+electron-density, history, and timing changes there, closes and `fsync`s it,
+reopens it to validate the required HDF5 objects and iteration count, and then
+replaces the stable result path with one `rename(2)`. The containing directory
+is synced afterward. A failed update therefore leaves the preceding generation
+available. This requires temporary free space approximately equal to one
+additional consistency-result file while a checkpoint is being written.
+
 This mode is substantially more expensive than `charge-only`. It is a stationary
 3D CRD correction with periodic horizontal boundaries and inclined
 characteristics through the complete x/y planes. All velocity components are
@@ -774,6 +783,12 @@ Slurm's job wall-time remains the overall limit because valid prediction time
 depends on atmosphere size. Set `FORWARD_FSDP_STATUS_TIMEOUT` to a positive
 number of seconds to add a per-launch timeout. MPI resumes only after every rank
 has received the launcher status.
+
+The checkpoint handoff is event-driven: the atomic publication must finish,
+all Julia ranks must pass the following MPI barrier, and only then may rank 0
+launch the distributed Python workers. Workers open the published HDF5 once and
+fail immediately if it is invalid; there is no filesystem polling or retry
+timeout.
 
 ### Progress, resource monitoring, and crash diagnostics
 

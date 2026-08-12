@@ -678,6 +678,142 @@ function consistency_prediction_work_path(result_h5::String)
 end
 
 
+function consistency_checkpoint_staging_path(result_h5::String)
+    directory = dirname(abspath(result_h5))
+    filename = basename(result_h5)
+    return joinpath(
+        directory,
+        ".$(filename).checkpoint-$(getpid())-$(time_ns()).tmp",
+    )
+end
+
+
+function fsync_file(path::String)
+    open(path, "r") do stream
+        result = ccall(:fsync, Cint, (Cint,), fd(stream))
+        systemerror("fsync($(path))", result != 0)
+    end
+    return nothing
+end
+
+
+function fsync_directory(path::String)
+    descriptor = ccall(:open, Cint, (Cstring, Cint), path, 0)
+    systemerror("open($(path)) for directory fsync", descriptor < 0)
+    try
+        result = ccall(:fsync, Cint, (Cint,), descriptor)
+        systemerror("fsync($(path))", result != 0)
+    finally
+        ccall(:close, Cint, (Cint,), descriptor)
+    end
+    return nothing
+end
+
+
+function atomic_replace_file(source::String, destination::String)
+    # POSIX rename(2) replaces an existing destination in one namespace
+    # operation. Do not use the force-overwrite filesystem helper here:
+    # implementations may remove destination before renaming, which would
+    # expose a gap to launchers on other nodes.
+    result = ccall(:rename, Cint, (Cstring, Cstring), source, destination)
+    systemerror("rename($(source), $(destination))", result != 0)
+    return nothing
+end
+
+
+function validate_consistency_checkpoint(
+    path::String;
+    pred_key::Union{Nothing,String}=nothing,
+    expected_iterations::Union{Nothing,Int}=nothing,
+    require_gpu_charge_model::Bool=false,
+)
+    h5open(path, "r") do file
+        for name in ("inputs", "z_scale", "dx", "dy", "iteration_history")
+            name in keys(file) || error(
+                "Atomic consistency checkpoint is missing required object $(name)"
+            )
+        end
+        if require_gpu_charge_model
+            "gpu_charge_model" in keys(file) || error(
+                "Atomic consistency checkpoint is missing gpu_charge_model"
+            )
+        end
+        if expected_iterations !== nothing
+            completed = Int(hdf_attribute(
+                attributes(file),
+                "iterations_completed",
+                -1,
+            ))
+            completed == expected_iterations || error(
+                "Atomic consistency checkpoint reports $(completed) completed " *
+                "iterations; expected $(expected_iterations)"
+            )
+            consistency_history_complete(file, expected_iterations) || error(
+                "Atomic consistency checkpoint has incomplete iteration history"
+            )
+            if expected_iterations > 0
+                for name in (
+                    "electron_density",
+                    "last_ffno_hydrogen_populations",
+                    pred_key,
+                )
+                    name === nothing && continue
+                    name in keys(file) || error(
+                        "Atomic consistency checkpoint is missing required state $(name)"
+                    )
+                end
+            end
+        end
+    end
+    return nothing
+end
+
+
+function atomic_consistency_update!(
+    operation,
+    result_h5::String;
+    pred_key::Union{Nothing,String}=nothing,
+    expected_iterations::Union{Nothing,Int}=nothing,
+    require_gpu_charge_model::Bool=false,
+)
+    isfile(result_h5) || error(
+        "Cannot atomically update missing consistency checkpoint: $(result_h5)"
+    )
+    staging_h5 = consistency_checkpoint_staging_path(result_h5)
+    published = false
+    try
+        cp(result_h5, staging_h5; force=false)
+        operation(staging_h5)
+
+        # Closing every h5open above flushes the HDF5 library state. fsync then
+        # makes the staged inode durable before it becomes visible to another
+        # node through the stable result path.
+        fsync_file(staging_h5)
+        validate_consistency_checkpoint(
+            staging_h5;
+            pred_key=pred_key,
+            expected_iterations=expected_iterations,
+            require_gpu_charge_model=require_gpu_charge_model,
+        )
+
+        # staging_h5 is deliberately in the same directory, so rename(2)
+        # replaces the old complete checkpoint atomically.
+        atomic_replace_file(staging_h5, result_h5)
+        published = true
+        fsync_directory(dirname(abspath(result_h5)))
+    catch exception
+        isfile(staging_h5) && rm(staging_h5)
+        if published
+            @error "Consistency checkpoint was atomically published, but directory fsync failed" result_h5 exception=(exception, catch_backtrace())
+        else
+            @error "Atomic consistency checkpoint publication failed; the previous checkpoint remains intact" result_h5 staging_h5 exception=(exception, catch_backtrace())
+        end
+        rethrow()
+    end
+    return nothing
+end
+
+
 function hdf_attribute(attributes_object, name, default)
     name in keys(attributes_object) || return default
     return read(attributes_object[name])
@@ -1152,6 +1288,8 @@ function write_consistency_checkpoint!(
     hydrogen_se_relaxation::Real,
     hydrogen_se_wavelength_stride::Int,
     converged::Bool,
+    io_start::Real,
+    iteration_start::Real,
 )
     all(isfinite, electron_density) || error("Cannot checkpoint non-finite electron density")
     all(>(0), electron_density) || error("Cannot checkpoint non-positive electron density")
@@ -1170,71 +1308,83 @@ function write_consistency_checkpoint!(
     end
 
     raw_ffno_hydrogen = permutedims(ffno_hydrogen_populations, (4, 1, 2, 3))
-    h5open(work_prediction_h5, "r") do prediction_file
-        h5open(result_h5, "r+") do file
-            ne_dataset = replace_hdf_dataset!(file, "electron_density", electron_density)
-            attributes(ne_dataset)["units"] = "m^-3"
-            attributes(ne_dataset)["dimensions"] = "z,y,x"
-            pred_key in keys(file) && delete_object(file, pred_key)
-            copy_object(prediction_file, pred_key, file, pred_key)
-            attributes(file[pred_key])["dimensions"] = "level,z,y,x"
-            ffno_dataset = replace_hdf_dataset!(
-                file,
-                "last_ffno_hydrogen_populations",
-                raw_ffno_hydrogen,
-            )
-            attributes(ffno_dataset)["dimensions"] = "hydrogen_level,z,y,x"
+    iteration = Int(metrics.iteration)
+    atomic_consistency_update!(
+        result_h5;
+        pred_key=pred_key,
+        expected_iterations=iteration,
+    ) do staging_h5
+        h5open(work_prediction_h5, "r") do prediction_file
+            h5open(staging_h5, "r+") do file
+                ne_dataset = replace_hdf_dataset!(file, "electron_density", electron_density)
+                attributes(ne_dataset)["units"] = "m^-3"
+                attributes(ne_dataset)["dimensions"] = "z,y,x"
+                pred_key in keys(file) && delete_object(file, pred_key)
+                copy_object(prediction_file, pred_key, file, pred_key)
+                attributes(file[pred_key])["dimensions"] = "level,z,y,x"
+                ffno_dataset = replace_hdf_dataset!(
+                    file,
+                    "last_ffno_hydrogen_populations",
+                    raw_ffno_hydrogen,
+                )
+                attributes(ffno_dataset)["dimensions"] = "hydrogen_level,z,y,x"
 
-            history = "iteration_history" in keys(file) ?
-                      file["iteration_history"] : create_group(file, "iteration_history")
-            append_history_scalar!(history, "iteration", metrics.iteration)
-            append_history_scalar!(history, "converged", converged ? 1.0 : 0.0)
-            append_history_scalar!(history, "electron_density_delta", metrics.electron_density_delta)
-            append_history_scalar!(history, "ffno_population_delta", metrics.ffno_population_delta)
-            append_history_scalar!(history, "se_population_correction", metrics.se_population_correction)
-            append_history_scalar!(history, "se_residual", metrics.se_residual)
-            append_history_scalar!(history, "background_scattering_iterations", metrics.background_scattering_iterations)
-            append_history_scalar!(history, "background_scattering_residual", metrics.background_scattering_residual)
-            append_history_scalar!(history, "electron_density_min", metrics.electron_density_min)
-            append_history_scalar!(history, "electron_density_max", metrics.electron_density_max)
-            append_history_scalar!(history, "ffno_population_min", metrics.ffno_population_min)
-            append_history_scalar!(history, "ffno_population_max", metrics.ffno_population_max)
-            append_history_scalar!(history, "prediction_seconds", metrics.prediction_seconds)
-            append_history_scalar!(history, "prediction_read_seconds", metrics.prediction_read_seconds)
-            append_history_scalar!(history, "se_seconds", metrics.se_seconds)
-            append_history_scalar!(history, "charge_seconds", metrics.charge_seconds)
-            append_history_scalar!(history, "io_seconds", metrics.io_seconds)
-            append_history_scalar!(history, "iteration_seconds", metrics.iteration_seconds)
-            append_history_levels!(history, "ffno_population_level_delta", metrics.ffno_level_changes)
-            append_history_levels!(history, "ffno_population_level_min", metrics.population_level_min)
-            append_history_levels!(history, "ffno_population_level_max", metrics.population_level_max)
+                history = "iteration_history" in keys(file) ?
+                          file["iteration_history"] : create_group(file, "iteration_history")
+                append_history_scalar!(history, "iteration", metrics.iteration)
+                append_history_scalar!(history, "converged", converged ? 1.0 : 0.0)
+                append_history_scalar!(history, "electron_density_delta", metrics.electron_density_delta)
+                append_history_scalar!(history, "ffno_population_delta", metrics.ffno_population_delta)
+                append_history_scalar!(history, "se_population_correction", metrics.se_population_correction)
+                append_history_scalar!(history, "se_residual", metrics.se_residual)
+                append_history_scalar!(history, "background_scattering_iterations", metrics.background_scattering_iterations)
+                append_history_scalar!(history, "background_scattering_residual", metrics.background_scattering_residual)
+                append_history_scalar!(history, "electron_density_min", metrics.electron_density_min)
+                append_history_scalar!(history, "electron_density_max", metrics.electron_density_max)
+                append_history_scalar!(history, "ffno_population_min", metrics.ffno_population_min)
+                append_history_scalar!(history, "ffno_population_max", metrics.ffno_population_max)
+                append_history_scalar!(history, "prediction_seconds", metrics.prediction_seconds)
+                append_history_scalar!(history, "prediction_read_seconds", metrics.prediction_read_seconds)
+                append_history_scalar!(history, "se_seconds", metrics.se_seconds)
+                append_history_scalar!(history, "charge_seconds", metrics.charge_seconds)
+                append_history_scalar!(history, "io_seconds", metrics.io_seconds)
+                append_history_scalar!(history, "iteration_seconds", metrics.iteration_seconds)
+                append_history_levels!(history, "ffno_population_level_delta", metrics.ffno_level_changes)
+                append_history_levels!(history, "ffno_population_level_min", metrics.population_level_min)
+                append_history_levels!(history, "ffno_population_level_max", metrics.population_level_max)
 
-            set_hdf_attribute!(file, "method", String(method))
-            set_hdf_attribute!(file, "converged", converged)
-            set_hdf_attribute!(file, "iterations_completed", metrics.iteration)
-            set_hdf_attribute!(file, "convergence_iteration", converged ? metrics.iteration : -1)
-            set_hdf_attribute!(file, "last_run_max_iterations", max_iterations)
-            set_hdf_attribute!(file, "requested_tolerance", Float64(tolerance))
-            set_hdf_attribute!(file, "final_electron_density_delta", Float64(metrics.electron_density_delta))
-            set_hdf_attribute!(file, "final_ffno_population_delta", Float64(metrics.ffno_population_delta))
-            set_hdf_attribute!(file, "final_se_population_correction", Float64(metrics.se_population_correction))
-            set_hdf_attribute!(file, "final_se_residual", Float64(metrics.se_residual))
-            set_hdf_attribute!(file, "final_background_scattering_iterations", Int(metrics.background_scattering_iterations))
-            set_hdf_attribute!(file, "final_background_scattering_residual", Float64(metrics.background_scattering_residual))
-            set_hdf_attribute!(file, "hydrogen_se_relaxation", Float64(hydrogen_se_relaxation))
-            set_hdf_attribute!(file, "hydrogen_se_wavelength_stride", hydrogen_se_wavelength_stride)
-            set_hdf_attribute!(file, "background_scattering_max_iterations", HSE_SCATTERING_MAX_ITERATIONS)
-            set_hdf_attribute!(file, "background_scattering_tolerance", HSE_SCATTERING_TOLERANCE)
-            set_hdf_attribute!(file, "updated_utc", diagnostic_timestamp())
+                set_hdf_attribute!(file, "method", String(method))
+                set_hdf_attribute!(file, "converged", converged)
+                set_hdf_attribute!(file, "iterations_completed", metrics.iteration)
+                set_hdf_attribute!(file, "convergence_iteration", converged ? metrics.iteration : -1)
+                set_hdf_attribute!(file, "last_run_max_iterations", max_iterations)
+                set_hdf_attribute!(file, "requested_tolerance", Float64(tolerance))
+                set_hdf_attribute!(file, "final_electron_density_delta", Float64(metrics.electron_density_delta))
+                set_hdf_attribute!(file, "final_ffno_population_delta", Float64(metrics.ffno_population_delta))
+                set_hdf_attribute!(file, "final_se_population_correction", Float64(metrics.se_population_correction))
+                set_hdf_attribute!(file, "final_se_residual", Float64(metrics.se_residual))
+                set_hdf_attribute!(file, "final_background_scattering_iterations", Int(metrics.background_scattering_iterations))
+                set_hdf_attribute!(file, "final_background_scattering_residual", Float64(metrics.background_scattering_residual))
+                set_hdf_attribute!(file, "hydrogen_se_relaxation", Float64(hydrogen_se_relaxation))
+                set_hdf_attribute!(file, "hydrogen_se_wavelength_stride", hydrogen_se_wavelength_stride)
+                set_hdf_attribute!(file, "background_scattering_max_iterations", HSE_SCATTERING_MAX_ITERATIONS)
+                set_hdf_attribute!(file, "background_scattering_tolerance", HSE_SCATTERING_TOLERANCE)
+                set_hdf_attribute!(file, "updated_utc", diagnostic_timestamp())
+            end
         end
+        # Update the copied solving-set input only in the staged checkpoint.
+        # The stable result path and the original cfg.solve_h5 are never opened
+        # for writing while a prediction launch could observe them.
+        write_solving_electron_density!(staging_h5, electron_density)
+        finalize_consistency_checkpoint_timings!(
+            staging_h5,
+            time() - io_start,
+            time() - iteration_start,
+        )
     end
-    # The complete population state is now inside result_h5. Keeping another
-    # full-volume working prediction would unnecessarily double disk use.
+    # Remove the working prediction only after the complete checkpoint has
+    # passed validation and atomically replaced the previous generation.
     isfile(work_prediction_h5) && rm(work_prediction_h5)
-    # Update the copied solving-set input only after the durable result and
-    # iteration history have been written. The original cfg.solve_h5 is never
-    # opened for writing.
-    write_solving_electron_density!(result_h5, electron_density)
     return nothing
 end
 
@@ -1768,43 +1918,49 @@ function predict_with_charge_conservation(
         "$(round(time() - gather_start; digits=2)) s; writing checkpoint...",
     )
     parallel_root_call(parallel) do
-        initial_write_start = time()
-        diagnostic_checkpoint!(
-            diagnostics,
-            "consistency_initial_density_write_start";
-            path=result_h5,
-            global_size=size(global_input_ne),
-        )
-        write_initial_consistency_state!(result_h5, global_input_ne)
-        if consistency_mode == :charge_only
-            write_gpu_charge_model!(
-                result_h5,
-                global_fixed_hydrogen_density,
-                background_atoms,
-                hydrogen_atom,
-                hydrogen_level_range,
+        atomic_consistency_update!(
+            result_h5;
+            expected_iterations=cache_state.iterations,
+            require_gpu_charge_model=consistency_mode == :charge_only,
+        ) do staging_h5
+            initial_write_start = time()
+            diagnostic_checkpoint!(
+                diagnostics,
+                "consistency_initial_density_write_start";
+                path=staging_h5,
+                global_size=size(global_input_ne),
+            )
+            write_initial_consistency_state!(staging_h5, global_input_ne)
+            if consistency_mode == :charge_only
+                write_gpu_charge_model!(
+                    staging_h5,
+                    global_fixed_hydrogen_density,
+                    background_atoms,
+                    hydrogen_atom,
+                    hydrogen_level_range,
+                )
+            end
+            diagnostic_checkpoint!(
+                diagnostics,
+                "consistency_initial_density_write_complete";
+                seconds=time() - initial_write_start,
+                path=staging_h5,
+            )
+
+            solving_write_start = time()
+            diagnostic_checkpoint!(
+                diagnostics,
+                "consistency_solving_density_write_start";
+                path=staging_h5,
+            )
+            write_solving_electron_density!(staging_h5, global_input_ne)
+            diagnostic_checkpoint!(
+                diagnostics,
+                "consistency_solving_density_write_complete";
+                seconds=time() - solving_write_start,
+                path=staging_h5,
             )
         end
-        diagnostic_checkpoint!(
-            diagnostics,
-            "consistency_initial_density_write_complete";
-            seconds=time() - initial_write_start,
-            path=result_h5,
-        )
-
-        solving_write_start = time()
-        diagnostic_checkpoint!(
-            diagnostics,
-            "consistency_solving_density_write_start";
-            path=result_h5,
-        )
-        write_solving_electron_density!(result_h5, global_input_ne)
-        diagnostic_checkpoint!(
-            diagnostics,
-            "consistency_solving_density_write_complete";
-            seconds=time() - solving_write_start,
-            path=result_h5,
-        )
     end
     diagnostic_checkpoint!(diagnostics, "consistency_initial_checkpoint_write_complete")
     parallel_println(parallel, "Consistency setup: checkpoint written; entering MPI barrier...")
@@ -2177,19 +2333,13 @@ function predict_with_charge_conservation(
                 hydrogen_se_relaxation=hydrogen_se_relaxation,
                 hydrogen_se_wavelength_stride=hydrogen_se_wavelength_stride,
                 converged=iteration_converged,
+                io_start=io_start,
+                iteration_start=iteration_start,
             )
         end
         parallel_barrier(parallel)
         io_seconds = time() - io_start
         iteration_seconds = time() - iteration_start
-        parallel_root_call(parallel) do
-            finalize_consistency_checkpoint_timings!(
-                result_h5,
-                io_seconds,
-                iteration_seconds,
-            )
-        end
-        parallel_barrier(parallel)
         parallel_println(
             parallel,
             "  electron-density range = [$(ne_min), $(ne_max)] m^-3",
