@@ -24,6 +24,7 @@ import os
 import platform
 import subprocess
 import sys
+import time
 import tomllib
 from pathlib import Path
 from types import SimpleNamespace
@@ -34,6 +35,9 @@ import numpy as np
 
 K_BOLTZMANN_CGS = 1.3806488e-16
 _WITT_EOS = None
+_RESAMPLER_PROGRESS_CALLBACK = ctypes.CFUNCTYPE(
+    None, ctypes.c_size_t, ctypes.c_void_p
+)
 _INTERPOLATION_METHODS = {"nearest", "linear", "cubic"}
 _OUTPUT_CHANNELS = ("temperature", "rho", "vx", "vy", "vz", "ne")
 _RESAMPLED_CHANNELS = _OUTPUT_CHANNELS + ("pgas", "hydrogen_populations")
@@ -411,6 +415,87 @@ def _compile_witt_cpp_library(source_path: Path, library_path: Path) -> None:
     subprocess.run(command, check=True)
 
 
+def _compile_atmosphere_resampler(source_path: Path, library_path: Path) -> None:
+    """Compile the Boost-based C++ atmosphere resampler used by this script."""
+    compiler = os.environ.get("CXX", "c++")
+    boost_include = os.environ.get("BOOST_INCLUDEDIR")
+    if boost_include is None:
+        for candidate in (
+            Path("/opt/homebrew/include"),
+            Path("/usr/local/include"),
+            Path(sys.prefix) / "include",
+        ):
+            if (candidate / "boost" / "math" / "interpolators").is_dir():
+                boost_include = os.fspath(candidate)
+                break
+    command = [
+        compiler,
+        "-O3",
+        "-std=c++17",
+        "-shared",
+        "-fPIC",
+    ]
+    if boost_include is not None:
+        command.extend(["-I", boost_include])
+    command.extend([
+        os.fspath(source_path),
+        "-o",
+        os.fspath(library_path),
+    ])
+    subprocess.run(command, check=True)
+
+
+def _load_atmosphere_resampler() -> ctypes.CDLL:
+    source_path = Path(__file__).resolve().parent / "atmosphere_resampler.cpp"
+    library_dir = source_path.parent / "__pycache__"
+    library_path = library_dir / (
+        f"libatmosphere_resampler{_shared_library_suffix()}"
+    )
+    if not source_path.is_file():
+        raise FileNotFoundError(source_path)
+
+    needs_build = not library_path.is_file()
+    if not needs_build:
+        needs_build = source_path.stat().st_mtime > library_path.stat().st_mtime
+    if needs_build:
+        library_dir.mkdir(parents=True, exist_ok=True)
+        _compile_atmosphere_resampler(source_path, library_path)
+
+    size_array = np.ctypeslib.ndpointer(
+        dtype=np.uintp, ndim=1, flags="C_CONTIGUOUS"
+    )
+    double_array = np.ctypeslib.ndpointer(
+        dtype=np.float64, ndim=1, flags="C_CONTIGUOUS"
+    )
+    float_array = np.ctypeslib.ndpointer(
+        dtype=np.float32, flags="C_CONTIGUOUS"
+    )
+    int_array = np.ctypeslib.ndpointer(
+        dtype=np.int32, ndim=1, flags="C_CONTIGUOUS"
+    )
+    lib = ctypes.CDLL(os.fspath(library_path))
+    lib.resample_atmosphere_field.argtypes = [
+        float_array,
+        size_array,
+        ctypes.c_int,
+        double_array,
+        double_array,
+        double_array,
+        double_array,
+        double_array,
+        double_array,
+        size_array,
+        int_array,
+        ctypes.c_int,
+        float_array,
+        ctypes.c_size_t,
+        _RESAMPLER_PROGRESS_CALLBACK,
+        ctypes.c_void_p,
+    ]
+    lib.resample_atmosphere_field.restype = ctypes.c_int
+    return lib
+
+
 def _load_witt_cpp_library(args) -> ctypes.CDLL:
     source_path = Path(__file__).resolve().parent / "witt_eos_cpp.cpp"
     library_dir = source_path.parent / "__pycache__"
@@ -638,132 +723,6 @@ def _target_axis_size(size: int, factor: float | None, target: int | None) -> in
     return int(round((size - 1) * factor)) + 1
 
 
-def _natural_cubic_second_derivatives(
-    coordinates: np.ndarray, values: np.ndarray
-) -> np.ndarray:
-    """Natural-cubic second derivatives for values shaped (n, n_series)."""
-    n = coordinates.size
-    second = np.zeros_like(values, dtype=np.float64)
-    if n <= 2:
-        return second
-
-    h = np.diff(coordinates)
-    diagonal = 2.0 * (h[:-1] + h[1:])
-    lower = h[1:-1]
-    upper = h[1:-1]
-    rhs = 6.0 * (
-        (values[2:] - values[1:-1]) / h[1:, None]
-        - (values[1:-1] - values[:-2]) / h[:-1, None]
-    )
-
-    # Thomas algorithm. The tridiagonal coefficients are shared by all series.
-    c_prime = np.empty(max(0, n - 2), dtype=np.float64)
-    d_prime = np.empty_like(rhs, dtype=np.float64)
-    c_prime[0] = upper[0] / diagonal[0] if n > 3 else 0.0
-    d_prime[0] = rhs[0] / diagonal[0]
-    for row in range(1, n - 2):
-        denominator = diagonal[row] - lower[row - 1] * c_prime[row - 1]
-        c_prime[row] = upper[row] / denominator if row < n - 3 else 0.0
-        d_prime[row] = (rhs[row] - lower[row - 1] * d_prime[row - 1]) / denominator
-
-    second[-2] = d_prime[-1]
-    for row in range(n - 4, -1, -1):
-        second[row + 1] = d_prime[row] - c_prime[row] * second[row + 2]
-    return second
-
-
-def _interpolate_series(
-    coordinates: np.ndarray,
-    target_coordinates: np.ndarray,
-    values: np.ndarray,
-    method: str,
-) -> np.ndarray:
-    """Interpolate a matrix whose first dimension follows coordinates."""
-    if coordinates.size == 1:
-        if target_coordinates.size != 1:
-            raise ValueError("Cannot upsample an axis containing only one point")
-        return values.copy()
-
-    indices = np.searchsorted(coordinates, target_coordinates, side="right") - 1
-    indices = np.clip(indices, 0, coordinates.size - 2)
-    left = coordinates[indices]
-    right = coordinates[indices + 1]
-
-    if method == "nearest":
-        choose_right = (target_coordinates - left) > (right - target_coordinates)
-        nearest = indices + choose_right.astype(np.intp)
-        return values[nearest]
-
-    fraction = ((target_coordinates - left) / (right - left))[:, None]
-    if method == "linear":
-        return values[indices] * (1.0 - fraction) + values[indices + 1] * fraction
-
-    second = _natural_cubic_second_derivatives(coordinates, values)
-    width = (right - left)[:, None]
-    a = (right[:, None] - target_coordinates[:, None]) / width
-    b = (target_coordinates[:, None] - left[:, None]) / width
-    return (
-        a * values[indices]
-        + b * values[indices + 1]
-        + ((a**3 - a) * second[indices] + (b**3 - b) * second[indices + 1])
-        * width**2
-        / 6.0
-    )
-
-
-def _interpolate_axis(
-    values: np.ndarray,
-    coordinates: np.ndarray,
-    target_coordinates: np.ndarray,
-    axis: int,
-    method: str,
-    *,
-    log_space: bool,
-) -> np.ndarray:
-    """Interpolate one cube axis, chunking independent series to bound memory."""
-    if method not in _INTERPOLATION_METHODS:
-        raise ValueError(
-            f"Unknown interpolation method {method!r}; choose nearest, linear, or cubic"
-        )
-    coordinates = np.asarray(coordinates, dtype=np.float64)
-    target_coordinates = np.asarray(target_coordinates, dtype=np.float64)
-    if coordinates.ndim != 1 or coordinates.size != values.shape[axis]:
-        raise ValueError("Interpolation coordinates do not match the selected axis")
-    if np.any(~np.isfinite(coordinates)) or np.any(np.diff(coordinates) == 0):
-        raise ValueError("Interpolation coordinates must be finite and strictly monotonic")
-
-    reversed_axis = coordinates[0] > coordinates[-1]
-    if reversed_axis:
-        coordinates = coordinates[::-1]
-        target_coordinates = target_coordinates[::-1]
-        values = np.flip(values, axis=axis)
-    if np.any(np.diff(coordinates) <= 0):
-        raise ValueError("Interpolation coordinates must be strictly monotonic")
-
-    moved = np.moveaxis(values, axis, 0)
-    original_shape = moved.shape[1:]
-    matrix = moved.reshape(moved.shape[0], -1).astype(np.float64, copy=False)
-    if log_space:
-        _validate_positive("log-space interpolation input", matrix)
-        matrix = np.log10(matrix)
-
-    output = np.empty((target_coordinates.size, matrix.shape[1]), dtype=np.float32)
-    chunk_size = 65536
-    for start in range(0, matrix.shape[1], chunk_size):
-        stop = min(start + chunk_size, matrix.shape[1])
-        result = _interpolate_series(
-            coordinates, target_coordinates, matrix[:, start:stop], method
-        )
-        if log_space:
-            result = 10.0**result
-        output[:, start:stop] = result.astype(np.float32, copy=False)
-
-    reshaped = output.reshape((target_coordinates.size, *original_shape))
-    if reversed_axis:
-        reshaped = reshaped[::-1]
-    return np.moveaxis(reshaped, 0, axis)
-
-
 def _channel_methods(args, channel: str) -> dict[str, str]:
     methods = dict(args.interpolation_default)
     methods.update(args.interpolation_channels.get(channel, {}))
@@ -776,25 +735,196 @@ def _channel_methods(args, channel: str) -> dict[str, str]:
     return methods
 
 
-def _resample_cube(
+def _resampling_coordinates(
+    args,
+    source_shape: tuple[int, int, int],
+    height_m: np.ndarray,
+    dx_m: float,
+    dy_m: float,
+) -> tuple[
+    tuple[np.ndarray, np.ndarray, np.ndarray],
+    tuple[np.ndarray, np.ndarray, np.ndarray],
+]:
+    """Build and validate the source and requested spatial coordinates."""
+    source_sizes = dict(zip(("x", "y", "z"), source_shape))
+    old_coordinates = (
+        np.ascontiguousarray(
+            np.arange(source_shape[0], dtype=np.float64) * dx_m
+        ),
+        np.ascontiguousarray(
+            np.arange(source_shape[1], dtype=np.float64) * dy_m
+        ),
+        np.ascontiguousarray(height_m, dtype=np.float64),
+    )
+    new_coordinates_list = []
+    for coordinates, axis in zip(old_coordinates, ("x", "y", "z")):
+        if coordinates.ndim != 1 or coordinates.size != source_sizes[axis]:
+            raise ValueError(f"Coordinates do not match the source {axis} axis")
+        if np.any(~np.isfinite(coordinates)) or np.any(np.diff(coordinates) == 0):
+            raise ValueError(
+                f"Source {axis} coordinates must be finite and strictly monotonic"
+            )
+        if np.any(np.diff(coordinates) > 0) and np.any(np.diff(coordinates) < 0):
+            raise ValueError(f"Source {axis} coordinates must be strictly monotonic")
+
+        target_spacing = args.upsample_target_spacing_m.get(axis)
+        if target_spacing is not None:
+            target_spacing = float(target_spacing)
+            if not math.isfinite(target_spacing) or target_spacing <= 0:
+                raise ValueError(
+                    f"Target spacing for {axis} must be finite and positive"
+                )
+            span = abs(float(coordinates[-1] - coordinates[0]))
+            target_size = int(math.floor(span / target_spacing + 1e-12)) + 1
+            if target_size < source_sizes[axis]:
+                native_mean = span / max(1, source_sizes[axis] - 1)
+                raise ValueError(
+                    f"Target {axis} spacing {target_spacing:g} m would downsample "
+                    f"the axis (mean native spacing {native_mean:g} m)"
+                )
+            direction = 1.0 if coordinates[-1] >= coordinates[0] else -1.0
+            target_coordinates = (
+                coordinates[0]
+                + direction
+                * target_spacing
+                * np.arange(target_size, dtype=np.float64)
+            )
+        else:
+            target_size = _target_axis_size(
+                source_sizes[axis],
+                args.upsample_factors.get(axis),
+                args.upsample_target_shape.get(axis),
+            )
+            target_coordinates = np.linspace(
+                coordinates[0], coordinates[-1], target_size
+            )
+        new_coordinates_list.append(
+            np.ascontiguousarray(target_coordinates, dtype=np.float64)
+        )
+    return old_coordinates, tuple(new_coordinates_list)
+
+
+def _field_resampling_work(
+    shape: tuple[int, ...],
+    old_coordinates: tuple[np.ndarray, np.ndarray, np.ndarray],
+    new_coordinates: tuple[np.ndarray, np.ndarray, np.ndarray],
+) -> int:
+    """Return the native interpolation work estimate for one field."""
+    current_shape = list(shape)
+    work = 0
+    for axis in range(3):
+        if np.array_equal(old_coordinates[axis], new_coordinates[axis]):
+            continue
+        current_shape[axis] = new_coordinates[axis].size
+        work += math.prod(current_shape)
+    return work
+
+
+def _format_eta(seconds: float) -> str:
+    if not math.isfinite(seconds) or seconds < 0:
+        return "--:--"
+    seconds = int(round(seconds))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return (
+        f"{hours:d}:{minutes:02d}:{seconds:02d}"
+        if hours
+        else f"{minutes:02d}:{seconds:02d}"
+    )
+
+
+def _resample_field_cpp(
+    lib: ctypes.CDLL,
+    channel: str,
     values: np.ndarray,
     old_coordinates: tuple[np.ndarray, np.ndarray, np.ndarray],
     new_coordinates: tuple[np.ndarray, np.ndarray, np.ndarray],
     methods: dict[str, str],
     *,
     log_space: bool,
+    field_work: int,
+    completed_before: int,
+    total_work: int,
+    started_at: float,
 ) -> np.ndarray:
-    result = values
-    for axis, axis_name in enumerate(("x", "y", "z")):
-        if np.array_equal(old_coordinates[axis], new_coordinates[axis]):
-            continue
-        result = _interpolate_axis(
-            result,
-            old_coordinates[axis],
-            new_coordinates[axis],
-            axis,
-            methods[axis_name],
-            log_space=log_space,
+    """Call the native Boost/C++ implementation for one atmosphere field."""
+    if values.ndim not in (3, 4):
+        raise ValueError(
+            f"Cannot resample {channel}: expected 3 or 4 dimensions, got {values.shape}"
+        )
+    source = np.ascontiguousarray(values, dtype=np.float32)
+    if log_space:
+        _validate_positive(f"log-space interpolation input ({channel})", source)
+
+    method_codes = {"nearest": 0, "linear": 1, "cubic": 2}
+    native_methods = np.array(
+        [
+            -1
+            if np.array_equal(old_coordinates[axis], new_coordinates[axis])
+            else method_codes[methods[axis_name]]
+            for axis, axis_name in enumerate(("x", "y", "z"))
+        ],
+        dtype=np.int32,
+    )
+    source_shape = np.ascontiguousarray(source.shape, dtype=np.uintp)
+    target_shape_tuple = tuple(coordinates.size for coordinates in new_coordinates)
+    target_shape = np.ascontiguousarray(target_shape_tuple, dtype=np.uintp)
+    result_shape = target_shape_tuple + source.shape[3:]
+    result = np.empty(result_shape, dtype=np.float32)
+
+    last_bucket = -1
+
+    def report(completed: int, _context) -> None:
+        nonlocal last_bucket
+        completed = min(int(completed), field_work)
+        field_fraction = 1.0 if field_work == 0 else completed / field_work
+        bucket = min(20, int(field_fraction * 20))
+        if bucket == last_bucket:
+            return
+        last_bucket = bucket
+        overall_completed = completed_before + completed
+        overall_fraction = 1.0 if total_work == 0 else overall_completed / total_work
+        elapsed = time.monotonic() - started_at
+        eta = (
+            elapsed * (1.0 - overall_fraction) / overall_fraction
+            if overall_fraction > 0
+            else math.inf
+        )
+        ending = "\n" if completed >= field_work else "\r"
+        print(
+            f"[resample] {channel:<22} {field_fraction:6.1%} | "
+            f"overall {overall_fraction:6.1%} | ETA {_format_eta(eta)}",
+            end=ending,
+            flush=True,
+        )
+
+    callback = _RESAMPLER_PROGRESS_CALLBACK(report)
+    if field_work == 0:
+        np.copyto(result, source)
+        report(0, None)
+        return result
+
+    status = lib.resample_atmosphere_field(
+        source,
+        source_shape,
+        source.ndim,
+        *old_coordinates,
+        *new_coordinates,
+        target_shape,
+        native_methods,
+        int(log_space),
+        result,
+        field_work,
+        callback,
+        None,
+    )
+    if status == 1:
+        raise MemoryError(
+            f"Boost/C++ resampler ran out of memory while processing {channel}"
+        )
+    if status != 0:
+        raise RuntimeError(
+            f"Boost/C++ resampler rejected {channel} with status code {status}"
         )
     return result
 
@@ -870,61 +1000,52 @@ def _resample_atmosphere(
     dx_m: float,
     dy_m: float,
 ) -> tuple[dict[str, np.ndarray], np.ndarray, float, float]:
-    """Upsample all spatial dimensions while preserving the physical extent."""
+    """Upsample the atmosphere through the compiled Boost/C++ implementation."""
     nx, ny, nz = fields["temperature"].shape
-    source_sizes = {"x": nx, "y": ny, "z": nz}
-    old_coordinates = (
-        np.arange(nx, dtype=np.float64) * dx_m,
-        np.arange(ny, dtype=np.float64) * dy_m,
-        np.asarray(height_m, dtype=np.float64),
+    inconsistent = {
+        channel: values.shape
+        for channel, values in fields.items()
+        if values.shape[:3] != (nx, ny, nz)
+    }
+    if inconsistent:
+        raise ValueError(
+            "Atmosphere fields do not share the temperature spatial grid: "
+            f"{inconsistent}"
+        )
+    old_coordinates, new_coordinates = _resampling_coordinates(
+        args, (nx, ny, nz), height_m, dx_m, dy_m
     )
-    new_coordinates_list = []
-    for coordinates, axis in zip(old_coordinates, ("x", "y", "z")):
-        target_spacing = args.upsample_target_spacing_m.get(axis)
-        if target_spacing is not None:
-            target_spacing = float(target_spacing)
-            if not math.isfinite(target_spacing) or target_spacing <= 0:
-                raise ValueError(
-                    f"Target spacing for {axis} must be finite and positive"
-                )
-            span = abs(float(coordinates[-1] - coordinates[0]))
-            target_size = int(math.floor(span / target_spacing + 1e-12)) + 1
-            if target_size < source_sizes[axis]:
-                native_mean = span / max(1, source_sizes[axis] - 1)
-                raise ValueError(
-                    f"Target {axis} spacing {target_spacing:g} m would downsample "
-                    f"the axis (mean native spacing {native_mean:g} m)"
-                )
-            direction = 1.0 if coordinates[-1] >= coordinates[0] else -1.0
-            target_coordinates = (
-                coordinates[0]
-                + direction * target_spacing * np.arange(target_size, dtype=np.float64)
-            )
-        else:
-            target_size = _target_axis_size(
-                source_sizes[axis],
-                args.upsample_factors.get(axis),
-                args.upsample_target_shape.get(axis),
-            )
-            target_coordinates = np.linspace(
-                coordinates[0], coordinates[-1], target_size
-            )
-        new_coordinates_list.append(target_coordinates)
-    new_coordinates = tuple(new_coordinates_list)
     target_sizes = {
         axis: coordinates.size
         for axis, coordinates in zip(("x", "y", "z"), new_coordinates)
     }
 
+    lib = _load_atmosphere_resampler()
+    field_work = {
+        channel: _field_resampling_work(
+            values.shape, old_coordinates, new_coordinates
+        )
+        for channel, values in fields.items()
+    }
+    total_work = sum(field_work.values())
+    completed = 0
+    started_at = time.monotonic()
     result = {}
     for channel, values in fields.items():
-        result[channel] = _resample_cube(
+        result[channel] = _resample_field_cpp(
+            lib,
+            channel,
             values,
             old_coordinates,
             new_coordinates,
             _channel_methods(args, channel),
             log_space=channel in args.log_interpolation_channels,
+            field_work=field_work[channel],
+            completed_before=completed,
+            total_work=total_work,
+            started_at=started_at,
         )
+        completed += field_work[channel]
     _validate_resampled_continuity(
         args, fields, result, old_coordinates, new_coordinates
     )
@@ -1228,6 +1349,127 @@ def _write_multi3d_atmosphere(
         print(f"Wrote Multi3D mesh: {mesh_path}")
 
 
+def _print_resampling_job_description(
+    args,
+    *,
+    folder: Path,
+    snap: str,
+    original_fits_shape: tuple[int, int, int],
+    x_slice: slice,
+    y_slice: slice,
+    z_indices: np.ndarray,
+    fields: dict[str, np.ndarray],
+    height_m: np.ndarray,
+    dx_m: float,
+    dy_m: float,
+    electron_source: str,
+    has_hydrogen_populations: bool,
+) -> None:
+    """Print the complete read-to-resample job before native work starts."""
+    source_shape = fields["temperature"].shape[:3]
+    _, new_coordinates = _resampling_coordinates(
+        args, source_shape, height_m, dx_m, dy_m
+    )
+    target_shape = tuple(coordinates.size for coordinates in new_coordinates)
+    target_dx = dx_m if target_shape[0] == 1 else abs(
+        new_coordinates[0][1] - new_coordinates[0][0]
+    )
+    target_dy = dy_m if target_shape[1] == 1 else abs(
+        new_coordinates[1][1] - new_coordinates[1][0]
+    )
+    units = {
+        "temperature": "K",
+        "rho": "kg m^-3",
+        "vx": "m s^-1",
+        "vy": "m s^-1",
+        "vz": "m s^-1",
+        "ne": "m^-3",
+        "pgas": "Pa",
+        "hydrogen_populations": "m^-3 (6 levels)",
+    }
+    quantities = {
+        "temperature": "lgtg",
+        "rho": "lgr",
+        "vx": "ux",
+        "vy": "uy",
+        "vz": "uz",
+        "ne": "lgne",
+        "pgas": "lgp",
+        "hydrogen_populations": "lgn1..lgn6",
+    }
+    z_summary = (
+        f"{int(z_indices[0])}..{int(z_indices[-1])} ({z_indices.size} points)"
+        if z_indices.size
+        else "none"
+    )
+
+    print("\nAtmosphere resampling job")
+    print(
+        f"  atmosphere: {args.simulation_code}/{args.simulation_name}, "
+        f"snapshot {snap} (MURaM FITS)"
+    )
+    print(f"  source folder: {folder}")
+    print(f"  original FITS shape (z, x, y): {original_fits_shape}")
+    print(
+        "  selection: "
+        f"x={x_slice.start}:{x_slice.stop}:{x_slice.step}, "
+        f"y={y_slice.start}:{y_slice.stop}:{y_slice.step}, z={z_summary}"
+    )
+    print(
+        f"  selected height: {float(np.min(height_m)):g} .. "
+        f"{float(np.max(height_m)):g} m"
+    )
+    print(
+        f"  oriented source grid (x, y, z): {source_shape}; "
+        f"dx={dx_m:g} m, dy={dy_m:g} m"
+    )
+    print(
+        f"  final resampled grid (x, y, z): {target_shape}; "
+        f"dx={float(target_dx):g} m, dy={float(target_dy):g} m; "
+        f"z={float(new_coordinates[2][0]):g} .. "
+        f"{float(new_coordinates[2][-1]):g} m"
+    )
+    print("  fields to resample:")
+    for channel, values in fields.items():
+        methods = _channel_methods(args, channel)
+        interpolation = ", ".join(
+            f"{axis}={methods[axis]}" for axis in ("x", "y", "z")
+        )
+        quantity = quantities[channel]
+        source = (
+            f"{folder / f'{args.simulation_code}_{args.simulation_name}_{quantity}_{snap}.fits'}"
+            if ".." not in quantity
+            else f"{quantity} FITS set"
+        )
+        print(
+            f"    - {channel}: {values.shape} {units[channel]}; "
+            f"source={source}; {interpolation}; "
+            f"log-space={'yes' if channel in args.log_interpolation_channels else 'no'}"
+        )
+    derived_ne = {
+        "lgne": "read from lgne",
+        "lgp": "derived on the final grid from resampled pgas with Witt EOS",
+        "lgr": "derived on the final grid from resampled rho with Witt EOS",
+    }[electron_source]
+    print(f"  final electron density: {derived_ne}")
+    print(
+        "  hydrogen populations: "
+        f"{'included' if has_hydrogen_populations else 'not included'}"
+    )
+    print(f"  FFNO output: {args.output}")
+    print(
+        "  final FFNO datasets: "
+        f"inputs={(1, 6, target_shape[2], target_shape[0], target_shape[1])}, "
+        f"z_scale={(1, target_shape[2], target_shape[0], target_shape[1])}"
+    )
+    if args.multi3d_atmos_out:
+        print(f"  Multi3D atmosphere output: {args.multi3d_atmos_out}")
+        print(f"  final Multi3D spatial shape: {target_shape}")
+    if args.multi3d_mesh_out:
+        print(f"  Multi3D mesh output: {args.multi3d_mesh_out}")
+    print("  resampling backend: compiled C++ (Boost.Math interpolators)\n")
+
+
 def convert(args) -> None:
     folder = Path(args.folder)
     snap = str(args.snap)
@@ -1442,6 +1684,21 @@ def convert(args) -> None:
 
     if nh is not None:
         resampling_fields["hydrogen_populations"] = nh
+    _print_resampling_job_description(
+        args,
+        folder=folder,
+        snap=snap,
+        original_fits_shape=(nz_full, nx_full, ny_full),
+        x_slice=x_slice,
+        y_slice=y_slice,
+        z_indices=z_indices,
+        fields=resampling_fields,
+        height_m=height_selected,
+        dx_m=dx,
+        dy_m=dy,
+        electron_source=electron_source,
+        has_hydrogen_populations=nh is not None,
+    )
     resampling_fields, height_selected, dx, dy = _resample_atmosphere(
         args, resampling_fields, height_selected, dx, dy
     )

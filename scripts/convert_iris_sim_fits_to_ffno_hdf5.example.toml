@@ -76,8 +76,9 @@ z = 16000.0
 # y = 1008
 # z = 512
 
-# Methods are nearest, linear, or cubic (natural cubic spline). Axis names here
-# refer to the final FFNO coordinates, after the horizontal rotation.
+# Methods are nearest, linear, or cubic. Cubic uses Boost.Math's
+# shape-preserving PCHIP interpolation. Axis names here refer to the final FFNO
+# coordinates, after the horizontal rotation.
 [resampling.default]
 x = "cubic"
 y = "cubic"

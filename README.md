@@ -355,7 +355,9 @@ automatically; set `witt_path` in `[eos]` only when those files live somewhere e
 default, this uses the C++ full-atmosphere EOS backend and all visible CPU
 threads; `show_progress = true` prints a C++-side progress line without Python
 callbacks. Use `backend = "python"` only for debugging or if no C++ compiler
-is available. The optional `multi3d_atmos` and `multi3d_mesh` outputs write a
+is available. Spatial resampling is also compiled at first use and requires a
+C++17 compiler plus Boost headers (set `BOOST_INCLUDEDIR` when they are not in
+a standard include location). The optional `multi3d_atmos` and `multi3d_mesh` outputs write a
 Multi3D atmosphere for reference calculations. If the complete `lgn1` through
 `lgn6` FITS set is present, the converter also reads and writes all six hydrogen
 populations; incomplete sets are ignored. The output contains no magnetic
@@ -367,9 +369,13 @@ output spacing, and the z selection is applied before the height filter. After
 coordinate rotation, every final axis can be upsampled to a requested physical
 spacing in metres with `[resampling.target_spacing_m]`; its x/y values become
 the written `dx`/`dy`, and z becomes the absolute increment in `z_scale`.
-Factors and target grid sizes remain available as alternatives. Interpolation
-supports `nearest`, `linear`, and natural `cubic`
-spline methods independently per x/y/z direction, with per-channel overrides
+Factors and target grid sizes remain available as alternatives. Before
+resampling starts, the converter prints the complete source selection, source
+and final grids, fields, methods, units, derived quantities, and output shapes.
+During resampling it prints both per-field and whole-job completion estimates
+with an ETA. Interpolation runs in the native C++ backend and supports
+`nearest`, `linear`, and Boost.Math shape-preserving `cubic` (PCHIP) methods
+independently per x/y/z direction, with per-channel overrides
 for temperature, density, velocity components, electron density, and hydrogen
 populations. Positive channels are interpolated in log space.
 
