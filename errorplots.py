@@ -353,16 +353,12 @@ def plot_departure_coefficient_error_assessment(
     figsize=None,
     residual_range=(-50, 50),
     residual_bins=100,
-    coefficient_bins=1000,
 ):
-    """Plot height-binned residual and coefficient distributions per level.
+    """Plot height-binned residual distributions per level.
 
-    The top row shows relative errors in percent and the bottom row shows the
-    corresponding true departure-coefficient count histograms with a
-    logarithmic x axis and a linear y axis. The histograms use unfilled step
-    outlines. Cells are grouped into the physical-height ranges
-    requested for the comparison: below 750 km, 750--1200 km, 1200--2500 km,
-    2500--5000 km, and 5000 km and above.
+    The row shows relative errors in percent. Cells are grouped into the
+    physical-height ranges requested for the comparison: below 750 km,
+    750--1200 km, 1200--2500 km, 2500--5000 km, and 5000 km and above.
     """
 
     pred = np.asarray(pred)
@@ -385,8 +381,6 @@ def plot_departure_coefficient_error_assessment(
         raise ValueError(
             f"Expected {nlevels} level names, got {len(level_names)}"
         )
-    if coefficient_bins < 1:
-        raise ValueError("coefficient_bins must be positive")
     z_km = z_axis * 1e3
     regions = (
         (z_km < 750, r"$z < 750$ km", "#482878"),
@@ -396,33 +390,19 @@ def plot_departure_coefficient_error_assessment(
         (z_km >= 5000, r"$z \geq 5000$ km", "#c44e52"),
     )
     if figsize is None:
-        figsize = (3.0 * nlevels, 6.3)
+        figsize = (3.0 * nlevels, 3.15)
 
     fig, axes = plt.subplots(
-        2,
+        1,
         nlevels,
         figsize=figsize,
         squeeze=False,
         constrained_layout=True,
     )
-    has_coefficient_histogram = False
 
     for ilevel in range(nlevels):
         residual_ax = axes[0, ilevel]
-        coefficient_ax = axes[1, ilevel]
         title = level_names[ilevel] if level_names is not None else f"Level {ilevel + 1}"
-
-        positive_actual = true[ilevel][
-            np.isfinite(true[ilevel]) & (true[ilevel] > 0)
-        ]
-        log_bins = None
-        if positive_actual.size:
-            log_min = np.log10(positive_actual.min())
-            log_max = np.log10(positive_actual.max())
-            if np.isclose(log_min, log_max):
-                log_min -= 0.5
-                log_max += 0.5
-            log_bins = np.logspace(log_min, log_max, coefficient_bins + 1)
 
         for height_mask, label, color in regions:
             actual = true[ilevel, height_mask, :, :].ravel()
@@ -446,19 +426,6 @@ def plot_departure_coefficient_error_assessment(
                     label=label,
                 )
 
-            actual = actual[np.isfinite(actual) & (actual > 0)]
-            if actual.size and log_bins is not None:
-                counts, _ = np.histogram(actual, bins=log_bins)
-                coefficient_ax.stairs(
-                    counts,
-                    log_bins,
-                    color=color,
-                    linewidth=1.4,
-                    fill=False,
-                    label=f"Actual: {label}",
-                )
-                has_coefficient_histogram = True
-
         residual_ax.axvline(0, color="0.25", linestyle="--", lw=1)
         residual_ax.set_xlim(*residual_range)
         residual_ax.set_title(f"{title} residuals", fontsize=14)
@@ -466,53 +433,8 @@ def plot_departure_coefficient_error_assessment(
         residual_ax.tick_params(axis="both", which="both", labelsize=11)
         residual_ax.grid(True, alpha=0.2)
 
-        coefficient_ax.set_xscale("log")
-        coefficient_ax.set_title(
-            f"{title} coefficient distribution", fontsize=14
-        )
-        coefficient_ax.set_xlabel("Departure coefficient", fontsize=13)
-        coefficient_ax.tick_params(axis="both", which="both", labelsize=11)
-        coefficient_ax.grid(True, which="both", alpha=0.2)
-
-    # Use the smallest and largest automatic limits across populated panels.
-    if has_coefficient_histogram:
-        populated_coefficient_axes = [
-            coefficient_ax
-            for coefficient_ax in axes[1, :]
-            if coefficient_ax.has_data()
-        ]
-        individual_ylims = np.asarray(
-            [
-                coefficient_ax.get_ylim()
-                for coefficient_ax in populated_coefficient_axes
-            ]
-        )
-        coefficient_ylim = (
-            individual_ylims[:, 0].min(),
-            individual_ylims[:, 1].max(),
-        )
-        for coefficient_ax in axes[1, :]:
-            coefficient_ax.set_ylim(*coefficient_ylim)
-
-        # Resolve the ticks once, then explicitly reuse both the locations and
-        # formatters so every panel displays the same labels.
-        fig.canvas.draw()
-        reference_ax = axes[1, 0]
-        major_ticks = reference_ax.get_yticks(minor=False)
-        minor_ticks = reference_ax.get_yticks(minor=True)
-        major_formatter = copy.copy(reference_ax.yaxis.get_major_formatter())
-        minor_formatter = copy.copy(reference_ax.yaxis.get_minor_formatter())
-        for coefficient_ax in axes[1, :]:
-            coefficient_ax.yaxis.set_major_locator(FixedLocator(major_ticks))
-            coefficient_ax.yaxis.set_minor_locator(FixedLocator(minor_ticks))
-            coefficient_ax.yaxis.set_major_formatter(copy.copy(major_formatter))
-            coefficient_ax.yaxis.set_minor_formatter(copy.copy(minor_formatter))
-            coefficient_ax.tick_params(axis="y", which="both", labelleft=True)
-
     axes[0, 0].set_ylabel("Density", fontsize=13)
-    axes[1, 0].set_ylabel("Count", fontsize=13)
     axes[0, -1].legend(loc="upper right", fontsize=10)
-    axes[1, -1].legend(loc="upper right", fontsize=10)
 
     return fig, axes
 
