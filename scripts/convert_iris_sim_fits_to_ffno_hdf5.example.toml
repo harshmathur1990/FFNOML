@@ -39,8 +39,8 @@ show_progress = true
 
 [output]
 hdf5 = "../training_FFNO3D_zscale_expand_lognlte/3D_sim_predict_ar098192_270000.hdf5"
-multi3d_atmos = "/mn/stornext/d9/data/harshm/bifrost_data/ar098192/27000/atm3d"
-multi3d_mesh = "/mn/stornext/d9/data/harshm/bifrost_data/ar098192/27000/mesh"
+multi3d_atmos = "/mn/stornext/d9/data/harshm/bifrost_data/ar098192/270000/atm3d"
+multi3d_mesh = "/mn/stornext/d9/data/harshm/bifrost_data/ar098192/270000/mesh"
 # compression = 4
 overwrite = false
 
@@ -60,8 +60,8 @@ temperature = true
 # requested absolute z increment. If the domain is not exactly divisible by a
 # spacing, the final remainder shorter than one grid cell is omitted.
 [resampling.target_spacing_m]
-x = 96000.0
-y = 96000.0
+x = 24000.0
+y = 24000.0
 z = 16000.0
 
 # Alternatively, use factors OR target_shape for a given axis. A factor of 2
