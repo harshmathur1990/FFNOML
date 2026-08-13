@@ -1,10 +1,14 @@
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstring>
+#include <exception>
 #include <memory>
+#include <mutex>
 #include <new>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 #include <boost/math/interpolators/barycentric_rational.hpp>
@@ -130,9 +134,11 @@ void interpolate_axis(
     const std::size_t target_count,
     const int method,
     const bool log_space,
-    std::size_t &completed,
+    const unsigned int requested_threads,
+    std::atomic<std::size_t> &completed,
     const std::size_t report_interval,
-    std::size_t &next_report,
+    std::atomic<std::size_t> &next_report,
+    std::mutex &callback_mutex,
     const ProgressCallback callback,
     void *context
 ) {
@@ -143,28 +149,80 @@ void interpolate_axis(
         throw std::invalid_argument("cannot upsample a one-point axis");
     }
 
-    for (std::size_t outer = 0; outer < outer_count; ++outer) {
-        for (std::size_t inner = 0; inner < inner_count; ++inner) {
-            const SeriesInterpolator interpolate(
-                coordinates, input, outer, inner, coordinate_count,
-                inner_count, method, log_space
-            );
-            for (std::size_t target_index = 0;
-                 target_index < target_count;
-                 ++target_index) {
-                double value = interpolate(targets[target_index]);
-                if (log_space) {
-                    value = std::pow(10.0, value);
+    const std::size_t series_count = outer_count * inner_count;
+    const unsigned int available_threads = requested_threads == 0
+        ? std::max(1u, std::thread::hardware_concurrency())
+        : requested_threads;
+    const unsigned int thread_count = static_cast<unsigned int>(
+        std::min<std::size_t>(available_threads, series_count)
+    );
+    std::atomic<std::size_t> next_series{0};
+    std::atomic<bool> failed{false};
+    std::exception_ptr worker_error;
+    std::mutex error_mutex;
+
+    const auto worker = [&]() {
+        try {
+            while (!failed.load(std::memory_order_relaxed)) {
+                const std::size_t series =
+                    next_series.fetch_add(1, std::memory_order_relaxed);
+                if (series >= series_count) {
+                    break;
                 }
-                output[(outer * target_count + target_index) * inner_count + inner] =
-                    static_cast<float>(value);
+                const std::size_t outer = series / inner_count;
+                const std::size_t inner = series % inner_count;
+                const SeriesInterpolator interpolate(
+                    coordinates, input, outer, inner, coordinate_count,
+                    inner_count, method, log_space
+                );
+                for (std::size_t target_index = 0;
+                     target_index < target_count;
+                     ++target_index) {
+                    double value = interpolate(targets[target_index]);
+                    if (log_space) {
+                        value = std::pow(10.0, value);
+                    }
+                    output[
+                        (outer * target_count + target_index) * inner_count + inner
+                    ] = static_cast<float>(value);
+                }
+                const std::size_t done =
+                    completed.fetch_add(target_count, std::memory_order_relaxed)
+                    + target_count;
+                std::size_t report_at = next_report.load(std::memory_order_relaxed);
+                if (callback && done >= report_at) {
+                    // ctypes callbacks enter Python, so serialize them even
+                    // though interpolation itself runs concurrently.
+                    std::lock_guard<std::mutex> lock(callback_mutex);
+                    report_at = next_report.load(std::memory_order_relaxed);
+                    if (done >= report_at) {
+                        next_report.store(
+                            done + report_interval, std::memory_order_relaxed
+                        );
+                        callback(done, context);
+                    }
+                }
             }
-            completed += target_count;
-            if (callback && completed >= next_report) {
-                callback(completed, context);
-                next_report = completed + report_interval;
+        } catch (...) {
+            failed.store(true, std::memory_order_relaxed);
+            std::lock_guard<std::mutex> lock(error_mutex);
+            if (!worker_error) {
+                worker_error = std::current_exception();
             }
         }
+    };
+
+    std::vector<std::thread> threads;
+    threads.reserve(thread_count > 0 ? thread_count - 1 : 0);
+    for (unsigned int index = 1; index < thread_count; ++index) {
+        threads.emplace_back(worker);
+    }
+    worker();
+    for (auto &thread : threads) {
+        thread.join();
+    }
+    if (worker_error) {
+        std::rethrow_exception(worker_error);
     }
 }
 
@@ -183,6 +241,7 @@ extern "C" int resample_atmosphere_field(
     const std::size_t *target_shape,
     const int *methods,
     const int log_space,
+    const unsigned int threads,
     float *output,
     const std::size_t total_work,
     const ProgressCallback callback,
@@ -199,9 +258,10 @@ extern "C" int resample_atmosphere_field(
         std::copy(input_shape, input_shape + dimensions, current_shape);
         const float *current = input;
         std::vector<float> current_storage;
-        std::size_t completed = 0;
+        std::atomic<std::size_t> completed{0};
         const std::size_t report_interval = total_work / 100 + 1;
-        std::size_t next_report = report_interval;
+        std::atomic<std::size_t> next_report{report_interval};
+        std::mutex callback_mutex;
 
         for (int axis = 0; axis < 3; ++axis) {
             if (methods[axis] == METHOD_SKIP) {
@@ -214,8 +274,8 @@ extern "C" int resample_atmosphere_field(
             interpolate_axis(
                 current, next.data(), current_shape, dimensions, axis,
                 old_coordinates[axis], new_coordinates[axis], target_shape[axis],
-                methods[axis], log_space != 0, completed, report_interval,
-                next_report, callback, context
+                methods[axis], log_space != 0, threads, completed,
+                report_interval, next_report, callback_mutex, callback, context
             );
             current_storage = std::move(next);
             current = current_storage.data();

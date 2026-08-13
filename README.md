@@ -373,7 +373,9 @@ Factors and target grid sizes remain available as alternatives. Before
 resampling starts, the converter prints the complete source selection, source
 and final grids, fields, methods, units, derived quantities, and output shapes.
 During resampling it prints both per-field and whole-job completion estimates
-with an ETA. Interpolation runs in the native C++ backend and supports
+with an ETA. Interpolation runs across all CPUs available to the process by
+default (respecting Linux/Slurm CPU affinity); set `[resampling].workers` to a
+positive integer to override it. The native C++ backend supports
 `nearest`, `linear`, and Boost.Math shape-preserving `cubic` (PCHIP) methods
 independently per x/y/z direction, with per-channel overrides
 for temperature, density, velocity components, electron density, and hydrogen

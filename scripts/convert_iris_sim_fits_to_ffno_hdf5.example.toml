@@ -44,6 +44,11 @@ multi3d_mesh = "/mn/stornext/d9/data/harshm/bifrost_data/ar098192/270000/mesh"
 # compression = 4
 overwrite = false
 
+[resampling]
+# Number of native C++ interpolation threads. Omit to use all CPUs available to
+# the process (including the CPU affinity assigned by Slurm).
+# workers = 32
+
 # By default, temperature, rho, ne, pgas, and hydrogen_populations are
 # interpolated in log10 space. Override individual channels here; false selects
 # ordinary value-space interpolation. Log-space interpolation requires every

@@ -415,28 +415,62 @@ def _compile_witt_cpp_library(source_path: Path, library_path: Path) -> None:
     subprocess.run(command, check=True)
 
 
+def _find_boost_include() -> Path:
+    """Find Boost in standard, Homebrew, and versioned local-RPM layouts."""
+    configured = os.environ.get("BOOST_INCLUDEDIR")
+    if configured:
+        candidate = Path(configured).expanduser()
+        if not (candidate / "boost" / "math" / "interpolators").is_dir():
+            raise FileNotFoundError(
+                "BOOST_INCLUDEDIR must name the directory immediately above "
+                f"boost/, but the headers were not found under {candidate}"
+            )
+        return candidate
+
+    include_roots = [Path(sys.prefix) / "include"]
+    packages_prefix = os.environ.get("PACKAGES")
+    if packages_prefix:
+        packages_path = Path(packages_prefix).expanduser()
+        include_roots.extend(
+            (packages_path / "usr" / "include", packages_path / "include")
+        )
+    include_roots.extend(
+        (
+            Path("/opt/homebrew/include"),
+            Path("/usr/local/include"),
+            Path("/usr/include"),
+        )
+    )
+
+    candidates = list(include_roots)
+    for include_root in include_roots:
+        if include_root.is_dir():
+            candidates.extend(
+                sorted(include_root.glob("boost[0-9]*"), reverse=True)
+            )
+    for candidate in candidates:
+        if (candidate / "boost" / "math" / "interpolators").is_dir():
+            return candidate
+    raise FileNotFoundError(
+        "Boost.Math interpolation headers were not found. Set BOOST_INCLUDEDIR "
+        "to the directory immediately above boost/. For the local RHEL RPM "
+        "layout this is normally $PACKAGES/usr/include/boost1.78."
+    )
+
+
 def _compile_atmosphere_resampler(source_path: Path, library_path: Path) -> None:
     """Compile the Boost-based C++ atmosphere resampler used by this script."""
     compiler = os.environ.get("CXX", "c++")
-    boost_include = os.environ.get("BOOST_INCLUDEDIR")
-    if boost_include is None:
-        for candidate in (
-            Path("/opt/homebrew/include"),
-            Path("/usr/local/include"),
-            Path(sys.prefix) / "include",
-        ):
-            if (candidate / "boost" / "math" / "interpolators").is_dir():
-                boost_include = os.fspath(candidate)
-                break
+    boost_include = _find_boost_include()
     command = [
         compiler,
         "-O3",
         "-std=c++17",
         "-shared",
         "-fPIC",
+        "-pthread",
     ]
-    if boost_include is not None:
-        command.extend(["-I", boost_include])
+    command.extend(["-I", os.fspath(boost_include)])
     command.extend([
         os.fspath(source_path),
         "-o",
@@ -487,6 +521,7 @@ def _load_atmosphere_resampler() -> ctypes.CDLL:
         size_array,
         int_array,
         ctypes.c_int,
+        ctypes.c_uint,
         float_array,
         ctypes.c_size_t,
         _RESAMPLER_PROGRESS_CALLBACK,
@@ -833,6 +868,21 @@ def _format_eta(seconds: float) -> str:
     )
 
 
+def _available_cpu_count() -> int:
+    """Return CPUs available to this process, respecting Linux/Slurm affinity."""
+    try:
+        available = max(1, len(os.sched_getaffinity(0)))
+    except AttributeError:
+        available = max(1, os.cpu_count() or 1)
+    slurm_cpus = os.environ.get("SLURM_CPUS_PER_TASK")
+    if slurm_cpus:
+        try:
+            available = min(available, max(1, int(slurm_cpus)))
+        except ValueError:
+            pass
+    return available
+
+
 def _resample_field_cpp(
     lib: ctypes.CDLL,
     channel: str,
@@ -846,6 +896,7 @@ def _resample_field_cpp(
     completed_before: int,
     total_work: int,
     started_at: float,
+    workers: int,
 ) -> np.ndarray:
     """Call the native Boost/C++ implementation for one atmosphere field."""
     if values.ndim not in (3, 4):
@@ -913,6 +964,7 @@ def _resample_field_cpp(
         target_shape,
         native_methods,
         int(log_space),
+        workers,
         result,
         field_work,
         callback,
@@ -1021,6 +1073,14 @@ def _resample_atmosphere(
     }
 
     lib = _load_atmosphere_resampler()
+    configured_workers = getattr(args, "resampling_workers", None)
+    workers = (
+        _available_cpu_count()
+        if configured_workers is None
+        else int(configured_workers)
+    )
+    if workers < 1:
+        raise ValueError("Resampling workers must be at least 1")
     field_work = {
         channel: _field_resampling_work(
             values.shape, old_coordinates, new_coordinates
@@ -1044,6 +1104,7 @@ def _resample_atmosphere(
             completed_before=completed,
             total_work=total_work,
             started_at=started_at,
+            workers=workers,
         )
         completed += field_work[channel]
     _validate_resampled_continuity(
@@ -1467,7 +1528,16 @@ def _print_resampling_job_description(
         print(f"  final Multi3D spatial shape: {target_shape}")
     if args.multi3d_mesh_out:
         print(f"  Multi3D mesh output: {args.multi3d_mesh_out}")
-    print("  resampling backend: compiled C++ (Boost.Math interpolators)\n")
+    configured_workers = getattr(args, "resampling_workers", None)
+    workers = (
+        _available_cpu_count()
+        if configured_workers is None
+        else int(configured_workers)
+    )
+    print(
+        "  resampling backend: compiled C++ (Boost.Math interpolators); "
+        f"threads={workers}\n"
+    )
 
 
 def convert(args) -> None:
@@ -1839,6 +1909,7 @@ def load_config(config_path: Path) -> SimpleNamespace:
     _check_keys(
         resampling,
         {
+            "workers",
             "factors",
             "target_shape",
             "target_spacing_m",
@@ -1849,6 +1920,11 @@ def load_config(config_path: Path) -> SimpleNamespace:
         "resampling",
     )
     factors = dict(resampling.get("factors", {}))
+    resampling_workers = resampling.get("workers")
+    if resampling_workers is not None:
+        resampling_workers = int(resampling_workers)
+        if resampling_workers < 1:
+            raise ValueError("[resampling].workers must be at least 1")
     targets = dict(resampling.get("target_shape", {}))
     target_spacing_m = dict(resampling.get("target_spacing_m", {}))
     _check_keys(factors, {"x", "y", "z"}, "resampling.factors")
@@ -1977,6 +2053,7 @@ def load_config(config_path: Path) -> SimpleNamespace:
         compression=int(output.get("compression", 4)),
         overwrite=bool(output.get("overwrite", False)),
         upsample_factors=factors,
+        resampling_workers=resampling_workers,
         upsample_target_shape=targets,
         upsample_target_spacing_m=target_spacing_m,
         interpolation_default=interpolation_default,
