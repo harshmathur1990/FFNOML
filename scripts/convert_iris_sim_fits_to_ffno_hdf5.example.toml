@@ -65,8 +65,8 @@ temperature = true
 # requested absolute z increment. If the domain is not exactly divisible by a
 # spacing, the final remainder shorter than one grid cell is omitted.
 [resampling.target_spacing_m]
-x = 24000.0
-y = 24000.0
+x = 48000.0
+y = 48000.0
 z = 16000.0
 
 # Alternatively, use factors OR target_shape for a given axis. A factor of 2
