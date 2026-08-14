@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=FNOML_train
+#SBATCH --job-name=FNOML_predict
 #SBATCH --partition=accel
 #SBATCH --nodes=8
 #SBATCH --ntasks-per-node=1
