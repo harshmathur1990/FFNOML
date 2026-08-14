@@ -14,6 +14,25 @@
 #   - Writes two diagnostic plots (PNG)
 # -----------------------------------------------------------------------------
 
+# Julia fixes the size of its thread pool at startup.  Make the common
+# `julia Forward.jl` invocation use all CPUs available to this process; an
+# explicit `julia --threads=N Forward.jl` invocation is left untouched.
+const _THREAD_RESTART_ENV = "FNOML_FORWARD_THREADS_RESTARTED"
+if abspath(PROGRAM_FILE) == @__FILE__ &&
+   Threads.nthreads() == 1 &&
+   Sys.CPU_THREADS > 1 &&
+   Base.JLOptions().nthreads == 0 &&
+   !haskey(ENV, "JULIA_NUM_THREADS") &&
+   get(ENV, _THREAD_RESTART_ENV, "0") != "1"
+    restart_env = copy(ENV)
+    restart_env[_THREAD_RESTART_ENV] = "1"
+    project_dir = dirname(Base.active_project())
+    restart_cmd = `$(Base.julia_cmd()) --project=$project_dir --threads=auto $(@__FILE__) $(ARGS)`
+    println("Restarting Forward.jl with --threads=auto ($(Sys.CPU_THREADS) CPUs available)...")
+    run(setenv(restart_cmd, restart_env))
+    exit()
+end
+
 ENV["GKSwstype"] = "100"     # file / offscreen
 ENV["GKS_WSTYPE"] = "100"    # some setups use this spelling
 
@@ -344,6 +363,10 @@ function synthesize_intensity_3d(
     upper_level::Int;
     voigt_cfg=(a_min=1f-4,a_max=1f1,a_n=20000,v_min=0f0,v_max=5f2,v_n=2500)
 )
+    if Threads.nthreads() == 1 && Sys.CPU_THREADS > 1
+        @warn "synthesize_intensity_3d has only one Julia thread; start Julia with --threads=auto (or --threads=N) to use multiple CPU cores"
+    end
+
     my_line = h_atom.lines[line_index]
 
     a = LinRange(Float32(voigt_cfg.a_min), Float32(voigt_cfg.a_max), voigt_cfg.a_n)
@@ -354,20 +377,27 @@ function synthesize_intensity_3d(
     σ_itp = get_σ_itp(atms, my_line.λ0, atom_files)
 
     intensity = Array{Float32,3}(undef, my_line.nλ, atms.ny, atms.nx)
-    p = Progress(atms.nx; desc="Synthesis columns (x)")
+    ncolumns = atms.nx * atms.ny
+    nworkers = min(Threads.nthreads(), ncolumns)
+    p = Progress(ncolumns; desc="Synthesis columns")
 
     n_u = nltepops_nz_nx_ny_nlev[:, :, :, upper_level]
     n_l = nltepops_nz_nx_ny_nlev[:, :, :, lower_level]
 
-    Threads.@threads for i in 1:atms.nx
+    # Expose every (x, y) column to the thread pool.  The old outer-x loop
+    # could only keep min(nx, nthreads()) threads busy.  One buffer per worker
+    # avoids both repeated allocations and shared mutable state.
+    Threads.@threads :static for worker in 1:nworkers
         buf = RTBuffer(atms.nz, my_line.nλ, Float32)
-        for j in 1:atms.ny
+        for column in worker:nworkers:ncolumns
+            j = mod1(column, atms.ny)
+            i = fld(column - 1, atms.ny) + 1
             calc_line_prep!(my_line, buf, atms[:, j, i], σ_itp)
             calc_line_1D!(my_line, buf, my_line.λ, atms[:, j, i],
                           n_u[:, j, i], n_l[:, j, i], voigt_itp)
             intensity[:, j, i] = buf.intensity
+            next!(p)
         end
-        next!(p)
     end
 
     return (intensity=intensity, wave=my_line.λ, line=my_line)

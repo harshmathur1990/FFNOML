@@ -556,6 +556,8 @@ Set `FORWARD_ATOMS` near the top of `Forward.jl` to choose which atoms to synthe
 
 `Forward.jl` skips atom outputs already present in the intensity HDF5. In Bifrost mode, if a required active-atom population folder or `out_pop` file is missing, it skips that atmosphere and prints the dataset/snapshot that could not run.
 
+Run the synthesis directly with `julia Forward.jl`; when no Julia thread count is configured, the script restarts itself with `--threads=auto`. To choose a specific count, use `julia --threads=N Forward.jl` or set `JULIA_NUM_THREADS=N` before starting Julia. The `Threads` line printed at startup is the number of CPU threads the synthesis can use.
+
 ## Caveats
 
 - The code does not overwrite existing dataset, solving-set, prediction, or checkpoint outputs by default
