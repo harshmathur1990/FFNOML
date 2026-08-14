@@ -18,7 +18,8 @@
 # `julia Forward.jl` invocation use all CPUs available to this process; an
 # explicit `julia --threads=N Forward.jl` invocation is left untouched.
 const _THREAD_RESTART_ENV = "FNOML_FORWARD_THREADS_RESTARTED"
-if abspath(PROGRAM_FILE) == @__FILE__ &&
+const _FORWARD_SCRIPT = abspath(@__FILE__)
+if abspath(PROGRAM_FILE) == _FORWARD_SCRIPT &&
    Threads.nthreads() == 1 &&
    Sys.CPU_THREADS > 1 &&
    Base.JLOptions().nthreads == 0 &&
@@ -27,7 +28,7 @@ if abspath(PROGRAM_FILE) == @__FILE__ &&
     restart_env = copy(ENV)
     restart_env[_THREAD_RESTART_ENV] = "1"
     project_dir = dirname(Base.active_project())
-    restart_cmd = `$(Base.julia_cmd()) --project=$project_dir --threads=auto $(@__FILE__) $(ARGS)`
+    restart_cmd = `$(Base.julia_cmd()) --project=$project_dir --threads=auto $_FORWARD_SCRIPT $(ARGS)`
     println("Restarting Forward.jl with --threads=auto ($(Sys.CPU_THREADS) CPUs available)...")
     run(setenv(restart_cmd, restart_env))
     exit()
