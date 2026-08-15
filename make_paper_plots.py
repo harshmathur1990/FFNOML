@@ -1172,111 +1172,139 @@ def _nearest_finite_index(values, target, excluded_index=None):
 
 
 def make_line_profile_sample_comparison_plots():
-    """Plot one typical and one high-error line profile per simulation."""
+    """Show one representative profile, its location, and its error per simulation."""
     plt.close("all")
     matplotlib.rc("font", size=8)
 
-    fig = plt.figure(figsize=(7.0, 7.2), constrained_layout=True)
-    outer_grid = fig.add_gridspec(
-        len(_line_profile_dataset_names()),
-        3,
-        width_ratios=(1.05, 1.0, 1.0),
-    )
-    profile_colors = ("tab:blue", "tab:orange")
-
-    for row, data in enumerate(_iter_line_profile_data()):
+    samples = []
+    for data in _iter_line_profile_data():
         velocity, core_index = _line_velocity_axis(data["wave"])
         multi3d = data["multi3d"]
         ml = data["ml"]
         spatial_shape = multi3d.shape[:-1]
 
-        core_intensity = multi3d[..., core_index]
-        median_core = float(np.nanmedian(core_intensity))
-        typical_index = _nearest_finite_index(core_intensity, median_core)
-
         nrmse = _profile_nrmse(ml, multi3d)
         finite_nrmse = nrmse[np.isfinite(nrmse)]
         if not finite_nrmse.size:
             raise ValueError(f"No finite profile errors for {data['name']!r}")
-        high_error_target = float(np.nanpercentile(finite_nrmse, 90.0))
-        high_error_index = _nearest_finite_index(
-            nrmse, high_error_target, excluded_index=typical_index
+        median_nrmse = float(np.nanmedian(finite_nrmse))
+        representative_index = _nearest_finite_index(
+            nrmse, median_nrmse
         )
-        selected = (
-            (typical_index, "Typical core intensity"),
-            (high_error_index, "90th-percentile profile error"),
-        )
+        ix, iy = np.unravel_index(representative_index, spatial_shape)
+        multi3d_profile = multi3d[ix, iy]
+        ml_profile = ml[ix, iy]
+        continuum = float(_profile_continuum(multi3d_profile))
+        continuum_scale = max(abs(continuum), 1e-12)
+        residual_percent = 100.0 * (ml_profile - multi3d_profile) / continuum_scale
 
+        samples.append({
+            "name": data["name"],
+            "core": multi3d[..., core_index].copy(),
+            "velocity": velocity,
+            "multi3d_profile": multi3d_profile.copy(),
+            "ml_profile": ml_profile.copy(),
+            "residual_percent": residual_percent.copy(),
+            "median_nrmse_percent": 100.0 * median_nrmse,
+            "ix": ix,
+            "iy": iy,
+            "dx": data["dx"],
+            "dy": data["dy"],
+        })
+
+    residual_limit = max(
+        0.1,
+        max(
+            float(np.nanpercentile(np.abs(sample["residual_percent"]), 99.0))
+            for sample in samples
+        ),
+    )
+    residual_limit *= 1.1
+
+    fig = plt.figure(figsize=(7.0, 7.0), constrained_layout=True)
+    outer_grid = fig.add_gridspec(
+        len(samples), 2, width_ratios=(0.9, 1.55)
+    )
+
+    for row, sample in enumerate(samples):
+        core_intensity = sample["core"]
+        spatial_shape = core_intensity.shape
         image_ax = fig.add_subplot(outer_grid[row, 0])
         extent = (
             0.0,
-            spatial_shape[0] * data["dx"],
+            spatial_shape[0] * sample["dx"],
             0.0,
-            spatial_shape[1] * data["dy"],
+            spatial_shape[1] * sample["dy"],
         )
+        finite_core = core_intensity[np.isfinite(core_intensity)]
+        vmin, vmax = np.nanpercentile(finite_core, (1.0, 99.0))
         image_ax.imshow(
             core_intensity.T,
             origin="lower",
             extent=extent,
             cmap="gray",
+            vmin=vmin,
+            vmax=vmax,
             aspect="equal",
         )
-        image_ax.set_title(_line_profile_short_name(data["name"]))
+        image_ax.plot(
+            (sample["ix"] + 0.5) * sample["dx"],
+            (sample["iy"] + 0.5) * sample["dy"],
+            marker="o",
+            markersize=6,
+            markerfacecolor="none",
+            markeredgecolor="tab:blue",
+            markeredgewidth=1.4,
+        )
+        image_ax.set_title(
+            f"{chr(ord('a') + 2 * row)}) "
+            f"{_line_profile_short_name(sample['name'])}: line core",
+            loc="left",
+        )
         image_ax.set_xlabel("x [Mm]")
         image_ax.set_ylabel("y [Mm]")
-        image_ax.text(
-            0.03,
-            0.97,
-            f"{chr(ord('a') + row)})",
-            transform=image_ax.transAxes,
-            ha="left",
-            va="top",
-            color="white",
-            fontweight="bold",
+
+        profile_grid = outer_grid[row, 1].subgridspec(
+            2, 1, height_ratios=(2.8, 1.0), hspace=0.05
         )
+        profile_ax = fig.add_subplot(profile_grid[0])
+        residual_ax = fig.add_subplot(profile_grid[1], sharex=profile_ax)
+        profile_ax.plot(
+            sample["velocity"],
+            sample["multi3d_profile"],
+            color="black",
+            linewidth=1.3,
+            label="Multi3D",
+        )
+        profile_ax.plot(
+            sample["velocity"],
+            sample["ml_profile"],
+            color="tab:blue",
+            linestyle="--",
+            linewidth=1.3,
+            label="ML",
+        )
+        profile_ax.set_xlim(-200.0, 200.0)
+        profile_ax.set_title(
+            f"{chr(ord('a') + 2 * row + 1)}) Representative profile "
+            f"(median NRMSE = {sample['median_nrmse_percent']:.2f}%)",
+            loc="left",
+        )
+        profile_ax.set_ylabel("Intensity")
+        profile_ax.tick_params(labelbottom=False)
+        if row == 0:
+            profile_ax.legend(frameon=False, ncol=2, loc="upper right")
 
-        for sample_column, ((flat_index, sample_title), color) in enumerate(
-            zip(selected, profile_colors), start=1
-        ):
-            ix, iy = np.unravel_index(flat_index, spatial_shape)
-            image_ax.plot(
-                (ix + 0.5) * data["dx"],
-                (iy + 0.5) * data["dy"],
-                marker="o",
-                markersize=5,
-                markerfacecolor="none",
-                markeredgecolor=color,
-                markeredgewidth=1.2,
-            )
-
-            profile_grid = outer_grid[row, sample_column].subgridspec(
-                2, 1, height_ratios=(3.0, 1.0), hspace=0.05
-            )
-            profile_ax = fig.add_subplot(profile_grid[0])
-            residual_ax = fig.add_subplot(profile_grid[1], sharex=profile_ax)
-            multi3d_profile = multi3d[ix, iy]
-            ml_profile = ml[ix, iy]
-
-            profile_ax.plot(
-                velocity, multi3d_profile, color="black", linewidth=1.1,
-                label="Multi3D"
-            )
-            profile_ax.plot(
-                velocity, ml_profile, color=color, linestyle="--", linewidth=1.1,
-                label="ML"
-            )
-            profile_ax.set_title(sample_title, fontsize=8)
-            profile_ax.set_ylabel("Intensity")
-            profile_ax.tick_params(labelbottom=False)
-            if row == 0:
-                profile_ax.legend(frameon=False, fontsize=7)
-
-            residual_ax.axhline(0.0, color="0.5", linewidth=0.6)
-            residual_ax.plot(
-                velocity, ml_profile - multi3d_profile, color=color, linewidth=0.9
-            )
-            residual_ax.set_xlabel(r"Velocity offset [km s$^{-1}$]")
-            residual_ax.set_ylabel(r"$\Delta I$")
+        residual_ax.axhline(0.0, color="0.4", linewidth=0.7)
+        residual_ax.plot(
+            sample["velocity"],
+            sample["residual_percent"],
+            color="tab:blue",
+            linewidth=1.0,
+        )
+        residual_ax.set_ylim(-residual_limit, residual_limit)
+        residual_ax.set_xlabel(r"Velocity from line center [km s$^{-1}$]")
+        residual_ax.set_ylabel("Error [%]")
 
     fig.savefig(
         plot_output_dir() / f"line_profile_samples_{paper_plot_tag()}.pdf",
@@ -1292,7 +1320,34 @@ def _profile_observables(profiles, velocity):
     minimum = np.take_along_axis(
         profiles, minimum_index[..., np.newaxis], axis=-1
     )[..., 0]
-    core_velocity = velocity[minimum_index]
+
+    # Refine the sampled minimum with a three-point parabolic estimate. This
+    # prevents the inferred Doppler shifts from being quantized to wavelength
+    # grid points.
+    interior_minimum = (
+        (minimum_index > 0) & (minimum_index < profiles.shape[-1] - 1)
+    )
+    left_index = np.maximum(minimum_index - 1, 0)
+    right_index = np.minimum(minimum_index + 1, profiles.shape[-1] - 1)
+    left_intensity = np.take_along_axis(
+        profiles, left_index[..., np.newaxis], axis=-1
+    )[..., 0]
+    right_intensity = np.take_along_axis(
+        profiles, right_index[..., np.newaxis], axis=-1
+    )[..., 0]
+    curvature = left_intensity - 2.0 * minimum + right_intensity
+    offset = np.zeros(minimum.shape, dtype=np.float64)
+    valid_curvature = interior_minimum & (np.abs(curvature) > 0.0)
+    offset[valid_curvature] = (
+        0.5
+        * (left_intensity[valid_curvature] - right_intensity[valid_curvature])
+        / curvature[valid_curvature]
+    )
+    offset = np.clip(offset, -1.0, 1.0)
+    local_velocity_step = 0.5 * (
+        velocity[right_index] - velocity[left_index]
+    )
+    core_velocity = velocity[minimum_index] + offset * local_velocity_step
 
     continuum_safe = np.where(np.abs(continuum) > 0.0, continuum, np.nan)
     normalized_absorption = 1.0 - profiles / continuum_safe[..., np.newaxis]
@@ -1306,78 +1361,101 @@ def _profile_observables(profiles, velocity):
 
     half_depth = minimum + 0.5 * (continuum - minimum)
     below_half_depth = profiles <= half_depth[..., np.newaxis]
-    has_width = np.any(below_half_depth, axis=-1) & (continuum > minimum)
     first_index = np.argmax(below_half_depth, axis=-1)
     last_index = profiles.shape[-1] - 1 - np.argmax(
         below_half_depth[..., ::-1], axis=-1
     )
-    half_depth_width = velocity[last_index] - velocity[first_index]
-    half_depth_width = np.where(has_width, half_depth_width, np.nan)
+    has_width = (
+        np.any(below_half_depth, axis=-1)
+        & (continuum > minimum)
+        & (first_index > 0)
+        & (last_index < profiles.shape[-1] - 1)
+    )
+
+    left_outer_index = np.maximum(first_index - 1, 0)
+    right_outer_index = np.minimum(last_index + 1, profiles.shape[-1] - 1)
+    left_outer_intensity = np.take_along_axis(
+        profiles, left_outer_index[..., np.newaxis], axis=-1
+    )[..., 0]
+    left_inner_intensity = np.take_along_axis(
+        profiles, first_index[..., np.newaxis], axis=-1
+    )[..., 0]
+    right_inner_intensity = np.take_along_axis(
+        profiles, last_index[..., np.newaxis], axis=-1
+    )[..., 0]
+    right_outer_intensity = np.take_along_axis(
+        profiles, right_outer_index[..., np.newaxis], axis=-1
+    )[..., 0]
+
+    left_fraction = np.divide(
+        half_depth - left_outer_intensity,
+        left_inner_intensity - left_outer_intensity,
+        out=np.zeros(half_depth.shape, dtype=np.float64),
+        where=np.abs(left_inner_intensity - left_outer_intensity) > 0.0,
+    )
+    right_fraction = np.divide(
+        half_depth - right_inner_intensity,
+        right_outer_intensity - right_inner_intensity,
+        out=np.zeros(half_depth.shape, dtype=np.float64),
+        where=np.abs(right_outer_intensity - right_inner_intensity) > 0.0,
+    )
+    left_crossing = (
+        velocity[left_outer_index]
+        + left_fraction
+        * (velocity[first_index] - velocity[left_outer_index])
+    )
+    right_crossing = (
+        velocity[last_index]
+        + right_fraction
+        * (velocity[right_outer_index] - velocity[last_index])
+    )
+    half_depth_width = np.where(
+        has_width, right_crossing - left_crossing, np.nan
+    )
 
     return core_velocity, equivalent_width, half_depth_width
 
 
-def _balanced_metric_sample(reference_metrics, ml_metrics, sample_size, rng):
-    finite = np.ones(np.asarray(reference_metrics[0]).shape, dtype=bool)
-    for reference, ml in zip(reference_metrics, ml_metrics):
-        finite &= np.isfinite(reference) & np.isfinite(ml)
-    indices = np.flatnonzero(finite.ravel())
-    if indices.size > sample_size:
-        indices = rng.choice(indices, size=sample_size, replace=False)
-    return [
-        (
-            np.asarray(reference).ravel()[indices],
-            np.asarray(ml).ravel()[indices],
-        )
-        for reference, ml in zip(reference_metrics, ml_metrics)
-    ]
+def _finite_downsample(values, sample_size, rng):
+    values = np.asarray(values).ravel()
+    values = values[np.isfinite(values)]
+    if values.size > sample_size:
+        values = values[rng.choice(values.size, size=sample_size, replace=False)]
+    return values
 
 
-def _plot_identity_hexbin(ax, reference, prediction, label):
-    reference = np.concatenate(reference)
-    prediction = np.concatenate(prediction)
-    finite = np.isfinite(reference) & np.isfinite(prediction)
-    reference = reference[finite]
-    prediction = prediction[finite]
-    if not reference.size:
-        ax.text(0.5, 0.5, "No finite data", ha="center", va="center")
-        return
-
-    combined = np.concatenate((reference, prediction))
-    lower, upper = np.nanpercentile(combined, (0.5, 99.5))
-    if not np.isfinite(lower + upper) or lower == upper:
-        lower, upper = float(np.nanmin(combined)), float(np.nanmax(combined))
-    padding = 0.04 * (upper - lower if upper > lower else 1.0)
-    lower -= padding
-    upper += padding
-
-    ax.hexbin(
-        reference,
-        prediction,
-        gridsize=55,
-        bins="log",
-        mincnt=1,
-        cmap="viridis",
-        extent=(lower, upper, lower, upper),
+def _draw_error_boxplots(ax, error_samples, colors, tick_labels, title, ylabel):
+    boxplot = ax.boxplot(
+        error_samples,
+        tick_labels=tick_labels,
+        whis=(5, 95),
+        showfliers=False,
+        widths=0.62,
+        patch_artist=True,
+        medianprops={"color": "black", "linewidth": 1.0},
     )
-    ax.plot((lower, upper), (lower, upper), color="tab:red", linewidth=0.8)
-    ax.set_xlim(lower, upper)
-    ax.set_ylim(lower, upper)
-    ax.set_aspect("equal", adjustable="box")
-    ax.set_xlabel(f"Multi3D {label}")
-    ax.set_ylabel(f"ML {label}")
+    for box, color in zip(boxplot["boxes"], colors):
+        box.set_facecolor(color)
+        box.set_alpha(0.65)
+    ax.axhline(0.0, color="0.35", linewidth=0.8)
+    ax.set_title(title)
+    ax.set_ylabel(ylabel)
+    ax.tick_params(axis="x", labelrotation=20)
 
 
 def make_line_profile_statistical_comparison_plots():
-    """Summarize wavelength-resolved errors and profile observables."""
+    """Summarize profile errors versus wavelength and in physical observables."""
     plt.close("all")
     matplotlib.rc("font", size=8)
 
     fig, axs = plt.subplots(2, 3, figsize=(7.0, 5.1), constrained_layout=True)
     colors = plt.get_cmap("tab10").colors
     rng = np.random.default_rng(20260815)
-    reference_samples = [[], [], []]
-    ml_samples = [[], [], []]
+    short_labels = ("EN385", "NW1050", "CH450", "EN-He109")
+    core_velocity_errors = []
+    equivalent_width_errors = []
+    half_depth_width_errors = []
+    nrmse_upper_limits = []
 
     for dataset_index, data in enumerate(_iter_line_profile_data()):
         color = colors[dataset_index]
@@ -1386,36 +1464,25 @@ def make_line_profile_statistical_comparison_plots():
         multi3d = data["multi3d"].reshape(-1, data["wave"].size)
         ml = data["ml"].reshape(-1, data["wave"].size)
 
-        reference_median = np.nanmedian(multi3d, axis=0)
-        ml_median = np.nanmedian(ml, axis=0)
-        axs[0, 0].plot(velocity, reference_median, color=color, label=label)
-        axs[0, 0].plot(velocity, ml_median, color=color, linestyle="--")
+        continuum = np.abs(_profile_continuum(multi3d))
+        finite_continuum = continuum[
+            np.isfinite(continuum) & (continuum > 0.0)
+        ]
+        continuum_floor = (
+            1e-6 * float(np.nanmedian(finite_continuum))
+            if finite_continuum.size else 1e-12
+        )
+        absolute_error_percent = (
+            100.0 * np.abs(ml - multi3d)
+            / np.maximum(continuum, continuum_floor)[:, np.newaxis]
+        )
+        median_error, upper_error = np.nanpercentile(
+            absolute_error_percent, (50.0, 90.0), axis=0
+        )
+        axs[0, 0].plot(velocity, median_error, color=color, label=label)
+        axs[0, 1].plot(velocity, upper_error, color=color, label=label)
 
-        residual = ml - multi3d
-        residual_percentiles = np.nanpercentile(
-            residual, (5.0, 16.0, 50.0, 84.0, 95.0), axis=0
-        )
-        axs[0, 1].fill_between(
-            velocity,
-            residual_percentiles[0],
-            residual_percentiles[4],
-            color=color,
-            alpha=0.08,
-            linewidth=0.0,
-        )
-        axs[0, 1].fill_between(
-            velocity,
-            residual_percentiles[1],
-            residual_percentiles[3],
-            color=color,
-            alpha=0.18,
-            linewidth=0.0,
-        )
-        axs[0, 1].plot(
-            velocity, residual_percentiles[2], color=color, linewidth=1.0
-        )
-
-        nrmse = _profile_nrmse(ml, multi3d)
+        nrmse = 100.0 * _profile_nrmse(ml, multi3d)
         finite_nrmse = np.sort(nrmse[np.isfinite(nrmse)])
         if finite_nrmse.size:
             cumulative_fraction = (
@@ -1424,48 +1491,86 @@ def make_line_profile_statistical_comparison_plots():
             axs[0, 2].plot(
                 finite_nrmse, cumulative_fraction, color=color, label=label
             )
+            nrmse_upper_limits.append(float(np.nanpercentile(finite_nrmse, 99.0)))
 
         reference_metrics = _profile_observables(multi3d, velocity)
         predicted_metrics = _profile_observables(ml, velocity)
-        sampled_metrics = _balanced_metric_sample(
-            reference_metrics, predicted_metrics, 50000, rng
-        )
-        for metric_index, (reference, prediction) in enumerate(sampled_metrics):
-            reference_samples[metric_index].append(reference)
-            ml_samples[metric_index].append(prediction)
+        core_velocity_errors.append(_finite_downsample(
+            predicted_metrics[0] - reference_metrics[0], 50000, rng
+        ))
 
-    axs[0, 0].set_title("Spatial median profiles")
-    axs[0, 0].set_xlabel(r"Velocity offset [km s$^{-1}$]")
-    axs[0, 0].set_ylabel("Intensity")
+        reference_equivalent_width = reference_metrics[1]
+        finite_width = np.abs(reference_equivalent_width[
+            np.isfinite(reference_equivalent_width)
+        ])
+        equivalent_width_floor = (
+            1e-3 * float(np.nanmedian(finite_width))
+            if finite_width.size else 1e-12
+        )
+        valid_equivalent_width = (
+            np.isfinite(reference_equivalent_width)
+            & np.isfinite(predicted_metrics[1])
+            & (np.abs(reference_equivalent_width) > equivalent_width_floor)
+        )
+        relative_equivalent_width_error = np.full(
+            reference_equivalent_width.shape, np.nan, dtype=np.float64
+        )
+        relative_equivalent_width_error[valid_equivalent_width] = (
+            100.0
+            * (
+                predicted_metrics[1][valid_equivalent_width]
+                - reference_equivalent_width[valid_equivalent_width]
+            )
+            / np.abs(reference_equivalent_width[valid_equivalent_width])
+        )
+        equivalent_width_errors.append(_finite_downsample(
+            relative_equivalent_width_error, 50000, rng
+        ))
+        half_depth_width_errors.append(_finite_downsample(
+            predicted_metrics[2] - reference_metrics[2], 50000, rng
+        ))
+
+    for ax in axs[0, :2]:
+        ax.set_xlim(-200.0, 200.0)
+        ax.set_xlabel(r"Velocity from line center [km s$^{-1}$]")
+        ax.set_ylabel("Error [% of wing intensity]")
+
+    axs[0, 0].set_title("Median absolute profile error")
     axs[0, 0].legend(frameon=False, fontsize=6)
-    axs[0, 0].text(
-        0.98, 0.04, "solid: Multi3D\ndashed: ML",
-        transform=axs[0, 0].transAxes, ha="right", va="bottom", fontsize=6
-    )
+    axs[0, 1].set_title("90th-percentile absolute error")
 
-    axs[0, 1].axhline(0.0, color="0.4", linewidth=0.7)
-    axs[0, 1].set_title("Residual percentiles")
-    axs[0, 1].set_xlabel(r"Velocity offset [km s$^{-1}$]")
-    axs[0, 1].set_ylabel(r"$I_{\rm ML}-I_{\rm Multi3D}$")
-
-    axs[0, 2].set_title("Per-profile NRMSE")
-    axs[0, 2].set_xlabel("NRMSE")
-    axs[0, 2].set_ylabel("Cumulative fraction")
+    axs[0, 2].set_title("Whole-profile error distribution")
+    axs[0, 2].set_xlabel("Profile NRMSE [% of wing intensity]")
+    axs[0, 2].set_ylabel("Fraction of profiles below error")
+    axs[0, 2].set_xlim(0.0, 1.08 * max(nrmse_upper_limits))
     axs[0, 2].set_ylim(0.0, 1.0)
-    axs[0, 2].legend(frameon=False, fontsize=6)
+    axs[0, 2].axhline(0.9, color="0.75", linewidth=0.7, linestyle=":")
 
-    observable_labels = (
-        r"core velocity [km s$^{-1}$]",
-        r"equivalent width [km s$^{-1}$]",
-        r"half-depth width [km s$^{-1}$]",
+    boxplot_colors = colors[:len(short_labels)]
+    _draw_error_boxplots(
+        axs[1, 0],
+        core_velocity_errors,
+        boxplot_colors,
+        short_labels,
+        "Line-core shift error",
+        r"ML - Multi3D [km s$^{-1}$]",
     )
-    for metric_index, label in enumerate(observable_labels):
-        _plot_identity_hexbin(
-            axs[1, metric_index],
-            reference_samples[metric_index],
-            ml_samples[metric_index],
-            label,
-        )
+    _draw_error_boxplots(
+        axs[1, 1],
+        equivalent_width_errors,
+        boxplot_colors,
+        short_labels,
+        "Equivalent-width error",
+        "Relative error [%]",
+    )
+    _draw_error_boxplots(
+        axs[1, 2],
+        half_depth_width_errors,
+        boxplot_colors,
+        short_labels,
+        "Line-width error",
+        r"ML - Multi3D [km s$^{-1}$]",
+    )
 
     for panel_index, ax in enumerate(axs.flat):
         ax.text(
@@ -1477,12 +1582,6 @@ def make_line_profile_statistical_comparison_plots():
             va="top",
             fontweight="bold",
             color="black",
-            bbox={
-                "facecolor": "white",
-                "edgecolor": "none",
-                "alpha": 0.7,
-                "pad": 1,
-            },
         )
 
     fig.savefig(
