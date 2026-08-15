@@ -1048,7 +1048,453 @@ def make_zero_shot_super_resolution_plots():
     )
 
 
+def _line_profile_dataset_names():
+    return [
+        "en024048_hion_385",
+        "nw012023_1050",
+        "ch024031_by200bz005_450",
+        "en024031_by100_helium_109",
+    ]
+
+
+def _line_profile_short_name(name):
+    labels = {
+        "en024048_hion_385": "EN, snapshot 385",
+        "nw012023_1050": "NW, snapshot 1050",
+        "ch024031_by200bz005_450": "CH, snapshot 450",
+        "en024031_by100_helium_109": "EN-He, snapshot 109",
+    }
+    return labels.get(name, name)
+
+
+def _read_line_profile_file(path):
+    with h5py.File(path, "r") as intensity_file:
+        atom_group = intensity_file[PAPER_PLOT_ATOM]
+        wave = np.asarray(atom_group["wave"], dtype=np.float64).squeeze()
+        intensity = np.asarray(atom_group["intensity"], dtype=np.float32)
+
+    if wave.ndim != 1:
+        raise ValueError(f"Expected a 1D wavelength grid in {path!s}, got {wave.shape}")
+
+    matching_axes = [
+        axis for axis, size in enumerate(intensity.shape) if size == wave.size
+    ]
+    if not matching_axes:
+        raise ValueError(
+            f"No axis of intensity shape {intensity.shape} matches the "
+            f"{wave.size}-point wavelength grid in {path!s}"
+        )
+
+    # The Julia HDF5 writer and h5py can expose dimensions in different orders.
+    # Prefer the last matching axis, which is the expected h5py layout [x, y, wave].
+    intensity = np.moveaxis(intensity, matching_axes[-1], -1)
+    return intensity, wave
+
+
+def _iter_line_profile_data():
+    fnoml_dir = Path(PRED_DIR) / "FFNOML"
+    ml_intensity_dir = fnoml_dir / MODEL_DIR
+    bifrost_intensity_dir = fnoml_dir / "IO"
+    datasets_by_name = {dataset["NAME"]: dataset for dataset in MULTI3D_PRED_DATA}
+    validate_paper_plot_atom()
+
+    for name in _line_profile_dataset_names():
+        if name not in datasets_by_name:
+            raise KeyError(f"No configured prediction dataset named {name!r}")
+
+        ml_path = (
+            ml_intensity_dir
+            / f"intensity_ml_{name}_{MODEL}_{active_atom_names_tag()}.h5"
+        )
+        multi3d_path = (
+            bifrost_intensity_dir
+            / f"intensity_bifrost_{name}_{active_atom_names_tag()}.h5"
+        )
+        ml_intensity, ml_wave = _read_line_profile_file(ml_path)
+        multi3d_intensity, multi3d_wave = _read_line_profile_file(multi3d_path)
+
+        if ml_intensity.shape != multi3d_intensity.shape:
+            raise ValueError(
+                f"Intensity shape mismatch for {name!r}: "
+                f"ML {ml_intensity.shape}, Multi3D {multi3d_intensity.shape}"
+            )
+        if ml_wave.shape != multi3d_wave.shape or not np.allclose(
+            ml_wave, multi3d_wave, rtol=1e-7, atol=0.0
+        ):
+            raise ValueError(f"Wavelength-grid mismatch for {name!r}")
+
+        dx, dy = _read_mesh_dx_dy_megameters(datasets_by_name[name]["MESH"])
+        yield {
+            "name": name,
+            "ml": ml_intensity,
+            "multi3d": multi3d_intensity,
+            "wave": multi3d_wave,
+            "dx": dx,
+            "dy": dy,
+        }
+
+
+def _line_velocity_axis(wave):
+    wave = np.asarray(wave, dtype=np.float64)
+    rest_wavelength = float(wave[wave.size // 2])
+    velocity = 299792.458 * (wave - rest_wavelength) / rest_wavelength
+    core_index = int(np.argmin(np.abs(velocity)))
+    return velocity, core_index
+
+
+def _profile_continuum(profiles):
+    edge_count = max(1, min(5, profiles.shape[-1] // 4))
+    return 0.5 * (
+        np.mean(profiles[..., :edge_count], axis=-1)
+        + np.mean(profiles[..., -edge_count:], axis=-1)
+    )
+
+
+def _profile_nrmse(ml_profiles, multi3d_profiles):
+    continuum = np.abs(_profile_continuum(multi3d_profiles))
+    finite_scale = continuum[np.isfinite(continuum) & (continuum > 0.0)]
+    scale_floor = (
+        1e-6 * float(np.median(finite_scale)) if finite_scale.size else 1e-12
+    )
+    rms_error = np.sqrt(np.mean((ml_profiles - multi3d_profiles) ** 2, axis=-1))
+    return rms_error / np.maximum(continuum, scale_floor)
+
+
+def _nearest_finite_index(values, target, excluded_index=None):
+    flat_values = np.asarray(values).ravel()
+    distance = np.abs(flat_values - target)
+    distance[~np.isfinite(distance)] = np.inf
+    if excluded_index is not None:
+        distance[excluded_index] = np.inf
+    if not np.any(np.isfinite(distance)):
+        raise ValueError("Cannot select a representative profile: no finite values")
+    return int(np.argmin(distance))
+
+
+def make_line_profile_sample_comparison_plots():
+    """Plot one typical and one high-error line profile per simulation."""
+    plt.close("all")
+    matplotlib.rc("font", size=8)
+
+    fig = plt.figure(figsize=(7.0, 7.2), constrained_layout=True)
+    outer_grid = fig.add_gridspec(
+        len(_line_profile_dataset_names()),
+        3,
+        width_ratios=(1.05, 1.0, 1.0),
+    )
+    profile_colors = ("tab:blue", "tab:orange")
+
+    for row, data in enumerate(_iter_line_profile_data()):
+        velocity, core_index = _line_velocity_axis(data["wave"])
+        multi3d = data["multi3d"]
+        ml = data["ml"]
+        spatial_shape = multi3d.shape[:-1]
+
+        core_intensity = multi3d[..., core_index]
+        median_core = float(np.nanmedian(core_intensity))
+        typical_index = _nearest_finite_index(core_intensity, median_core)
+
+        nrmse = _profile_nrmse(ml, multi3d)
+        finite_nrmse = nrmse[np.isfinite(nrmse)]
+        if not finite_nrmse.size:
+            raise ValueError(f"No finite profile errors for {data['name']!r}")
+        high_error_target = float(np.nanpercentile(finite_nrmse, 90.0))
+        high_error_index = _nearest_finite_index(
+            nrmse, high_error_target, excluded_index=typical_index
+        )
+        selected = (
+            (typical_index, "Typical core intensity"),
+            (high_error_index, "90th-percentile profile error"),
+        )
+
+        image_ax = fig.add_subplot(outer_grid[row, 0])
+        extent = (
+            0.0,
+            spatial_shape[0] * data["dx"],
+            0.0,
+            spatial_shape[1] * data["dy"],
+        )
+        image_ax.imshow(
+            core_intensity.T,
+            origin="lower",
+            extent=extent,
+            cmap="gray",
+            aspect="equal",
+        )
+        image_ax.set_title(_line_profile_short_name(data["name"]))
+        image_ax.set_xlabel("x [Mm]")
+        image_ax.set_ylabel("y [Mm]")
+        image_ax.text(
+            0.03,
+            0.97,
+            f"{chr(ord('a') + row)})",
+            transform=image_ax.transAxes,
+            ha="left",
+            va="top",
+            color="white",
+            fontweight="bold",
+        )
+
+        for sample_column, ((flat_index, sample_title), color) in enumerate(
+            zip(selected, profile_colors), start=1
+        ):
+            ix, iy = np.unravel_index(flat_index, spatial_shape)
+            image_ax.plot(
+                (ix + 0.5) * data["dx"],
+                (iy + 0.5) * data["dy"],
+                marker="o",
+                markersize=5,
+                markerfacecolor="none",
+                markeredgecolor=color,
+                markeredgewidth=1.2,
+            )
+
+            profile_grid = outer_grid[row, sample_column].subgridspec(
+                2, 1, height_ratios=(3.0, 1.0), hspace=0.05
+            )
+            profile_ax = fig.add_subplot(profile_grid[0])
+            residual_ax = fig.add_subplot(profile_grid[1], sharex=profile_ax)
+            multi3d_profile = multi3d[ix, iy]
+            ml_profile = ml[ix, iy]
+
+            profile_ax.plot(
+                velocity, multi3d_profile, color="black", linewidth=1.1,
+                label="Multi3D"
+            )
+            profile_ax.plot(
+                velocity, ml_profile, color=color, linestyle="--", linewidth=1.1,
+                label="ML"
+            )
+            profile_ax.set_title(sample_title, fontsize=8)
+            profile_ax.set_ylabel("Intensity")
+            profile_ax.tick_params(labelbottom=False)
+            if row == 0:
+                profile_ax.legend(frameon=False, fontsize=7)
+
+            residual_ax.axhline(0.0, color="0.5", linewidth=0.6)
+            residual_ax.plot(
+                velocity, ml_profile - multi3d_profile, color=color, linewidth=0.9
+            )
+            residual_ax.set_xlabel(r"Velocity offset [km s$^{-1}$]")
+            residual_ax.set_ylabel(r"$\Delta I$")
+
+    fig.savefig(
+        plot_output_dir() / f"line_profile_samples_{paper_plot_tag()}.pdf",
+        dpi=300,
+        format="pdf",
+    )
+
+
+def _profile_observables(profiles, velocity):
+    profiles = np.asarray(profiles)
+    continuum = _profile_continuum(profiles)
+    minimum_index = np.argmin(profiles, axis=-1)
+    minimum = np.take_along_axis(
+        profiles, minimum_index[..., np.newaxis], axis=-1
+    )[..., 0]
+    core_velocity = velocity[minimum_index]
+
+    continuum_safe = np.where(np.abs(continuum) > 0.0, continuum, np.nan)
+    normalized_absorption = 1.0 - profiles / continuum_safe[..., np.newaxis]
+    velocity_steps = np.diff(velocity)
+    equivalent_width = np.sum(
+        0.5
+        * (normalized_absorption[..., 1:] + normalized_absorption[..., :-1])
+        * velocity_steps,
+        axis=-1,
+    )
+
+    half_depth = minimum + 0.5 * (continuum - minimum)
+    below_half_depth = profiles <= half_depth[..., np.newaxis]
+    has_width = np.any(below_half_depth, axis=-1) & (continuum > minimum)
+    first_index = np.argmax(below_half_depth, axis=-1)
+    last_index = profiles.shape[-1] - 1 - np.argmax(
+        below_half_depth[..., ::-1], axis=-1
+    )
+    half_depth_width = velocity[last_index] - velocity[first_index]
+    half_depth_width = np.where(has_width, half_depth_width, np.nan)
+
+    return core_velocity, equivalent_width, half_depth_width
+
+
+def _balanced_metric_sample(reference_metrics, ml_metrics, sample_size, rng):
+    finite = np.ones(np.asarray(reference_metrics[0]).shape, dtype=bool)
+    for reference, ml in zip(reference_metrics, ml_metrics):
+        finite &= np.isfinite(reference) & np.isfinite(ml)
+    indices = np.flatnonzero(finite.ravel())
+    if indices.size > sample_size:
+        indices = rng.choice(indices, size=sample_size, replace=False)
+    return [
+        (
+            np.asarray(reference).ravel()[indices],
+            np.asarray(ml).ravel()[indices],
+        )
+        for reference, ml in zip(reference_metrics, ml_metrics)
+    ]
+
+
+def _plot_identity_hexbin(ax, reference, prediction, label):
+    reference = np.concatenate(reference)
+    prediction = np.concatenate(prediction)
+    finite = np.isfinite(reference) & np.isfinite(prediction)
+    reference = reference[finite]
+    prediction = prediction[finite]
+    if not reference.size:
+        ax.text(0.5, 0.5, "No finite data", ha="center", va="center")
+        return
+
+    combined = np.concatenate((reference, prediction))
+    lower, upper = np.nanpercentile(combined, (0.5, 99.5))
+    if not np.isfinite(lower + upper) or lower == upper:
+        lower, upper = float(np.nanmin(combined)), float(np.nanmax(combined))
+    padding = 0.04 * (upper - lower if upper > lower else 1.0)
+    lower -= padding
+    upper += padding
+
+    ax.hexbin(
+        reference,
+        prediction,
+        gridsize=55,
+        bins="log",
+        mincnt=1,
+        cmap="viridis",
+        extent=(lower, upper, lower, upper),
+    )
+    ax.plot((lower, upper), (lower, upper), color="tab:red", linewidth=0.8)
+    ax.set_xlim(lower, upper)
+    ax.set_ylim(lower, upper)
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlabel(f"Multi3D {label}")
+    ax.set_ylabel(f"ML {label}")
+
+
+def make_line_profile_statistical_comparison_plots():
+    """Summarize wavelength-resolved errors and profile observables."""
+    plt.close("all")
+    matplotlib.rc("font", size=8)
+
+    fig, axs = plt.subplots(2, 3, figsize=(7.0, 5.1), constrained_layout=True)
+    colors = plt.get_cmap("tab10").colors
+    rng = np.random.default_rng(20260815)
+    reference_samples = [[], [], []]
+    ml_samples = [[], [], []]
+
+    for dataset_index, data in enumerate(_iter_line_profile_data()):
+        color = colors[dataset_index]
+        label = _line_profile_short_name(data["name"])
+        velocity, _ = _line_velocity_axis(data["wave"])
+        multi3d = data["multi3d"].reshape(-1, data["wave"].size)
+        ml = data["ml"].reshape(-1, data["wave"].size)
+
+        reference_median = np.nanmedian(multi3d, axis=0)
+        ml_median = np.nanmedian(ml, axis=0)
+        axs[0, 0].plot(velocity, reference_median, color=color, label=label)
+        axs[0, 0].plot(velocity, ml_median, color=color, linestyle="--")
+
+        residual = ml - multi3d
+        residual_percentiles = np.nanpercentile(
+            residual, (5.0, 16.0, 50.0, 84.0, 95.0), axis=0
+        )
+        axs[0, 1].fill_between(
+            velocity,
+            residual_percentiles[0],
+            residual_percentiles[4],
+            color=color,
+            alpha=0.08,
+            linewidth=0.0,
+        )
+        axs[0, 1].fill_between(
+            velocity,
+            residual_percentiles[1],
+            residual_percentiles[3],
+            color=color,
+            alpha=0.18,
+            linewidth=0.0,
+        )
+        axs[0, 1].plot(
+            velocity, residual_percentiles[2], color=color, linewidth=1.0
+        )
+
+        nrmse = _profile_nrmse(ml, multi3d)
+        finite_nrmse = np.sort(nrmse[np.isfinite(nrmse)])
+        if finite_nrmse.size:
+            cumulative_fraction = (
+                np.arange(1, finite_nrmse.size + 1) / finite_nrmse.size
+            )
+            axs[0, 2].plot(
+                finite_nrmse, cumulative_fraction, color=color, label=label
+            )
+
+        reference_metrics = _profile_observables(multi3d, velocity)
+        predicted_metrics = _profile_observables(ml, velocity)
+        sampled_metrics = _balanced_metric_sample(
+            reference_metrics, predicted_metrics, 50000, rng
+        )
+        for metric_index, (reference, prediction) in enumerate(sampled_metrics):
+            reference_samples[metric_index].append(reference)
+            ml_samples[metric_index].append(prediction)
+
+    axs[0, 0].set_title("Spatial median profiles")
+    axs[0, 0].set_xlabel(r"Velocity offset [km s$^{-1}$]")
+    axs[0, 0].set_ylabel("Intensity")
+    axs[0, 0].legend(frameon=False, fontsize=6)
+    axs[0, 0].text(
+        0.98, 0.04, "solid: Multi3D\ndashed: ML",
+        transform=axs[0, 0].transAxes, ha="right", va="bottom", fontsize=6
+    )
+
+    axs[0, 1].axhline(0.0, color="0.4", linewidth=0.7)
+    axs[0, 1].set_title("Residual percentiles")
+    axs[0, 1].set_xlabel(r"Velocity offset [km s$^{-1}$]")
+    axs[0, 1].set_ylabel(r"$I_{\rm ML}-I_{\rm Multi3D}$")
+
+    axs[0, 2].set_title("Per-profile NRMSE")
+    axs[0, 2].set_xlabel("NRMSE")
+    axs[0, 2].set_ylabel("Cumulative fraction")
+    axs[0, 2].set_ylim(0.0, 1.0)
+    axs[0, 2].legend(frameon=False, fontsize=6)
+
+    observable_labels = (
+        r"core velocity [km s$^{-1}$]",
+        r"equivalent width [km s$^{-1}$]",
+        r"half-depth width [km s$^{-1}$]",
+    )
+    for metric_index, label in enumerate(observable_labels):
+        _plot_identity_hexbin(
+            axs[1, metric_index],
+            reference_samples[metric_index],
+            ml_samples[metric_index],
+            label,
+        )
+
+    for panel_index, ax in enumerate(axs.flat):
+        ax.text(
+            0.02,
+            0.98,
+            f"{chr(ord('a') + panel_index)})",
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontweight="bold",
+            color="black",
+            bbox={
+                "facecolor": "white",
+                "edgecolor": "none",
+                "alpha": 0.7,
+                "pad": 1,
+            },
+        )
+
+    fig.savefig(
+        plot_output_dir() / f"line_profile_statistics_{paper_plot_tag()}.pdf",
+        dpi=300,
+        format="pdf",
+    )
+
+
 if __name__ == '__main__':
     # make_branch_importance_plots()
     make_line_core_intensity_compare_plots()
     make_zero_shot_super_resolution_plots()
+    make_line_profile_sample_comparison_plots()
+    make_line_profile_statistical_comparison_plots()
