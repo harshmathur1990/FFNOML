@@ -261,6 +261,23 @@ The JSON summary includes:
 
 ## Predict Mode
 
+Build the solving set for every entry in `MULTI3D_PRED_DATA`:
+
+```bash
+python pipeline.py --buildforpredict
+```
+
+To build one atmosphere/snapshot without declaring it in `MULTI3D_PRED_DATA`,
+pass a name in `<atmosphere>_<snap>` form:
+
+```bash
+python pipeline.py --buildforpredict --predname en024048_hion_386
+```
+
+This reads `PRED_DIR/bifrost_data/en024048_hion/386/atm3d` and `mesh`, and
+writes `MODEL_DIR/3D_sim_predict_en024048_hion_386.hdf5`. Missing source files
+are reported before loading begins.
+
 Run:
 
 ```bash
