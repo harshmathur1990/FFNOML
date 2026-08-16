@@ -66,8 +66,9 @@ function atom_tag(atom_names)
     return join(atom_names, "_")
 end
 
-function load_multi3d_pred_data()
+function load_multi3d_pred_data(predname=nothing)
     script = """
+import os
 import sys
 import types
 
@@ -82,7 +83,41 @@ sys.modules.setdefault(
 import config
 
 model_dir = config.MODEL_DIR.rstrip("/")
-for item in config.MULTI3D_PRED_DATA:
+prediction_name = sys.argv[1] if len(sys.argv) > 1 else None
+pred_items = config.MULTI3D_PRED_DATA
+
+if prediction_name is not None:
+    pred_items = [item for item in pred_items if item["NAME"] == prediction_name]
+
+    if not pred_items:
+        try:
+            sim_name, snap = prediction_name.rsplit("_", 1)
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid --predname {prediction_name!r}; expected <atmosphere>_<snap>."
+            ) from exc
+
+        if not sim_name or not snap:
+            raise ValueError(
+                f"Invalid --predname {prediction_name!r}; expected <atmosphere>_<snap>."
+            )
+
+        snapshot_dir = os.path.join(
+            config.PRED_DIR,
+            "bifrost_data",
+            sim_name,
+            snap,
+        )
+        pred_items = [{
+            "NAME": prediction_name,
+            "SIM_NAME": sim_name,
+            "SNAP": snap,
+            "MESH": os.path.join(snapshot_dir, "mesh"),
+            "MULTI3D_ATMOS": os.path.join(snapshot_dir, "atm3d"),
+            "TRAIN_DIR": model_dir,
+        }]
+
+for item in pred_items:
     print("\\t".join([
         item["NAME"],
         item.get("SIM_NAME", "_".join(item["NAME"].split("_")[:-1])),
@@ -95,7 +130,8 @@ for item in config.MULTI3D_PRED_DATA:
 """
 
     output = cd(@__DIR__) do
-        read(`python3 -c $script`, String)
+        command = isnothing(predname) ? `python3 -c $script` : `python3 -c $script $predname`
+        read(command, String)
     end
 
     pred_data = []
@@ -119,6 +155,34 @@ for item in config.MULTI3D_PRED_DATA:
     end
 
     return pred_data
+end
+
+function print_usage(io::IO=stdout)
+    println(io, "Usage: julia Forward.jl [--predname <atmosphere>_<snap>]")
+end
+
+function parse_cli_args(args)
+    predname = nothing
+    i = 1
+
+    while i <= length(args)
+        arg = args[i]
+
+        if arg == "--predname"
+            isnothing(predname) || error("--predname may only be specified once")
+            i == length(args) && error("--predname requires a value")
+            predname = args[i + 1]
+            isempty(predname) && error("--predname requires a non-empty value")
+            i += 2
+        elseif arg == "--help" || arg == "-h"
+            print_usage()
+            exit(0)
+        else
+            error("Unknown argument: $(arg). Run with --help for usage.")
+        end
+    end
+
+    return (predname = predname,)
 end
 
 function all_atom_configs(pred)
@@ -448,6 +512,24 @@ function missing_population_inputs(atoms)
 end
 
 
+function ensure_forward_inputs(cfg)
+    required = [
+        (label = "mesh", path = cfg.mesh_file),
+        (label = "atmosphere", path = cfg.atmos_file),
+    ]
+
+    if cfg.mode == :ml
+        push!(required, (label = "ML prediction", path = cfg.pred_h5))
+    end
+
+    missing = [item for item in required if !isfile(item.path)]
+    isempty(missing) && return
+
+    lines = join(["  - $(item.label): $(item.path)" for item in missing], "\n")
+    error("Missing inputs for --predname $(repr(cfg.name)):\n$(lines)")
+end
+
+
 function save_synthesis_results(out_h5::String, results)
     mode = isfile(out_h5) ? "r+" : "w"
 
@@ -549,6 +631,8 @@ function main(cfg)
         end
     end
 
+    ensure_forward_inputs(cfg)
+
     println("Reading atmosphere...")
     atmos = read_atmos_multi3d(cfg.mesh_file, cfg.atmos_file)
 
@@ -641,9 +725,9 @@ function main(cfg)
 end
 
 # Run
-function run_all()
-    pred_data = load_multi3d_pred_data()
-    isempty(pred_data) && error("config.py MULTI3D_PRED_DATA is empty")
+function run_all(; predname=nothing)
+    pred_data = load_multi3d_pred_data(predname)
+    isempty(pred_data) && error("No prediction atmospheres were selected")
 
     for (idx, pred) in enumerate(pred_data)
         println("")
@@ -656,4 +740,5 @@ function run_all()
     end
 end
 
-run_all()
+cli_args = parse_cli_args(ARGS)
+run_all(predname=cli_args.predname)

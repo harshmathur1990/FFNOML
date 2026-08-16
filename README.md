@@ -573,7 +573,23 @@ Set `FORWARD_ATOMS` near the top of `Forward.jl` to choose which atoms to synthe
 
 `Forward.jl` skips atom outputs already present in the intensity HDF5. In Bifrost mode, if a required active-atom population folder or `out_pop` file is missing, it skips that atmosphere and prints the dataset/snapshot that could not run.
 
-Run the synthesis directly with `julia Forward.jl`; when no Julia thread count is configured, the script restarts itself with `--threads=auto`. To choose a specific count, use `julia --threads=N Forward.jl` or set `JULIA_NUM_THREADS=N` before starting Julia. The `Threads` line printed at startup is the number of CPU threads the synthesis can use.
+Run the synthesis directly with `julia Forward.jl`. To process only one
+atmosphere and snapshot, including one not declared in `MULTI3D_PRED_DATA`, use:
+
+```bash
+julia Forward.jl --predname en024048_hion_386
+```
+
+An undeclared name is interpreted as `<atmosphere>_<snap>` and uses the same
+`PRED_DIR/bifrost_data/<atmosphere>/<snap>` layout as `pipeline.py`. Before
+synthesis, `Forward.jl` checks the selected `mesh`, `atm3d`, and ML prediction
+files and reports any that are missing.
+
+When no Julia thread count is configured, the script restarts itself with
+`--threads=auto` and preserves `--predname`. To choose a specific count, use
+`julia --threads=N Forward.jl --predname en024048_hion_386` or set
+`JULIA_NUM_THREADS=N` before starting Julia. The `Threads` line printed at
+startup is the number of CPU threads the synthesis can use.
 
 ## Caveats
 
