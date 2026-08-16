@@ -1317,17 +1317,24 @@ def make_line_profile_statistical_comparison_plots():
         probability = np.zeros(
             (error_edges.size - 1, selected_velocity.size), dtype=np.float64
         )
+        rms_absolute_error_percent = np.full(
+            selected_velocity.size, np.nan, dtype=np.float64
+        )
         for wavelength_index in range(selected_velocity.size):
             errors = signed_error_percent[:, wavelength_index]
             errors = errors[np.isfinite(errors)]
             counts, _ = np.histogram(errors, bins=error_edges)
             if errors.size > 0:
                 probability[:, wavelength_index] = counts / errors.size
+                rms_absolute_error_percent[wavelength_index] = np.sqrt(
+                    np.mean(np.square(np.abs(errors)))
+                )
 
         histograms.append({
             "name": data["name"],
             "velocity": selected_velocity,
             "probability": probability,
+            "rms_absolute_error_percent": rms_absolute_error_percent,
         })
 
     error_limit = 30.0
@@ -1357,6 +1364,13 @@ def make_line_profile_statistical_comparison_plots():
             shading="flat",
         )
         ax.axhline(0.0, color="cyan", linewidth=0.7)
+        ax.plot(
+            histogram["velocity"],
+            histogram["rms_absolute_error_percent"],
+            color="cyan",
+            linewidth=1.3,
+            label="RMS absolute error",
+        )
         ax.set_xlim(-200.0, 200.0)
         ax.set_ylim(-error_limit, error_limit)
         ax.set_title(
@@ -1370,6 +1384,8 @@ def make_line_profile_statistical_comparison_plots():
             )
         if panel_index >= 2:
             ax.set_xlabel(r"Velocity from line center [km s$^{-1}$]")
+        if panel_index == 0:
+            ax.legend(frameon=False, loc="upper right")
 
     if image is not None:
         fig.colorbar(
