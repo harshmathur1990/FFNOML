@@ -1290,7 +1290,6 @@ def make_line_profile_statistical_comparison_plots():
 
     error_edges = np.linspace(-100.0, 100.0, 401)
     histograms = []
-    robust_error_limits = []
 
     for data in _iter_line_profile_data():
         velocity, _ = _line_velocity_axis(data["wave"])
@@ -1314,9 +1313,6 @@ def make_line_profile_statistical_comparison_plots():
         finite_error = signed_error_percent[np.isfinite(signed_error_percent)]
         if not finite_error.size:
             raise ValueError(f"No finite profile errors for {data['name']!r}")
-        robust_error_limits.append(
-            float(np.nanpercentile(np.abs(finite_error), 99.5))
-        )
 
         probability = np.zeros(
             (error_edges.size - 1, selected_velocity.size), dtype=np.float64
@@ -1334,7 +1330,7 @@ def make_line_profile_statistical_comparison_plots():
             "probability": probability,
         })
 
-    error_limit = min(100.0, max(1.0, 1.1 * max(robust_error_limits)))
+    error_limit = 30.0
     maximum_probability = max(
         float(np.nanmax(histogram["probability"]))
         for histogram in histograms
