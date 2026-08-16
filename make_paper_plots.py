@@ -1373,6 +1373,8 @@ def make_line_profile_statistical_comparison_plots():
         )
         ax.set_xlim(-200.0, 200.0)
         ax.set_ylim(-error_limit, error_limit)
+        ax.yaxis.set_major_locator(matplotlib.ticker.MultipleLocator(5.0))
+        ax.yaxis.set_minor_locator(matplotlib.ticker.MultipleLocator(1.0))
         ax.set_title(
             f"{chr(ord('a') + panel_index)}) "
             f"{_line_profile_short_name(histogram['name'])}",
@@ -1404,7 +1406,7 @@ def make_line_profile_statistical_comparison_plots():
 
 if __name__ == '__main__':
     # make_branch_importance_plots()
-    make_line_core_intensity_compare_plots()
-    make_zero_shot_super_resolution_plots()
-    make_line_profile_sample_comparison_plots()
+    # make_line_core_intensity_compare_plots()
+    # make_zero_shot_super_resolution_plots()
+    # make_line_profile_sample_comparison_plots()
     make_line_profile_statistical_comparison_plots()
