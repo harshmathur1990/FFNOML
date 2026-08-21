@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from helita.sim.multi3d import Multi3dAtmos, Multi3dOut
 
-from config import ACTIVE_ATOMS, MODEL, MODEL_DIR, MULTI3D_PRED_DATA
+from config import ACTIVE_ATOMS, MODEL, MODEL_DIR, MULTI3D_PRED_DATA, PRED_DIR
 from pipeline import compute_dx_dy
 from matplotlib.ticker import (
     AutoMinorLocator,
@@ -529,6 +529,59 @@ def load_prediction_file(pred_file):
     return populations, np.asarray(z_scale)
 
 
+def load_halpha_core_intensities(dataset_name):
+    """Load ML and Bifrost H-alpha line-core maps used by the paper plots."""
+    fnoml_dir = os.path.join(PRED_DIR, "FFNOML")
+    atom = "H"
+    tag = active_atom_names_tag()
+    ml_path = os.path.join(
+        fnoml_dir,
+        MODEL_DIR,
+        f"intensity_ml_{dataset_name}_{MODEL}_{tag}.h5",
+    )
+    bifrost_path = os.path.join(
+        fnoml_dir,
+        "IO",
+        f"intensity_bifrost_{dataset_name}_{tag}.h5",
+    )
+
+    def read_core(path):
+        with h5py.File(path, "r") as intensity_file:
+            group = intensity_file[atom]
+            intensity = np.asarray(group["intensity"], dtype=np.float64)
+            wave = np.asarray(group["wave"], dtype=np.float64).squeeze()
+
+        if wave.ndim != 1:
+            raise ValueError(
+                f"Expected a 1D wavelength grid in {path}, got {wave.shape}"
+            )
+        matching_axes = [
+            axis for axis, size in enumerate(intensity.shape) if size == wave.size
+        ]
+        if not matching_axes:
+            raise ValueError(
+                f"No axis of intensity shape {intensity.shape} matches the "
+                f"{wave.size}-point wavelength grid in {path}"
+            )
+        intensity = np.moveaxis(intensity, matching_axes[-1], -1)
+        core_index = wave.size // 2
+        return intensity[..., core_index], wave
+
+    pred_core, pred_wave = read_core(ml_path)
+    true_core, true_wave = read_core(bifrost_path)
+    if pred_core.shape != true_core.shape:
+        raise ValueError(
+            f"H-alpha core shape mismatch for {dataset_name}: "
+            f"ML {pred_core.shape}, Bifrost {true_core.shape}"
+        )
+    if pred_wave.shape != true_wave.shape or not np.allclose(
+        pred_wave, true_wave, rtol=1e-7, atol=0.0
+    ):
+        raise ValueError(f"H-alpha wavelength-grid mismatch for {dataset_name}")
+
+    return pred_core, true_core
+
+
 def compute_departure_coefficients(lte, nlte):
     eps = 1e-30
     true_dep = (nlte + eps) / (lte + eps)
@@ -567,6 +620,141 @@ def prepare_plot_arrays(pred_dep, true_dep):
     pred_plot = np.transpose(pred_dep, (3, 2, 0, 1))
     true_plot = np.transpose(true_dep, (3, 2, 0, 1))
     return pred_plot, true_plot
+
+
+def compute_and_print_quantitative_metrics(
+    pred_populations,
+    true_populations,
+    atmosphere_name,
+    level_names=None,
+    pred_halpha_core=None,
+    true_halpha_core=None,
+):
+    """Compute and print compact error metrics for one test atmosphere.
+
+    Population arrays may have any layout, provided prediction and truth have
+    matching shapes. When ``level_names`` is supplied, the level axis is
+    inferred and metrics are printed per level and for all levels combined.
+    Relative errors are dimensionless (and printed as percent); absolute
+    log10 errors are in dex.
+
+    Optional H-alpha core arrays may be maps or vectors, but must have matching
+    shapes and units. Their MAE and normalized MAE are then also reported.
+
+    Returns a machine-readable dictionary containing all printed metrics.
+    """
+    pred = np.asarray(pred_populations, dtype=np.float64)
+    true = np.asarray(true_populations, dtype=np.float64)
+    if pred.shape != true.shape:
+        raise ValueError(
+            f"Prediction/true population shape mismatch: {pred.shape} vs {true.shape}"
+        )
+
+    level_axis = None
+    if level_names is not None:
+        level_names = list(level_names)
+        candidates = [
+            axis for axis, size in enumerate(pred.shape) if size == len(level_names)
+        ]
+        if len(candidates) != 1:
+            raise ValueError(
+                "Could not infer a unique population level axis: "
+                f"shape={pred.shape}, number of names={len(level_names)}"
+            )
+        level_axis = candidates[0]
+
+    def population_metrics(pred_values, true_values):
+        relative_valid = (
+            np.isfinite(pred_values)
+            & np.isfinite(true_values)
+            & (true_values != 0)
+        )
+        absolute_relative = np.abs(
+            (pred_values[relative_valid] - true_values[relative_valid])
+            / true_values[relative_valid]
+        )
+        log_valid = (
+            np.isfinite(pred_values)
+            & np.isfinite(true_values)
+            & (pred_values > 0)
+            & (true_values > 0)
+        )
+        absolute_log = np.abs(
+            np.log10(pred_values[log_valid]) - np.log10(true_values[log_valid])
+        )
+        if absolute_relative.size == 0 or absolute_log.size == 0:
+            raise ValueError("No valid population cells available for metrics")
+        return {
+            "n_relative": int(absolute_relative.size),
+            "n_log": int(absolute_log.size),
+            "median_absolute_relative_error": float(np.median(absolute_relative)),
+            "p90_absolute_relative_error": float(np.percentile(absolute_relative, 90)),
+            "median_absolute_log10_error_dex": float(np.median(absolute_log)),
+            "p90_absolute_log10_error_dex": float(np.percentile(absolute_log, 90)),
+        }
+
+    results = {
+        "atmosphere": atmosphere_name,
+        "aggregate": population_metrics(pred, true),
+        "per_level": {},
+    }
+    if level_axis is not None:
+        for index, name in enumerate(level_names):
+            results["per_level"][name] = population_metrics(
+                np.take(pred, index, axis=level_axis),
+                np.take(true, index, axis=level_axis),
+            )
+
+    if (pred_halpha_core is None) != (true_halpha_core is None):
+        raise ValueError("Provide both predicted and true H-alpha core intensities")
+    if pred_halpha_core is not None:
+        pred_core = np.asarray(pred_halpha_core, dtype=np.float64)
+        true_core = np.asarray(true_halpha_core, dtype=np.float64)
+        if pred_core.shape != true_core.shape:
+            raise ValueError(
+                f"H-alpha prediction/true shape mismatch: {pred_core.shape} vs "
+                f"{true_core.shape}"
+            )
+        valid = np.isfinite(pred_core) & np.isfinite(true_core)
+        if not np.any(valid):
+            raise ValueError("No finite H-alpha core intensities available")
+        error = np.abs(pred_core[valid] - true_core[valid])
+        mean_true = np.mean(np.abs(true_core[valid]))
+        results["halpha_core"] = {
+            "n": int(error.size),
+            "mae": float(np.mean(error)),
+            "normalized_mae": (
+                float(np.mean(error) / mean_true) if mean_true > 0 else np.nan
+            ),
+        }
+
+    def print_row(label, metrics):
+        print(
+            f"{label:<16} "
+            f"{100 * metrics['median_absolute_relative_error']:10.3f} "
+            f"{100 * metrics['p90_absolute_relative_error']:10.3f} "
+            f"{metrics['median_absolute_log10_error_dex']:12.4f} "
+            f"{metrics['p90_absolute_log10_error_dex']:12.4f}"
+        )
+
+    print(f"\nQuantitative population errors: {atmosphere_name}")
+    print(
+        f"{'Level':<16} {'Med |rel| %':>10} {'P90 |rel| %':>10} "
+        f"{'Med |dlog10|':>12} {'P90 |dlog10|':>12}"
+    )
+    print("-" * 66)
+    print_row("All levels", results["aggregate"])
+    for name, metrics in results["per_level"].items():
+        print_row(name, metrics)
+    if "halpha_core" in results:
+        metrics = results["halpha_core"]
+        print(
+            f"H-alpha core: MAE={metrics['mae']:.6e}, "
+            f"normalized MAE={100 * metrics['normalized_mae']:.3f}% "
+            f"(N={metrics['n']})"
+        )
+
+    return results
 
 
 # def prepare_forward_lte_populations(muspel_lte, simulation_lte_shape):
@@ -781,11 +969,30 @@ def make_snapshot_plot(dataset, output_dir, show=False):
         plt.close(assessment_fig)
 
 
+def print_snapshot_quantitative_metrics(dataset):
+    """Load and print population and H-alpha metrics for one atmosphere."""
+    pred_nlte, _ = load_prediction_file(dataset["PRED_FILE"])
+    _, _, _, true_nlte, level_names = load_true_multi3d_departures(dataset)
+    pred_halpha_core, true_halpha_core = load_halpha_core_intensities(
+        dataset["NAME"]
+    )
+
+    return compute_and_print_quantitative_metrics(
+        pred_nlte,
+        true_nlte,
+        dataset["NAME"],
+        level_names=level_names,
+        pred_halpha_core=pred_halpha_core,
+        true_halpha_core=true_halpha_core,
+    )
+
+
 def main():
     args = parse_args()
 
     for dataset in build_plot_jobs():
-        make_snapshot_plot(dataset, output_dir=MODEL_DIR, show=args.show)
+        print_snapshot_quantitative_metrics(dataset)
+        # make_snapshot_plot(dataset, output_dir=MODEL_DIR, show=args.show)
 
 
 if __name__ == "__main__":
