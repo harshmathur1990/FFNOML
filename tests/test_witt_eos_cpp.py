@@ -263,26 +263,40 @@ class AtmosphereResamplingTests(unittest.TestCase):
         sys.path.insert(0, str(SCRIPTS))
         import convert_iris_sim_fits_to_ffno_hdf5 as converter
         from convert_iris_sim_fits_to_ffno_hdf5 import (
-            _interpolate_axis,
             _resample_atmosphere,
             _validate_atmosphere,
         )
 
         cls.converter = converter
-        cls.interpolate_axis = staticmethod(_interpolate_axis)
         cls.resample = staticmethod(_resample_atmosphere)
         cls.validate = staticmethod(_validate_atmosphere)
 
-    def test_linear_and_cubic_interpolation_preserve_linear_profiles(self):
-        values = np.arange(3, dtype=np.float32).reshape(1, 1, 3)
-        source = np.array([2.0, 1.0, 0.0])
-        target = np.linspace(2.0, 0.0, 5)
-        expected = np.linspace(0.0, 2.0, 5).reshape(1, 1, 5)
+    def test_linear_and_boost_cubic_preserve_linear_profiles(self):
+        profile = np.arange(4, dtype=np.float32).reshape(1, 1, 4)
+        expected = np.linspace(0.0, 3.0, 7).reshape(1, 1, 7)
         for method in ("linear", "cubic"):
-            actual = self.interpolate_axis(
-                values, source, target, 2, method, log_space=False
+            args = types.SimpleNamespace(
+                upsample_factors={"z": 2},
+                upsample_target_shape={},
+                upsample_target_spacing_m={},
+                interpolation_default={"x": method, "y": method, "z": method},
+                interpolation_channels={},
+                log_interpolation_channels=set(),
+                continuity_max_relative_increase={},
             )
-            np.testing.assert_allclose(actual, expected, atol=1e-6)
+            fields = {
+                "temperature": 5000.0 + profile,
+                "rho": 1e-4 + profile,
+                "vx": profile,
+                "vy": profile,
+                "vz": profile,
+                "ne": 1e16 + profile,
+            }
+            actual, height, _, _ = self.resample(
+                args, fields, np.array([3.0, 2.0, 1.0, 0.0]), 1.0, 1.0
+            )
+            np.testing.assert_allclose(actual["vx"], expected, atol=1e-6)
+            np.testing.assert_allclose(height, np.linspace(3.0, 0.0, 7))
 
     def test_channel_specific_methods_and_all_axis_factors(self):
         base = np.arange(8, dtype=np.float32).reshape(2, 2, 2)

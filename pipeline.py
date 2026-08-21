@@ -41,8 +41,10 @@ def parse_args():
         "--predname",
         default=None,
         help=(
-            "Limit prediction/buildforpredict to one NAME. For --predict and "
-            "--fsdppredict, this can also name an already-built solving HDF5."
+            "Limit prediction/buildforpredict to one NAME. For --buildforpredict, "
+            "an unconfigured NAME is interpreted as <atmosphere>_<snap> below "
+            "PRED_DIR/bifrost_data. For prediction, this can also name an "
+            "already-built solving HDF5."
         ),
     )
     parser.add_argument("--resume", action="store_true")
@@ -289,6 +291,35 @@ def init_distributed_prediction():
     init_distributed_runtime()
 
 
+def prediction_entry_from_name(prediction_name):
+    try:
+        atmosphere, snap = prediction_name.rsplit("_", 1)
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid --predname {prediction_name!r}; expected <atmosphere>_<snap>."
+        ) from exc
+
+    if not atmosphere or not snap:
+        raise ValueError(
+            f"Invalid --predname {prediction_name!r}; expected <atmosphere>_<snap>."
+        )
+
+    prediction_dir = os.path.join(
+        PRED_DIR,
+        "bifrost_data",
+        atmosphere,
+        snap,
+    )
+    return {
+        "MULTI3D_ATMOS": os.path.join(prediction_dir, "atm3d"),
+        "MESH": os.path.join(prediction_dir, "mesh"),
+        "NAME": prediction_name,
+        "SIM_NAME": atmosphere,
+        "SNAP": snap,
+        "TRAIN_DIR": MODEL_DIR.rstrip("/"),
+    }
+
+
 def select_prediction_entries(prediction_name=None, *, allow_prebuilt=False):
     if prediction_name is None:
         return MULTI3D_PRED_DATA
@@ -304,10 +335,22 @@ def select_prediction_entries(prediction_name=None, *, allow_prebuilt=False):
     if allow_prebuilt:
         return [{"NAME": prediction_name}]
 
-    configured_names = ", ".join(pred_atmos["NAME"] for pred_atmos in MULTI3D_PRED_DATA)
-    raise KeyError(
-        f"No configured prediction atmosphere named {prediction_name!r}. "
-        f"Configured names: {configured_names}"
+    return [prediction_entry_from_name(prediction_name)]
+
+
+def ensure_prediction_source_files(prediction_entry):
+    missing = [
+        (label, prediction_entry[key])
+        for label, key in (("atmosphere", "MULTI3D_ATMOS"), ("mesh", "MESH"))
+        if not os.path.exists(prediction_entry[key])
+    ]
+    if not missing:
+        return
+
+    missing_lines = "\n".join(f"  - {label}: {path}" for label, path in missing)
+    raise FileNotFoundError(
+        f"Missing source files for --predname {prediction_entry['NAME']!r}:\n"
+        f"{missing_lines}"
     )
 
 
@@ -331,6 +374,8 @@ def build_prediction_solving_sets(prediction_name=None):
         if os.path.exists(PREDICT_FILE):
             print(f"Prediction solving set already exists, skipping: {PREDICT_FILE}")
             continue
+
+        ensure_prediction_source_files(PRED_ATMOS)
 
         rho, z_scale, temp, vx, vy, vz, ne, dx, dy = load_pred_data(
             mesh_file=PRED_ATMOS['MESH'],

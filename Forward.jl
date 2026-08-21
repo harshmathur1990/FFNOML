@@ -14,6 +14,26 @@
 #   - Writes two diagnostic plots (PNG)
 # -----------------------------------------------------------------------------
 
+# Julia fixes the size of its thread pool at startup.  Make the common
+# `julia Forward.jl` invocation use all CPUs available to this process; an
+# explicit `julia --threads=N Forward.jl` invocation is left untouched.
+const _THREAD_RESTART_ENV = "FNOML_FORWARD_THREADS_RESTARTED"
+const _FORWARD_SCRIPT = abspath(@__FILE__)
+if abspath(PROGRAM_FILE) == _FORWARD_SCRIPT &&
+   Threads.nthreads() == 1 &&
+   Sys.CPU_THREADS > 1 &&
+   Base.JLOptions().nthreads == 0 &&
+   !haskey(ENV, "JULIA_NUM_THREADS") &&
+   get(ENV, _THREAD_RESTART_ENV, "0") != "1"
+    restart_env = copy(ENV)
+    restart_env[_THREAD_RESTART_ENV] = "1"
+    project_dir = dirname(Base.active_project())
+    restart_cmd = `$(Base.julia_cmd()) --project=$project_dir --threads=auto $_FORWARD_SCRIPT $(ARGS)`
+    println("Restarting Forward.jl with --threads=auto ($(Sys.CPU_THREADS) CPUs available)...")
+    run(setenv(restart_cmd, restart_env))
+    exit()
+end
+
 ENV["GKSwstype"] = "100"     # file / offscreen
 ENV["GKS_WSTYPE"] = "100"    # some setups use this spelling
 
@@ -46,8 +66,9 @@ function atom_tag(atom_names)
     return join(atom_names, "_")
 end
 
-function load_multi3d_pred_data()
+function load_multi3d_pred_data(predname=nothing)
     script = """
+import os
 import sys
 import types
 
@@ -62,7 +83,41 @@ sys.modules.setdefault(
 import config
 
 model_dir = config.MODEL_DIR.rstrip("/")
-for item in config.MULTI3D_PRED_DATA:
+prediction_name = sys.argv[1] if len(sys.argv) > 1 else None
+pred_items = config.MULTI3D_PRED_DATA
+
+if prediction_name is not None:
+    pred_items = [item for item in pred_items if item["NAME"] == prediction_name]
+
+    if not pred_items:
+        try:
+            sim_name, snap = prediction_name.rsplit("_", 1)
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid --predname {prediction_name!r}; expected <atmosphere>_<snap>."
+            ) from exc
+
+        if not sim_name or not snap:
+            raise ValueError(
+                f"Invalid --predname {prediction_name!r}; expected <atmosphere>_<snap>."
+            )
+
+        snapshot_dir = os.path.join(
+            config.PRED_DIR,
+            "bifrost_data",
+            sim_name,
+            snap,
+        )
+        pred_items = [{
+            "NAME": prediction_name,
+            "SIM_NAME": sim_name,
+            "SNAP": snap,
+            "MESH": os.path.join(snapshot_dir, "mesh"),
+            "MULTI3D_ATMOS": os.path.join(snapshot_dir, "atm3d"),
+            "TRAIN_DIR": model_dir,
+        }]
+
+for item in pred_items:
     print("\\t".join([
         item["NAME"],
         item.get("SIM_NAME", "_".join(item["NAME"].split("_")[:-1])),
@@ -75,7 +130,8 @@ for item in config.MULTI3D_PRED_DATA:
 """
 
     output = cd(@__DIR__) do
-        read(`python3 -c $script`, String)
+        command = isnothing(predname) ? `python3 -c $script` : `python3 -c $script $predname`
+        read(command, String)
     end
 
     pred_data = []
@@ -99,6 +155,34 @@ for item in config.MULTI3D_PRED_DATA:
     end
 
     return pred_data
+end
+
+function print_usage(io::IO=stdout)
+    println(io, "Usage: julia Forward.jl [--predname <atmosphere>_<snap>]")
+end
+
+function parse_cli_args(args)
+    predname = nothing
+    i = 1
+
+    while i <= length(args)
+        arg = args[i]
+
+        if arg == "--predname"
+            isnothing(predname) || error("--predname may only be specified once")
+            i == length(args) && error("--predname requires a value")
+            predname = args[i + 1]
+            isempty(predname) && error("--predname requires a non-empty value")
+            i += 2
+        elseif arg == "--help" || arg == "-h"
+            print_usage()
+            exit(0)
+        else
+            error("Unknown argument: $(arg). Run with --help for usage.")
+        end
+    end
+
+    return (predname = predname,)
 end
 
 function all_atom_configs(pred)
@@ -344,6 +428,10 @@ function synthesize_intensity_3d(
     upper_level::Int;
     voigt_cfg=(a_min=1f-4,a_max=1f1,a_n=20000,v_min=0f0,v_max=5f2,v_n=2500)
 )
+    if Threads.nthreads() == 1 && Sys.CPU_THREADS > 1
+        @warn "synthesize_intensity_3d has only one Julia thread; start Julia with --threads=auto (or --threads=N) to use multiple CPU cores"
+    end
+
     my_line = h_atom.lines[line_index]
 
     a = LinRange(Float32(voigt_cfg.a_min), Float32(voigt_cfg.a_max), voigt_cfg.a_n)
@@ -354,20 +442,27 @@ function synthesize_intensity_3d(
     σ_itp = get_σ_itp(atms, my_line.λ0, atom_files)
 
     intensity = Array{Float32,3}(undef, my_line.nλ, atms.ny, atms.nx)
-    p = Progress(atms.nx; desc="Synthesis columns (x)")
+    ncolumns = atms.nx * atms.ny
+    nworkers = min(Threads.nthreads(), ncolumns)
+    p = Progress(ncolumns; desc="Synthesis columns")
 
     n_u = nltepops_nz_nx_ny_nlev[:, :, :, upper_level]
     n_l = nltepops_nz_nx_ny_nlev[:, :, :, lower_level]
 
-    Threads.@threads for i in 1:atms.nx
+    # Expose every (x, y) column to the thread pool.  The old outer-x loop
+    # could only keep min(nx, nthreads()) threads busy.  One buffer per worker
+    # avoids both repeated allocations and shared mutable state.
+    Threads.@threads :static for worker in 1:nworkers
         buf = RTBuffer(atms.nz, my_line.nλ, Float32)
-        for j in 1:atms.ny
+        for column in worker:nworkers:ncolumns
+            j = mod1(column, atms.ny)
+            i = fld(column - 1, atms.ny) + 1
             calc_line_prep!(my_line, buf, atms[:, j, i], σ_itp)
             calc_line_1D!(my_line, buf, my_line.λ, atms[:, j, i],
                           n_u[:, j, i], n_l[:, j, i], voigt_itp)
             intensity[:, j, i] = buf.intensity
+            next!(p)
         end
-        next!(p)
     end
 
     return (intensity=intensity, wave=my_line.λ, line=my_line)
@@ -414,6 +509,24 @@ function missing_population_inputs(atoms)
     end
 
     return missing
+end
+
+
+function ensure_forward_inputs(cfg)
+    required = [
+        (label = "mesh", path = cfg.mesh_file),
+        (label = "atmosphere", path = cfg.atmos_file),
+    ]
+
+    if cfg.mode == :ml
+        push!(required, (label = "ML prediction", path = cfg.pred_h5))
+    end
+
+    missing = [item for item in required if !isfile(item.path)]
+    isempty(missing) && return
+
+    lines = join(["  - $(item.label): $(item.path)" for item in missing], "\n")
+    error("Missing inputs for --predname $(repr(cfg.name)):\n$(lines)")
 end
 
 
@@ -518,6 +631,8 @@ function main(cfg)
         end
     end
 
+    ensure_forward_inputs(cfg)
+
     println("Reading atmosphere...")
     atmos = read_atmos_multi3d(cfg.mesh_file, cfg.atmos_file)
 
@@ -610,9 +725,9 @@ function main(cfg)
 end
 
 # Run
-function run_all()
-    pred_data = load_multi3d_pred_data()
-    isempty(pred_data) && error("config.py MULTI3D_PRED_DATA is empty")
+function run_all(; predname=nothing)
+    pred_data = load_multi3d_pred_data(predname)
+    isempty(pred_data) && error("No prediction atmospheres were selected")
 
     for (idx, pred) in enumerate(pred_data)
         println("")
@@ -625,4 +740,5 @@ function run_all()
     end
 end
 
-run_all()
+cli_args = parse_cli_args(ARGS)
+run_all(predname=cli_args.predname)

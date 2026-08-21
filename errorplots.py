@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from helita.sim.multi3d import Multi3dAtmos, Multi3dOut
 
-from config import ACTIVE_ATOMS, MODEL, MODEL_DIR, MULTI3D_PRED_DATA
+from config import ACTIVE_ATOMS, MODEL, MODEL_DIR, MULTI3D_PRED_DATA, PRED_DIR
 from pipeline import compute_dx_dy
 from matplotlib.ticker import (
     AutoMinorLocator,
@@ -33,144 +33,144 @@ def parse_args():
     return parser.parse_args()
 
 
-def plot_population_error_envelopes(
-    pred,
-    true,
-    z_scale,
-    level_names=None,
-    figsize=(10, 10),
-    ncols=2,
-    ylabel=r"(b$_{NN}$ - b) / b",
-):
-    """
-    Plot median + 68% + 95% relative-error envelopes vs z_scale.
-    """
+# def plot_population_error_envelopes(
+#     pred,
+#     true,
+#     z_scale,
+#     level_names=None,
+#     figsize=(10, 10),
+#     ncols=2,
+#     ylabel=r"(b$_{NN}$ - b) / b",
+# ):
+#     """
+#     Plot median + 68% + 95% relative-error envelopes vs z_scale.
+#     """
 
-    assert pred.shape == true.shape
-    nlevels, ndepth, nx, ny = pred.shape
+#     assert pred.shape == true.shape
+#     nlevels, ndepth, nx, ny = pred.shape
 
-    eps = 1e-30
-    rel_err = (pred - true) / (true + eps)
-    rel_err[true <= 0] = np.nan
-    rel_err = rel_err.reshape(nlevels, ndepth, -1)
+#     eps = 1e-30
+#     rel_err = (pred - true) / (true + eps)
+#     rel_err[true <= 0] = np.nan
+#     rel_err = rel_err.reshape(nlevels, ndepth, -1)
 
-    p50 = np.nanmedian(rel_err, axis=-1)
-    p16 = np.nanpercentile(rel_err, 16, axis=-1)
-    p84 = np.nanpercentile(rel_err, 84, axis=-1)
-    p025 = np.nanpercentile(rel_err, 2.5, axis=-1)
-    p975 = np.nanpercentile(rel_err, 97.5, axis=-1)
+#     p50 = np.nanmedian(rel_err, axis=-1)
+#     p16 = np.nanpercentile(rel_err, 16, axis=-1)
+#     p84 = np.nanpercentile(rel_err, 84, axis=-1)
+#     p025 = np.nanpercentile(rel_err, 2.5, axis=-1)
+#     p975 = np.nanpercentile(rel_err, 97.5, axis=-1)
 
-    z_axis = np.asarray(z_scale)
-    if z_axis.ndim != 1:
-        raise ValueError(f"Expected 1D z_scale for plotting, got shape {z_axis.shape}")
+#     z_axis = np.asarray(z_scale)
+#     if z_axis.ndim != 1:
+#         raise ValueError(f"Expected 1D z_scale for plotting, got shape {z_axis.shape}")
 
-    nrows = int(np.ceil(nlevels / ncols))
-    fig, axes = plt.subplots(
-        nrows,
-        ncols,
-        figsize=figsize,
-        sharex=True,
-        sharey=True,
-        squeeze=False,
-    )
+#     nrows = int(np.ceil(nlevels / ncols))
+#     fig, axes = plt.subplots(
+#         nrows,
+#         ncols,
+#         figsize=figsize,
+#         sharex=True,
+#         sharey=True,
+#         squeeze=False,
+#     )
 
-    for i in range(nlevels):
-        ax = axes[i // ncols, i % ncols]
+#     for i in range(nlevels):
+#         ax = axes[i // ncols, i % ncols]
 
-        ax.fill_between(z_axis, p025[i], p975[i], color="#e6b98c", alpha=0.8)
-        ax.fill_between(z_axis, p16[i], p84[i], color="#6f8fa6", alpha=0.9)
-        ax.plot(z_axis, p50[i], color="#1f77b4", lw=1.5)
+#         ax.fill_between(z_axis, p025[i], p975[i], color="#e6b98c", alpha=0.8)
+#         ax.fill_between(z_axis, p16[i], p84[i], color="#6f8fa6", alpha=0.9)
+#         ax.plot(z_axis, p50[i], color="#1f77b4", lw=1.5)
 
-        if level_names is not None:
-            ax.set_title(level_names[i], fontsize=12)
+#         if level_names is not None:
+#             ax.set_title(level_names[i], fontsize=12)
 
-        ax.axhline(0.0, color="k", lw=0.5, alpha=0.5)
+#         ax.axhline(0.0, color="k", lw=0.5, alpha=0.5)
 
-    for ax in axes[-1]:
-        ax.set_xlabel(r"z [Mm]")
+#     for ax in axes[-1]:
+#         ax.set_xlabel(r"z [Mm]")
 
-    for ax in axes[:, 0]:
-        ax.set_ylabel(ylabel)
+#     for ax in axes[:, 0]:
+#         ax.set_ylabel(ylabel)
 
-    for j in range(nlevels, nrows * ncols):
-        fig.delaxes(axes[j // ncols, j % ncols])
+#     for j in range(nlevels, nrows * ncols):
+#         fig.delaxes(axes[j // ncols, j % ncols])
 
-    finite_rel_err = rel_err[np.isfinite(rel_err)]
-    if finite_rel_err.size:
-        ylim = max(np.max(np.abs(finite_rel_err)), 1e-12)
-        for ax in axes.flat:
-            if ax in fig.axes:
-                ax.set_ylim(-1, 1)
-                # ax.yaxis.set_minor_locator(MultipleLocator(0.1))
-                ax.set_xlim(-1, 5)
-                ax.set_yticks([-1, -0.8, -0.6, -0.4, -0.2, 0, 0.2, 0.4, 0.6, 0.8, 1], [-1, "", -0.6, "", -0.2, "", 0.2, "", 0.6, "", 1])
-    plt.tight_layout()
-    return fig, axes
+#     finite_rel_err = rel_err[np.isfinite(rel_err)]
+#     if finite_rel_err.size:
+#         ylim = max(np.max(np.abs(finite_rel_err)), 1e-12)
+#         for ax in axes.flat:
+#             if ax in fig.axes:
+#                 ax.set_ylim(-1, 1)
+#                 # ax.yaxis.set_minor_locator(MultipleLocator(0.1))
+#                 ax.set_xlim(-1, 5)
+#                 ax.set_yticks([-1, -0.8, -0.6, -0.4, -0.2, 0, 0.2, 0.4, 0.6, 0.8, 1], [-1, "", -0.6, "", -0.2, "", 0.2, "", 0.6, "", 1])
+#     plt.tight_layout()
+#     return fig, axes
 
 
-def plot_log_population_error_envelopes(
-    pred,
-    true,
-    z_scale,
-    level_names=None,
-    figsize=(10, 10),
-    ncols=2,
-):
-    """
-    Plot median + 68% + 95% envelopes for log10(b_NN / b) vs z_scale.
-    """
+# def plot_log_population_error_envelopes(
+#     pred,
+#     true,
+#     z_scale,
+#     level_names=None,
+#     figsize=(10, 10),
+#     ncols=2,
+# ):
+#     """
+#     Plot median + 68% + 95% envelopes for log10(b_NN / b) vs z_scale.
+#     """
 
-    assert pred.shape == true.shape
-    nlevels, ndepth, nx, ny = pred.shape
+#     assert pred.shape == true.shape
+#     nlevels, ndepth, nx, ny = pred.shape
 
-    eps = 1e-30
-    log_ratio = np.log10((pred + eps) / (true + eps))
-    log_ratio[true <= 0] = np.nan
-    log_ratio = log_ratio.reshape(nlevels, ndepth, -1)
+#     eps = 1e-30
+#     log_ratio = np.log10((pred + eps) / (true + eps))
+#     log_ratio[true <= 0] = np.nan
+#     log_ratio = log_ratio.reshape(nlevels, ndepth, -1)
 
-    p50 = np.nanmedian(log_ratio, axis=-1)
-    p16 = np.nanpercentile(log_ratio, 16, axis=-1)
-    p84 = np.nanpercentile(log_ratio, 84, axis=-1)
-    p025 = np.nanpercentile(log_ratio, 2.5, axis=-1)
-    p975 = np.nanpercentile(log_ratio, 97.5, axis=-1)
+#     p50 = np.nanmedian(log_ratio, axis=-1)
+#     p16 = np.nanpercentile(log_ratio, 16, axis=-1)
+#     p84 = np.nanpercentile(log_ratio, 84, axis=-1)
+#     p025 = np.nanpercentile(log_ratio, 2.5, axis=-1)
+#     p975 = np.nanpercentile(log_ratio, 97.5, axis=-1)
 
-    z_axis = np.asarray(z_scale)
-    if z_axis.ndim != 1:
-        raise ValueError(f"Expected 1D z_scale for plotting, got shape {z_axis.shape}")
+#     z_axis = np.asarray(z_scale)
+#     if z_axis.ndim != 1:
+#         raise ValueError(f"Expected 1D z_scale for plotting, got shape {z_axis.shape}")
 
-    nrows = int(np.ceil(nlevels / ncols))
-    fig, axes = plt.subplots(
-        nrows,
-        ncols,
-        figsize=figsize,
-        sharex=True,
-        sharey=True,
-        squeeze=False,
-    )
+#     nrows = int(np.ceil(nlevels / ncols))
+#     fig, axes = plt.subplots(
+#         nrows,
+#         ncols,
+#         figsize=figsize,
+#         sharex=True,
+#         sharey=True,
+#         squeeze=False,
+#     )
 
-    for i in range(nlevels):
-        ax = axes[i // ncols, i % ncols]
+#     for i in range(nlevels):
+#         ax = axes[i // ncols, i % ncols]
 
-        ax.fill_between(z_axis, p025[i], p975[i], color="#d9c2f0", alpha=0.8)
-        ax.fill_between(z_axis, p16[i], p84[i], color="#7b8fc7", alpha=0.9)
-        ax.plot(z_axis, p50[i], color="#243b6b", lw=1.5)
+#         ax.fill_between(z_axis, p025[i], p975[i], color="#d9c2f0", alpha=0.8)
+#         ax.fill_between(z_axis, p16[i], p84[i], color="#7b8fc7", alpha=0.9)
+#         ax.plot(z_axis, p50[i], color="#243b6b", lw=1.5)
 
-        if level_names is not None:
-            ax.set_title(level_names[i], fontsize=12)
+#         if level_names is not None:
+#             ax.set_title(level_names[i], fontsize=12)
 
-        ax.axhline(0.0, color="k", lw=0.5, alpha=0.5)
+#         ax.axhline(0.0, color="k", lw=0.5, alpha=0.5)
 
-    for ax in axes[-1]:
-        ax.set_xlabel(r"z [Mm]")
+#     for ax in axes[-1]:
+#         ax.set_xlabel(r"z [Mm]")
 
-    for ax in axes[:, 0]:
-        ax.set_ylabel(r"$\log_{10}(b_{NN} / b)$")
+#     for ax in axes[:, 0]:
+#         ax.set_ylabel(r"$\log_{10}(b_{NN} / b)$")
 
-    for j in range(nlevels, nrows * ncols):
-        fig.delaxes(axes[j // ncols, j % ncols])
+#     for j in range(nlevels, nrows * ncols):
+#         fig.delaxes(axes[j // ncols, j % ncols])
 
-    plt.tight_layout()
-    return fig, axes
+#     plt.tight_layout()
+#     return fig, axes
 
 
 def plot_departure_coefficient_scatter_by_height(
@@ -353,15 +353,12 @@ def plot_departure_coefficient_error_assessment(
     figsize=None,
     residual_range=(-50, 50),
     residual_bins=100,
-    coefficient_bins=80,
 ):
-    """Plot height-binned residual and coefficient distributions per level.
+    """Plot height-binned residual distributions per level.
 
-    The top row shows relative errors in percent and the bottom row shows the
-    corresponding true departure-coefficient distributions on a logarithmic
-    x axis. Cells are grouped into the physical-height ranges requested for
-    the comparison: below 750 km, 750--1200 km, 1200--2500 km, 2500--5000 km,
-    and 5000 km and above.
+    The row shows relative errors in percent. Cells are grouped into the
+    physical-height ranges requested for the comparison: below 750 km,
+    750--1200 km, 1200--2500 km, 2500--5000 km, and 5000 km and above.
     """
 
     pred = np.asarray(pred)
@@ -393,10 +390,10 @@ def plot_departure_coefficient_error_assessment(
         (z_km >= 5000, r"$z \geq 5000$ km", "#c44e52"),
     )
     if figsize is None:
-        figsize = (3.0 * nlevels, 6.3)
+        figsize = (3.0 * nlevels, 3.15)
 
     fig, axes = plt.subplots(
-        2,
+        1,
         nlevels,
         figsize=figsize,
         squeeze=False,
@@ -405,20 +402,7 @@ def plot_departure_coefficient_error_assessment(
 
     for ilevel in range(nlevels):
         residual_ax = axes[0, ilevel]
-        coefficient_ax = axes[1, ilevel]
         title = level_names[ilevel] if level_names is not None else f"Level {ilevel + 1}"
-
-        positive_actual = true[ilevel][
-            np.isfinite(true[ilevel]) & (true[ilevel] > 0)
-        ]
-        log_bins = None
-        if positive_actual.size:
-            log_min = np.log10(positive_actual.min())
-            log_max = np.log10(positive_actual.max())
-            if np.isclose(log_min, log_max):
-                log_min -= 0.5
-                log_max += 0.5
-            log_bins = np.logspace(log_min, log_max, coefficient_bins + 1)
 
         for height_mask, label, color in regions:
             actual = true[ilevel, height_mask, :, :].ravel()
@@ -442,18 +426,6 @@ def plot_departure_coefficient_error_assessment(
                     label=label,
                 )
 
-            actual = actual[np.isfinite(actual) & (actual > 0)]
-            if actual.size and log_bins is not None:
-                coefficient_ax.hist(
-                    actual,
-                    bins=log_bins,
-                    histtype="step",
-                    color=color,
-                    linewidth=1.4,
-                    hatch="//",
-                    label=f"Actual: {label}",
-                )
-
         residual_ax.axvline(0, color="0.25", linestyle="--", lw=1)
         residual_ax.set_xlim(*residual_range)
         residual_ax.set_title(f"{title} residuals", fontsize=14)
@@ -461,18 +433,8 @@ def plot_departure_coefficient_error_assessment(
         residual_ax.tick_params(axis="both", which="both", labelsize=11)
         residual_ax.grid(True, alpha=0.2)
 
-        coefficient_ax.set_xscale("log")
-        coefficient_ax.set_title(
-            f"{title} coefficient distribution", fontsize=14
-        )
-        coefficient_ax.set_xlabel("Departure coefficient", fontsize=13)
-        coefficient_ax.tick_params(axis="both", which="both", labelsize=11)
-        coefficient_ax.grid(True, which="both", alpha=0.2)
-
     axes[0, 0].set_ylabel("Density", fontsize=13)
-    axes[1, 0].set_ylabel("Count", fontsize=13)
     axes[0, -1].legend(loc="upper right", fontsize=10)
-    axes[1, -1].legend(loc="upper right", fontsize=10)
 
     return fig, axes
 
@@ -567,6 +529,59 @@ def load_prediction_file(pred_file):
     return populations, np.asarray(z_scale)
 
 
+def load_halpha_core_intensities(dataset_name):
+    """Load ML and Bifrost H-alpha line-core maps used by the paper plots."""
+    fnoml_dir = os.path.join(PRED_DIR, "FFNOML")
+    atom = "H"
+    tag = active_atom_names_tag()
+    ml_path = os.path.join(
+        fnoml_dir,
+        MODEL_DIR,
+        f"intensity_ml_{dataset_name}_{MODEL}_{tag}.h5",
+    )
+    bifrost_path = os.path.join(
+        fnoml_dir,
+        "IO",
+        f"intensity_bifrost_{dataset_name}_{tag}.h5",
+    )
+
+    def read_core(path):
+        with h5py.File(path, "r") as intensity_file:
+            group = intensity_file[atom]
+            intensity = np.asarray(group["intensity"], dtype=np.float64)
+            wave = np.asarray(group["wave"], dtype=np.float64).squeeze()
+
+        if wave.ndim != 1:
+            raise ValueError(
+                f"Expected a 1D wavelength grid in {path}, got {wave.shape}"
+            )
+        matching_axes = [
+            axis for axis, size in enumerate(intensity.shape) if size == wave.size
+        ]
+        if not matching_axes:
+            raise ValueError(
+                f"No axis of intensity shape {intensity.shape} matches the "
+                f"{wave.size}-point wavelength grid in {path}"
+            )
+        intensity = np.moveaxis(intensity, matching_axes[-1], -1)
+        core_index = wave.size // 2
+        return intensity[..., core_index], wave
+
+    pred_core, pred_wave = read_core(ml_path)
+    true_core, true_wave = read_core(bifrost_path)
+    if pred_core.shape != true_core.shape:
+        raise ValueError(
+            f"H-alpha core shape mismatch for {dataset_name}: "
+            f"ML {pred_core.shape}, Bifrost {true_core.shape}"
+        )
+    if pred_wave.shape != true_wave.shape or not np.allclose(
+        pred_wave, true_wave, rtol=1e-7, atol=0.0
+    ):
+        raise ValueError(f"H-alpha wavelength-grid mismatch for {dataset_name}")
+
+    return pred_core, true_core
+
+
 def compute_departure_coefficients(lte, nlte):
     eps = 1e-30
     true_dep = (nlte + eps) / (lte + eps)
@@ -607,143 +622,278 @@ def prepare_plot_arrays(pred_dep, true_dep):
     return pred_plot, true_plot
 
 
-def prepare_forward_lte_populations(muspel_lte, simulation_lte_shape):
-    """Put Muspel LTE populations from ``Forward.jl`` in Multi3D layout.
-
-    ``lte_pops_saha`` in ``Forward.jl`` returns ``[nz, nx, ny, nlevels]``,
-    whereas helita reads the simulation populations as
-    ``[nx, ny, nz, nlevels]``.
-    """
-
-    muspel_lte = np.asarray(muspel_lte)
-    if muspel_lte.ndim != 4:
-        raise ValueError(
-            "Expected 4D Muspel LTE populations [nz, nx, ny, nlevels], "
-            f"got shape {muspel_lte.shape}"
-        )
-
-    forward_shape = (
-        simulation_lte_shape[2],
-        simulation_lte_shape[0],
-        simulation_lte_shape[1],
-        simulation_lte_shape[3],
-    )
-    if muspel_lte.shape == forward_shape:
-        muspel_lte = np.transpose(muspel_lte, (1, 2, 0, 3))
-    elif muspel_lte.shape != simulation_lte_shape:
-        raise ValueError(
-            "Muspel/simulation LTE shape mismatch: expected Forward.jl layout "
-            f"{forward_shape} (or Multi3D layout {simulation_lte_shape}), got "
-            f"{muspel_lte.shape}"
-        )
-
-    return muspel_lte
-
-
-def compute_muspel_lte(dataset, active_atoms=None):
-    """Run the Julia/Muspel LTE calculation and return one combined array."""
-
-    active_atoms = active_atoms or ACTIVE_ATOMS
-    julia_script = os.path.join(os.path.dirname(__file__), "compute_muspel_lte.jl")
-    output_file = None
-
-    try:
-        with tempfile.NamedTemporaryFile(suffix=".h5", delete=False) as tmp:
-            output_file = tmp.name
-
-        command = [
-            os.environ.get("JULIA", "julia"),
-            "--startup-file=no",
-            julia_script,
-            dataset["MESH"],
-            dataset["MULTI3D_ATMOS"],
-            output_file,
-            *active_atoms,
-        ]
-        print(f"Computing Muspel LTE populations for {dataset['NAME']}...")
-        subprocess.run(command, check=True)
-
-        blocks = []
-        with h5py.File(output_file, "r") as file:
-            for atom in active_atoms:
-                if atom not in file:
-                    raise KeyError(f"Julia LTE output is missing atom {atom}")
-                group = file[atom]
-                shape = tuple(int(value) for value in group["shape"][...])
-                values = group["values"][...]
-                blocks.append(values.reshape(shape, order="F"))
-
-        return np.concatenate(blocks, axis=-1)
-    except FileNotFoundError as exc:
-        raise RuntimeError(
-            "Could not launch Julia. Install Julia or set JULIA to its executable path."
-        ) from exc
-    except subprocess.CalledProcessError as exc:
-        raise RuntimeError(
-            f"Muspel LTE calculation failed for {dataset['NAME']}"
-        ) from exc
-    finally:
-        if output_file is not None and os.path.exists(output_file):
-            os.remove(output_file)
-
-
-def make_lte_population_comparison_plot(
-    dataset,
-    output_dir,
-    show=False,
+def compute_and_print_quantitative_metrics(
+    pred_populations,
+    true_populations,
+    atmosphere_name,
+    level_names=None,
+    pred_halpha_core=None,
+    true_halpha_core=None,
 ):
-    """Compare simulation LTE populations with those computed by Muspel.
+    """Compute and print compact error metrics for one test atmosphere.
 
-    Parameters
-    ----------
-    dataset : dict
-        A plot job produced by :func:`build_plot_jobs`.
-    output_dir : path-like
-        Directory in which to save the PDF.
+    Population arrays may have any layout, provided prediction and truth have
+    matching shapes. When ``level_names`` is supplied, the level axis is
+    inferred and metrics are printed per level and for all levels combined.
+    Relative errors are dimensionless (and printed as percent); absolute
+    log10 errors are in dex.
 
-    The plotted quantity is ``(n_LTE,Muspel - n_LTE,simulation) /
-    n_LTE,simulation``. Percentile envelopes and panel layout match
-    :func:`make_snapshot_plot`.
+    Optional H-alpha core arrays may be maps or vectors, but must have matching
+    shapes and units. Their MAE and normalized MAE are then also reported.
+
+    Returns a machine-readable dictionary containing all printed metrics.
     """
+    pred = np.asarray(pred_populations, dtype=np.float64)
+    true = np.asarray(true_populations, dtype=np.float64)
+    if pred.shape != true.shape:
+        raise ValueError(
+            f"Prediction/true population shape mismatch: {pred.shape} vs {true.shape}"
+        )
 
-    muspel_lte = compute_muspel_lte(dataset)
-    _, true_z_scale, simulation_lte, _, level_names = (
-        load_true_multi3d_departures(dataset)
-    )
-    muspel_lte = prepare_forward_lte_populations(
-        muspel_lte, simulation_lte.shape
-    )
-    z_axis = extract_plot_z_axis(true_z_scale, scale_to_mm=True)
-    muspel_plot, simulation_plot = prepare_plot_arrays(
-        muspel_lte, simulation_lte
-    )
+    level_axis = None
+    if level_names is not None:
+        level_names = list(level_names)
+        candidates = [
+            axis for axis, size in enumerate(pred.shape) if size == len(level_names)
+        ]
+        if len(candidates) != 1:
+            raise ValueError(
+                "Could not infer a unique population level axis: "
+                f"shape={pred.shape}, number of names={len(level_names)}"
+            )
+        level_axis = candidates[0]
 
-    fig, axes = plot_population_error_envelopes(
-        muspel_plot,
-        simulation_plot,
-        z_axis,
-        level_names=level_names,
-        figsize=(12, 10),
-        ncols=2,
-        ylabel=r"$(n_{\mathrm{LTE,Muspel}}-n_{\mathrm{LTE,sim}}) / "
-        r"n_{\mathrm{LTE,sim}}$",
+    def population_metrics(pred_values, true_values):
+        relative_valid = (
+            np.isfinite(pred_values)
+            & np.isfinite(true_values)
+            & (true_values != 0)
+        )
+        absolute_relative = np.abs(
+            (pred_values[relative_valid] - true_values[relative_valid])
+            / true_values[relative_valid]
+        )
+        log_valid = (
+            np.isfinite(pred_values)
+            & np.isfinite(true_values)
+            & (pred_values > 0)
+            & (true_values > 0)
+        )
+        absolute_log = np.abs(
+            np.log10(pred_values[log_valid]) - np.log10(true_values[log_valid])
+        )
+        if absolute_relative.size == 0 or absolute_log.size == 0:
+            raise ValueError("No valid population cells available for metrics")
+        return {
+            "n_relative": int(absolute_relative.size),
+            "n_log": int(absolute_log.size),
+            "median_absolute_relative_error": float(np.median(absolute_relative)),
+            "p90_absolute_relative_error": float(np.percentile(absolute_relative, 90)),
+            "median_absolute_log10_error_dex": float(np.median(absolute_log)),
+            "p90_absolute_log10_error_dex": float(np.percentile(absolute_log, 90)),
+        }
+
+    results = {
+        "atmosphere": atmosphere_name,
+        "aggregate": population_metrics(pred, true),
+        "per_level": {},
+    }
+    if level_axis is not None:
+        for index, name in enumerate(level_names):
+            results["per_level"][name] = population_metrics(
+                np.take(pred, index, axis=level_axis),
+                np.take(true, index, axis=level_axis),
+            )
+
+    if (pred_halpha_core is None) != (true_halpha_core is None):
+        raise ValueError("Provide both predicted and true H-alpha core intensities")
+    if pred_halpha_core is not None:
+        pred_core = np.asarray(pred_halpha_core, dtype=np.float64)
+        true_core = np.asarray(true_halpha_core, dtype=np.float64)
+        if pred_core.shape != true_core.shape:
+            raise ValueError(
+                f"H-alpha prediction/true shape mismatch: {pred_core.shape} vs "
+                f"{true_core.shape}"
+            )
+        valid = np.isfinite(pred_core) & np.isfinite(true_core)
+        if not np.any(valid):
+            raise ValueError("No finite H-alpha core intensities available")
+        error = np.abs(pred_core[valid] - true_core[valid])
+        mean_true = np.mean(np.abs(true_core[valid]))
+        results["halpha_core"] = {
+            "n": int(error.size),
+            "mae": float(np.mean(error)),
+            "normalized_mae": (
+                float(np.mean(error) / mean_true) if mean_true > 0 else np.nan
+            ),
+        }
+
+    def print_row(label, metrics):
+        print(
+            f"{label:<16} "
+            f"{100 * metrics['median_absolute_relative_error']:10.3f} "
+            f"{100 * metrics['p90_absolute_relative_error']:10.3f} "
+            f"{metrics['median_absolute_log10_error_dex']:12.4f} "
+            f"{metrics['p90_absolute_log10_error_dex']:12.4f}"
+        )
+
+    print(f"\nQuantitative population errors: {atmosphere_name}")
+    print(
+        f"{'Level':<16} {'Med |rel| %':>10} {'P90 |rel| %':>10} "
+        f"{'Med |dlog10|':>12} {'P90 |dlog10|':>12}"
     )
-    fig.tight_layout(rect=[0, 0, 1, 1])
+    print("-" * 66)
+    print_row("All levels", results["aggregate"])
+    for name, metrics in results["per_level"].items():
+        print_row(name, metrics)
+    if "halpha_core" in results:
+        metrics = results["halpha_core"]
+        print(
+            f"H-alpha core: MAE={metrics['mae']:.6e}, "
+            f"normalized MAE={100 * metrics['normalized_mae']:.3f}% "
+            f"(N={metrics['n']})"
+        )
 
-    os.makedirs(output_dir, exist_ok=True)
-    outpath = os.path.join(
-        output_dir,
-        f"lte_population_comparison_{dataset['NAME']}_{active_atom_names_tag()}.pdf",
-    )
-    fig.savefig(outpath, dpi=200, bbox_inches="tight")
-    print(f"Saved {outpath}")
+    return results
 
-    if show:
-        plt.show()
-    else:
-        plt.close(fig)
 
-    return outpath, axes
+# def prepare_forward_lte_populations(muspel_lte, simulation_lte_shape):
+#     """Put Muspel LTE populations from ``Forward.jl`` in Multi3D layout.
+
+#     ``lte_pops_saha`` in ``Forward.jl`` returns ``[nz, nx, ny, nlevels]``,
+#     whereas helita reads the simulation populations as
+#     ``[nx, ny, nz, nlevels]``.
+#     """
+
+#     muspel_lte = np.asarray(muspel_lte)
+#     if muspel_lte.ndim != 4:
+#         raise ValueError(
+#             "Expected 4D Muspel LTE populations [nz, nx, ny, nlevels], "
+#             f"got shape {muspel_lte.shape}"
+#         )
+
+#     forward_shape = (
+#         simulation_lte_shape[2],
+#         simulation_lte_shape[0],
+#         simulation_lte_shape[1],
+#         simulation_lte_shape[3],
+#     )
+#     if muspel_lte.shape == forward_shape:
+#         muspel_lte = np.transpose(muspel_lte, (1, 2, 0, 3))
+#     elif muspel_lte.shape != simulation_lte_shape:
+#         raise ValueError(
+#             "Muspel/simulation LTE shape mismatch: expected Forward.jl layout "
+#             f"{forward_shape} (or Multi3D layout {simulation_lte_shape}), got "
+#             f"{muspel_lte.shape}"
+#         )
+
+#     return muspel_lte
+
+
+# def compute_muspel_lte(dataset, active_atoms=None):
+#     """Run the Julia/Muspel LTE calculation and return one combined array."""
+
+#     active_atoms = active_atoms or ACTIVE_ATOMS
+#     julia_script = os.path.join(os.path.dirname(__file__), "compute_muspel_lte.jl")
+#     output_file = None
+
+#     try:
+#         with tempfile.NamedTemporaryFile(suffix=".h5", delete=False) as tmp:
+#             output_file = tmp.name
+
+#         command = [
+#             os.environ.get("JULIA", "julia"),
+#             "--startup-file=no",
+#             julia_script,
+#             dataset["MESH"],
+#             dataset["MULTI3D_ATMOS"],
+#             output_file,
+#             *active_atoms,
+#         ]
+#         print(f"Computing Muspel LTE populations for {dataset['NAME']}...")
+#         subprocess.run(command, check=True)
+
+#         blocks = []
+#         with h5py.File(output_file, "r") as file:
+#             for atom in active_atoms:
+#                 if atom not in file:
+#                     raise KeyError(f"Julia LTE output is missing atom {atom}")
+#                 group = file[atom]
+#                 shape = tuple(int(value) for value in group["shape"][...])
+#                 values = group["values"][...]
+#                 blocks.append(values.reshape(shape, order="F"))
+
+#         return np.concatenate(blocks, axis=-1)
+#     except FileNotFoundError as exc:
+#         raise RuntimeError(
+#             "Could not launch Julia. Install Julia or set JULIA to its executable path."
+#         ) from exc
+#     except subprocess.CalledProcessError as exc:
+#         raise RuntimeError(
+#             f"Muspel LTE calculation failed for {dataset['NAME']}"
+#         ) from exc
+#     finally:
+#         if output_file is not None and os.path.exists(output_file):
+#             os.remove(output_file)
+
+
+# def make_lte_population_comparison_plot(
+#     dataset,
+#     output_dir,
+#     show=False,
+# ):
+#     """Compare simulation LTE populations with those computed by Muspel.
+
+#     Parameters
+#     ----------
+#     dataset : dict
+#         A plot job produced by :func:`build_plot_jobs`.
+#     output_dir : path-like
+#         Directory in which to save the PDF.
+
+#     The plotted quantity is ``(n_LTE,Muspel - n_LTE,simulation) /
+#     n_LTE,simulation``. Percentile envelopes and panel layout match
+#     :func:`make_snapshot_plot`.
+#     """
+
+#     muspel_lte = compute_muspel_lte(dataset)
+#     _, true_z_scale, simulation_lte, _, level_names = (
+#         load_true_multi3d_departures(dataset)
+#     )
+#     muspel_lte = prepare_forward_lte_populations(
+#         muspel_lte, simulation_lte.shape
+#     )
+#     z_axis = extract_plot_z_axis(true_z_scale, scale_to_mm=True)
+#     muspel_plot, simulation_plot = prepare_plot_arrays(
+#         muspel_lte, simulation_lte
+#     )
+
+#     fig, axes = plot_population_error_envelopes(
+#         muspel_plot,
+#         simulation_plot,
+#         z_axis,
+#         level_names=level_names,
+#         figsize=(12, 10),
+#         ncols=2,
+#         ylabel=r"$(n_{\mathrm{LTE,Muspel}}-n_{\mathrm{LTE,sim}}) / "
+#         r"n_{\mathrm{LTE,sim}}$",
+#     )
+#     fig.tight_layout(rect=[0, 0, 1, 1])
+
+#     os.makedirs(output_dir, exist_ok=True)
+#     outpath = os.path.join(
+#         output_dir,
+#         f"lte_population_comparison_{dataset['NAME']}_{active_atom_names_tag()}.pdf",
+#     )
+#     fig.savefig(outpath, dpi=200, bbox_inches="tight")
+#     print(f"Saved {outpath}")
+
+#     if show:
+#         plt.show()
+#     else:
+#         plt.close(fig)
+
+#     return outpath, axes
 
 
 def make_snapshot_plot(dataset, output_dir, show=False):
@@ -766,24 +916,24 @@ def make_snapshot_plot(dataset, output_dir, show=False):
 
     pred_plot, true_plot = prepare_plot_arrays(pred_dep, true_dep)
 
-    fig, _ = plot_population_error_envelopes(
-        pred_plot,
-        true_plot,
-        pred_z_axis,
-        level_names=level_names,
-        figsize=(12, 10),
-        ncols=2,
-    )
-    # fig.suptitle(dataset["NAME"], fontsize=14)
-    fig.tight_layout(rect=[0, 0, 1, 1])
+    # fig, _ = plot_population_error_envelopes(
+    #     pred_plot,
+    #     true_plot,
+    #     pred_z_axis,
+    #     level_names=level_names,
+    #     figsize=(12, 10),
+    #     ncols=2,
+    # )
+    # # fig.suptitle(dataset["NAME"], fontsize=14)
+    # fig.tight_layout(rect=[0, 0, 1, 1])
 
-    os.makedirs(output_dir, exist_ok=True)
-    outpath = os.path.join(
-        output_dir,
-        f"population_error_envelopes_{dataset['NAME']}_{active_atom_names_tag()}.pdf",
-    )
-    fig.savefig(outpath, dpi=200, bbox_inches="tight")
-    print(f"Saved {outpath}")
+    # os.makedirs(output_dir, exist_ok=True)
+    # outpath = os.path.join(
+    #     output_dir,
+    #     f"population_error_envelopes_{dataset['NAME']}_{active_atom_names_tag()}.pdf",
+    # )
+    # fig.savefig(outpath, dpi=200, bbox_inches="tight")
+    # print(f"Saved {outpath}")
 
     scatter_fig, _ = plot_departure_coefficient_scatter_by_height(
         pred_plot,
@@ -814,19 +964,46 @@ def make_snapshot_plot(dataset, output_dir, show=False):
     if show:
         plt.show()
     else:
-        plt.close(fig)
+        # plt.close(fig)
         plt.close(scatter_fig)
         plt.close(assessment_fig)
+
+
+def print_snapshot_quantitative_metrics(dataset):
+    """Print H-level 2/3 population metrics and H-alpha metrics."""
+    pred_nlte, _ = load_prediction_file(dataset["PRED_FILE"])
+    _, _, _, true_nlte, level_names = load_true_multi3d_departures(dataset)
+    pred_halpha_core, true_halpha_core = load_halpha_core_intensities(
+        dataset["NAME"]
+    )
+
+    # H-alpha is controlled primarily by its lower and upper levels, H 2 and
+    # H 3. Multi3D population arrays store the level on the final axis.
+    level_indices = [1, 2]
+    if pred_nlte.shape[-1] <= max(level_indices):
+        raise ValueError(
+            f"Expected at least three population levels, got {pred_nlte.shape[-1]}"
+        )
+    pred_nlte = pred_nlte[..., level_indices]
+    true_nlte = true_nlte[..., level_indices]
+    selected_level_names = [level_names[index] for index in level_indices]
+
+    return compute_and_print_quantitative_metrics(
+        pred_nlte,
+        true_nlte,
+        dataset["NAME"],
+        level_names=selected_level_names,
+        pred_halpha_core=pred_halpha_core,
+        true_halpha_core=true_halpha_core,
+    )
 
 
 def main():
     args = parse_args()
 
     for dataset in build_plot_jobs():
-        make_snapshot_plot(dataset, output_dir=MODEL_DIR, show=args.show)
-        make_lte_population_comparison_plot(
-            dataset, output_dir=MODEL_DIR, show=args.show
-        )
+        print_snapshot_quantitative_metrics(dataset)
+        # make_snapshot_plot(dataset, output_dir=MODEL_DIR, show=args.show)
 
 
 if __name__ == "__main__":

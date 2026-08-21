@@ -39,10 +39,15 @@ show_progress = true
 
 [output]
 hdf5 = "../training_FFNO3D_zscale_expand_lognlte/3D_sim_predict_ar098192_270000.hdf5"
-multi3d_atmos = "/mn/stornext/d9/data/harshm/bifrost_data/ar098192/27000/atm3d"
-multi3d_mesh = "/mn/stornext/d9/data/harshm/bifrost_data/ar098192/27000/mesh"
+multi3d_atmos = "/mn/stornext/d9/data/harshm/bifrost_data/ar098192/270000/atm3d"
+multi3d_mesh = "/mn/stornext/d9/data/harshm/bifrost_data/ar098192/270000/mesh"
 # compression = 4
 overwrite = false
+
+[resampling]
+# Number of native C++ interpolation threads. Omit to use all CPUs available to
+# the process (including the CPU affinity assigned by Slurm).
+# workers = 32
 
 # By default, temperature, rho, ne, pgas, and hydrogen_populations are
 # interpolated in log10 space. Override individual channels here; false selects
@@ -60,8 +65,8 @@ temperature = true
 # requested absolute z increment. If the domain is not exactly divisible by a
 # spacing, the final remainder shorter than one grid cell is omitted.
 [resampling.target_spacing_m]
-x = 96000.0
-y = 96000.0
+x = 48000.0
+y = 48000.0
 z = 16000.0
 
 # Alternatively, use factors OR target_shape for a given axis. A factor of 2
@@ -76,8 +81,9 @@ z = 16000.0
 # y = 1008
 # z = 512
 
-# Methods are nearest, linear, or cubic (natural cubic spline). Axis names here
-# refer to the final FFNO coordinates, after the horizontal rotation.
+# Methods are nearest, linear, or cubic. Cubic uses Boost.Math's
+# shape-preserving PCHIP interpolation. Axis names here refer to the final FFNO
+# coordinates, after the horizontal rotation.
 [resampling.default]
 x = "cubic"
 y = "cubic"
@@ -117,11 +123,11 @@ positive_channels = ["temperature", "rho", "ne", "pgas"]
 # hierarchy to disable continuity comparison. A channel must exist on the
 # original grid, so use pgas (not ne) when ne is derived from pgas by the EOS.
 [validation.continuity_max_relative_increase.rho]
-x = 0.25
-y = 0.25
-z = 0.25
+# x = 0.25
+# y = 0.25
+# z = 0.25
 
 [validation.continuity_max_relative_increase.pgas]
-x = 0.25
-y = 0.25
-z = 0.25
+# x = 0.25
+# y = 0.25
+# z = 0.25
