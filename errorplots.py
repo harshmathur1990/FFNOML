@@ -970,18 +970,29 @@ def make_snapshot_plot(dataset, output_dir, show=False):
 
 
 def print_snapshot_quantitative_metrics(dataset):
-    """Load and print population and H-alpha metrics for one atmosphere."""
+    """Print H-level 2/3 population metrics and H-alpha metrics."""
     pred_nlte, _ = load_prediction_file(dataset["PRED_FILE"])
     _, _, _, true_nlte, level_names = load_true_multi3d_departures(dataset)
     pred_halpha_core, true_halpha_core = load_halpha_core_intensities(
         dataset["NAME"]
     )
 
+    # H-alpha is controlled primarily by its lower and upper levels, H 2 and
+    # H 3. Multi3D population arrays store the level on the final axis.
+    level_indices = [1, 2]
+    if pred_nlte.shape[-1] <= max(level_indices):
+        raise ValueError(
+            f"Expected at least three population levels, got {pred_nlte.shape[-1]}"
+        )
+    pred_nlte = pred_nlte[..., level_indices]
+    true_nlte = true_nlte[..., level_indices]
+    selected_level_names = [level_names[index] for index in level_indices]
+
     return compute_and_print_quantitative_metrics(
         pred_nlte,
         true_nlte,
         dataset["NAME"],
-        level_names=level_names,
+        level_names=selected_level_names,
         pred_halpha_core=pred_halpha_core,
         true_halpha_core=true_halpha_core,
     )
