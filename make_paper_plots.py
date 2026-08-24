@@ -851,7 +851,12 @@ def get_data_for_line_core_intensity_plots():
     return plot_data
 
 
-def make_line_core_intensity_compare_plots():
+def make_line_core_intensity_compare_plots(poster=False):
+    """Plot ML and Multi3D line-core intensities for the four snapshots.
+
+    Set ``poster=True`` for a compact version without axis labels, x ticks,
+    or the intensity colorbar, and with uppercase panel labels.
+    """
     plt.close('all')
 
     plt.clf()
@@ -862,7 +867,19 @@ def make_line_core_intensity_compare_plots():
 
     matplotlib.rc('font', **font)
 
-    fig, axs = plt.subplots(2, 4, figsize=(7, 3.5), constrained_layout=True)
+    fig, axs = plt.subplots(
+        2,
+        4,
+        figsize=(7, 3.5),
+        layout="compressed" if poster else "constrained",
+    )
+    if poster:
+        fig.get_layout_engine().set(
+            w_pad=0.01,
+            h_pad=0.01,
+            wspace=0.01,
+            hspace=0.01,
+        )
     plot_data = get_data_for_line_core_intensity_plots()
     profile_selections = _get_representative_profile_selections()
     image = None
@@ -870,7 +887,11 @@ def make_line_core_intensity_compare_plots():
     for index, data in enumerate(plot_data):
         row = index // 2
         first_column = 2 * (index % 2)
-        panel_label = f"{chr(ord('a') + index)})"
+        panel_label = (
+            chr(ord("A") + index)
+            if poster
+            else f"{chr(ord('a') + index)})"
+        )
 
         for column, source, title in (
             (first_column, "ml", "ML"),
@@ -903,8 +924,17 @@ def make_line_core_intensity_compare_plots():
                 markeredgewidth=1.3,
             )
             ax.set_title(title)
-            ax.set_xlabel("x [Mm]")
-            if column in (0, 2):
+            if poster:
+                ax.tick_params(
+                    axis="x",
+                    which="both",
+                    bottom=False,
+                    top=False,
+                    labelbottom=False,
+                )
+            else:
+                ax.set_xlabel("x [Mm]")
+            if not poster and column in (0, 2):
                 ax.set_ylabel("y [Mm]")
             if source == "ml":
                 ax.text(
@@ -918,13 +948,17 @@ def make_line_core_intensity_compare_plots():
                     fontweight="bold",
                 )
 
-    if image is not None:
+    if image is not None and not poster:
         fig.colorbar(image, ax=axs, label="Line-core intensity", shrink=0.8)
 
+    output_variant = "_poster" if poster else ""
     fig.savefig(
-        plot_output_dir() / f"line_core_intensity_comparison_{paper_plot_tag()}.pdf",
+        plot_output_dir()
+        / f"line_core_intensity_comparison_{paper_plot_tag()}{output_variant}.pdf",
         dpi=300,
         format="pdf",
+        bbox_inches="tight" if poster else None,
+        pad_inches=0.01 if poster else 0.1,
     )
 
 
