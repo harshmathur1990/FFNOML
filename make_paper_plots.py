@@ -854,7 +854,7 @@ def get_data_for_line_core_intensity_plots():
 def make_line_core_intensity_compare_plots(poster=False):
     """Plot ML and Multi3D line-core intensities for the four snapshots.
 
-    Set ``poster=True`` for a compact version without axis labels, x ticks,
+    Set ``poster=True`` for a compact version without axis labels, ticks,
     or the intensity colorbar, and with uppercase panel labels.
     """
     plt.close('all')
@@ -926,11 +926,14 @@ def make_line_core_intensity_compare_plots(poster=False):
             ax.set_title(title)
             if poster:
                 ax.tick_params(
-                    axis="x",
+                    axis="both",
                     which="both",
                     bottom=False,
                     top=False,
+                    left=False,
+                    right=False,
                     labelbottom=False,
+                    labelleft=False,
                 )
             else:
                 ax.set_xlabel("x [Mm]")
