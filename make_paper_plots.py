@@ -1367,8 +1367,13 @@ def _centers_to_edges(centers):
     ))
 
 
-def make_line_profile_statistical_comparison_plots():
-    """Plot the spatial distribution of profile errors at each wavelength."""
+def make_line_profile_statistical_comparison_plots(poster=False):
+    """Plot the spatial distribution of profile errors at each wavelength.
+
+    In poster mode, replace each descriptive panel title with its uppercase
+    panel letter and identify the output with a ``_poster`` suffix. All other
+    plot styling is unchanged.
+    """
     plt.close("all")
     matplotlib.rc("font", size=8)
 
@@ -1459,11 +1464,15 @@ def make_line_profile_statistical_comparison_plots():
         ax.set_ylim(-error_limit, error_limit)
         ax.yaxis.set_major_locator(matplotlib.ticker.MultipleLocator(5.0))
         ax.yaxis.set_minor_locator(matplotlib.ticker.MultipleLocator(1.0))
-        ax.set_title(
-            f"{chr(ord('a') + panel_index)}) "
-            f"{_line_profile_short_name(histogram['name'])}",
-            loc="left",
+        panel_title = (
+            chr(ord("A") + panel_index)
+            if poster
+            else (
+                f"{chr(ord('a') + panel_index)}) "
+                f"{_line_profile_short_name(histogram['name'])}"
+            )
         )
+        ax.set_title(panel_title, loc="left")
         if panel_index % 2 == 0:
             ax.set_ylabel(
                 r"$(I_{\rm ML}-I_{\rm Multi3D})/I_{\rm wing}$ [%]"
@@ -1481,8 +1490,10 @@ def make_line_profile_statistical_comparison_plots():
             shrink=0.9,
         )
 
+    output_variant = "_poster" if poster else ""
     fig.savefig(
-        plot_output_dir() / f"line_profile_statistics_{paper_plot_tag()}.pdf",
+        plot_output_dir()
+        / f"line_profile_statistics_{paper_plot_tag()}{output_variant}.pdf",
         dpi=300,
         format="pdf",
     )
