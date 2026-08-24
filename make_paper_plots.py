@@ -1298,7 +1298,8 @@ def make_line_profile_sample_comparison_plots(poster=False):
     """Show the four profiles marked in the line-core comparison figure.
 
     In poster mode, replace each descriptive panel title with its uppercase
-    panel letter. All other plot styling and output behavior is unchanged.
+    panel letter and identify the output with a ``_poster`` suffix. All other
+    plot styling is unchanged.
     """
     plt.close("all")
     matplotlib.rc("font", size=8)
@@ -1345,8 +1346,10 @@ def make_line_profile_sample_comparison_plots(poster=False):
         if panel_index == 0:
             ax.legend(frameon=False, ncol=2, loc="lower right")
 
+    output_variant = "_poster" if poster else ""
     fig.savefig(
-        plot_output_dir() / f"line_profile_samples_{paper_plot_tag()}.pdf",
+        plot_output_dir()
+        / f"line_profile_samples_{paper_plot_tag()}{output_variant}.pdf",
         dpi=300,
         format="pdf",
     )
