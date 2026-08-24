@@ -957,11 +957,13 @@ def make_snapshot_plot(dataset, output_dir, show=False, poster=False):
         true_plot,
         pred_z_axis,
         level_names=level_names,
-        poster=False
+        poster=poster,
     )
+    scatter_variant = "_poster" if poster else ""
     scatter_outpath = os.path.join(
         output_dir,
-        f"departure_coefficient_scatter_{dataset['NAME']}_{active_atom_names_tag()}.pdf",
+        f"departure_coefficient_scatter_{dataset['NAME']}_"
+        f"{active_atom_names_tag()}{scatter_variant}.pdf",
     )
     scatter_fig.savefig(scatter_outpath, dpi=200, bbox_inches="tight")
     print(f"Saved {scatter_outpath}")
