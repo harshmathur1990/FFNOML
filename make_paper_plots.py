@@ -1294,8 +1294,12 @@ def _get_representative_profile_selections():
     return selections
 
 
-def make_line_profile_sample_comparison_plots():
-    """Show the four profiles marked in the line-core comparison figure."""
+def make_line_profile_sample_comparison_plots(poster=False):
+    """Show the four profiles marked in the line-core comparison figure.
+
+    In poster mode, replace each descriptive panel title with its uppercase
+    panel letter. All other plot styling and output behavior is unchanged.
+    """
     plt.close("all")
     matplotlib.rc("font", size=8)
 
@@ -1325,12 +1329,15 @@ def make_line_profile_sample_comparison_plots():
             label="ML",
         )
         ax.set_xlim(-200.0, 200.0)
-        ax.set_title(
-            f"{chr(ord('a') + panel_index)}) "
-            f"{_line_profile_short_name(name)}\n"
-            f"x = {x_position:.2f} Mm, y = {y_position:.2f} Mm",
-            loc="left",
-        )
+        if poster:
+            panel_title = chr(ord("A") + panel_index)
+        else:
+            panel_title = (
+                f"{chr(ord('a') + panel_index)}) "
+                f"{_line_profile_short_name(name)}\n"
+                f"x = {x_position:.2f} Mm, y = {y_position:.2f} Mm"
+            )
+        ax.set_title(panel_title, loc="left")
         if panel_index % 2 == 0:
             ax.set_ylabel("Intensity")
         if panel_index >= 2:
