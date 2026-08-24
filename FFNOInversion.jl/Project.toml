@@ -1,0 +1,32 @@
+name = "FFNOInversion"
+uuid = "5f657311-4af4-4e09-9b93-d21004ee51b8"
+version = "0.1.0"
+authors = ["FFNOML contributors"]
+
+[deps]
+Libdl = "8f399da3-3557-5675-b5ff-fb832c97cbdb"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+MPI = "da04e1cc-30fd-572f-bb4f-1f8673147195"
+Serialization = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
+Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"
+TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
+
+[weakdeps]
+Muspel = "6074595b-091a-495a-9b39-045a690b2c53"
+PythonCall = "6099a3de-0909-46bc-b1f4-468b9a2dfc0d"
+
+[extensions]
+FFNOInversionPythonCallExt = "PythonCall"
+FFNOInversionMuspelExt = "Muspel"
+
+[compat]
+Muspel = "0.2.5"
+MPI = "0.20"
+PythonCall = "0.9.35"
+
+[extras]
+PythonCall = "6099a3de-0909-46bc-b1f4-468b9a2dfc0d"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test", "PythonCall"]

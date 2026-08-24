@@ -13,6 +13,13 @@
 #include <thread>
 #include <vector>
 
+void cop(double T, double TKEV, double TK, double HKT, double TLOG,
+         double XNA, double XNE, double *WLGRID, double *OPACITY, double *SCATTER,
+         double H1, double H2, double HMIN, double HE1, double HE2, double HE3,
+         double C1, double AL1, double SI1, double SI2, double CA1, double CA2,
+         double MG1, double MG2, double FE1, double N1, double O1,
+         int nWLGRID, int NLINES, int NTOTALLIST);
+
 namespace {
 
 constexpr double BK = 1.3806488E-16;
@@ -20,6 +27,9 @@ constexpr double HH = 6.62606957E-27;
 constexpr double CC = 2.99792458E10;
 constexpr double AMU = 1.660538921E-24;
 constexpr double EV = 1.602176565E-12;
+constexpr double ME = 9.10938188E-28;
+constexpr double PI = 3.14159265358979323846;
+const double SAHA_FAC = std::pow((2.0*PI*ME*BK)/(HH*HH),1.5);
 constexpr int NCONTR = 28;
 constexpr double PREC = 1.0e-5;
 
@@ -83,6 +93,10 @@ struct Element {
 struct GasResult {
     double pg;
     double fe;
+    double f1;
+    double f2;
+    double f3;
+    double phtot;
 };
 
 class WittEOS {
@@ -116,6 +130,58 @@ public:
         const double pgas_cgs = pgas_pa * 10.0;
         const double pe = pe_from_pg(temp, pgas_cgs);
         return pe / (BK * temp) * 1.0e6;
+    }
+
+    void thermodynamics_from_pgas_si(double temp, double pgas_pa,
+                                     double& rho_kg_m3, double& ne_m3) const {
+        const double pgas_cgs = pgas_pa * 10.0;
+        const double pe = pe_from_pg(temp, pgas_cgs);
+        rho_kg_m3 = rho_from_pe(temp, pe) * 1.0e3;
+        ne_m3 = pe / (BK * temp) * 1.0e6;
+    }
+
+    double opacity500_mass_si(double temp, double pgas_pa) const {
+        const double pgas = pgas_pa * 10.0;
+        const double pe = pe_from_pg(temp, pgas);
+        const double rho = rho_from_pe(temp, pe) * 1.0e3;
+        double n[17] = {};
+        background_partials(temp, pgas, pe, n);
+        const double tk = BK*temp, tkev = tk/EV, htk = HH/tk;
+        double wavelength_angstrom = 5000.0, extinction_cm = 0.0, scattering_cm = 0.0;
+        cop(temp,tkev,tk,htk,std::log(temp),(pgas-pe)/tk,pe/tk,
+            &wavelength_angstrom,&extinction_cm,&scattering_cm,
+            n[0],n[1],n[2],n[3],n[4],n[5],n[6],n[7],n[8],n[9],n[10],n[11],
+            n[12],n[13],n[14],n[15],n[16],1,0,0);
+        return extinction_cm*100.0/rho;
+    }
+
+    double continuum_extinction_si(double temp, double pgas_pa,
+                                   double wavelength_angstrom) const {
+        const double pgas=pgas_pa*10.0, pe=pe_from_pg(temp,pgas);
+        double n[17]={}; background_partials(temp,pgas,pe,n);
+        const double tk=BK*temp,tkev=tk/EV,htk=HH/tk;
+        double opacity=0.0,scattering=0.0;
+        cop(temp,tkev,tk,htk,std::log(temp),(pgas-pe)/tk,pe/tk,
+            &wavelength_angstrom,&opacity,&scattering,
+            n[0],n[1],n[2],n[3],n[4],n[5],n[6],n[7],n[8],n[9],n[10],n[11],
+            n[12],n[13],n[14],n[15],n[16],1,0,0);
+        return (opacity+scattering)*100.0;
+    }
+
+    double kurucz_lower_population_m3(double temp,double pgas_pa,int atomic_number,
+                                      int stage,double energy_j,double statistical_weight) const {
+        if(atomic_number<1 || atomic_number>99 || stage<0) throw std::runtime_error("invalid Kurucz species");
+        const double pgas=pgas_pa*10.0, pe=pe_from_pg(temp,pgas);
+        double xpa[8]={}; ion_partials(atomic_number-1,temp,pgas,pe,xpa,0);
+        if(stage>=8) throw std::runtime_error("unsupported Kurucz ion stage");
+        return xpa[stage]*statistical_weight*std::exp(-energy_j/(BK*1.0e-7*temp))*1.0e6;
+    }
+
+    double neutral_hydrogen_m3(double temp,double pgas_pa) const {
+        const double pgas=pgas_pa*10.0,pe=pe_from_pg(temp,pgas);
+        double xpa[8]={},u[8]={}; int count=0;
+        ion_partials(0,temp,pgas,pe,xpa,0); partition_f(0,temp,0,u,count);
+        return xpa[0]*u[0]*1.0e6;
     }
 
 private:
@@ -191,6 +257,38 @@ private:
     double saha(double theta, double eion, double u1, double u2, double pe) const {
         return u2 * std::exp(2.302585093 * (9.0804625434325867 - theta * eion)) /
                (u1 * pe * std::pow(theta, 2.5));
+    }
+
+    void ion_partials(int atom, double temp, double pgas, double pe,
+                      double* xpa, int requested) const {
+        double u[8]; int count=0; partition_f(atom,temp,requested,u,count);
+        const double xna=(pgas-pe)/(BK*temp), xne=pe/(BK*temp);
+        const double ntot=xna*ABUND[atom];
+        xpa[0]=1.0;
+        for (int stage=1;stage<count;++stage)
+            xpa[stage]=2.0*SAHA_FAC*(u[stage]/u[stage-1])*std::pow(temp,1.5)*
+                std::exp(-el[atom].eion[stage-1]*EV/(temp*BK))/xne;
+        for (int stage=count-1;stage>0;--stage) xpa[0]=1.0+xpa[0]*xpa[stage];
+        xpa[0]=1.0/xpa[0];
+        for (int stage=1;stage<count;++stage) xpa[stage]*=xpa[stage-1];
+        for (int stage=0;stage<count;++stage) xpa[stage]*=ntot/u[stage];
+    }
+
+    void background_partials(double temp,double pgas,double pe,double* n) const {
+        double x[8] = {};
+        ion_partials(1,temp,pgas,pe,x,3); n[3]=x[0]; n[4]=x[1]; n[5]=x[2];
+        ion_partials(5,temp,pgas,pe,x,0); n[6]=x[0];
+        ion_partials(12,temp,pgas,pe,x,0); n[7]=x[0];
+        ion_partials(13,temp,pgas,pe,x,0); n[8]=x[0]; n[9]=x[1];
+        ion_partials(19,temp,pgas,pe,x,0); n[10]=x[0]; n[11]=x[1];
+        ion_partials(11,temp,pgas,pe,x,0); n[12]=x[0]; n[13]=x[1];
+        ion_partials(25,temp,pgas,pe,x,0); n[14]=x[0];
+        ion_partials(6,temp,pgas,pe,x,0); n[15]=x[0];
+        ion_partials(7,temp,pgas,pe,x,0); n[16]=x[0];
+        const GasResult h=gasc(temp,pe);
+        n[0]=h.f1*h.phtot/(temp*BK)*0.5;
+        n[1]=h.f2*h.phtot/(temp*BK);
+        n[2]=h.f3*h.phtot/(temp*BK);
     }
 
     double init_pe_from_pg(double t, double pg) const {
@@ -354,7 +452,7 @@ private:
         }
 
         const double pg = pe * (1.0 + (f1 + f2 + f3 + f4 + f5 + ab_others) / fe);
-        return {pg, fe};
+        return {pg,fe,f1,f2,f3,phtot};
     }
 
     double pg_from_pe(double t, double pe) const {
@@ -521,4 +619,73 @@ extern "C" int witt_ne_from_pgas(
     return witt_ne(
         pf_path, temp, pgas_pa, ne_m3, n, threads, show_progress, true
     );
+}
+
+extern "C" int witt_thermodynamics_from_pgas(
+    const char* pf_path, const double* temp, const double* pgas_pa,
+    double* rho_kg_m3, double* ne_m3, std::size_t n
+) {
+    try {
+        WittEOS eos(pf_path);
+        for (std::size_t i = 0; i < n; ++i)
+            eos.thermodynamics_from_pgas_si(temp[i],pgas_pa[i],rho_kg_m3[i],ne_m3[i]);
+        return 0;
+    } catch (...) {
+        return 1;
+    }
+}
+
+extern "C" int witt_opacity500_mass_from_pgas(
+    const char* pf_path, const double* temp, const double* pgas_pa,
+    double* kappa_m2_kg, std::size_t n
+) {
+    try {
+        WittEOS eos(pf_path);
+        for (std::size_t i=0;i<n;++i)
+            kappa_m2_kg[i]=eos.opacity500_mass_si(temp[i],pgas_pa[i]);
+        return 0;
+    } catch (...) {
+        return 1;
+    }
+}
+
+extern "C" int witt_kurucz_state_from_pgas(
+    const char* pf_path,const double* temp,const double* pgas_pa,
+    double wavelength_angstrom,int atomic_number,int stage,double energy_j,double statistical_weight,
+    double* continuum_m_inv,double* lower_population_m3,double* neutral_hydrogen_m3,std::size_t n
+) {
+    try {
+        WittEOS eos(pf_path);
+        for(std::size_t i=0;i<n;++i) {
+            continuum_m_inv[i]=eos.continuum_extinction_si(temp[i],pgas_pa[i],wavelength_angstrom);
+            lower_population_m3[i]=eos.kurucz_lower_population_m3(temp[i],pgas_pa[i],atomic_number,stage,energy_j,statistical_weight);
+            neutral_hydrogen_m3[i]=eos.neutral_hydrogen_m3(temp[i],pgas_pa[i]);
+        }
+        return 0;
+    } catch(...) { return 1; }
+}
+
+extern "C" void* witt_create_backend(const char* pf_path) {
+    try { return new WittEOS(pf_path); } catch(...) { return nullptr; }
+}
+
+extern "C" void witt_destroy_backend(void* backend) {
+    delete static_cast<WittEOS*>(backend);
+}
+
+extern "C" int witt_kurucz_state(
+    void* backend,const double* temp,const double* pgas_pa,
+    double wavelength_angstrom,int atomic_number,int stage,double energy_j,double statistical_weight,
+    double* continuum_m_inv,double* lower_population_m3,double* neutral_hydrogen_m3,std::size_t n
+) {
+    try {
+        if(!backend) return 1;
+        const WittEOS& eos=*static_cast<WittEOS*>(backend);
+        for(std::size_t i=0;i<n;++i) {
+            continuum_m_inv[i]=eos.continuum_extinction_si(temp[i],pgas_pa[i],wavelength_angstrom);
+            lower_population_m3[i]=eos.kurucz_lower_population_m3(temp[i],pgas_pa[i],atomic_number,stage,energy_j,statistical_weight);
+            neutral_hydrogen_m3[i]=eos.neutral_hydrogen_m3(temp[i],pgas_pa[i]);
+        }
+        return 0;
+    } catch(...) { return 1; }
 }
