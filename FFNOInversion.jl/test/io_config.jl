@@ -32,6 +32,9 @@
     @test cfg.regularization.vertical.weights[4] == 0.1
     @test cfg.parallel.decomposition == :cartesian_2d
     @test cfg.parallel.gpu_launcher_rank == 0
+    @test cfg.parallel.gpu_connect_timeout_seconds == 30.0
+    @test cfg.parallel.gpu_status_timeout_seconds == 0.0
+    @test cfg.parallel.gpu_diagnostic_interval_seconds == 30.0
     mktemp() do path, io
         write(io,"[grid]\nnz=4\nnx=2\nny=2\n[observation]\nnlambda=3\nstokes=[\"I\",\"Q\"]\n[physics]\nredistribution=\"non_prd\"\n")
         close(io)

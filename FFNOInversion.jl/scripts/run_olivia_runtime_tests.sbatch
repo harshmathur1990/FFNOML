@@ -45,6 +45,9 @@ export MKL_NUM_THREADS=${MKL_NUM_THREADS:-1}
 export PYTHONFAULTHANDLER=1
 export NCCL_DEBUG=${NCCL_DEBUG:-INFO}
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+export FFNO_GPU_CONNECT_TIMEOUT=${FFNO_GPU_CONNECT_TIMEOUT:-60}
+export FFNO_GPU_STATUS_TIMEOUT=${FFNO_GPU_STATUS_TIMEOUT:-180}
+export FFNO_GPU_DIAGNOSTIC_INTERVAL=${FFNO_GPU_DIAGNOSTIC_INTERVAL:-5}
 
 # Olivia/Slingshot defaults used by the existing charge-branch production job.
 export HSA_FORCE_FINE_GRAIN_PCIE=${HSA_FORCE_FINE_GRAIN_PCIE:-1}
@@ -138,6 +141,7 @@ run_case() {
     local case_dir=${diagnostics_root}/${label}
     mkdir -p "${case_dir}"
     export OLIVIA_CASE_DIAGNOSTICS=${case_dir}
+    export FFNO_GPU_DIAGNOSTICS_DIR=${case_dir}/gpu-control
     printf '%q ' "$@" > "${case_dir}/command.txt"
     printf '\n' >> "${case_dir}/command.txt"
     snapshot_scheduler "${case_dir}/scheduler-before.txt"
@@ -164,6 +168,15 @@ run_case() {
     local result=FAIL
     if [[ "${expectation}" == success && ${status} -eq 0 ]]; then
         result=PASS
+    elif [[ "${expectation}" == controlled_failure && ${status} -ne 0 &&
+            ${status} -ne 124 && ${status} -ne 137 ]]; then
+        if [[ "${required_marker}" != - ]] && grep --recursive --quiet --fixed-strings \
+                "${required_marker}" "${case_dir}"; then
+            result=PASS
+        else
+            echo "controlled failure did not contain required marker: ${required_marker}" \
+                >> "${case_dir}/validation-error.txt"
+        fi
     elif [[ "${expectation}" == timeout && ( ${status} -eq 124 || ${status} -eq 137 ) ]]; then
         if [[ "${required_marker}" != - ]] && grep --recursive --quiet --fixed-strings \
                 "${required_marker}" "${case_dir}"; then
@@ -222,8 +235,12 @@ run_case hybrid_gpu_success success 240 - \
     "${mpi_command[@]}" test/olivia_hybrid_gpu_probe.jl success
 run_case hybrid_gpu_failure_recovery success 240 - \
     "${mpi_command[@]}" test/olivia_hybrid_gpu_probe.jl failure
-run_case hybrid_gpu_intentional_stall timeout 60 intentional_gpu_stall_enter \
-    "${mpi_command[@]}" test/olivia_hybrid_gpu_probe.jl stall
+run_case hybrid_gpu_internal_status_timeout controlled_failure 90 gpu_status_timeout \
+    env FFNO_GPU_STATUS_TIMEOUT=20 "${mpi_command[@]}" test/olivia_hybrid_gpu_probe.jl stall
+run_case hybrid_gpu_post_internal_timeout_success success 240 - \
+    "${mpi_command[@]}" test/olivia_hybrid_gpu_probe.jl success
+run_case hybrid_gpu_external_watchdog_stall timeout 60 intentional_gpu_stall_enter \
+    env FFNO_GPU_STATUS_TIMEOUT=0 "${mpi_command[@]}" test/olivia_hybrid_gpu_probe.jl stall
 run_case hybrid_gpu_post_timeout_success success 240 - \
     "${mpi_command[@]}" test/olivia_hybrid_gpu_probe.jl success
 

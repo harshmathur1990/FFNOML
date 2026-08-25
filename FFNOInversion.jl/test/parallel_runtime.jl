@@ -28,6 +28,18 @@
     @test launch_gpu!(coordinator,serial,4) == 8
     @test launches[] == 1
 
+    mktempdir() do directory
+        diagnostics=initialize_gpu_control_diagnostics(serial;directory=directory,interval=0.01)
+        set_diagnostic_context!(diagnostics;phase="unit_test")
+        diagnostic_checkpoint!(diagnostics,"unit_test_checkpoint";value=7)
+        sleep(0.04)
+        stop_diagnostics!(diagnostics)
+        events=read(diagnostics.event_path,String)
+        @test occursin("unit_test_checkpoint",events)
+        @test occursin("gpu_diagnostics_stopped",events)
+        @test length(readlines(diagnostics.resource_path))>=4
+    end
+
     cache = ThreadedSynthesisCache(Float64,4,7)
     @test length(cache.workspaces) == Threads.maxthreadid()
     @test length(unique(objectid(ws.extinction) for ws in cache.workspaces)) == Threads.maxthreadid()

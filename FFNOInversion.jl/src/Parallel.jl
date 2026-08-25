@@ -8,6 +8,10 @@ Base.@kwdef struct ParallelOptions
     decomposition::Symbol = :cartesian_2d
     threads_per_rank::Int = Threads.nthreads()
     gpu_launcher_rank::Int = 0
+    gpu_connect_timeout_seconds::Float64 = 30.0
+    gpu_status_timeout_seconds::Float64 = 0.0
+    gpu_diagnostic_interval_seconds::Float64 = 30.0
+    gpu_diagnostics_directory::String = ""
 end
 
 struct Tile2D
@@ -39,6 +43,9 @@ function initialize_parallel(;options=ParallelOptions())
     options.threads_per_rank == Threads.nthreads() || throw(ArgumentError(
         "configured threads_per_rank=$(options.threads_per_rank), but Julia started with $(Threads.nthreads()) threads"))
     options.decomposition == :cartesian_2d || throw(ArgumentError("only cartesian_2d decomposition is supported"))
+    options.gpu_connect_timeout_seconds >= 0 || throw(ArgumentError("gpu_connect_timeout_seconds must be non-negative"))
+    options.gpu_status_timeout_seconds >= 0 || throw(ArgumentError("gpu_status_timeout_seconds must be non-negative"))
+    options.gpu_diagnostic_interval_seconds >= 0 || throw(ArgumentError("gpu_diagnostic_interval_seconds must be non-negative"))
     options.enabled || return serial_context(options=options)
     owns = !MPI.Initialized()
     owns && MPI.Init()
@@ -90,6 +97,10 @@ function parallel_provenance(context::ParallelContext,tile::Tile2D;
         "decomposition"=>string(context.options.decomposition),
         "process_grid"=>collect(tile.process_grid),
         "gpu_launcher_rank"=>context.root,
+        "gpu_connect_timeout_seconds"=>context.options.gpu_connect_timeout_seconds,
+        "gpu_status_timeout_seconds"=>context.options.gpu_status_timeout_seconds,
+        "gpu_diagnostic_interval_seconds"=>context.options.gpu_diagnostic_interval_seconds,
+        "gpu_diagnostics_directory"=>context.options.gpu_diagnostics_directory,
         "global_spatial_shape"=>[tile.global_nx,tile.global_ny],
         "configuration_hash"=>String(configuration_hash),
         "model_hash"=>String(model_hash),
@@ -302,9 +313,33 @@ RootGPUCoordinator(launcher;launcher_rank=0) = RootGPUCoordinator(launcher,launc
 The launcher should manage a persistent worker. Its result remains on the
 launcher rank; subsequent distributed staging/scatter is a separate operation.
 """
-function launch_gpu!(coordinator::RootGPUCoordinator,context::ParallelContext,args...;kwargs...)
+function _gpu_timeout(context::ParallelContext,name::AbstractString,configured::Float64)
+    raw=get(ENV,name,"")
+    isempty(raw) && return configured
+    value=tryparse(Float64,raw)
+    value===nothing && throw(ArgumentError("$name must be a number of seconds"))
+    value>=0 || throw(ArgumentError("$name must be zero (disabled) or positive"))
+    value
+end
+
+function _gpu_diagnostics_directory(context::ParallelContext)
+    configured=get(ENV,"FFNO_GPU_DIAGNOSTICS_DIR",context.options.gpu_diagnostics_directory)
+    !isempty(configured) && return configured
+    job_id=get(ENV,"SLURM_JOB_ID","")
+    isempty(job_id) ? "" : abspath("gpu-control-diagnostics-slurm-$job_id")
+end
+
+function _launch_gpu_control!(coordinator::RootGPUCoordinator,context::ParallelContext,
+        diagnostics,args...;kwargs...)
+    connect_timeout=_gpu_timeout(context,"FFNO_GPU_CONNECT_TIMEOUT",
+        context.options.gpu_connect_timeout_seconds)
+    status_timeout=_gpu_timeout(context,"FFNO_GPU_STATUS_TIMEOUT",
+        context.options.gpu_status_timeout_seconds)
+    set_diagnostic_context!(diagnostics;phase="control_setup")
+    diagnostic_checkpoint!(diagnostics,"gpu_control_setup_start";
+        connect_timeout_s=connect_timeout,status_timeout_s=status_timeout)
+
     coordinator.launcher_rank == context.root || throw(ArgumentError("GPU coordinator rank differs from ParallelContext root"))
-    context.enabled || return coordinator.launcher(args...;kwargs...)
     _assert_mpi_thread(context)
 
     # Establish the non-MPI control path before the nested GPU operation. This
@@ -313,49 +348,127 @@ function launch_gpu!(coordinator::RootGPUCoordinator,context::ParallelContext,ar
     server=isroot(context) ? listen(ip"0.0.0.0",0) : nothing
     endpoint=mpi_broadcast(isroot(context) ?
         (get(ENV,"FFNO_GPU_CONTROL_HOST",string(getipaddr())),Int(getsockname(server)[2])) : nothing,context)
+    diagnostic_checkpoint!(diagnostics,"gpu_control_endpoint_ready";host=endpoint[1],port=endpoint[2])
     peers=TCPSocket[]
     control=nothing
     if isroot(context)
         ranks=Set{Int}()
-        for _ in 1:context.size-1
-            socket=accept(server); rank=Int(read(socket,Int32))
-            rank in ranks && error("duplicate GPU-control connection from MPI rank $rank")
-            push!(ranks,rank); push!(peers,socket)
+        accept_timed_out=Ref(false)
+        accept_timer=connect_timeout>0 ? Timer(connect_timeout) do _
+            accept_timed_out[]=true
+            isopen(server) && close(server)
+        end : nothing
+        try
+            for _ in 1:context.size-1
+                socket=accept(server); rank=Int(read(socket,Int32))
+                rank in ranks && error("duplicate GPU-control connection from MPI rank $rank")
+                push!(ranks,rank); push!(peers,socket)
+                diagnostic_event!(diagnostics,"gpu_control_peer_connected";
+                    peer_rank=rank,connected=length(ranks),expected=context.size-1)
+            end
+        catch exception
+            accept_timed_out[] && error("timed out after $connect_timeout s accepting GPU-control peers; connected=$(length(ranks))/$(context.size-1)$(diagnostic_location(diagnostics))")
+            rethrow(exception)
+        finally
+            accept_timer===nothing || close(accept_timer)
+            isopen(server) && close(server)
         end
-        close(server)
     else
-        control=nothing
-        for attempt in 1:100
+        deadline=connect_timeout>0 ? time()+connect_timeout : Inf
+        attempts=0
+        while control===nothing
+            attempts+=1
             try
-                control=connect(endpoint[1],endpoint[2]); break
+                control=connect(endpoint[1],endpoint[2])
             catch exception
-                attempt==100 && rethrow(exception)
+                time()>=deadline && error("timed out after $connect_timeout s connecting to rank-0 GPU control at $(endpoint[1]):$(endpoint[2]); attempts=$attempts$(diagnostic_location(diagnostics))")
                 sleep(0.05)
             end
         end
         write(control,Int32(context.rank)); flush(control)
+        diagnostic_checkpoint!(diagnostics,"gpu_control_connected_to_root";attempts=attempts)
     end
+    set_diagnostic_context!(diagnostics;phase="prelaunch_barrier")
+    diagnostic_checkpoint!(diagnostics,"gpu_prelaunch_barrier_start")
     barrier(context)
+    diagnostic_checkpoint!(diagnostics,"gpu_prelaunch_barrier_complete")
     result=nothing; success=true; message=""
     if isroot(context)
+        set_diagnostic_context!(diagnostics;phase="launcher")
+        launch_start=time()
+        diagnostic_checkpoint!(diagnostics,"gpu_launcher_start")
         try
             result=coordinator.launcher(args...;kwargs...)
         catch exception
             success=false; message=sprint(showerror,exception,catch_backtrace())
         end
+        diagnostic_checkpoint!(diagnostics,"gpu_launcher_returned";
+            seconds=time()-launch_start,success=success)
+        notification_errors=String[]
         for socket in peers
-            serialize(socket,(success=success,message=message)); flush(socket); close(socket)
+            try
+                serialize(socket,(success=success,message=message)); flush(socket)
+            catch exception
+                push!(notification_errors,sprint(showerror,exception))
+            finally
+                isopen(socket) && close(socket)
+            end
         end
+        isempty(notification_errors) || error("failed to notify $(length(notification_errors)) GPU-control peers after launcher return: $(join(notification_errors,"; "))")
     else
+        set_diagnostic_context!(diagnostics;phase="status_wait")
+        wait_start=time(); timed_out=Ref(false)
+        diagnostic_checkpoint!(diagnostics,"gpu_status_wait_start";timeout_s=status_timeout)
+        timeout_timer=status_timeout>0 ? Timer(status_timeout) do _
+            timed_out[]=true
+            isopen(control) && close(control)
+        end : nothing
         status=try
             deserialize(control)
         catch exception
-            close(control)
-            error("lost rank-0 GPU-control connection: $(sprint(showerror,exception))")
+            if timed_out[]
+                diagnostic_checkpoint!(diagnostics,"gpu_status_timeout";
+                    seconds=time()-wait_start,timeout_s=status_timeout)
+                error("timed out after $status_timeout s waiting for rank-0 GPU launcher status$(diagnostic_location(diagnostics))")
+            end
+            error("lost rank-0 GPU-control connection: $(sprint(showerror,exception))$(diagnostic_location(diagnostics))")
+        finally
+            timeout_timer===nothing || close(timeout_timer)
+            isopen(control) && close(control)
         end
-        close(control); success=status.success; message=status.message
+        success=status.success; message=status.message
+        diagnostic_checkpoint!(diagnostics,"gpu_status_received";
+            seconds=time()-wait_start,success=success)
     end
+    set_diagnostic_context!(diagnostics;phase="postlaunch_barrier")
+    diagnostic_checkpoint!(diagnostics,"gpu_postlaunch_barrier_start")
     barrier(context)
-    success || error("rank-0 GPU launcher failed:\n$message")
+    diagnostic_checkpoint!(diagnostics,"gpu_postlaunch_barrier_complete")
+    success || error("rank-0 GPU launcher failed:\n$message$(diagnostic_location(diagnostics))")
+    set_diagnostic_context!(diagnostics;phase="complete")
+    diagnostic_checkpoint!(diagnostics,"gpu_control_complete")
     result
+end
+
+function launch_gpu!(coordinator::RootGPUCoordinator,context::ParallelContext,args...;
+        diagnostics=nothing,kwargs...)
+    coordinator.launcher_rank == context.root || throw(ArgumentError("GPU coordinator rank differs from ParallelContext root"))
+    context.enabled || return coordinator.launcher(args...;kwargs...)
+    _assert_mpi_thread(context)
+    active=diagnostics; owned=false
+    directory=_gpu_diagnostics_directory(context)
+    if active===nothing && !isempty(directory)
+        interval=_gpu_timeout(context,"FFNO_GPU_DIAGNOSTIC_INTERVAL",
+            context.options.gpu_diagnostic_interval_seconds)
+        active=initialize_gpu_control_diagnostics(context;directory=directory,interval=interval)
+        owned=true
+    end
+    try
+        _launch_gpu_control!(coordinator,context,active,args...;kwargs...)
+    catch exception
+        record_diagnostic_failure!(active,exception,catch_backtrace())
+        rethrow(exception)
+    finally
+        owned && stop_diagnostics!(active)
+    end
 end

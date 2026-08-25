@@ -39,6 +39,12 @@ and diagnostic collection without loading the scientific forward model. See
 `docs/reports/olivia-runtime-test-guide.md` for submission and return-artifact
 instructions.
 
+The production GPU control plane also supports an internal non-root status
+timeout and charge-style periodic per-rank diagnostics. Configure these through
+the `parallel` TOML keys or the `FFNO_GPU_*` environment overrides documented in
+ADR-009. The external Slurm watchdog remains necessary for a rank-0 process that
+cannot be interrupted safely.
+
 Phase 4 integrates that runtime into the sole application-level forward path: distributed node expansion, HE3D/optional-B MHS and EOS, rank-0 population inference with tile redistribution, threaded local synthesis, halo-aware spatial PSF, distributed observations and weights, global chi-squared/regularization reductions, and final atmosphere/spectrum collection. One-rank development runs and multi-rank production runs invoke the same `HybridForwardModel` and `forward!` implementation.
 
 The scheduler chooses rank count and Julia chooses threads per rank. For example, a 256-core allocation can start with 16 ranks and 16 threads per rank. Set BLAS/OpenMP thread counts to one when Julia threads own column-level parallelism.

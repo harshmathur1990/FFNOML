@@ -1,5 +1,6 @@
 module FFNOInversion
 
+using Dates
 using LinearAlgebra
 using Libdl
 using Serialization
@@ -9,6 +10,7 @@ import MPI
 
 include("Types.jl")
 include("Parallel.jl")
+include("Diagnostics.jl")
 include("Nodes.jl")
 include("EOS.jl")
 include("Opacity500.jl")
@@ -30,6 +32,8 @@ export allreduce_sum, allreduce_max, process_grid, tile_for_rank, local_tile, lo
 export distribute_field, gather_field, exchange_halos
 export AbstractGPUCoordinator, RootGPUCoordinator, launch_gpu!
 export parallel_provenance, write_parallel_provenance
+export GPUControlDiagnostics, initialize_gpu_control_diagnostics, stop_diagnostics!
+export diagnostic_event!, diagnostic_checkpoint!, set_diagnostic_context!, record_diagnostic_failure!
 export HE3DMode, MHSMode, select_force_balance
 export AbstractEOS, WittmannEOS, IdealGasEOS, thermodynamics!
 export AbstractOpacity500, WittmannOpacity500, ReferenceOpacity500, opacity500!

@@ -114,3 +114,10 @@ enabled = false
 decomposition = "cartesian_2d"
 threads_per_rank = 1
 gpu_launcher_rank = 0
+gpu_connect_timeout_seconds = 30.0
+# Zero disables the internal rank status timeout. On Olivia, choose a value
+# longer than one normal FFNO call; the batch watchdog remains the final limit.
+gpu_status_timeout_seconds = 0.0
+gpu_diagnostic_interval_seconds = 30.0
+# Empty selects gpu-control-diagnostics-slurm-JOBID automatically under Slurm.
+gpu_diagnostics_directory = ""

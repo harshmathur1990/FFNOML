@@ -166,8 +166,18 @@ function load_config(path::AbstractString)
     threads_per_rank > 0 || throw(ArgumentError("parallel.threads_per_rank must be positive"))
     gpu_launcher_rank = Int(get(parallel_raw,"gpu_launcher_rank",0))
     gpu_launcher_rank >= 0 || throw(ArgumentError("parallel.gpu_launcher_rank must be non-negative"))
+    gpu_connect_timeout_seconds=Float64(get(parallel_raw,"gpu_connect_timeout_seconds",30.0))
+    gpu_status_timeout_seconds=Float64(get(parallel_raw,"gpu_status_timeout_seconds",0.0))
+    gpu_diagnostic_interval_seconds=Float64(get(parallel_raw,"gpu_diagnostic_interval_seconds",30.0))
+    all(>=(0),(gpu_connect_timeout_seconds,gpu_status_timeout_seconds,gpu_diagnostic_interval_seconds)) ||
+        throw(ArgumentError("parallel GPU timeout/diagnostic intervals must be non-negative"))
+    gpu_diagnostics_directory=String(get(parallel_raw,"gpu_diagnostics_directory",""))
     parallel = ParallelOptions(enabled=Bool(get(parallel_raw,"enabled",false)),decomposition=decomposition,
-        threads_per_rank=threads_per_rank,gpu_launcher_rank=gpu_launcher_rank)
+        threads_per_rank=threads_per_rank,gpu_launcher_rank=gpu_launcher_rank,
+        gpu_connect_timeout_seconds=gpu_connect_timeout_seconds,
+        gpu_status_timeout_seconds=gpu_status_timeout_seconds,
+        gpu_diagnostic_interval_seconds=gpu_diagnostic_interval_seconds,
+        gpu_diagnostics_directory=gpu_diagnostics_directory)
     RunConfig(atmosphere,observed,weights,outputs,SynthesisGridConfig(wavelength_m,dx_m,dy_m),regions,observation_model,stokes,redistribution,regularization,parallel)
 end
 
@@ -177,7 +187,7 @@ function dry_run_summary(config::RunConfig)
     vertical_vars = Symbol[VERTICAL_PARAMETER_ORDER[i] for i in 1:7 if config.regularization.vertical.types[i] != 0]
     regvars = sort!(collect(union(vertical_vars,keys(config.regularization.horizontal))))
     nsources=sum(length(r.sources) for r in config.regions)
-    "observation_input=$(config.observed.file) atmosphere_input=$(config.atmosphere.file) synthesis_output=$(config.outputs.synthesis_file) atmosphere_output=$(config.outputs.atmosphere_file) logtau=$(config.atmosphere.logtau500_dataset) dx_m=$(config.synthesis.dx_m) dy_m=$(config.synthesis.dy_m) spectral_regions=$(length(config.regions)) spectral_sources=$nsources synthesis_wavelengths=$nlambda full_grid_psf=true zero_weight_exclusion=true stokes=$(join(config.stokes.components,',')) redistribution=$(config.redistribution) force_balance=$mode regularized=$(join(regvars,',')) mpi=$(config.parallel.enabled) decomposition=$(config.parallel.decomposition) threads_per_rank=$(config.parallel.threads_per_rank) gpu_launcher_rank=$(config.parallel.gpu_launcher_rank)"
+    "observation_input=$(config.observed.file) atmosphere_input=$(config.atmosphere.file) synthesis_output=$(config.outputs.synthesis_file) atmosphere_output=$(config.outputs.atmosphere_file) logtau=$(config.atmosphere.logtau500_dataset) dx_m=$(config.synthesis.dx_m) dy_m=$(config.synthesis.dy_m) spectral_regions=$(length(config.regions)) spectral_sources=$nsources synthesis_wavelengths=$nlambda full_grid_psf=true zero_weight_exclusion=true stokes=$(join(config.stokes.components,',')) redistribution=$(config.redistribution) force_balance=$mode regularized=$(join(regvars,',')) mpi=$(config.parallel.enabled) decomposition=$(config.parallel.decomposition) threads_per_rank=$(config.parallel.threads_per_rank) gpu_launcher_rank=$(config.parallel.gpu_launcher_rank) gpu_connect_timeout_seconds=$(config.parallel.gpu_connect_timeout_seconds) gpu_status_timeout_seconds=$(config.parallel.gpu_status_timeout_seconds) gpu_diagnostic_interval_seconds=$(config.parallel.gpu_diagnostic_interval_seconds)"
 end
 
 function checkpoint!(path::AbstractString,state;manifest::CapabilityManifest=CapabilityManifest())

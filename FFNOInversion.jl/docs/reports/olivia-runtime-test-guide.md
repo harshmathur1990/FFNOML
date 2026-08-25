@@ -8,6 +8,13 @@ Inversion MPI jobs source `/cluster/home/harshm/loadnvidiampi.sh` by default.
 Set `OLIVIA_ENV_SCRIPT` only when an alternate MPI-compatible module setup is
 required. Non-inversion training and prediction jobs are unaffected.
 
+The harness enables the production control-plane diagnostics every 5 seconds,
+a 60-second peer-connection timeout and a 180-second normal status timeout.
+The internal-timeout case overrides the status timeout to 20 seconds; the
+external-watchdog case sets it to zero deliberately. The relevant overrides are
+`FFNO_GPU_CONNECT_TIMEOUT`, `FFNO_GPU_STATUS_TIMEOUT`,
+`FFNO_GPU_DIAGNOSTIC_INTERVAL`, and `FFNO_GPU_DIAGNOSTICS_DIR`.
+
 ## Submit
 
 From the `FFNOInversion.jl` package directory on Olivia:
@@ -48,10 +55,14 @@ Slingshot and NCCL paths. The probes transfer only scalar tensors.
    allreduce across every allocated GPU.
 5. Intentional GPU-process failure. Every outer MPI rank must receive the same
    launcher error, then the control path must recover.
-6. Intentional GPU-rank stall after CUDA/NCCL initialization. The wrapper must
-   time out and kill the outer and nested steps. Python faulthandler writes
-   periodic stack traces while the stall is active.
-7. Healthy hybrid GPU rerun after the timeout.
+6. Intentional GPU-rank stall with the internal status timeout enabled. A
+   non-root inversion rank must record `gpu_status_timeout`; Slurm then cleans
+   up the failed outer and nested steps.
+7. Healthy hybrid GPU rerun after the internal timeout.
+8. Intentional GPU-rank stall with the internal timeout deliberately disabled.
+   The batch wrapper must time out and kill the outer and nested steps. Python
+   faulthandler writes periodic stack traces while the stall is active.
+9. Healthy hybrid GPU rerun after the external timeout.
 
 An intentional stall is counted as passing only when GNU `timeout` terminates
 it and the rank logs contain the exact injected-stall marker. A timeout during
