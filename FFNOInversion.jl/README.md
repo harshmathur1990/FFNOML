@@ -32,6 +32,15 @@ Phase 3 adds production mixed intensity synthesis. Each region may combine FFNO 
 
 The Phase 4 runtime foundation uses hybrid MPI plus Julia threading. MPI ranks own non-overlapping 2D spatial tiles; typed numeric payloads are scattered/gathered without Julia object serialization; coupled spatial kernels use corner-complete halo exchange; and `Forward.jl`-style column synthesis uses one mutable workspace per Julia thread. Global rank 0 alone controls the persistent or nested GPU launcher through a TCP status channel, so non-root ranks do not hold an MPI collective open during an overlapping Slurm/NCCL launch. MPI calls remain on the initializing Julia thread.
 
+Olivia deployment validation is provided by `scripts/run_olivia_runtime_tests.sbatch`.
+It runs small MPI/CUDA/NCCL probes, intentional CPU and GPU-rank stalls with
+bounded timeouts, Slurm-step cleanup, failure propagation, post-timeout recovery,
+and diagnostic collection without loading the scientific forward model. See
+`docs/reports/olivia-runtime-test-guide.md` for submission and return-artifact
+instructions.
+
+Phase 4 integrates that runtime into the sole application-level forward path: distributed node expansion, HE3D/optional-B MHS and EOS, rank-0 population inference with tile redistribution, threaded local synthesis, halo-aware spatial PSF, distributed observations and weights, global chi-squared/regularization reductions, and final atmosphere/spectrum collection. One-rank development runs and multi-rank production runs invoke the same `HybridForwardModel` and `forward!` implementation.
+
 The scheduler chooses rank count and Julia chooses threads per rank. For example, a 256-core allocation can start with 16 ranks and 16 threads per rank. Set BLAS/OpenMP thread counts to one when Julia threads own column-level parallelism.
 
 ## Grid and objective convention
@@ -49,4 +58,7 @@ julia --project=. benchmarks/mock_forward.jl
 
 # Local hybrid integration example: 4 MPI ranks x 2 Julia threads
 julia --project=. -e 'using MPI; run(`$(MPI.mpiexec()) -n 4 $(Base.julia_cmd()) --project=. --threads=2 test/mpi_hybrid_worker.jl`)'
+
+# Full Phase 4 one-rank versus four-rank topology parity
+julia --project=. scripts/validate_phase4_topology.jl
 ```

@@ -65,6 +65,48 @@ mpi_broadcast(value,context::ParallelContext) = context.enabled ? (_assert_mpi_t
 allreduce_sum(value,context::ParallelContext) = context.enabled ? (_assert_mpi_thread(context); MPI.Allreduce(value,MPI.SUM,context.comm)) : value
 allreduce_max(value,context::ParallelContext) = context.enabled ? (_assert_mpi_thread(context); MPI.Allreduce(value,MPI.MAX,context.comm)) : value
 
+"""Collect reproducibility metadata for the active MPI/thread topology.
+
+Only rank 0 receives the returned dictionary.  The payload contains metadata,
+not atmospheric arrays, and is therefore safe to gather as Julia objects.
+"""
+function parallel_provenance(context::ParallelContext,tile::Tile2D;
+        configuration_hash::AbstractString="",model_hash::AbstractString="",
+        source_revision::AbstractString="",capabilities=String[])
+    local_entry=Dict{String,Any}(
+        "rank"=>context.rank,
+        "hostname"=>gethostname(),
+        "threads"=>Threads.nthreads(),
+        "coordinates"=>collect(tile.coordinates),
+        "xrange"=>[first(tile.xrange),last(tile.xrange)],
+        "yrange"=>[first(tile.yrange),last(tile.yrange)])
+    ranks=context.enabled ? (_assert_mpi_thread(context); MPI.gather(local_entry,context.comm;root=context.root)) : [local_entry]
+    isroot(context) || return nothing
+    Dict{String,Any}(
+        "schema_version"=>1,
+        "julia_version"=>string(VERSION),
+        "mpi_ranks"=>context.size,
+        "threads_per_rank"=>context.options.threads_per_rank,
+        "decomposition"=>string(context.options.decomposition),
+        "process_grid"=>collect(tile.process_grid),
+        "gpu_launcher_rank"=>context.root,
+        "global_spatial_shape"=>[tile.global_nx,tile.global_ny],
+        "configuration_hash"=>String(configuration_hash),
+        "model_hash"=>String(model_hash),
+        "source_revision"=>String(source_revision),
+        "capabilities"=>String.(capabilities),
+        "rank_layout"=>ranks)
+end
+
+"""Write a rank-0 provenance dictionary in stable, human-readable TOML."""
+function write_parallel_provenance(path::AbstractString,provenance)
+    provenance===nothing && return nothing
+    open(path,"w") do io
+        TOML.print(io,provenance;sorted=true)
+    end
+    path
+end
+
 function _axis_partition(n::Int,index::Int,parts::Int)
     n >= parts || throw(ArgumentError("cannot split axis of length $n over $parts non-empty tiles"))
     q,r = divrem(n,parts)
@@ -269,7 +311,8 @@ function launch_gpu!(coordinator::RootGPUCoordinator,context::ParallelContext,ar
     # is the charge-branch pattern that avoids holding an outer MPI collective
     # open while Slurm/NCCL launches overlapping work.
     server=isroot(context) ? listen(ip"0.0.0.0",0) : nothing
-    endpoint=mpi_broadcast(isroot(context) ? (gethostname(),Int(getsockname(server)[2])) : nothing,context)
+    endpoint=mpi_broadcast(isroot(context) ?
+        (get(ENV,"FFNO_GPU_CONTROL_HOST",string(getipaddr())),Int(getsockname(server)[2])) : nothing,context)
     peers=TCPSocket[]
     control=nothing
     if isroot(context)
@@ -281,7 +324,16 @@ function launch_gpu!(coordinator::RootGPUCoordinator,context::ParallelContext,ar
         end
         close(server)
     else
-        control=connect(endpoint[1],endpoint[2]); write(control,Int32(context.rank)); flush(control)
+        control=nothing
+        for attempt in 1:100
+            try
+                control=connect(endpoint[1],endpoint[2]); break
+            catch exception
+                attempt==100 && rethrow(exception)
+                sleep(0.05)
+            end
+        end
+        write(control,Int32(context.rank)); flush(control)
     end
     barrier(context)
     result=nothing; success=true; message=""

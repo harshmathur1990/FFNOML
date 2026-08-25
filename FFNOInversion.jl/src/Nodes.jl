@@ -41,3 +41,22 @@ function expand_nodes(field::NodeField{T}, grid::Grid3D{T}) where T
     end
     out
 end
+
+"""Expand node maps directly onto one MPI-owned tile using global normalized coordinates."""
+function expand_nodes(field::NodeField{T},grid::Grid3D{T},tile::Tile2D) where T
+    nnode,ncx,ncy=size(field.values); nz=length(grid.log_tau500)
+    out=Array{T}(undef,nz,length(tile.xrange),length(tile.yrange))
+    cx=ncx==1 ? T[zero(T)] : collect(range(zero(T),one(T),length=ncx))
+    cy=ncy==1 ? T[zero(T)] : collect(range(zero(T),one(T),length=ncy))
+    xn=length(grid.x)==1 ? T[zero(T)] : collect(range(zero(T),one(T),length=length(grid.x)))
+    yn=length(grid.y)==1 ? T[zero(T)] : collect(range(zero(T),one(T),length=length(grid.y)))
+    for iz in 1:nz,(ii,ix) in enumerate(tile.xrange),(jj,iy) in enumerate(tile.yrange)
+        z0,z1,wz=_bracket(field.log_tau_nodes,grid.log_tau500[iz])
+        x0,x1,wx=ncx==1 ? (1,1,zero(T)) : _bracket(cx,xn[ix])
+        y0,y1,wy=ncy==1 ? (1,1,zero(T)) : _bracket(cy,yn[iy])
+        v0=(1-wx)*((1-wy)*field.values[z0,x0,y0]+wy*field.values[z0,x0,y1])+wx*((1-wy)*field.values[z0,x1,y0]+wy*field.values[z0,x1,y1])
+        v1=(1-wx)*((1-wy)*field.values[z1,x0,y0]+wy*field.values[z1,x0,y1])+wx*((1-wy)*field.values[z1,x1,y0]+wy*field.values[z1,x1,y1])
+        out[iz,ii,jj]=(1-wz)*v0+wz*v1
+    end
+    out
+end

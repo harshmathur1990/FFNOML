@@ -21,6 +21,6 @@ julia --project=. -e 'using MPI; run(`$(MPI.mpiexec()) -n 4 $(Base.julia_cmd()) 
 
 The first command passes the complete Phase 0-3 suite plus serial decomposition, local atmosphere, thread-workspace and halo tests. The second passes with four MPI ranks and two Julia threads per rank. It verifies typed scatter/gather, 2D/corner halo values, threaded local reductions, distributed forward-model parity against a monolithic result, exactly one GPU launcher invocation, and communicator recovery after the GPU control stage.
 
-## Remaining integrated Phase 4 work
+## Superseded status note
 
-The runtime substrate is complete, but the existing HE3D/MHS numerical kernel, spatial observation operator, horizontal regularization and production FFNO population adapter still need distributed wrappers using these primitives. Parallel HDF5 hyperslab I/O is also not yet implemented. These are scientific-module integrations, not changes to the chosen parallel architecture.
+The integrations originally listed here as pending are now implemented and validated in `phase-4-validation.md`. Collective HDF5 hyperslab output remains a later output-backend optimization; the current Phase 4 adapter collects final products on rank 0.
