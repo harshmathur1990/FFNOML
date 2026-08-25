@@ -61,6 +61,7 @@ export OLIVIA_PYTHON=${OLIVIA_PYTHON:-python3}
 export OLIVIA_GPUS_PER_NODE=${OLIVIA_GPUS_PER_NODE:-4}
 export OLIVIA_JULIA_THREADS=${OLIVIA_JULIA_THREADS:-4}
 export OLIVIA_GPU_CPUS_PER_NODE=${OLIVIA_GPU_CPUS_PER_NODE:-8}
+export CUDA_DEVICE_ORDER=${CUDA_DEVICE_ORDER:-PCI_BUS_ID}
 export FFNO_GPU_CONTROL_HOST=${FFNO_GPU_CONTROL_HOST:-$(scontrol show hostnames "${SLURM_JOB_NODELIST}" | head -n 1)}
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
 export OPENBLAS_NUM_THREADS=${OPENBLAS_NUM_THREADS:-1}
@@ -292,9 +293,15 @@ fi
     scontrol show job "${SLURM_JOB_ID}"
 } > "${diagnostics_root}/environment.txt" 2>&1
 
+# Keep the long-lived Julia/OpenMPI ranks CUDA-blind. Olivia's CUDA-aware
+# OpenMPI/OFI stack may otherwise initialize the default device on every node,
+# which prevents nested torchrun local-rank 0 from acquiring that GPU when the
+# devices use exclusive-process mode. The nested GPU srun step receives a new,
+# step-local CUDA_VISIBLE_DEVICES value from Slurm's GRES plugin.
 mpi_command=(srun --kill-on-bad-exit=1 --mpi=pmix --gres=none
     --nodes="${SLURM_NNODES}" --ntasks="${SLURM_NNODES}" --ntasks-per-node=1
     --cpu-bind=cores --cpus-per-task="${SLURM_CPUS_PER_TASK}"
+    env CUDA_VISIBLE_DEVICES=-1
     julia --project="${JULIA_PROJECT}" --startup-file=no --threads="${OLIVIA_JULIA_THREADS}")
 
 run_case cpu_mpi_success success 90 OLIVIA_MPI_PROBE_OK \

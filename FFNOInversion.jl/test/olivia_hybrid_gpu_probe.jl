@@ -36,7 +36,7 @@ try
         true
     end;launcher_rank=context.root)
 
-    record("hybrid_launch_enter";details="mode=$mode")
+    record("hybrid_launch_enter";details="mode=$mode outer_cuda_visible_devices=$(get(ENV,"CUDA_VISIBLE_DEVICES","<unset>"))")
     if mode==:failure
         caught=false
         try

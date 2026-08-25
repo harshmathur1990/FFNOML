@@ -69,6 +69,16 @@ By default the Julia project is the package directory. Set
 Use at least two nodes: the purpose is to exercise Olivia's inter-node PMIx,
 Slingshot and NCCL paths. The probes transfer only scalar tensors.
 
+The outer Julia/OpenMPI step is launched with `CUDA_VISIBLE_DEVICES=-1` even
+though the batch allocation contains GPUs. This prevents the CUDA-aware
+OpenMPI/OFI runtime from retaining a context on the default GPU of every node;
+the observed symptom was `cudaErrorDevicesUnavailable` only for torchrun
+`local_rank=0` on every node. The overlapping nested `srun --gpus-per-node`
+step receives a fresh, step-local `CUDA_VISIBLE_DEVICES` mapping from Slurm.
+The nested launcher validates and records that mapping before starting
+torchrun, so a missing remap fails explicitly instead of appearing as an NCCL
+problem.
+
 ## Test sequence
 
 1. Healthy multi-node MPI initialization, barrier and scalar allreduce.

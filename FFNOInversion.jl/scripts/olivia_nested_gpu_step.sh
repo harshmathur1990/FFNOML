@@ -40,7 +40,13 @@ srun --overlap --exact --kill-on-bad-exit=1 --mpi=none --network=no_vni --cpu-bi
     --ntasks-per-node=1 \
     --gpus-per-node="${gpus_per_node}" \
     --cpus-per-task="${gpu_cpus_per_node}" \
-    bash -c 'exec "${OLIVIA_PYTHON}" -m torch.distributed.run \
+    bash -c '
+        if [[ -z "${CUDA_VISIBLE_DEVICES:-}" || "${CUDA_VISIBLE_DEVICES}" == "-1" ]]; then
+            echo "nested GPU step did not receive a Slurm GPU visibility mapping on $(hostname)" >&2
+            exit 2
+        fi
+        echo "torchrun node worker: host=$(hostname) node_rank=${SLURM_PROCID} CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
+        exec "${OLIVIA_PYTHON}" -m torch.distributed.run \
         --nnodes="${SLURM_NNODES}" \
         --nproc_per_node="${OLIVIA_GPUS_PER_NODE}" \
         --node_rank="${SLURM_PROCID}" \
