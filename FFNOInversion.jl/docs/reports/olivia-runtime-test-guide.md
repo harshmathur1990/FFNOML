@@ -45,10 +45,14 @@ JULIA_DEPOT_PATH=/cluster/work/projects/nn2834k/harshm/julia-depot-1.12.2 \
 ```
 
 Before allocating any MPI step, the batch script now imports `FFNOInversion`
-and `MPI` from the resolved project. A missing package, bad depot, or MPI
-preference therefore stops once with exit 2 and leaves the exact import error in
-`preflight.txt`, instead of producing the same immediate failure for all nine
-runtime cases.
+and `MPI` from the resolved project. It first configures MPIPreferences to use
+the system OpenMPI selected by `loadnvidiampi.sh`, with `srun` as the launcher
+and the OpenMPI ABI. This is required because MPI.jl otherwise defaults to
+MPICH_jll, which rejects Slurm's PMIx runtime during `MPI_Init_thread`. A missing
+package, bad depot, system-library problem, or wrong MPI preference therefore
+stops once with exit 2 and leaves the exact error in `preflight.txt`, instead of
+producing the same immediate failure for all nine runtime cases. The resulting
+`LocalPreferences.toml` is checkout-local and ignored by git.
 
 The defaults request two `accel` nodes, four GPUs per node, one outer MPI rank
 per node and four Julia threads per rank. Override paths at submission time only

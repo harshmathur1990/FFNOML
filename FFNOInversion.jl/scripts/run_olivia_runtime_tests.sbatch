@@ -240,18 +240,35 @@ for required_file in Project.toml src/FFNOInversion.jl \
     fi
 done
 
-# Detect a missing/uninstantiated Julia environment or MPI preference problem
-# once. Without this gate, Slurm's --kill-on-bad-exit can report 143 for every
-# case after one rank exits with the same immediate package-load error.
+# Julia MPI defaults to MPICH_jll, but Olivia's `srun --mpi=pmix` and the
+# loadnvidiampi.sh module stack use system OpenMPI. Persist a checkout-local MPI
+# preference before importing FFNOInversion/MPI in a fresh Julia process. This
+# is the same selection used by the established charge-branch environment.
 set +o errexit
 timeout --signal=TERM --kill-after=15s 180s \
     julia --project="${JULIA_PROJECT}" --startup-file=no -e \
-    'using FFNOInversion; import MPI; println("OLIVIA_JULIA_PREFLIGHT_OK threads=", Threads.nthreads())' \
+    'using MPIPreferences; MPIPreferences.use_system_binary(mpiexec="srun", abi="OpenMPI")' \
+    >> "${diagnostics_root}/preflight.txt" 2>&1
+mpi_preference_status=$?
+set -o errexit
+if [[ ${mpi_preference_status} -ne 0 ]]; then
+    echo "Julia system-OpenMPI preference setup failed (exit=${mpi_preference_status})." \
+        | tee -a "${diagnostics_root}/preflight.txt"
+    exit 2
+fi
+
+# Detect a missing/uninstantiated Julia environment or system-MPI loading
+# problem once. Without this gate, Slurm's --kill-on-bad-exit can report 143
+# for every case after one rank exits with the same immediate load error.
+set +o errexit
+timeout --signal=TERM --kill-after=15s 180s \
+    julia --project="${JULIA_PROJECT}" --startup-file=no -e \
+    'using FFNOInversion; import MPI; MPI.MPIPreferences.binary == "system" || error("MPI binary is not system"); MPI.MPIPreferences.abi == "OpenMPI" || error("MPI ABI is not OpenMPI"); println("OLIVIA_JULIA_PREFLIGHT_OK binary=", MPI.MPIPreferences.binary, " abi=", MPI.MPIPreferences.abi, " threads=", Threads.nthreads())' \
     >> "${diagnostics_root}/preflight.txt" 2>&1
 julia_preflight_status=$?
 set -o errexit
 if [[ ${julia_preflight_status} -ne 0 ]]; then
-    echo "Julia project preflight failed (exit=${julia_preflight_status}); no runtime cases were launched." \
+    echo "Julia project/system-MPI preflight failed (exit=${julia_preflight_status}); no runtime cases were launched." \
         | tee -a "${diagnostics_root}/preflight.txt"
     exit 2
 fi

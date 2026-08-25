@@ -2,7 +2,7 @@
 
 julia_version = "1.12.3"
 manifest_format = "2.0"
-project_hash = "978cc42d4fedbec3aaba7d4d67cfdb7d485343ec"
+project_hash = "d2e7e0a23d8dd0209d721dce266724ecd28b0957"
 
 [[deps.ArgTools]]
 uuid = "0dad84c5-d112-42e6-8d28-ef12dabb789f"
@@ -42,7 +42,7 @@ uuid = "f43a241f-c20a-4ad4-852c-f6b1247861c6"
 version = "1.7.0"
 
 [[deps.FFNOInversion]]
-deps = ["Libdl", "LinearAlgebra", "MPI", "Serialization", "Sockets", "TOML"]
+deps = ["Dates", "Libdl", "LinearAlgebra", "MPI", "MPIPreferences", "Serialization", "Sockets", "TOML"]
 path = "."
 uuid = "5f657311-4af4-4e09-9b93-d21004ee51b8"
 version = "0.1.0"
