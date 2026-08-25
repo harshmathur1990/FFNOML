@@ -4,6 +4,10 @@ This harness tests only MPI, Julia-thread, rank-0 launcher, CUDA/NCCL, timeout,
 cleanup and recovery behavior. It does not load an atmosphere, FFNO checkpoint,
 atom, Kurucz list or synthesis code.
 
+Inversion MPI jobs source `/cluster/home/harshm/loadnvidiampi.sh` by default.
+Set `OLIVIA_ENV_SCRIPT` only when an alternate MPI-compatible module setup is
+required. Non-inversion training and prediction jobs are unaffected.
+
 ## Submit
 
 From the `FFNOInversion.jl` package directory on Olivia:

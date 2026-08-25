@@ -20,7 +20,7 @@ set -o errexit
 : "${SLURM_JOB_ID:?submit this file with sbatch}"
 
 module --quiet reset
-environment_script=${OLIVIA_ENV_SCRIPT:-/cluster/home/harshm/loadnvidia.sh}
+environment_script=${OLIVIA_ENV_SCRIPT:-/cluster/home/harshm/loadnvidiampi.sh}
 if [[ ! -r "${environment_script}" ]]; then
     echo "Cannot read Olivia environment script: ${environment_script}" >&2
     exit 2
