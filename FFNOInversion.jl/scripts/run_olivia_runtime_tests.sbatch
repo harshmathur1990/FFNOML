@@ -106,9 +106,9 @@ snapshot_scheduler() {
     {
         date -u +%Y-%m-%dT%H:%M:%SZ
         scontrol show job "${SLURM_JOB_ID}" || true
-        squeue --steps --jobs="${SLURM_JOB_ID}" --noheader --format='%i %T %M %N' || true
+        squeue --steps --jobs="${SLURM_JOB_ID}" --noheader --format='%i %t %M %N' || true
         timeout 8s sstat --allsteps --jobs="${SLURM_JOB_ID}" \
-            --format='JobID,State,AveCPU,MaxRSS,MaxVMSize,NTasks,NodeList' || true
+            --format='JobID,AveCPU,MaxRSS,MaxVMSize,NTasks,NodeList' || true
         timeout 8s sacct --jobs="${SLURM_JOB_ID}" \
             --format='JobID,JobName,State,ExitCode,Elapsed,MaxRSS,NodeList' || true
     } >> "${destination}" 2>&1
@@ -134,6 +134,40 @@ cleanup_numeric_steps() {
         sleep 1
     done
     echo "numeric Slurm steps still visible 20 seconds after cleanup" >> "${destination}"
+}
+
+wait_for_interconnect_recovery() {
+    local destination=$1
+    local deadline=$((SECONDS+90))
+    local attempt=0
+    local status
+
+    while (( SECONDS < deadline )); do
+        attempt=$((attempt+1))
+        printf '%s interconnect readiness attempt=%d\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${attempt}" >> "${destination}"
+        if timeout --signal=TERM --kill-after=5s 15s \
+                srun --kill-on-bad-exit=1 --mpi=pmix --gres=none \
+                --nodes="${SLURM_NNODES}" --ntasks="${SLURM_NNODES}" \
+                --ntasks-per-node=1 --cpu-bind=none --cpus-per-task=1 \
+                env CUDA_VISIBLE_DEVICES=-1 /bin/true \
+                >> "${destination}" 2>&1; then
+            printf '%s interconnect ready attempt=%d\n' \
+                "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${attempt}" >> "${destination}"
+            return 0
+        else
+            status=$?
+            printf '%s interconnect not ready attempt=%d exit=%d\n' \
+                "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${attempt}" "${status}" \
+                >> "${destination}"
+        fi
+        cleanup_numeric_steps "${destination}"
+        sleep 5
+    done
+
+    printf '%s interconnect did not recover within 90 seconds\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${destination}"
+    return 1
 }
 
 capture_node_health() {
@@ -163,6 +197,7 @@ run_case() {
     local required_marker=$4
     shift 4
     local case_dir=${diagnostics_root}/${label}
+    local cleanup_ready=1
     mkdir -p "${case_dir}"
     export OLIVIA_CASE_DIAGNOSTICS=${case_dir}
     export FFNO_GPU_DIAGNOSTICS_DIR=${case_dir}/gpu-control
@@ -185,12 +220,15 @@ run_case() {
     snapshot_scheduler "${case_dir}/scheduler-after-command.txt"
     if [[ ${status} -ne 0 ]]; then
         cleanup_numeric_steps "${case_dir}/cleanup.log"
+        if ! wait_for_interconnect_recovery "${case_dir}/interconnect-recovery.log"; then
+            cleanup_ready=0
+        fi
     fi
     snapshot_scheduler "${case_dir}/scheduler-after-cleanup.txt"
     capture_node_health "${case_dir}/node-health-after.txt"
 
     local result=FAIL
-    if [[ "${expectation}" == success && ${status} -eq 0 ]]; then
+    if [[ ${cleanup_ready} -eq 1 && "${expectation}" == success && ${status} -eq 0 ]]; then
         if [[ "${required_marker}" == - ]] || grep --recursive --quiet --fixed-strings \
                 "${required_marker}" "${case_dir}"; then
             result=PASS
@@ -198,7 +236,7 @@ run_case() {
             echo "successful command did not contain required marker: ${required_marker}" \
                 >> "${case_dir}/validation-error.txt"
         fi
-    elif [[ "${expectation}" == controlled_failure && ${status} -ne 0 &&
+    elif [[ ${cleanup_ready} -eq 1 && "${expectation}" == controlled_failure && ${status} -ne 0 &&
             ${status} -ne 124 && ${status} -ne 137 ]]; then
         if [[ "${required_marker}" != - ]] && grep --recursive --quiet --fixed-strings \
                 "${required_marker}" "${case_dir}"; then
@@ -207,7 +245,7 @@ run_case() {
             echo "controlled failure did not contain required marker: ${required_marker}" \
                 >> "${case_dir}/validation-error.txt"
         fi
-    elif [[ "${expectation}" == timeout && ( ${status} -eq 124 || ${status} -eq 137 ) ]]; then
+    elif [[ ${cleanup_ready} -eq 1 && "${expectation}" == timeout && ( ${status} -eq 124 || ${status} -eq 137 ) ]]; then
         if [[ "${required_marker}" != - ]] && grep --recursive --quiet --fixed-strings \
                 "${required_marker}" "${case_dir}"; then
             result=PASS
@@ -215,6 +253,10 @@ run_case() {
             echo "timeout occurred before required injected-stall marker: ${required_marker}" \
                 >> "${case_dir}/validation-error.txt"
         fi
+    fi
+    if [[ ${cleanup_ready} -ne 1 ]]; then
+        echo "Slingshot/PMIx did not become ready after forced step cleanup" \
+            >> "${case_dir}/validation-error.txt"
     fi
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' "${label}" "${expectation}" "${result}" \
         "${status}" "${timeout_seconds}" "${required_marker}" >> "${summary}"

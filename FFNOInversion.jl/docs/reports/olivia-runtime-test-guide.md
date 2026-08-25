@@ -15,6 +15,14 @@ external-watchdog case sets it to zero deliberately. The relevant overrides are
 `FFNO_GPU_CONNECT_TIMEOUT`, `FFNO_GPU_STATUS_TIMEOUT`,
 `FFNO_GPU_DIAGNOSTIC_INTERVAL`, and `FFNO_GPU_DIAGNOSTICS_DIR`.
 
+After any forced timeout or nonzero step exit, the harness cancels orphaned
+numeric Slurm steps and then performs bounded multi-node PMIx readiness probes
+for up to 90 seconds. Olivia can remove a killed step from `squeue` before its
+Slingshot interconnect resources are ready for reuse; immediately starting the
+next MPI step then reports `Error configuring interconnect`. A timeout test is
+accepted only if the readiness probe succeeds, so cleanup and subsequent-step
+recovery are part of the evidence rather than an assumed delay.
+
 ## Submit
 
 From the `FFNOInversion.jl` package directory on Olivia:
