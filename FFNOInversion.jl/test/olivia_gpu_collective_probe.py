@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import threading
 import time
+import traceback
 
 import torch
 import torch.distributed as dist
@@ -40,6 +41,7 @@ def record(event, **fields):
 
 
 stop_watchdog = threading.Event()
+current_stage = "startup"
 
 
 def watchdog():
@@ -50,28 +52,41 @@ def watchdog():
 threading.Thread(target=watchdog, name="olivia-gpu-watchdog", daemon=True).start()
 
 try:
+    current_stage = "python_started"
     record("python_started", torch=torch.__version__, cuda=torch.version.cuda,
            ignored_arguments=repr(unknown_arguments))
+    current_stage = "cuda_availability_check"
     if not torch.cuda.is_available():
         raise RuntimeError("torch.cuda.is_available() is false")
+    record(
+        "cuda_runtime_available",
+        device_count=torch.cuda.device_count(),
+        visible=os.environ.get("CUDA_VISIBLE_DEVICES", ""),
+    )
+    current_stage = "cuda_device_selection"
     torch.cuda.set_device(local_rank)
     record(
         "cuda_device_selected",
         device=torch.cuda.get_device_name(local_rank).replace(" ", "_"),
         visible=os.environ.get("CUDA_VISIBLE_DEVICES", ""),
     )
+    current_stage = "nccl_initialization"
     dist.init_process_group("nccl", timeout=datetime.timedelta(seconds=120))
     global_rank = dist.get_rank()
     world = dist.get_world_size()
     record("nccl_initialized", world=world)
 
+    current_stage = "cuda_tensor_allocation"
     value = torch.tensor([float(global_rank + 1)], device="cuda")
+    current_stage = "cuda_smoke"
     torch.cuda.synchronize()
     record("cuda_smoke_complete")
+    current_stage = "initial_barrier"
     dist.barrier()
     record("initial_collective_complete")
 
     if MODE == "failure":
+        current_stage = "intentional_failure"
         if global_rank == 0:
             record("intentional_gpu_process_failure")
             os._exit(23)
@@ -81,11 +96,13 @@ try:
             time.sleep(60)
 
     if MODE == "stall" and global_rank == 0:
+        current_stage = "intentional_stall"
         record("intentional_gpu_stall_enter")
         while True:
             time.sleep(60)
 
     record("allreduce_enter")
+    current_stage = "nccl_allreduce"
     dist.all_reduce(value, op=dist.ReduceOp.SUM)
     torch.cuda.synchronize()
     expected = world * (world + 1) / 2
@@ -93,9 +110,19 @@ try:
     if actual != expected:
         raise RuntimeError(f"NCCL allreduce returned {actual}, expected {expected}")
     record("allreduce_complete", value=actual)
+    current_stage = "final_barrier"
     dist.barrier()
     if global_rank == 0:
         print(f"OLIVIA_GPU_PROBE_OK world={world} sum={actual}", flush=True)
+except BaseException as exception:
+    record(
+        "python_failure",
+        stage=current_stage,
+        exception_type=type(exception).__name__,
+        error=repr(exception),
+        traceback=repr(traceback.format_exc()),
+    )
+    raise
 finally:
     stop_watchdog.set()
     faulthandler.cancel_dump_traceback_later()

@@ -190,7 +190,13 @@ run_case() {
 
     local result=FAIL
     if [[ "${expectation}" == success && ${status} -eq 0 ]]; then
-        result=PASS
+        if [[ "${required_marker}" == - ]] || grep --recursive --quiet --fixed-strings \
+                "${required_marker}" "${case_dir}"; then
+            result=PASS
+        else
+            echo "successful command did not contain required marker: ${required_marker}" \
+                >> "${case_dir}/validation-error.txt"
+        fi
     elif [[ "${expectation}" == controlled_failure && ${status} -ne 0 &&
             ${status} -ne 124 && ${status} -ne 137 ]]; then
         if [[ "${required_marker}" != - ]] && grep --recursive --quiet --fixed-strings \
@@ -291,24 +297,24 @@ mpi_command=(srun --kill-on-bad-exit=1 --mpi=pmix --gres=none
     --cpu-bind=cores --cpus-per-task="${SLURM_CPUS_PER_TASK}"
     julia --project="${JULIA_PROJECT}" --startup-file=no --threads="${OLIVIA_JULIA_THREADS}")
 
-run_case cpu_mpi_success success 90 - \
+run_case cpu_mpi_success success 90 OLIVIA_MPI_PROBE_OK \
     "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_mpi_probe.jl" success
 run_case cpu_mpi_intentional_stall timeout 30 intentional_cpu_stall_enter \
     "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_mpi_probe.jl" stall
-run_case cpu_mpi_post_timeout_success success 90 - \
+run_case cpu_mpi_post_timeout_success success 90 OLIVIA_MPI_PROBE_OK \
     "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_mpi_probe.jl" success
 
-run_case hybrid_gpu_success success 240 - \
+run_case hybrid_gpu_success success 240 OLIVIA_GPU_PROBE_OK \
     "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_hybrid_gpu_probe.jl" success
-run_case hybrid_gpu_failure_recovery success 240 - \
+run_case hybrid_gpu_failure_recovery success 240 intentional_gpu_process_failure \
     "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_hybrid_gpu_probe.jl" failure
 run_case hybrid_gpu_internal_status_timeout controlled_failure 90 gpu_status_timeout \
     env FFNO_GPU_STATUS_TIMEOUT=20 "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_hybrid_gpu_probe.jl" stall
-run_case hybrid_gpu_post_internal_timeout_success success 240 - \
+run_case hybrid_gpu_post_internal_timeout_success success 240 OLIVIA_GPU_PROBE_OK \
     "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_hybrid_gpu_probe.jl" success
 run_case hybrid_gpu_external_watchdog_stall timeout 60 intentional_gpu_stall_enter \
     env FFNO_GPU_STATUS_TIMEOUT=0 "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_hybrid_gpu_probe.jl" stall
-run_case hybrid_gpu_post_timeout_success success 240 - \
+run_case hybrid_gpu_post_timeout_success success 240 OLIVIA_GPU_PROBE_OK \
     "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_hybrid_gpu_probe.jl" success
 
 snapshot_scheduler "${diagnostics_root}/scheduler-final.txt"

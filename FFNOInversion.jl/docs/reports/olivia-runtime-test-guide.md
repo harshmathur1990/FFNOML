@@ -88,10 +88,14 @@ Slingshot and NCCL paths. The probes transfer only scalar tensors.
    faulthandler writes periodic stack traces while the stall is active.
 9. Healthy hybrid GPU rerun after the external timeout.
 
-An intentional stall is counted as passing only when GNU `timeout` terminates
-it and the rank logs contain the exact injected-stall marker. A timeout during
-MPI, CUDA or NCCL initialization is therefore a failure, not a false positive.
-An early crash is also a failure because it did not exercise timeout containment.
+Every healthy case must contain its explicit MPI or GPU completion marker. The
+injected GPU-failure/recovery case must contain
+`intentional_gpu_process_failure`; an unrelated CUDA/NCCL initialization error
+is not accepted as the requested injected failure. An intentional stall is
+counted as passing only when GNU `timeout` terminates it and the rank logs
+contain the exact injected-stall marker. A timeout during MPI, CUDA or NCCL
+initialization is therefore a failure, not a false positive. An early crash is
+also a failure because it did not exercise timeout containment.
 
 ## Send back
 
