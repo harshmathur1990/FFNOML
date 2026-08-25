@@ -1,6 +1,6 @@
 # FFNOInversion.jl
 
-Phase 0 scaffold for the spatially coupled Julia inversion layer described in the project planning PDF.
+Spatially coupled Julia inversion layer implementing Phases 0-5 of the project planning PDF.
 
 ## Run contract
 
@@ -47,6 +47,8 @@ cannot be interrupted safely.
 
 Phase 4 integrates that runtime into the sole application-level forward path: distributed node expansion, HE3D/optional-B MHS and EOS, rank-0 population inference with tile redistribution, threaded local synthesis, halo-aware spatial PSF, distributed observations and weights, global chi-squared/regularization reductions, and final atmosphere/spectrum collection. One-rank development runs and multi-rank production runs invoke the same `HybridForwardModel` and `forward!` implementation.
 
+Phase 5 adds the first closed-loop inversion. Bounded temperature and velocity node maps are packed into scaled coarse control maps, broadcast from rank 0, expanded directly onto MPI-owned tiles, and evaluated with separately reported normalized chi-square and 3D regularization terms. A deterministic projected pattern search provides the derivative-free reference solver; centered directional finite differences provide the gradient oracle for Phase 6. Checkpoints are atomic, capability/layout validated, and portable across compatible MPI/thread topologies. TOML/CSV diagnostic bundles retain final controls and every objective component.
+
 The scheduler chooses rank count and Julia chooses threads per rank. For example, a 256-core allocation can start with 16 ranks and 16 threads per rank. Set BLAS/OpenMP thread counts to one when Julia threads own column-level parallelism.
 
 ## Grid and objective convention
@@ -67,4 +69,7 @@ julia --project=. -e 'using MPI; run(`$(MPI.mpiexec()) -n 4 $(Base.julia_cmd()) 
 
 # Full Phase 4 one-rank versus four-rank topology parity
 julia --project=. scripts/validate_phase4_topology.jl
+
+# Phase 5 one-rank/four-rank solver parity and 1-rank -> 4-rank restart
+julia --project=. scripts/validate_phase5_mpi.jl
 ```

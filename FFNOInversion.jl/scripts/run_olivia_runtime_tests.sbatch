@@ -27,7 +27,30 @@ if [[ ! -r "${environment_script}" ]]; then
 fi
 source "${environment_script}"
 
-export OLIVIA_REPO_DIR=${OLIVIA_REPO_DIR:-${SLURM_SUBMIT_DIR}}
+# Resolve the package root independently of the directory from which sbatch was
+# invoked. The established Olivia checkout is the default; OLIVIA_REPO_DIR is
+# only needed when deliberately testing another checkout.
+default_olivia_repo=/cluster/work/projects/nn2834k/harshm/FNOML/FFNOInversion.jl
+if [[ -n "${OLIVIA_REPO_DIR:-}" ]]; then
+    repository_candidate=${OLIVIA_REPO_DIR}
+elif [[ -f "${default_olivia_repo}/Project.toml" &&
+        -f "${default_olivia_repo}/src/FFNOInversion.jl" ]]; then
+    repository_candidate=${default_olivia_repo}
+elif [[ -f "${SLURM_SUBMIT_DIR}/Project.toml" &&
+        -f "${SLURM_SUBMIT_DIR}/src/FFNOInversion.jl" ]]; then
+    repository_candidate=${SLURM_SUBMIT_DIR}
+elif [[ -f "$(dirname "${SLURM_SUBMIT_DIR}")/Project.toml" &&
+        -f "$(dirname "${SLURM_SUBMIT_DIR}")/src/FFNOInversion.jl" ]]; then
+    repository_candidate=$(dirname "${SLURM_SUBMIT_DIR}")
+else
+    echo "Cannot locate the default Olivia checkout at ${default_olivia_repo}." >&2
+    echo "Also checked SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR} and its parent." >&2
+    echo "Set OLIVIA_REPO_DIR only when using a different checkout." >&2
+    exit 2
+fi
+export OLIVIA_REPO_DIR
+OLIVIA_REPO_DIR=$(cd "${repository_candidate}" && pwd)
+export OLIVIA_REPO_DIR
 cd "${OLIVIA_REPO_DIR}" || exit 2
 
 export JULIA_PROJECT=${OLIVIA_JULIA_PROJECT:-${OLIVIA_REPO_DIR}}
@@ -207,8 +230,35 @@ for required in timeout srun scontrol squeue scancel sstat sacct julia "${OLIVIA
     }
 done
 
+for required_file in Project.toml src/FFNOInversion.jl \
+        test/olivia_mpi_probe.jl test/olivia_hybrid_gpu_probe.jl \
+        test/olivia_gpu_collective_probe.py scripts/olivia_nested_gpu_step.sh; do
+    if [[ ! -f "${OLIVIA_REPO_DIR}/${required_file}" ]]; then
+        echo "Missing required repository file: ${OLIVIA_REPO_DIR}/${required_file}" \
+            | tee -a "${diagnostics_root}/preflight.txt"
+        exit 2
+    fi
+done
+
+# Detect a missing/uninstantiated Julia environment or MPI preference problem
+# once. Without this gate, Slurm's --kill-on-bad-exit can report 143 for every
+# case after one rank exits with the same immediate package-load error.
+set +o errexit
+timeout --signal=TERM --kill-after=15s 180s \
+    julia --project="${JULIA_PROJECT}" --startup-file=no -e \
+    'using FFNOInversion; import MPI; println("OLIVIA_JULIA_PREFLIGHT_OK threads=", Threads.nthreads())' \
+    >> "${diagnostics_root}/preflight.txt" 2>&1
+julia_preflight_status=$?
+set -o errexit
+if [[ ${julia_preflight_status} -ne 0 ]]; then
+    echo "Julia project preflight failed (exit=${julia_preflight_status}); no runtime cases were launched." \
+        | tee -a "${diagnostics_root}/preflight.txt"
+    exit 2
+fi
+
 {
     date -u +%Y-%m-%dT%H:%M:%SZ
+    echo "submit_dir=${SLURM_SUBMIT_DIR}"
     echo "repository=${OLIVIA_REPO_DIR}"
     echo "job=${SLURM_JOB_ID} nodes=${SLURM_NNODES} nodelist=${SLURM_JOB_NODELIST}"
     echo "julia_project=${JULIA_PROJECT} julia_threads=${OLIVIA_JULIA_THREADS}"
@@ -225,24 +275,24 @@ mpi_command=(srun --kill-on-bad-exit=1 --mpi=pmix --gres=none
     julia --project="${JULIA_PROJECT}" --startup-file=no --threads="${OLIVIA_JULIA_THREADS}")
 
 run_case cpu_mpi_success success 90 - \
-    "${mpi_command[@]}" test/olivia_mpi_probe.jl success
+    "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_mpi_probe.jl" success
 run_case cpu_mpi_intentional_stall timeout 30 intentional_cpu_stall_enter \
-    "${mpi_command[@]}" test/olivia_mpi_probe.jl stall
+    "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_mpi_probe.jl" stall
 run_case cpu_mpi_post_timeout_success success 90 - \
-    "${mpi_command[@]}" test/olivia_mpi_probe.jl success
+    "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_mpi_probe.jl" success
 
 run_case hybrid_gpu_success success 240 - \
-    "${mpi_command[@]}" test/olivia_hybrid_gpu_probe.jl success
+    "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_hybrid_gpu_probe.jl" success
 run_case hybrid_gpu_failure_recovery success 240 - \
-    "${mpi_command[@]}" test/olivia_hybrid_gpu_probe.jl failure
+    "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_hybrid_gpu_probe.jl" failure
 run_case hybrid_gpu_internal_status_timeout controlled_failure 90 gpu_status_timeout \
-    env FFNO_GPU_STATUS_TIMEOUT=20 "${mpi_command[@]}" test/olivia_hybrid_gpu_probe.jl stall
+    env FFNO_GPU_STATUS_TIMEOUT=20 "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_hybrid_gpu_probe.jl" stall
 run_case hybrid_gpu_post_internal_timeout_success success 240 - \
-    "${mpi_command[@]}" test/olivia_hybrid_gpu_probe.jl success
+    "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_hybrid_gpu_probe.jl" success
 run_case hybrid_gpu_external_watchdog_stall timeout 60 intentional_gpu_stall_enter \
-    env FFNO_GPU_STATUS_TIMEOUT=0 "${mpi_command[@]}" test/olivia_hybrid_gpu_probe.jl stall
+    env FFNO_GPU_STATUS_TIMEOUT=0 "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_hybrid_gpu_probe.jl" stall
 run_case hybrid_gpu_post_timeout_success success 240 - \
-    "${mpi_command[@]}" test/olivia_hybrid_gpu_probe.jl success
+    "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_hybrid_gpu_probe.jl" success
 
 snapshot_scheduler "${diagnostics_root}/scheduler-final.txt"
 tarball=${diagnostics_root}.tar.gz

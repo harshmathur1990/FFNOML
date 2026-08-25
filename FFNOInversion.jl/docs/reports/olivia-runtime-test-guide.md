@@ -23,6 +23,20 @@ From the `FFNOInversion.jl` package directory on Olivia:
 sbatch scripts/run_olivia_runtime_tests.sbatch
 ```
 
+Submitting from the package's `scripts` directory is also supported:
+
+```sh
+sbatch run_olivia_runtime_tests.sbatch
+```
+
+The default package root is
+`/cluster/work/projects/nn2834k/harshm/FNOML/FFNOInversion.jl`, so the script
+may be submitted from any directory when invoked by its absolute path. The
+harness validates `Project.toml` and `src/FFNOInversion.jl` before running. An
+explicit `OLIVIA_REPO_DIR` takes precedence only when deliberately testing a
+different checkout; submission-directory and parent-directory discovery remain
+fallbacks if the default checkout is unavailable.
+
 The package environment must already be instantiated in the selected depot:
 
 ```sh
@@ -30,12 +44,18 @@ JULIA_DEPOT_PATH=/cluster/work/projects/nn2834k/harshm/julia-depot-1.12.2 \
     julia --project=. -e 'using Pkg; Pkg.instantiate()'
 ```
 
+Before allocating any MPI step, the batch script now imports `FFNOInversion`
+and `MPI` from the resolved project. A missing package, bad depot, or MPI
+preference therefore stops once with exit 2 and leaves the exact import error in
+`preflight.txt`, instead of producing the same immediate failure for all nine
+runtime cases.
+
 The defaults request two `accel` nodes, four GPUs per node, one outer MPI rank
-per node and four Julia threads per rank. Override paths at submission time when
-the checkout or environments differ:
+per node and four Julia threads per rank. Override paths at submission time only
+when the checkout or environments differ:
 
 ```sh
-sbatch --export=ALL,OLIVIA_REPO_DIR=/cluster/work/projects/nn2834k/harshm/FNOML/FFNOInversion.jl,OLIVIA_JULIA_DEPOT=/cluster/work/projects/nn2834k/harshm/julia-depot-1.12.2,OLIVIA_PYTHON=/cluster/home/harshm/nvidiaenv/bin/python scripts/run_olivia_runtime_tests.sbatch
+sbatch --export=ALL,OLIVIA_JULIA_DEPOT=/cluster/work/projects/nn2834k/harshm/julia-depot-1.12.2,OLIVIA_PYTHON=/cluster/home/harshm/nvidiaenv/bin/python /cluster/work/projects/nn2834k/harshm/FNOML/FFNOInversion.jl/scripts/run_olivia_runtime_tests.sbatch
 ```
 
 By default the Julia project is the package directory. Set

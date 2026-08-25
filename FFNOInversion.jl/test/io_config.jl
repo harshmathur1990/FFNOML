@@ -35,6 +35,15 @@
     @test cfg.parallel.gpu_connect_timeout_seconds == 30.0
     @test cfg.parallel.gpu_status_timeout_seconds == 0.0
     @test cfg.parallel.gpu_diagnostic_interval_seconds == 30.0
+    @test getfield.(cfg.controls,:variable) == [:temperature,:vz]
+    @test cfg.controls[1].control_nx == 8
+    @test cfg.controls[2].lower == -30000.0
+    @test cfg.solver.max_iterations == 20
+    @test cfg.solver.checkpoint_path == "outputs/inversion.checkpoint"
+    @test occursin("controls=temperature,vz",summary)
+    control_atmosphere=test_atmosphere()
+    control_layout=build_control_layout(control_atmosphere,[ControlMapConfig(:temperature,[-5.0,-1.0],2,2,3000.0,8000.0,1000.0)])
+    @test parameter_nodefield(control_layout,initial_parameters(control_layout),:temperature).values==fill(5000.0,2,2,2)
     mktemp() do path, io
         write(io,"[grid]\nnz=4\nnx=2\nny=2\n[observation]\nnlambda=3\nstokes=[\"I\",\"Q\"]\n[physics]\nredistribution=\"non_prd\"\n")
         close(io)

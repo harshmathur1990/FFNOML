@@ -109,6 +109,40 @@ pgas_boundary = 0.1 # reference top pressure; type 1 penalizes deviation from th
 vx = 1000.0
 vy = 1000.0
 vz = 1000.0
+
+# Coarse global maps are the only replicated optimization state. The initial
+# values are sampled from the initial-atmosphere input; full atmosphere cubes
+# remain MPI tile-local.
+[inversion]
+
+[[inversion.controls]]
+variable = "temperature"
+log_tau_nodes = [-5.0, -3.0, -1.0, 1.0]
+control_nx = 8
+control_ny = 8
+lower = 2500.0
+upper = 12000.0
+scale = 1000.0
+
+[[inversion.controls]]
+variable = "vz"
+log_tau_nodes = [-5.0, -3.0, -1.0, 1.0]
+control_nx = 8
+control_ny = 8
+lower = -30000.0
+upper = 30000.0
+scale = 1000.0
+
+[solver]
+max_iterations = 20
+initial_step = 0.25       # dimensionless; multiplied by each control's scale
+step_shrink = 0.5
+minimum_step = 1.0e-3
+improvement_tolerance = 1.0e-8
+maximum_evaluations = 100000
+checkpoint_every = 1
+checkpoint_path = "outputs/inversion.checkpoint"
+
 [parallel]
 enabled = false
 decomposition = "cartesian_2d"

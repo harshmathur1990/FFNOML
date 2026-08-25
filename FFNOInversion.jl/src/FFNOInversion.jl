@@ -23,6 +23,7 @@ include("ForwardModel.jl")
 include("Objectives.jl")
 include("Regularization.jl")
 include("DistributedForward.jl")
+include("Solvers.jl")
 include("IO.jl")
 
 export Grid3D, MagneticField3D, Atmosphere3D, HE3DBoundaryState
@@ -60,7 +61,15 @@ export HybridForwardWorkspace, HybridForwardModel, HybridForwardTimings, gather_
 export distributed_memory_report
 export distribute_observation
 export ResidualLayout, residual!, VerticalRegularizationSpec, RegularizationSpec, regularization_penalty
+export ControlMapSpec, ControlMapLayout, initial_parameters, parameter_nodefield
+export project_parameters!, scaled_parameters, refine_control_maps, apply_control_maps!
+export DistributedInversionProblem, ObjectiveComponents, ObjectiveEvaluation, evaluate_objective!
+export PrototypeSolverOptions, PrototypeIterationRecord, PrototypeSolverState, PrototypeInversionResult
+export write_prototype_diagnostics
+export prototype_invert!, DirectionalDerivativeEstimate, DirectionalDerivativeReport
+export centered_directional_validation
 export AtmosphereInputConfig, ObservedDataConfig, WeightInputConfig, OutputConfig, SynthesisGridConfig, SpectralSourceConfig, SpectralRegionConfig, wavelengths, RunConfig
+export ControlMapConfig, build_control_layout
 export load_config, dry_run_summary
 export checkpoint!, restore_checkpoint
 
