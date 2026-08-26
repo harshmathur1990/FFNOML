@@ -113,6 +113,14 @@ diagnostics_root=${OLIVIA_DIAGNOSTICS_DIR:-${OLIVIA_REPO_DIR}/olivia-runtime-evi
 mkdir -p "${diagnostics_root}"
 summary=${diagnostics_root}/summary.tsv
 printf 'test\texpectation\tresult\texit_code\ttimeout_seconds\trequired_marker\n' > "${summary}"
+test_group=${OLIVIA_TEST_GROUP:-safe}
+case "${test_group}" in
+    safe|internal_timeout|external_timeout|recovery) ;;
+    *)
+        echo "Unknown OLIVIA_TEST_GROUP=${test_group}; expected safe, internal_timeout, external_timeout, or recovery" >&2
+        exit 2
+        ;;
+esac
 
 failures=0
 
@@ -149,6 +157,7 @@ cleanup_numeric_steps() {
         sleep 1
     done
     echo "numeric Slurm steps still visible 20 seconds after cleanup" >> "${destination}"
+    return 1
 }
 
 wait_for_interconnect_recovery() {
@@ -176,7 +185,7 @@ wait_for_interconnect_recovery() {
                 "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${attempt}" "${status}" \
                 >> "${destination}"
         fi
-        cleanup_numeric_steps "${destination}"
+        cleanup_numeric_steps "${destination}" || return 1
         sleep 5
     done
 
@@ -210,7 +219,12 @@ run_case() {
     local expectation=$2
     local timeout_seconds=$3
     local required_marker=$4
-    shift 4
+    local recovery_policy=$5
+    shift 5
+    [[ "${recovery_policy}" == reusable || "${recovery_policy}" == terminal ]] || {
+        echo "unknown recovery policy for ${label}: ${recovery_policy}" >&2
+        exit 2
+    }
     local case_dir=${diagnostics_root}/${label}
     local cleanup_ready=1
     mkdir -p "${case_dir}"
@@ -234,8 +248,10 @@ run_case() {
 
     snapshot_scheduler "${case_dir}/scheduler-after-command.txt"
     if [[ ${status} -ne 0 ]]; then
-        cleanup_numeric_steps "${case_dir}/cleanup.log"
-        if ! wait_for_interconnect_recovery "${case_dir}/interconnect-recovery.log"; then
+        if ! cleanup_numeric_steps "${case_dir}/cleanup.log"; then
+            cleanup_ready=0
+        elif [[ "${recovery_policy}" == reusable ]] && \
+                ! wait_for_interconnect_recovery "${case_dir}/interconnect-recovery.log"; then
             cleanup_ready=0
         fi
     fi
@@ -283,7 +299,7 @@ run_case() {
 
 record_batch_termination() {
     snapshot_scheduler "${diagnostics_root}/batch-termination.txt"
-    cleanup_numeric_steps "${diagnostics_root}/batch-termination.txt"
+    cleanup_numeric_steps "${diagnostics_root}/batch-termination.txt" || true
 }
 trap 'record_batch_termination; exit 143' TERM INT
 
@@ -374,6 +390,7 @@ fi
     echo "submit_dir=${SLURM_SUBMIT_DIR}"
     echo "repository=${OLIVIA_REPO_DIR}"
     echo "job=${SLURM_JOB_ID} nodes=${SLURM_NNODES} nodelist=${SLURM_JOB_NODELIST}"
+    echo "test_group=${test_group}"
     echo "julia_project=${JULIA_PROJECT} julia_threads=${OLIVIA_JULIA_THREADS}"
     echo "python=${OLIVIA_PYTHON} gpus_per_node=${OLIVIA_GPUS_PER_NODE}"
     module list 2>&1
@@ -393,25 +410,38 @@ mpi_command=(srun --kill-on-bad-exit=1 --mpi=pmix --gres=none
     env CUDA_VISIBLE_DEVICES=-1
     "${OLIVIA_JULIA}" --project="${JULIA_PROJECT}" --startup-file=no --threads="${OLIVIA_JULIA_THREADS}")
 
-run_case cpu_mpi_success success 90 OLIVIA_MPI_PROBE_OK \
-    "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_mpi_probe.jl" success
-run_case cpu_mpi_intentional_stall timeout 30 intentional_cpu_stall_enter \
-    "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_mpi_probe.jl" stall
-run_case cpu_mpi_post_timeout_success success 90 OLIVIA_MPI_PROBE_OK \
-    "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_mpi_probe.jl" success
-
-run_case hybrid_gpu_success success 240 OLIVIA_GPU_PROBE_OK \
-    "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_hybrid_gpu_probe.jl" success
-run_case hybrid_gpu_failure_recovery success 240 intentional_gpu_process_failure \
-    "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_hybrid_gpu_probe.jl" failure
-run_case hybrid_gpu_internal_status_timeout controlled_failure 90 gpu_status_timeout \
-    env FFNO_GPU_STATUS_TIMEOUT=20 "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_hybrid_gpu_probe.jl" stall
-run_case hybrid_gpu_post_internal_timeout_success success 240 OLIVIA_GPU_PROBE_OK \
-    "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_hybrid_gpu_probe.jl" success
-run_case hybrid_gpu_external_watchdog_stall timeout 60 intentional_gpu_stall_enter \
-    env FFNO_GPU_STATUS_TIMEOUT=0 "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_hybrid_gpu_probe.jl" stall
-run_case hybrid_gpu_post_timeout_success success 240 OLIVIA_GPU_PROBE_OK \
-    "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_hybrid_gpu_probe.jl" success
+case "${test_group}" in
+    safe)
+        run_case cpu_mpi_success success 90 OLIVIA_MPI_PROBE_OK reusable \
+            "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_mpi_probe.jl" success
+        run_case cpu_mpi_intentional_stall timeout 30 intentional_cpu_stall_enter reusable \
+            "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_mpi_probe.jl" stall
+        run_case cpu_mpi_post_timeout_success success 90 OLIVIA_MPI_PROBE_OK reusable \
+            "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_mpi_probe.jl" success
+        run_case hybrid_gpu_success success 240 OLIVIA_GPU_PROBE_OK reusable \
+            "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_hybrid_gpu_probe.jl" success
+        run_case hybrid_gpu_failure_recovery success 240 intentional_gpu_process_failure reusable \
+            "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_hybrid_gpu_probe.jl" failure
+        ;;
+    internal_timeout)
+        run_case hybrid_gpu_pre_internal_timeout_success success 240 OLIVIA_GPU_PROBE_OK reusable \
+            "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_hybrid_gpu_probe.jl" success
+        run_case hybrid_gpu_internal_status_timeout controlled_failure 90 gpu_status_timeout terminal \
+            env FFNO_GPU_STATUS_TIMEOUT=20 "${mpi_command[@]}" \
+            "${OLIVIA_REPO_DIR}/test/olivia_hybrid_gpu_probe.jl" stall
+        ;;
+    external_timeout)
+        run_case hybrid_gpu_post_internal_timeout_success success 240 OLIVIA_GPU_PROBE_OK reusable \
+            "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_hybrid_gpu_probe.jl" success
+        run_case hybrid_gpu_external_watchdog_stall timeout 60 intentional_gpu_stall_enter terminal \
+            env FFNO_GPU_STATUS_TIMEOUT=0 "${mpi_command[@]}" \
+            "${OLIVIA_REPO_DIR}/test/olivia_hybrid_gpu_probe.jl" stall
+        ;;
+    recovery)
+        run_case hybrid_gpu_post_timeout_success success 240 OLIVIA_GPU_PROBE_OK reusable \
+            "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_hybrid_gpu_probe.jl" success
+        ;;
+esac
 
 snapshot_scheduler "${diagnostics_root}/scheduler-final.txt"
 tarball=${diagnostics_root}.tar.gz
@@ -419,12 +449,13 @@ tar -czf "${tarball}" -C "$(dirname "${diagnostics_root}")" "$(basename "${diagn
 
 echo
 echo "===== Olivia runtime test summary ====="
+echo "Test group: ${test_group}"
 column -t -s $'\t' "${summary}" || cat "${summary}"
 echo "Diagnostics: ${diagnostics_root}"
 echo "Archive: ${tarball}"
 
 if [[ ${failures} -ne 0 ]]; then
-    echo "OLIVIA_RUNTIME_TESTS_FAILED count=${failures}"
+    echo "OLIVIA_RUNTIME_TESTS_FAILED group=${test_group} count=${failures}"
     exit 1
 fi
-echo "OLIVIA_RUNTIME_TESTS_OK"
+echo "OLIVIA_RUNTIME_TESTS_OK group=${test_group}"

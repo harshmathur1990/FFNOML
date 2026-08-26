@@ -12,39 +12,49 @@ paths on the batch host and verifies both executables on every allocated node
 before launching MPI. `OLIVIA_JULIA` and `OLIVIA_PYTHON` are optional explicit
 overrides; normal runs do not need either variable.
 
-The harness enables the production control-plane diagnostics every 5 seconds,
+Each batch worker enables the production control-plane diagnostics every 5 seconds,
 a 60-second peer-connection timeout and a 180-second normal status timeout.
 The internal-timeout case overrides the status timeout to 20 seconds; the
 external-watchdog case sets it to zero deliberately. The relevant overrides are
 `FFNO_GPU_CONNECT_TIMEOUT`, `FFNO_GPU_STATUS_TIMEOUT`,
 `FFNO_GPU_DIAGNOSTIC_INTERVAL`, and `FFNO_GPU_DIAGNOSTICS_DIR`.
 
-After any forced timeout or nonzero step exit, the harness cancels orphaned
-numeric Slurm steps and then performs bounded multi-node PMIx readiness probes
-for up to 90 seconds. Olivia can remove a killed step from `squeue` before its
-Slingshot interconnect resources are ready for reuse; immediately starting the
-next MPI step then reports `Error configuring interconnect`. A timeout test is
-accepted only if the readiness probe succeeds, so cleanup and subsequent-step
-recovery are part of the evidence rather than an assumed delay.
+After a recoverable timeout or nonzero step exit, the worker cancels orphaned
+numeric Slurm steps and performs bounded multi-node PMIx readiness probes.
+Hard-killing a stalled nested GPU step was observed to make Olivia's job-level
+Slingshot VNI unusable for the remainder of that allocation: repeated new MPI
+steps reported `Error configuring interconnect` for many minutes. Therefore,
+the internal and external GPU-deadlock cases are terminal cases in separate
+allocations. Their dependent successor allocations prove fresh-start recovery;
+the harness does not claim that a destroyed job VNI can be repaired in place.
 
-## Submit
+## Submit the full validation chain
 
-From the `FFNOInversion.jl` package directory on Olivia:
-
-```sh
-sbatch scripts/run_olivia_runtime_tests.sbatch
-```
-
-Submitting from the package's `scripts` directory is also supported:
+From the `FFNOInversion.jl` package directory on Olivia, use the submission
+helper rather than submitting the batch worker directly:
 
 ```sh
-sbatch run_olivia_runtime_tests.sbatch
+bash scripts/submit_olivia_runtime_tests.sh
 ```
+
+It can also be invoked from the package's `scripts` directory:
+
+```sh
+bash submit_olivia_runtime_tests.sh
+```
+
+The helper submits four dependency-chained allocations: safe/recoverable
+tests, internal-timeout containment, external-watchdog containment, and final
+fresh-allocation recovery. It prints every job ID and the final job to monitor.
+Additional `sbatch` options supplied to the helper are forwarded to all four
+jobs. Directly submitting `run_olivia_runtime_tests.sbatch` runs only the
+non-destructive `safe` group and is intended for focused debugging, not full
+acceptance evidence.
 
 The default package root is
-`/cluster/work/projects/nn2834k/harshm/FNOML/FFNOInversion.jl`, so the script
-may be submitted from any directory when invoked by its absolute path. The
-harness validates `Project.toml` and `src/FFNOInversion.jl` before running. An
+`/cluster/work/projects/nn2834k/harshm/FNOML/FFNOInversion.jl`. The submission
+helper may be invoked from any directory through its absolute path. Each batch
+worker validates `Project.toml` and `src/FFNOInversion.jl` before running. An
 explicit `OLIVIA_REPO_DIR` takes precedence only when deliberately testing a
 different checkout; submission-directory and parent-directory discovery remain
 fallbacks if the default checkout is unavailable.
@@ -71,7 +81,9 @@ per node and four Julia threads per rank. Override paths at submission time only
 when the checkout or environments differ:
 
 ```sh
-sbatch --export=ALL,OLIVIA_JULIA_DEPOT=/cluster/work/projects/nn2834k/harshm/julia-depot-1.12.2,OLIVIA_PYTHON=/cluster/home/harshm/nvidiaenv/bin/python /cluster/work/projects/nn2834k/harshm/FNOML/FFNOInversion.jl/scripts/run_olivia_runtime_tests.sbatch
+OLIVIA_JULIA_DEPOT=/cluster/work/projects/nn2834k/harshm/julia-depot-1.12.2 \
+OLIVIA_PYTHON=/cluster/home/harshm/nvidiaenv/bin/python \
+    bash /cluster/work/projects/nn2834k/harshm/FNOML/FFNOInversion.jl/scripts/submit_olivia_runtime_tests.sh
 ```
 
 By default the Julia project is the package directory. Set
@@ -91,7 +103,7 @@ The nested launcher validates and records that mapping before starting
 torchrun, so a missing remap fails explicitly instead of appearing as an NCCL
 problem.
 
-## Test sequence
+## Test sequence across allocations
 
 1. Healthy multi-node MPI initialization, barrier and scalar allreduce.
 2. Intentional CPU-rank stall. The wrapper must time out, kill numbered Slurm
@@ -101,14 +113,18 @@ problem.
    allreduce across every allocated GPU.
 5. Intentional GPU-process failure. Every outer MPI rank must receive the same
    launcher error, then the control path must recover.
-6. Intentional GPU-rank stall with the internal status timeout enabled. A
+6. In a separate allocation, intentionally stall a GPU rank with the internal
+   status timeout enabled. A
    non-root inversion rank must record `gpu_status_timeout`; Slurm then cleans
    up the failed outer and nested steps.
-7. Healthy hybrid GPU rerun after the internal timeout.
-8. Intentional GPU-rank stall with the internal timeout deliberately disabled.
+7. Rerun the healthy hybrid GPU case in a fresh dependent allocation after the
+   internal timeout.
+8. In that allocation, intentionally stall a GPU rank with the internal timeout
+   deliberately disabled.
    The batch wrapper must time out and kill the outer and nested steps. Python
    faulthandler writes periodic stack traces while the stall is active.
-9. Healthy hybrid GPU rerun after the external timeout.
+9. Rerun the healthy hybrid GPU case in a fresh dependent allocation after the
+   external timeout.
 
 Every healthy case must contain its explicit MPI or GPU completion marker. The
 injected GPU-failure/recovery case must contain
@@ -121,12 +137,15 @@ also a failure because it did not exercise timeout containment.
 
 ## Send back
 
-The final log prints paths like:
+Each allocation's final log prints paths like:
 
 ```text
 Diagnostics: .../olivia-runtime-evidence-JOBID
 Archive: .../olivia-runtime-evidence-JOBID.tar.gz
 ```
+
+The complete validation passes only when all four logs end with their matching
+`OLIVIA_RUNTIME_TESTS_OK group=...` marker.
 
 Please provide:
 
