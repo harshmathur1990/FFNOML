@@ -24,6 +24,8 @@ include("Objectives.jl")
 include("Regularization.jl")
 include("DistributedForward.jl")
 include("Solvers.jl")
+include("Gradients.jl")
+include("ScalableSolvers.jl")
 include("IO.jl")
 
 export Grid3D, MagneticField3D, Atmosphere3D, HE3DBoundaryState
@@ -68,6 +70,12 @@ export PrototypeSolverOptions, PrototypeIterationRecord, PrototypeSolverState, P
 export write_prototype_diagnostics
 export prototype_invert!, DirectionalDerivativeEstimate, DirectionalDerivativeReport
 export centered_directional_validation
+export MatrixFreeLinearization, apply_jvp, apply_vjp, DotProductReport, dot_product_validation
+export node_expansion_vjp, accumulate_control_vjp!
+export AbstractObjectiveGradient, ObjectiveGradientEvaluation, FiniteDifferenceObjectiveGradient
+export objective_gradient!, TaylorRemainderSample, GradientTaylorReport, gradient_taylor_validation
+export LBFGSSolverOptions, LBFGSIterationRecord, LBFGSSolverState, LBFGSInversionResult
+export lbfgs_invert!, write_lbfgs_diagnostics
 export AtmosphereInputConfig, ObservedDataConfig, WeightInputConfig, OutputConfig, SynthesisGridConfig, SpectralSourceConfig, SpectralRegionConfig, wavelengths, RunConfig
 export ControlMapConfig, build_control_layout
 export load_config, dry_run_summary

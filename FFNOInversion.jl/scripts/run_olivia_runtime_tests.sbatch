@@ -87,6 +87,12 @@ export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export FFNO_GPU_CONNECT_TIMEOUT=${FFNO_GPU_CONNECT_TIMEOUT:-60}
 export FFNO_GPU_STATUS_TIMEOUT=${FFNO_GPU_STATUS_TIMEOUT:-180}
 export FFNO_GPU_DIAGNOSTIC_INTERVAL=${FFNO_GPU_DIAGNOSTIC_INTERVAL:-5}
+export PHASE6_MEMORY_NX=${PHASE6_MEMORY_NX:-800}
+export PHASE6_MEMORY_NY=${PHASE6_MEMORY_NY:-800}
+export PHASE6_MEMORY_NZ=${PHASE6_MEMORY_NZ:-64}
+export PHASE6_MEMORY_NLAMBDA=${PHASE6_MEMORY_NLAMBDA:-134}
+export PHASE6_MEMORY_LEVELS=${PHASE6_MEMORY_LEVELS:-10}
+export PHASE6_MEMORY_LIMIT_GIB=${PHASE6_MEMORY_LIMIT_GIB:-24}
 
 # Olivia/Slingshot defaults used by the existing charge-branch production job.
 export HSA_FORCE_FINE_GRAIN_PCIE=${HSA_FORCE_FINE_GRAIN_PCIE:-1}
@@ -115,9 +121,9 @@ summary=${diagnostics_root}/summary.tsv
 printf 'test\texpectation\tresult\texit_code\ttimeout_seconds\trequired_marker\n' > "${summary}"
 test_group=${OLIVIA_TEST_GROUP:-safe}
 case "${test_group}" in
-    safe|internal_timeout|external_timeout|recovery) ;;
+    safe|phase6|internal_timeout|external_timeout|recovery) ;;
     *)
-        echo "Unknown OLIVIA_TEST_GROUP=${test_group}; expected safe, internal_timeout, external_timeout, or recovery" >&2
+        echo "Unknown OLIVIA_TEST_GROUP=${test_group}; expected safe, phase6, internal_timeout, external_timeout, or recovery" >&2
         exit 2
         ;;
 esac
@@ -320,6 +326,7 @@ done
 
 for required_file in Project.toml src/FFNOInversion.jl \
         test/olivia_mpi_probe.jl test/olivia_hybrid_gpu_probe.jl \
+        test/olivia_phase6_solver_probe.jl test/olivia_phase6_memory_probe.jl \
         test/olivia_gpu_collective_probe.py scripts/olivia_nested_gpu_step.sh; do
     if [[ ! -f "${OLIVIA_REPO_DIR}/${required_file}" ]]; then
         echo "Missing required repository file: ${OLIVIA_REPO_DIR}/${required_file}" \
@@ -422,6 +429,16 @@ case "${test_group}" in
             "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_hybrid_gpu_probe.jl" success
         run_case hybrid_gpu_failure_recovery success 240 intentional_gpu_process_failure reusable \
             "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_hybrid_gpu_probe.jl" failure
+        ;;
+    phase6)
+        run_case phase6_solver_mpi success 180 OLIVIA_PHASE6_SOLVER_OK reusable \
+            "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_phase6_solver_probe.jl" success
+        run_case phase6_rejected_trial_recovery success 120 OLIVIA_PHASE6_REJECTION_RECOVERY_OK reusable \
+            "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_phase6_solver_probe.jl" rejection
+        run_case phase6_full_layout_memory success 300 OLIVIA_PHASE6_MEMORY_LAYOUT_OK reusable \
+            "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_phase6_memory_probe.jl"
+        run_case phase6_rank0_gpu_autograd_vjp success 240 OLIVIA_GPU_VJP_PROBE_OK reusable \
+            "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_hybrid_gpu_probe.jl" vjp
         ;;
     internal_timeout)
         run_case hybrid_gpu_pre_internal_timeout_success success 240 OLIVIA_GPU_PROBE_OK reusable \

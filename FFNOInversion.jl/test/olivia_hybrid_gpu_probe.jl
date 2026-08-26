@@ -2,8 +2,8 @@ using FFNOInversion
 using Sockets
 
 mode=length(ARGS)==1 ? Symbol(ARGS[1]) : error(
-    "usage: olivia_hybrid_gpu_probe.jl success|failure|stall")
-mode in (:success,:failure,:stall) || error("unknown hybrid probe mode: $mode")
+    "usage: olivia_hybrid_gpu_probe.jl success|failure|stall|vjp")
+mode in (:success,:failure,:stall,:vjp) || error("unknown hybrid probe mode: $mode")
 
 context=initialize_parallel(options=ParallelOptions(enabled=true,threads_per_rank=Threads.nthreads()))
 diagnostics_root=get(ENV,"OLIVIA_CASE_DIAGNOSTICS",pwd())

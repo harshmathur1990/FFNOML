@@ -38,8 +38,12 @@
     @test getfield.(cfg.controls,:variable) == [:temperature,:vz]
     @test cfg.controls[1].control_nx == 8
     @test cfg.controls[2].lower == -30000.0
-    @test cfg.solver.max_iterations == 20
+    @test cfg.solver isa LBFGSSolverOptions
+    @test cfg.solver.max_iterations == 50
+    @test cfg.solver.history_length == 10
     @test cfg.solver.checkpoint_path == "outputs/inversion.checkpoint"
+    @test occursin("solver=bounded_lbfgs",summary)
+    @test FFNOInversion._solver(Dict{String,Any}("method"=>"prototype_pattern_search")) isa PrototypeSolverOptions
     @test occursin("controls=temperature,vz",summary)
     control_atmosphere=test_atmosphere()
     control_layout=build_control_layout(control_atmosphere,[ControlMapConfig(:temperature,[-5.0,-1.0],2,2,3000.0,8000.0,1000.0)])

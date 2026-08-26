@@ -134,12 +134,18 @@ upper = 30000.0
 scale = 1000.0
 
 [solver]
-max_iterations = 20
-initial_step = 0.25       # dimensionless; multiplied by each control's scale
-step_shrink = 0.5
-minimum_step = 1.0e-3
-improvement_tolerance = 1.0e-8
-maximum_evaluations = 100000
+method = "lbfgs"
+max_iterations = 50
+history_length = 10
+gradient_tolerance = 1.0e-6
+step_tolerance = 1.0e-10
+objective_tolerance = 1.0e-12
+initial_step = 1.0
+backtracking_factor = 0.5
+armijo_coefficient = 1.0e-4
+maximum_line_search_trials = 20
+maximum_forward_evaluations = 100000
+curvature_tolerance = 1.0e-10
 checkpoint_every = 1
 checkpoint_path = "outputs/inversion.checkpoint"
 

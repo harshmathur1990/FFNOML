@@ -15,7 +15,7 @@ import torch.distributed as dist
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument("mode", choices=("success", "failure", "stall"))
+parser.add_argument("mode", choices=("success", "failure", "stall", "vjp"))
 parser.add_argument("--local-rank", "--local_rank", type=int)
 arguments, unknown_arguments = parser.parse_known_args()
 MODE = arguments.mode
@@ -100,6 +100,40 @@ try:
         record("intentional_gpu_stall_enter")
         while True:
             time.sleep(60)
+
+    if MODE == "vjp":
+        current_stage = "cuda_autograd_vjp"
+        inputs = torch.arange(1, 9, dtype=torch.float32, device="cuda", requires_grad=True)
+        cotangent = torch.linspace(0.25, 2.0, 8, dtype=torch.float32, device="cuda")
+        outputs = inputs.square() + 3.0 * inputs
+        gradient, = torch.autograd.grad(outputs, inputs, grad_outputs=cotangent)
+        expected_gradient = (2.0 * inputs.detach() + 3.0) * cotangent
+        maximum_error = (gradient - expected_gradient).abs().max()
+        torch.cuda.synchronize()
+        if maximum_error.item() > 2.0e-6:
+            raise RuntimeError(
+                f"CUDA VJP maximum error {maximum_error.item()} exceeds tolerance"
+            )
+        checksum = gradient.sum()
+        expected_checksum = expected_gradient.sum() * world
+        dist.all_reduce(checksum, op=dist.ReduceOp.SUM)
+        torch.cuda.synchronize()
+        if not torch.allclose(checksum, expected_checksum, rtol=1.0e-6, atol=1.0e-5):
+            raise RuntimeError(
+                f"distributed VJP checksum {checksum.item()} differs from "
+                f"expected {expected_checksum.item()}"
+            )
+        record(
+            "cuda_vjp_complete",
+            maximum_error=maximum_error.item(),
+            distributed_checksum=checksum.item(),
+        )
+        if global_rank == 0:
+            print(
+                f"OLIVIA_GPU_VJP_PROBE_OK world={world} "
+                f"maximum_error={maximum_error.item()} checksum={checksum.item()}",
+                flush=True,
+            )
 
     record("allreduce_enter")
     current_stage = "nccl_allreduce"

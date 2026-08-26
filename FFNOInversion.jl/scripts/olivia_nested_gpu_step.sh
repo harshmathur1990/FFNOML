@@ -3,11 +3,12 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-mode=${1:?usage: olivia_nested_gpu_step.sh success|failure|stall}
+mode=${1:?usage: olivia_nested_gpu_step.sh success|failure|stall|vjp}
 case "${mode}" in
     success) port_offset=1 ;;
     failure) port_offset=2 ;;
     stall) port_offset=3 ;;
+    vjp) port_offset=4 ;;
     *) echo "unknown GPU probe mode: ${mode}" >&2; exit 2 ;;
 esac
 

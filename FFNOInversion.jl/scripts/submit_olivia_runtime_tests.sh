@@ -36,13 +36,15 @@ submit_group() {
 }
 
 safe_job=$(submit_group safe "" "$@")
-internal_job=$(submit_group internal_timeout "${safe_job}" "$@")
+phase6_job=$(submit_group phase6 "${safe_job}" "$@")
+internal_job=$(submit_group internal_timeout "${phase6_job}" "$@")
 external_job=$(submit_group external_timeout "${internal_job}" "$@")
 recovery_job=$(submit_group recovery "${external_job}" "$@")
 
 echo "Submitted Olivia runtime validation chain:"
 echo "  safe/recoverable cases:         ${safe_job}"
-echo "  internal-timeout containment:   ${internal_job} (after ${safe_job})"
+echo "  Phase 6 solver/GPU prerequisites: ${phase6_job} (after ${safe_job})"
+echo "  internal-timeout containment:   ${internal_job} (after ${phase6_job})"
 echo "  post-internal + external stall: ${external_job} (after ${internal_job})"
 echo "  post-external recovery:         ${recovery_job} (after ${external_job})"
 echo

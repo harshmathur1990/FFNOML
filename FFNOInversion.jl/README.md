@@ -49,6 +49,8 @@ Phase 4 integrates that runtime into the sole application-level forward path: di
 
 Phase 5 adds the first closed-loop inversion. Bounded temperature and velocity node maps are packed into scaled coarse control maps, broadcast from rank 0, expanded directly onto MPI-owned tiles, and evaluated with separately reported normalized chi-square and 3D regularization terms. A deterministic projected pattern search provides the derivative-free reference solver; centered directional finite differences provide the gradient oracle for Phase 6. Checkpoints are atomic, capability/layout validated, and portable across compatible MPI/thread topologies. TOML/CSV diagnostic bundles retain final controls and every objective component.
 
+Phase 6 now has its first gradient-based implementation slice. Matrix-free JVP/VJP contracts avoid dense Jacobians; the node-expansion adjoint reduces rank-local atmospheric cotangents onto replicated coarse controls. A retained bounded finite-difference backend is the validation oracle. The production solver is synchronized bounded L-BFGS with projected gradients, Armijo backtracking, limited-memory restart state, explicit restoration after rejected trials, and forward-call accounting. The configuration selects `solver.method = "lbfgs"`; `prototype_pattern_search` remains available only as the Phase 5 regression baseline. The exact-model VJP and solver are locally and under MPI tested. Real FFNO GPU, force-balance/EOS, Muspel, Kurucz, PSF, and regularization pullbacks remain before Phase 6 acceptance.
+
 The scheduler chooses rank count and Julia chooses threads per rank. For example, a 256-core allocation can start with 16 ranks and 16 threads per rank. Set BLAS/OpenMP thread counts to one when Julia threads own column-level parallelism.
 
 ## Grid and objective convention
@@ -72,4 +74,10 @@ julia --project=. scripts/validate_phase4_topology.jl
 
 # Phase 5 one-rank/four-rank solver parity and 1-rank -> 4-rank restart
 julia --project=. scripts/validate_phase5_mpi.jl
+
+# Phase 6 one-rank/four-rank gradient-solver parity and cross-topology restart
+julia --project=. scripts/validate_phase6_mpi.jl
+
+# Submit the bounded Phase 6 target-runtime probes on Olivia
+bash scripts/submit_olivia_phase6_tests.sh
 ```

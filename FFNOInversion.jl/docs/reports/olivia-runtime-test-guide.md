@@ -1,8 +1,10 @@
 # Olivia hybrid-runtime test guide
 
-This harness tests only MPI, Julia-thread, rank-0 launcher, CUDA/NCCL, timeout,
-cleanup and recovery behavior. It does not load an atmosphere, FFNO checkpoint,
-atom, Kurucz list or synthesis code.
+This harness tests MPI, Julia threads, the rank-0 launcher, CUDA/NCCL, timeout,
+cleanup and recovery behavior. Its Phase 6 group additionally runs the small
+exact-model distributed L-BFGS fixture and allocates a configurable full-layout
+memory model. It does not load a real atmosphere, FFNO checkpoint, atom or
+Kurucz list, and it does not claim a production-physics gradient test.
 
 Inversion MPI jobs source `/cluster/home/harshm/loadnvidiampi.sh` by default.
 Set `OLIVIA_ENV_SCRIPT` only when an alternate MPI-compatible module setup is
@@ -43,10 +45,11 @@ It can also be invoked from the package's `scripts` directory:
 bash submit_olivia_runtime_tests.sh
 ```
 
-The helper submits four dependency-chained allocations: safe/recoverable
-tests, internal-timeout containment, external-watchdog containment, and final
-fresh-allocation recovery. It prints every job ID and the final job to monitor.
-Additional `sbatch` options supplied to the helper are forwarded to all four
+The helper submits five dependency-chained allocations: safe/recoverable
+tests, Phase 6 solver/GPU prerequisites, internal-timeout containment,
+external-watchdog containment, and final fresh-allocation recovery. It prints
+every job ID and the final job to monitor.
+Additional `sbatch` options supplied to the helper are forwarded to all five
 jobs. Directly submitting `run_olivia_runtime_tests.sbatch` runs only the
 non-destructive `safe` group and is intended for focused debugging, not full
 acceptance evidence.
@@ -73,7 +76,7 @@ and the OpenMPI ABI. This is required because MPI.jl otherwise defaults to
 MPICH_jll, which rejects Slurm's PMIx runtime during `MPI_Init_thread`. A missing
 package, bad depot, system-library problem, or wrong MPI preference therefore
 stops once with exit 2 and leaves the exact error in `preflight.txt`, instead of
-producing the same immediate failure for all nine runtime cases. The resulting
+producing the same immediate failure for all fourteen runtime cases. The resulting
 `LocalPreferences.toml` is checkout-local and ignored by git.
 
 The defaults request two `accel` nodes, four GPUs per node, one outer MPI rank
@@ -91,7 +94,50 @@ By default the Julia project is the package directory. Set
 `Pkg.develop` entry for this checkout.
 
 Use at least two nodes: the purpose is to exercise Olivia's inter-node PMIx,
-Slingshot and NCCL paths. The probes transfer only scalar tensors.
+Slingshot and NCCL paths. The GPU collective probes transfer only scalar
+tensors; the full-layout memory case allocates rank-local arrays without
+communicating model payloads.
+
+No `testdata` directory is needed. The Phase 6 solver fixture is generated in
+memory. The memory-layout probe directly constructs rank-owned arrays and does
+not read an input model.
+
+## Phase 6 allocation
+
+The dedicated `phase6` allocation runs four bounded cases:
+
+1. The exact-model six-control L-BFGS fixture through the normal multi-node MPI
+   route. It checks convergence, control recovery, a forward-call ceiling and
+   interrupted-versus-restarted checkpoint identity.
+2. A deliberately reversed gradient. All Armijo trials must be rejected and
+   the last accepted atmosphere must be restored on every rank.
+3. A full-layout allocation probe. Defaults are `NZ=64`, `NX=NY=800`, 134
+   wavelengths and 10 population levels in Float64. Every rank allocates only
+   its tile. The reported owned arrays and peak rank RSS must remain below 24
+   GiB. Override `PHASE6_MEMORY_NX`, `PHASE6_MEMORY_NY`,
+   `PHASE6_MEMORY_NZ`, `PHASE6_MEMORY_NLAMBDA`,
+   `PHASE6_MEMORY_LEVELS`, or `PHASE6_MEMORY_LIMIT_GIB` when the production
+   layout changes.
+4. A rank-0-controlled nested CUDA/NCCL probe that computes a known PyTorch
+   vector-Jacobian product on every allocated GPU and verifies the distributed
+   checksum.
+
+The memory probe validates the currently implemented rank-owned array layout,
+not the final production-gradient peak. The CUDA VJP probe validates Olivia's
+autograd and launcher environment, not the FFNO checkpoint pullback. These
+distinctions are intentional: the production FFNO and CPU-physics pullbacks
+must be implemented before their scientific tests can exist.
+
+Run only the Phase 6 allocation with:
+
+```sh
+bash scripts/submit_olivia_phase6_tests.sh
+```
+
+As with the full-chain helper, this command may be invoked through its absolute
+path from any directory. Additional `sbatch` options are forwarded. For
+example, a deliberate alternate checkout can still be selected with
+`OLIVIA_REPO_DIR`; the established Olivia checkout remains the default.
 
 The outer Julia/OpenMPI step is launched with `CUDA_VISIBLE_DEVICES=-1` even
 though the batch allocation contains GPUs. This prevents the CUDA-aware
@@ -113,17 +159,21 @@ problem.
    allreduce across every allocated GPU.
 5. Intentional GPU-process failure. Every outer MPI rank must receive the same
    launcher error, then the control path must recover.
-6. In a separate allocation, intentionally stall a GPU rank with the internal
+6. Multi-node Phase 6 L-BFGS convergence and forward-call check.
+7. Multi-node rejected-trial restoration.
+8. Configured full-layout rank-owned allocation and RSS check.
+9. Rank-0-controlled CUDA VJP and NCCL checksum.
+10. In a separate allocation, intentionally stall a GPU rank with the internal
    status timeout enabled. A
    non-root inversion rank must record `gpu_status_timeout`; Slurm then cleans
    up the failed outer and nested steps.
-7. Rerun the healthy hybrid GPU case in a fresh dependent allocation after the
+11. Rerun the healthy hybrid GPU case in a fresh dependent allocation after the
    internal timeout.
-8. In that allocation, intentionally stall a GPU rank with the internal timeout
+12. In that allocation, intentionally stall a GPU rank with the internal timeout
    deliberately disabled.
    The batch wrapper must time out and kill the outer and nested steps. Python
    faulthandler writes periodic stack traces while the stall is active.
-9. Rerun the healthy hybrid GPU case in a fresh dependent allocation after the
+13. Rerun the healthy hybrid GPU case in a fresh dependent allocation after the
    external timeout.
 
 Every healthy case must contain its explicit MPI or GPU completion marker. The
@@ -144,7 +194,7 @@ Diagnostics: .../olivia-runtime-evidence-JOBID
 Archive: .../olivia-runtime-evidence-JOBID.tar.gz
 ```
 
-The complete validation passes only when all four logs end with their matching
+The complete validation passes only when all five logs end with their matching
 `OLIVIA_RUNTIME_TESTS_OK group=...` marker.
 
 Please provide:

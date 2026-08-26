@@ -80,7 +80,7 @@ struct RunConfig{T<:AbstractFloat}
     regularization::RegularizationSpec{T}
     parallel::ParallelOptions
     controls::Vector{ControlMapConfig{T}}
-    solver::PrototypeSolverOptions
+    solver::Union{PrototypeSolverOptions,LBFGSSolverOptions}
 end
 
 function _regions(cfg)
@@ -174,6 +174,30 @@ function _prototype_solver(section)
         checkpoint_path=String(get(section,"checkpoint_path",""))) |> _validate
 end
 
+function _lbfgs_solver(section)
+    LBFGSSolverOptions(
+        max_iterations=Int(get(section,"max_iterations",50)),
+        history_length=Int(get(section,"history_length",10)),
+        gradient_tolerance=Float64(get(section,"gradient_tolerance",1e-6)),
+        step_tolerance=Float64(get(section,"step_tolerance",1e-10)),
+        objective_tolerance=Float64(get(section,"objective_tolerance",1e-12)),
+        initial_step=Float64(get(section,"initial_step",1.0)),
+        backtracking_factor=Float64(get(section,"backtracking_factor",0.5)),
+        armijo_coefficient=Float64(get(section,"armijo_coefficient",1e-4)),
+        maximum_line_search_trials=Int(get(section,"maximum_line_search_trials",20)),
+        maximum_forward_evaluations=Int(get(section,"maximum_forward_evaluations",typemax(Int))),
+        curvature_tolerance=Float64(get(section,"curvature_tolerance",1e-10)),
+        checkpoint_every=Int(get(section,"checkpoint_every",1)),
+        checkpoint_path=String(get(section,"checkpoint_path",""))) |> _validate
+end
+
+function _solver(section)
+    method=Symbol(lowercase(String(get(section,"method","lbfgs"))))
+    method in (:lbfgs,:bounded_lbfgs) && return _lbfgs_solver(section)
+    method in (:prototype,:prototype_pattern_search) && return _prototype_solver(section)
+    throw(ArgumentError("solver.method must be lbfgs or prototype_pattern_search"))
+end
+
 function _sample_control_field(atmosphere::Atmosphere3D{T},config::ControlMapConfig{T}) where T
     source=_control_destination(atmosphere,config.variable)
     xsource=length(atmosphere.grid.x)==1 ? T[0] : collect(range(zero(T),one(T),length=length(atmosphere.grid.x)))
@@ -244,7 +268,7 @@ function load_config(path::AbstractString)
     regularization = _regularization(get(cfg,"regularization",Dict{String,Any}()))
     inversion_raw=_required(cfg,"inversion")
     controls=_controls(inversion_raw)
-    solver=_prototype_solver(get(cfg,"solver",Dict{String,Any}()))
+    solver=_solver(get(cfg,"solver",Dict{String,Any}()))
     parallel_raw = get(cfg,"parallel",Dict{String,Any}())
     decomposition = Symbol(lowercase(String(get(parallel_raw,"decomposition","cartesian_2d"))))
     decomposition == :cartesian_2d || throw(ArgumentError("parallel.decomposition must be cartesian_2d"))
@@ -275,7 +299,8 @@ function dry_run_summary(config::RunConfig)
     regvars = sort!(collect(union(vertical_vars,keys(config.regularization.horizontal))))
     nsources=sum(length(r.sources) for r in config.regions)
     controlvars=join(getfield.(config.controls,:variable),',')
-    "observation_input=$(config.observed.file) atmosphere_input=$(config.atmosphere.file) synthesis_output=$(config.outputs.synthesis_file) atmosphere_output=$(config.outputs.atmosphere_file) logtau=$(config.atmosphere.logtau500_dataset) dx_m=$(config.synthesis.dx_m) dy_m=$(config.synthesis.dy_m) spectral_regions=$(length(config.regions)) spectral_sources=$nsources synthesis_wavelengths=$nlambda full_grid_psf=true zero_weight_exclusion=true stokes=$(join(config.stokes.components,',')) redistribution=$(config.redistribution) force_balance=$mode controls=$controlvars solver=prototype_pattern_search max_iterations=$(config.solver.max_iterations) checkpoint=$(config.solver.checkpoint_path) regularized=$(join(regvars,',')) mpi=$(config.parallel.enabled) decomposition=$(config.parallel.decomposition) threads_per_rank=$(config.parallel.threads_per_rank) gpu_launcher_rank=$(config.parallel.gpu_launcher_rank) gpu_connect_timeout_seconds=$(config.parallel.gpu_connect_timeout_seconds) gpu_status_timeout_seconds=$(config.parallel.gpu_status_timeout_seconds) gpu_diagnostic_interval_seconds=$(config.parallel.gpu_diagnostic_interval_seconds)"
+    solver_name=config.solver isa LBFGSSolverOptions ? "bounded_lbfgs" : "prototype_pattern_search"
+    "observation_input=$(config.observed.file) atmosphere_input=$(config.atmosphere.file) synthesis_output=$(config.outputs.synthesis_file) atmosphere_output=$(config.outputs.atmosphere_file) logtau=$(config.atmosphere.logtau500_dataset) dx_m=$(config.synthesis.dx_m) dy_m=$(config.synthesis.dy_m) spectral_regions=$(length(config.regions)) spectral_sources=$nsources synthesis_wavelengths=$nlambda full_grid_psf=true zero_weight_exclusion=true stokes=$(join(config.stokes.components,',')) redistribution=$(config.redistribution) force_balance=$mode controls=$controlvars solver=$solver_name max_iterations=$(config.solver.max_iterations) checkpoint=$(config.solver.checkpoint_path) regularized=$(join(regvars,',')) mpi=$(config.parallel.enabled) decomposition=$(config.parallel.decomposition) threads_per_rank=$(config.parallel.threads_per_rank) gpu_launcher_rank=$(config.parallel.gpu_launcher_rank) gpu_connect_timeout_seconds=$(config.parallel.gpu_connect_timeout_seconds) gpu_status_timeout_seconds=$(config.parallel.gpu_status_timeout_seconds) gpu_diagnostic_interval_seconds=$(config.parallel.gpu_diagnostic_interval_seconds)"
 end
 
 function checkpoint!(path::AbstractString,state;manifest::CapabilityManifest=CapabilityManifest())
