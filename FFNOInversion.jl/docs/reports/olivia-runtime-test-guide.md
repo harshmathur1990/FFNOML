@@ -7,6 +7,10 @@ atom, Kurucz list or synthesis code.
 Inversion MPI jobs source `/cluster/home/harshm/loadnvidiampi.sh` by default.
 Set `OLIVIA_ENV_SCRIPT` only when an alternate MPI-compatible module setup is
 required. Non-inversion training and prediction jobs are unaffected.
+The harness resolves the module-provided Julia and Python commands to absolute
+paths on the batch host and verifies both executables on every allocated node
+before launching MPI. `OLIVIA_JULIA` and `OLIVIA_PYTHON` are optional explicit
+overrides; normal runs do not need either variable.
 
 The harness enables the production control-plane diagnostics every 5 seconds,
 a 60-second peer-connection timeout and a 180-second normal status timeout.

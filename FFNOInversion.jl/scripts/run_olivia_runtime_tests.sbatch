@@ -27,6 +27,22 @@ if [[ ! -r "${environment_script}" ]]; then
 fi
 source "${environment_script}"
 
+# Resolve module-provided executables once on the batch host. Some Olivia
+# nodes have presented a different task PATH even though the module setup was
+# successful in the batch shell; using absolute paths prevents nine repeated
+# exit-127 failures and lets the all-node preflight identify a missing mount.
+julia_candidate=${OLIVIA_JULIA:-julia}
+python_candidate=${OLIVIA_PYTHON:-python3}
+OLIVIA_JULIA=$(command -v "${julia_candidate}") || {
+    echo "Cannot resolve Julia executable: ${julia_candidate}" >&2
+    exit 2
+}
+OLIVIA_PYTHON=$(command -v "${python_candidate}") || {
+    echo "Cannot resolve Python executable: ${python_candidate}" >&2
+    exit 2
+}
+export OLIVIA_JULIA OLIVIA_PYTHON
+
 # Resolve the package root independently of the directory from which sbatch was
 # invoked. The established Olivia checkout is the default; OLIVIA_REPO_DIR is
 # only needed when deliberately testing another checkout.
@@ -57,7 +73,6 @@ export JULIA_PROJECT=${OLIVIA_JULIA_PROJECT:-${OLIVIA_REPO_DIR}}
 if [[ -n "${OLIVIA_JULIA_DEPOT:-}" ]]; then
     export JULIA_DEPOT_PATH=${OLIVIA_JULIA_DEPOT}
 fi
-export OLIVIA_PYTHON=${OLIVIA_PYTHON:-python3}
 export OLIVIA_GPUS_PER_NODE=${OLIVIA_GPUS_PER_NODE:-4}
 export OLIVIA_JULIA_THREADS=${OLIVIA_JULIA_THREADS:-4}
 export OLIVIA_GPU_CPUS_PER_NODE=${OLIVIA_GPU_CPUS_PER_NODE:-8}
@@ -272,11 +287,19 @@ record_batch_termination() {
 }
 trap 'record_batch_termination; exit 143' TERM INT
 
-for required in timeout srun scontrol squeue scancel sstat sacct julia "${OLIVIA_PYTHON}"; do
+for required in timeout srun scontrol squeue scancel sstat sacct; do
     command -v "${required}" >> "${diagnostics_root}/preflight.txt" 2>&1 || {
         echo "Missing required command: ${required}" | tee -a "${diagnostics_root}/preflight.txt"
         exit 2
     }
+done
+
+for required_executable in "${OLIVIA_JULIA}" "${OLIVIA_PYTHON}"; do
+    if [[ ! -x "${required_executable}" ]]; then
+        echo "Resolved executable is not executable: ${required_executable}" \
+            | tee -a "${diagnostics_root}/preflight.txt"
+        exit 2
+    fi
 done
 
 for required_file in Project.toml src/FFNOInversion.jl \
@@ -295,7 +318,7 @@ done
 # is the same selection used by the established charge-branch environment.
 set +o errexit
 timeout --signal=TERM --kill-after=15s 180s \
-    julia --project="${JULIA_PROJECT}" --startup-file=no -e \
+    "${OLIVIA_JULIA}" --project="${JULIA_PROJECT}" --startup-file=no -e \
     'using MPIPreferences; MPIPreferences.use_system_binary(mpiexec="srun", abi="OpenMPI")' \
     >> "${diagnostics_root}/preflight.txt" 2>&1
 mpi_preference_status=$?
@@ -311,13 +334,37 @@ fi
 # for every case after one rank exits with the same immediate load error.
 set +o errexit
 timeout --signal=TERM --kill-after=15s 180s \
-    julia --project="${JULIA_PROJECT}" --startup-file=no -e \
+    "${OLIVIA_JULIA}" --project="${JULIA_PROJECT}" --startup-file=no -e \
     'using FFNOInversion; import MPI; MPI.MPIPreferences.binary == "system" || error("MPI binary is not system"); MPI.MPIPreferences.abi == "OpenMPI" || error("MPI ABI is not OpenMPI"); println("OLIVIA_JULIA_PREFLIGHT_OK binary=", MPI.MPIPreferences.binary, " abi=", MPI.MPIPreferences.abi, " threads=", Threads.nthreads())' \
     >> "${diagnostics_root}/preflight.txt" 2>&1
 julia_preflight_status=$?
 set -o errexit
 if [[ ${julia_preflight_status} -ne 0 ]]; then
     echo "Julia project/system-MPI preflight failed (exit=${julia_preflight_status}); no runtime cases were launched." \
+        | tee -a "${diagnostics_root}/preflight.txt"
+    exit 2
+fi
+
+# Verify that both module-provided executable paths are mounted and executable
+# on every allocated node. This is deliberately non-MPI and requests no GPUs,
+# so environment failures are reported once before the runtime sequence.
+set +o errexit
+timeout --signal=TERM --kill-after=5s 60s \
+    srun --exact --kill-on-bad-exit=1 --mpi=none --network=no_vni --gres=none \
+    --nodes="${SLURM_NNODES}" --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 \
+    --cpu-bind=none --cpus-per-task=1 \
+    env OLIVIA_JULIA="${OLIVIA_JULIA}" OLIVIA_PYTHON="${OLIVIA_PYTHON}" \
+    /bin/bash -c '
+        echo "host=$(hostname) julia=${OLIVIA_JULIA} python=${OLIVIA_PYTHON}"
+        [[ -x "${OLIVIA_JULIA}" ]] || exit 127
+        [[ -x "${OLIVIA_PYTHON}" ]] || exit 127
+        "${OLIVIA_JULIA}" --version
+        "${OLIVIA_PYTHON}" --version
+    ' >> "${diagnostics_root}/preflight.txt" 2>&1
+node_executable_status=$?
+set -o errexit
+if [[ ${node_executable_status} -ne 0 ]]; then
+    echo "Julia/Python all-node executable preflight failed (exit=${node_executable_status}); no runtime cases were launched." \
         | tee -a "${diagnostics_root}/preflight.txt"
     exit 2
 fi
@@ -330,7 +377,7 @@ fi
     echo "julia_project=${JULIA_PROJECT} julia_threads=${OLIVIA_JULIA_THREADS}"
     echo "python=${OLIVIA_PYTHON} gpus_per_node=${OLIVIA_GPUS_PER_NODE}"
     module list 2>&1
-    julia --version
+    "${OLIVIA_JULIA}" --version
     "${OLIVIA_PYTHON}" -c 'import torch; print("torch",torch.__version__,"cuda",torch.version.cuda,"available",torch.cuda.is_available())'
     scontrol show job "${SLURM_JOB_ID}"
 } > "${diagnostics_root}/environment.txt" 2>&1
@@ -344,7 +391,7 @@ mpi_command=(srun --kill-on-bad-exit=1 --mpi=pmix --gres=none
     --nodes="${SLURM_NNODES}" --ntasks="${SLURM_NNODES}" --ntasks-per-node=1
     --cpu-bind=cores --cpus-per-task="${SLURM_CPUS_PER_TASK}"
     env CUDA_VISIBLE_DEVICES=-1
-    julia --project="${JULIA_PROJECT}" --startup-file=no --threads="${OLIVIA_JULIA_THREADS}")
+    "${OLIVIA_JULIA}" --project="${JULIA_PROJECT}" --startup-file=no --threads="${OLIVIA_JULIA_THREADS}")
 
 run_case cpu_mpi_success success 90 OLIVIA_MPI_PROBE_OK \
     "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_mpi_probe.jl" success
