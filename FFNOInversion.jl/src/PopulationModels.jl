@@ -52,17 +52,6 @@ function _spacing(values,name)
     Float32(abs(reference))
 end
 
-"""Persistent Python backend. Construct with `load_python_ffno_model` after loading PythonCall."""
-mutable struct PythonFFNOModel{B} <: AbstractPopulationModel
-    backend::B
-    metadata::PopulationMetadata
-    calls::Int
-end
-
-function load_python_ffno_model(args...;kwargs...)
-    throw(ArgumentError("load PythonCall before constructing the Python FFNO backend"))
-end
-
 """In-memory recorded backend for parity tests without Python, GPU, or file I/O."""
 struct RecordedPopulationModel{T<:AbstractFloat,A<:AbstractArray{T,4},Z<:AbstractArray{T,3}} <: AbstractPopulationModel
     features::A

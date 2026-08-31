@@ -136,84 +136,132 @@ try:
             )
 
     if MODE == "ffno_vjp":
-        current_stage = "production_ffno_vjp"
+        current_stage = "production_fsdp_ffno_vjp"
+        import sys
+        import numpy as np
+
+        repository = Path(os.environ["OLIVIA_REPO_DIR"])
+        sys.path.insert(0, str(repository.parent))
+        from distributed_inference import partition_range
+        from ffno_fsdp_runtime import DistributedFSDPBackend
+
+        checkpoint = (
+            repository.parent
+            / "training_FFNO3D_zscale_expand_lognlte"
+            / "3D_sim_train_H.pt"
+        )
+        if not checkpoint.is_file():
+            raise FileNotFoundError(f"production FFNO checkpoint is missing: {checkpoint}")
+        level_names = [f"H level {index}" for index in range(1, 7)]
+        backend = DistributedFSDPBackend(
+            checkpoint_path=checkpoint,
+            factory_module="ffno_model_factory",
+            factory_name="create_ffno3d",
+            level_names=level_names,
+            require_multi_gpu=True,
+        )
+        global_shape = (4, max(8, world), 8)
+        h0, h1 = partition_range(global_shape[1], global_rank, world)
+        local_shape = (global_shape[0], h1 - h0, global_shape[2])
+        features = np.zeros((6,) + local_shape, dtype=np.float32)
+        features[0] = 5500.0 + 0.25 * global_rank
+        features[4] = 17.0
+        features[5] = -7.0
+        z_scale = np.broadcast_to(
+            np.linspace(-3.0e5, 0.0, local_shape[0], dtype=np.float32)[:, None, None],
+            local_shape,
+        ).copy()
+        populations = backend.predict_local(features, z_scale, 48000.0, 48000.0)
+        cotangent = 1.0 / np.maximum(populations, np.finfo(np.float32).tiny)
+        cotangent /= np.prod(global_shape) * len(level_names)
+        result = backend.vjp_local(
+            features, z_scale, 48000.0, 48000.0, cotangent
+        )
+        feature_direction = np.zeros_like(features)
+        feature_direction[0] = 1.0
+        z_direction = np.full_like(z_scale, 100.0)
+        analytic_local = float(
+            np.sum(result["features"] * feature_direction)
+            + np.sum(result["z_scale"] * z_direction)
+        )
+        step = 1.0
+        plus = backend.predict_local(
+            features + step * feature_direction,
+            z_scale + step * z_direction,
+            48000.0,
+            48000.0,
+        )
+        minus = backend.predict_local(
+            features - step * feature_direction,
+            z_scale - step * z_direction,
+            48000.0,
+            48000.0,
+        )
+        finite_difference_local = float(
+            np.sum((plus - minus) * cotangent) / (2.0 * step)
+        )
+        totals = torch.tensor(
+            [analytic_local, finite_difference_local],
+            dtype=torch.float64,
+            device="cuda",
+        )
+        dist.all_reduce(totals, op=dist.ReduceOp.SUM)
+        analytic, finite_difference = (float(value) for value in totals.cpu())
+        relative_error = abs(analytic - finite_difference) / max(
+            abs(analytic), abs(finite_difference), 1.0e-8
+        )
+        description = backend.describe()
+        shard_count = torch.tensor(
+            [description["local_parameter_count"]], dtype=torch.int64, device="cuda"
+        )
+        dist.all_reduce(shard_count, op=dist.ReduceOp.MAX)
+        maximum_local_parameters = int(shard_count.item())
+        checkpoint_readers = torch.tensor(
+            [int(description["checkpoint_loaded_locally"])],
+            dtype=torch.int64,
+            device="cuda",
+        )
+        dist.all_reduce(checkpoint_readers, op=dist.ReduceOp.SUM)
+        checkpoint_reader_count = int(checkpoint_readers.item())
+        if not description["fsdp_enabled"]:
+            raise RuntimeError("production FFNO backend is not wrapped in FSDP")
+        if checkpoint_reader_count != 1:
+            raise RuntimeError(
+                "the full checkpoint must be read by exactly torchrun rank 0; "
+                f"observed readers={checkpoint_reader_count}"
+            )
+        if maximum_local_parameters >= description["full_parameter_count"]:
+            raise RuntimeError(
+                "FSDP did not shard model parameters: "
+                f"maximum_local={maximum_local_parameters} "
+                f"full={description['full_parameter_count']}"
+            )
+        if not np.isfinite(relative_error) or relative_error > 5.0e-2:
+            raise RuntimeError(
+                "production FSDP FFNO VJP directional check failed: "
+                f"analytic={analytic} finite_difference={finite_difference} "
+                f"relative_error={relative_error}"
+            )
+        record(
+            "production_fsdp_ffno_vjp_complete",
+            analytic=analytic,
+            finite_difference=finite_difference,
+            relative_error=relative_error,
+            checkpoint=checkpoint,
+            world=world,
+            local_h=local_shape[1],
+            maximum_local_parameters=maximum_local_parameters,
+            full_parameters=description["full_parameter_count"],
+            checkpoint_readers=checkpoint_reader_count,
+        )
         if global_rank == 0:
-            import sys
-            import numpy as np
-
-            repository = Path(os.environ["OLIVIA_REPO_DIR"])
-            sys.path.insert(0, str(repository.parent))
-            from ffno_runtime import PersistentFFNOBackend
-
-            checkpoint = (
-                repository.parent
-                / "training_FFNO3D_zscale_expand_lognlte"
-                / "3D_sim_train_H.pt"
-            )
-            if not checkpoint.is_file():
-                raise FileNotFoundError(f"production FFNO checkpoint is missing: {checkpoint}")
-            level_names = [f"H level {index}" for index in range(1, 7)]
-            backend = PersistentFFNOBackend(
-                checkpoint_path=checkpoint,
-                factory_module="ffno_model_factory",
-                factory_name="create_ffno3d",
-                level_names=level_names,
-                device="cuda",
-            )
-            shape = (4, 8, 8)
-            features = np.zeros((6,) + shape, dtype=np.float32)
-            features[0] = 5500.0
-            features[4] = 17.0
-            features[5] = -7.0
-            z_scale = np.broadcast_to(
-                np.linspace(-3.0e5, 0.0, shape[0], dtype=np.float32)[:, None, None],
-                shape,
-            ).copy()
-            populations = backend.predict(features, z_scale, 48000.0, 48000.0)
-            cotangent = 1.0 / np.maximum(populations, np.finfo(np.float32).tiny)
-            cotangent /= cotangent.size
-            result = backend.vjp(features, z_scale, 48000.0, 48000.0, cotangent)
-            feature_direction = np.zeros_like(features)
-            feature_direction[0] = 1.0
-            z_direction = np.full_like(z_scale, 100.0)
-            analytic = float(
-                np.sum(result["features"] * feature_direction)
-                + np.sum(result["z_scale"] * z_direction)
-            )
-            step = 1.0
-            plus = backend.predict(
-                features + step * feature_direction,
-                z_scale + step * z_direction,
-                48000.0,
-                48000.0,
-            )
-            minus = backend.predict(
-                features - step * feature_direction,
-                z_scale - step * z_direction,
-                48000.0,
-                48000.0,
-            )
-            finite_difference = float(np.sum((plus - minus) * cotangent) / (2.0 * step))
-            relative_error = abs(analytic - finite_difference) / max(
-                abs(analytic), abs(finite_difference), 1.0e-8
-            )
-            if not np.isfinite(relative_error) or relative_error > 5.0e-2:
-                raise RuntimeError(
-                    "production FFNO VJP directional check failed: "
-                    f"analytic={analytic} finite_difference={finite_difference} "
-                    f"relative_error={relative_error}"
-                )
-            record(
-                "production_ffno_vjp_complete",
-                analytic=analytic,
-                finite_difference=finite_difference,
-                relative_error=relative_error,
-                checkpoint=checkpoint,
-            )
             print(
-                "OLIVIA_PRODUCTION_FFNO_VJP_OK "
-                f"relative_error={relative_error} analytic={analytic} "
-                f"finite_difference={finite_difference}",
+                "OLIVIA_PRODUCTION_FSDP_FFNO_VJP_OK "
+                f"world={world} relative_error={relative_error} "
+                f"analytic={analytic} finite_difference={finite_difference} "
+                f"maximum_local_parameters={maximum_local_parameters} "
+                f"full_parameters={description['full_parameter_count']} "
+                f"checkpoint_readers={checkpoint_reader_count}",
                 flush=True,
             )
         dist.barrier()

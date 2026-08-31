@@ -6,8 +6,10 @@ using HDF5
 
 length(ARGS) == 1 || error("usage: validate_muspel_reference.jl FNOML_ROOT")
 root = abspath(ARGS[1])
-atmos = read_atmos_multi3d(joinpath(root,"testdata/en024048_hion/385/mesh"),
-                           joinpath(root,"testdata/en024048_hion/385/atm3d"))
+atmosphere_dir = abspath(get(ENV,"FFNO_REFERENCE_ATMOSPHERE_DIR",
+    joinpath(dirname(root),"bifrost_data","en024048_hion","385")))
+atmos = read_atmos_multi3d(joinpath(atmosphere_dir,"mesh"),
+                           joinpath(atmosphere_dir,"atm3d"))
 atom_dir = normpath(joinpath(root,"..","multi3d","input","atoms"))
 background = [joinpath(AtomicData.get_atom_dir(),name) for name in
     ("Al.yaml","C.yaml","Ca.yaml","Fe.yaml","H_6.yaml","He.yaml","KI.yaml",
@@ -37,3 +39,4 @@ for (name,atom_name,lower,upper) in cases
     println("$name maxabs=$maxabs maxrel=$maxrel")
     maxabs == 0 && maxrel == 0 || error("$name Muspel reference parity failed")
 end
+println("PHASE3_MUSPEL_REFERENCE_OK cases=$(length(cases)) atmosphere=$atmosphere_dir")

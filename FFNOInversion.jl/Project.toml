@@ -10,28 +10,25 @@ Libdl = "8f399da3-3557-5675-b5ff-fb832c97cbdb"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 MPI = "da04e1cc-30fd-572f-bb4f-1f8673147195"
 MPIPreferences = "3da0fdf6-3ccc-4f1b-acd9-58baa6c99267"
+Muspel = "6074595b-091a-495a-9b39-045a690b2c53"
 Serialization = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
 Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"
 TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
 
-[weakdeps]
-Muspel = "6074595b-091a-495a-9b39-045a690b2c53"
-PythonCall = "6099a3de-0909-46bc-b1f4-468b9a2dfc0d"
-
 [extensions]
 FFNOInversionMuspelExt = "Muspel"
-FFNOInversionPythonCallExt = "PythonCall"
+
+[sources]
+Muspel = {url = "https://github.com/harshmathur1990/Muspel.jl.git", rev = "01ec68da389be75c9ce31494a910095d3590499a"}
 
 [compat]
 HDF5 = "0.17.3"
 MPI = "0.20"
 MPIPreferences = "0.1"
 Muspel = "0.2.5"
-PythonCall = "0.9.35"
 
 [extras]
-PythonCall = "6099a3de-0909-46bc-b1f4-468b9a2dfc0d"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]
-test = ["Test", "PythonCall"]
+test = ["Test"]

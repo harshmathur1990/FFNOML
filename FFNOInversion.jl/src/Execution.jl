@@ -10,8 +10,9 @@ end
 `population_levels` is an integer or species-to-level dictionary. `build_model`
 is called on every rank as
 `build_model(config, distributed, workspace, local_pressure_top, context)`.
-Only rank 0 should construct a live Python FFNO model; other ranks place
-`nothing` in `RootDistributedPopulationModel`.
+Production FFNO models are constructed collectively with
+`launch_fsdp_population_models`; the persistent multi-GPU FSDP service is
+launched only by MPI rank 0.
 """
 struct InversionModelFactory{L,B}
     population_levels::L
@@ -161,6 +162,28 @@ end
 _factory_levels(factory::InversionModelFactory,config)=factory.population_levels isa Function ?
     factory.population_levels(config) : factory.population_levels
 
+_is_fsdp_population_backend(model)=false
+_is_fsdp_population_backend(model::RootDistributedPopulationModel)=
+    model.root_model isa FSDPFFNOModel
+_is_fsdp_population_backend(model::CompositeDistributedPopulationModel)=
+    !isempty(model.models) && all(_is_fsdp_population_backend,values(model.models))
+
+function _require_production_population_backend(model,context)
+    local_valid=if isroot(context)
+        _is_fsdp_population_backend(model) ? 1 : 0
+    else
+        # RootDistributedPopulationModel intentionally contains `nothing` away
+        # from the Julia launcher rank, so rank 0 is authoritative for the
+        # service handle and broadcasts the validation decision.
+        0
+    end
+    valid=mpi_broadcast(isroot(context) ? local_valid : nothing,context)
+    valid==1 || throw(ArgumentError(
+        "run_inversion! requires the persistent multi-GPU FSDP population service; " *
+        "construct it collectively with launch_fsdp_population_models"))
+    nothing
+end
+
 function _gather_populations(populations,distributed,context)
     grid=distributed.global_grid; tile=distributed.tile; nz=length(grid.log_tau500)
     nx=length(grid.x); ny=length(grid.y)
@@ -196,25 +219,30 @@ function run_inversion!(config::RunConfig,root_inputs,
     workspace=HybridForwardWorkspace(Float64,distributed,config.synthesis.wavelength_m,config.stokes,levels)
     model=factory.build_model(config,distributed,workspace,pressure_field,context)
     model isa HybridForwardModel || throw(ArgumentError("model factory must return HybridForwardModel"))
-    local_observation=distribute_observation(Float64,isroot(context) ? root_inputs.observation : nothing,
-        metadata.observation_shape,config.synthesis.wavelength_m,config.stokes,context)
-    layout=mpi_broadcast(isroot(context) ? build_control_layout(root_inputs.atmosphere,config.controls) : nothing,context)
-    problem=DistributedInversionProblem(model,workspace,distributed,local_observation,
-        config.regularization,config.synthesis.dx_m,config.synthesis.dy_m,context)
-    solver=if config.solver isa LBFGSSolverOptions
-        lbfgs_invert!(problem,layout,gradient_backend,context;options=config.solver,restart=restart)
-    else
-        restart ? prototype_invert!(problem,layout,context;options=config.solver,restart=true) :
-            prototype_invert!(problem,layout,context;options=config.solver)
+    _require_production_population_backend(model.populations,context)
+    try
+        local_observation=distribute_observation(Float64,isroot(context) ? root_inputs.observation : nothing,
+            metadata.observation_shape,config.synthesis.wavelength_m,config.stokes,context)
+        layout=mpi_broadcast(isroot(context) ? build_control_layout(root_inputs.atmosphere,config.controls) : nothing,context)
+        problem=DistributedInversionProblem(model,workspace,distributed,local_observation,
+            config.regularization,config.synthesis.dx_m,config.synthesis.dy_m,context)
+        solver=if config.solver isa LBFGSSolverOptions
+            lbfgs_invert!(problem,layout,gradient_backend,context;options=config.solver,restart=restart)
+        else
+            restart ? prototype_invert!(problem,layout,context;options=config.solver,restart=true) :
+                prototype_invert!(problem,layout,context;options=config.solver)
+        end
+        final_parameters=solver.state.parameters
+        objective=evaluate_objective!(problem,layout,final_parameters,context)
+        synthesis=gather_spectrum(workspace.output,distributed,context)
+        atmosphere=gather_atmosphere(distributed,context)
+        populations=_gather_populations(workspace.populations,distributed,context)
+        provenance=parallel_provenance(context,distributed.tile;capabilities=["intensity","non_prd",
+            "matrix_free_vjp","lbfgs","fsdp_distributed_h_slab"])
+        InversionRunResult(solver,synthesis,atmosphere,populations,objective,provenance)
+    finally
+        close_distributed_population_model!(model.populations,context)
     end
-    final_parameters=solver.state.parameters
-    objective=evaluate_objective!(problem,layout,final_parameters,context)
-    synthesis=gather_spectrum(workspace.output,distributed,context)
-    atmosphere=gather_atmosphere(distributed,context)
-    populations=_gather_populations(workspace.populations,distributed,context)
-    provenance=parallel_provenance(context,distributed.tile;capabilities=["intensity","non_prd",
-        "matrix_free_vjp","lbfgs"])
-    InversionRunResult(solver,synthesis,atmosphere,populations,objective,provenance)
 end
 
 function run_inversion_files!(config_path::AbstractString,factory::InversionModelFactory;

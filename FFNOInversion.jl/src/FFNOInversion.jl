@@ -24,6 +24,7 @@ include("ForwardModel.jl")
 include("Objectives.jl")
 include("Regularization.jl")
 include("DistributedForward.jl")
+include("FSDPService.jl")
 include("Solvers.jl")
 include("Gradients.jl")
 include("ProductionGradients.jl")
@@ -47,7 +48,7 @@ export ForceBalanceOptions, ForceBalanceDiagnostics, lorentz_force!, reconstruct
 export StokesSet, SpectralCube, ObservationCube, CapabilityManifest
 export NodeField, expand_nodes
 export AbstractPopulationModel, predict_populations!, population_vjp!, MockPopulationModel
-export FFNO_INPUT_CHANNELS, PopulationMetadata, population_features, PythonFFNOModel, RecordedPopulationModel, load_python_ffno_model
+export FFNO_INPUT_CHANNELS, PopulationMetadata, population_features, RecordedPopulationModel
 export save_population_record, load_population_record
 export AbstractRedistributionModel, NonPRD, MockPRD
 export AbstractLineOpacityModel, AbstractFormalSolver, FFNOTransition, MuspelLineOpacityModel, MuspelFormalSolver, build_muspel_line_model
@@ -64,6 +65,9 @@ export reconstruct_force_balance_distributed!, AbstractDistributedPopulationMode
 export LocalDistributedPopulationModel, RootDistributedPopulationModel, CompositeDistributedPopulationModel, predict_distributed_populations!
 export HybridForwardWorkspace, HybridForwardModel, HybridForwardTimings, gather_spectrum, distributed_chi2, distributed_regularization_penalty
 export distributed_memory_report
+export FSDPModelSpec, FSDPServiceClient, FSDPFFNOModel
+export launch_fsdp_service, close_fsdp_service!, launch_fsdp_population_models
+export close_distributed_population_model!
 export distribute_observation
 export ResidualLayout, residual!, VerticalRegularizationSpec, RegularizationSpec, regularization_penalty
 export ControlMapSpec, ControlMapLayout, initial_parameters, parameter_nodefield

@@ -1,6 +1,6 @@
 # FFNOInversion.jl
 
-Spatially coupled Julia inversion layer implementing Phases 0-5 of the project planning PDF.
+Spatially coupled Julia inversion layer implementing Phases 0-6 of the project planning PDF.
 
 ## Run contract
 
@@ -26,9 +26,9 @@ The TOML file configures these four paths but is not itself a scientific data in
 
 Phase 1 provides iterative HE3D/MHS reconstruction, an in-memory Wittmann EOS adapter, Lorentz-force diagnostics, and a production 500 nm mass-opacity backend using STiC's continuum routine. The constant-opacity backend remains only for manufactured tests.
 
-Phase 2 adds a persistent PythonCall extension for FFNOML inference plus a Python-free recorded request/response backend. The production runtime loads a checkpoint once, validates normalization and channel/level metadata, and accepts in-memory `(T,vx,vy,vz,ne,rho,z)` volumes on repeated calls. The supplied H and Ca checkpoints pass real-checkpoint integration and persistence tests.
+Phase 2 defines and validates the six-channel population request, level metadata, units, positivity and canonical array layouts. `RecordedPopulationModel` remains available for deterministic CPU tests. The inversion application has one production FFNO implementation: the persistent multi-GPU FSDP service introduced by Phase 6.
 
-Phase 3 adds production mixed intensity synthesis. Each region may combine FFNO Halpha or Ca II 8542 with RH K94 LTE lines before one formal solution. `build_synthesis_setup` caches Muspel atom/continuum/Voigt data, K94 lists, and the persistent Wittmann partition-function backend outside the pixel loops. Exactly one contributor owns continuum, so blended sources do not double count it. LTE-only regions do not invoke FFNO. Configured STiC-style air wavelengths are retained for observations and converted to vacuum for line physics.
+Phase 3 adds production mixed intensity synthesis. Each region may combine FFNO Halpha or Ca II 8542 with RH K94 LTE lines before one formal solution. `build_synthesis_setup` caches Muspel atom/continuum/Voigt data, K94 lists, and the persistent Wittmann partition-function backend outside the pixel loops. Exactly one contributor owns continuum, so blended sources do not double count it. LTE-only regions do not invoke FFNO. Configured STiC-style air wavelengths are retained for observations and converted to vacuum for line physics. Muspel is pinned to Git commit `01ec68d`, whose `Atmosphere3D` accepts the corrugated three-dimensional height field produced by HE3D/MHS.
 
 The Phase 4 runtime foundation uses hybrid MPI plus Julia threading. MPI ranks own non-overlapping 2D spatial tiles; typed numeric payloads are scattered/gathered without Julia object serialization; coupled spatial kernels use corner-complete halo exchange; and `Forward.jl`-style column synthesis uses one mutable workspace per Julia thread. Global rank 0 alone controls the persistent or nested GPU launcher through a TCP status channel, so non-root ranks do not hold an MPI collective open during an overlapping Slurm/NCCL launch. MPI calls remain on the initializing Julia thread.
 
@@ -49,11 +49,11 @@ Phase 4 integrates that runtime into the sole application-level forward path: di
 
 Phase 5 adds the first closed-loop inversion. Bounded temperature and velocity node maps are packed into scaled coarse control maps, broadcast from rank 0, expanded directly onto MPI-owned tiles, and evaluated with separately reported normalized chi-square and 3D regularization terms. A deterministic projected pattern search provides the derivative-free reference solver; centered directional finite differences provide the gradient oracle for Phase 6. Checkpoints are atomic, capability/layout validated, and portable across compatible MPI/thread topologies. TOML/CSV diagnostic bundles retain final controls and every objective component.
 
-Phase 6 implements the production gradient path. Exact distributed PSF and formal-transfer transposes, FFNO-transition and Julia Kurucz LTE pullbacks, Muspel/Wittmann local fallbacks, the persistent PyTorch FFNO VJP, and the force-balance/regularization composite feed synchronized bounded L-BFGS without a dense Jacobian. H and Ca can use separate distributed population workspaces while contributing with Kurucz LTE lines to the same objective. The centered finite-difference backend remains only as the validation oracle. The complete mixed gradient agrees with that oracle, Taylor tests pass, and one/four-rank VJP plus cross-topology restart parity pass.
+Phase 6 implements the production gradient path. Exact distributed PSF and formal-transfer transposes, FFNO-transition and Julia Kurucz LTE pullbacks, Muspel/Wittmann local fallbacks, the persistent multi-GPU FFNO VJP, and the force-balance/regularization composite feed synchronized bounded L-BFGS without a dense Jacobian. The GPU service combines `FULL_SHARD` FSDP parameters with H-slab-distributed activations/FFTs and eval-mode activation checkpointing. Only torchrun rank 0 reads each full checkpoint; every GPU retains only parameter shards between wrapped-block calls. H and Ca can reside together in one persistent service while contributing with Kurucz LTE lines to the same objective. `run_inversion!` positively requires this FSDP backend with at least two GPU ranks; no alternate production FFNO route exists. The centered finite-difference backend remains only as the validation oracle.
 
 `src/Execution.jl` and `scripts/invert.jl` provide the canonical HDF5 two-input/two-output route. Atmosphere files use `(time,z,y,x)` and observation files use `(time,Stokes,wavelength,y,x)`; internal conversion is explicit and performs no interpolation. A model-factory file supplies deployment-specific checkpoints, atom data, EOS and synthesis construction without becoming a third scientific input.
 
-Olivia job 2072078 passed the Phase 6 solver, rejection-recovery, 800 x 800 memory and CUDA/NCCL VJP probes. The updated Phase 6 group adds a real H-checkpoint VJP versus finite-difference regression and should be rerun after this implementation change.
+Olivia job 2072078 passed the Phase 6 solver, rejection-recovery, 800 x 800 memory and CUDA/NCCL VJP probes. The cumulative regression adds two acceptance gates: a real H-checkpoint `FULL_SHARD` FSDP VJP versus finite differences, and the complete outer-MPI to persistent-FSDP predict/VJP/shutdown route. All five jobs from the regression chain must pass before the production GPU path is accepted.
 
 The scheduler chooses rank count and Julia chooses threads per rank. For example, a 256-core allocation can start with 16 ranks and 16 threads per rank. Set BLAS/OpenMP thread counts to one when Julia threads own column-level parallelism.
 
@@ -85,6 +85,6 @@ julia --project=. scripts/validate_phase6_mpi.jl
 # Canonical two-input/two-output executable
 julia --project=. scripts/invert.jl configs/example_intensity_nonprd.toml MODEL_FACTORY.jl
 
-# Submit the bounded Phase 6 target-runtime probes on Olivia
-bash scripts/submit_olivia_phase6_tests.sh
+# Submit every Phase 1-6 test plus timeout/recovery tests on Olivia
+bash scripts/submit_olivia_regression.sh
 ```

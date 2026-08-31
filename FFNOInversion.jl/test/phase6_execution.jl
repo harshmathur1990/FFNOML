@@ -1,4 +1,63 @@
 using HDF5
+using Sockets
+
+function fake_fsdp_population_backend(;levels=1,value=1.0f10,temperature_scaled=false)
+    listener=listen(ip"127.0.0.1",0); port=Int(getsockname(listener)[2])
+    server=@async begin
+        peer=accept(listener)
+        try
+            while true
+                fields=split(readline(peer)); operation=fields[1]
+                if operation=="PREDICT"
+                    nz,nx,ny,nlevels=parse.(Int,fields[3:6])
+                    @test nlevels==levels
+                    features=FFNOInversion._read_float32_array(peer,(6,nz,nx,ny))
+                    FFNOInversion._read_float32_array(peer,(nz,nx,ny))
+                    println(peer,"OK PREDICT $nz $nx $ny $nlevels")
+                    base=temperature_scaled ? value.*(@view(features[1,:,:,:]))./5000f0 :
+                        fill(value,nz,nx,ny)
+                    predicted=repeat(reshape(base,nz,nx,ny,1),1,1,1,nlevels)
+                    FFNOInversion._write_float32_array(peer,predicted); flush(peer)
+                elseif operation=="VJP"
+                    nz,nx,ny,nlevels=parse.(Int,fields[3:6])
+                    FFNOInversion._read_float32_array(peer,(6,nz,nx,ny))
+                    FFNOInversion._read_float32_array(peer,(nz,nx,ny))
+                    FFNOInversion._read_float32_array(peer,(nz,nx,ny,nlevels))
+                    println(peer,"OK VJP $nz $nx $ny $nlevels")
+                    FFNOInversion._write_float32_array(peer,zeros(Float32,6,nz,nx,ny))
+                    FFNOInversion._write_float32_array(peer,zeros(Float32,nz,nx,ny)); flush(peer)
+                elseif operation=="SHUTDOWN"
+                    println(peer,"BYE"); flush(peer); break
+                else
+                    error("unexpected fake FSDP operation: $operation")
+                end
+            end
+        finally
+            close(peer); close(listener)
+        end
+    end
+    socket=connect(ip"127.0.0.1",port)
+    metadata=PopulationMetadata(FFNO_INPUT_CHANNELS,Tuple("level $index" for index in 1:levels),
+        "fake-fsdp-checkpoint")
+    service=FSDPServiceClient(socket,nothing,nothing,"127.0.0.1",port,"test-token",2,
+        Dict(:H=>metadata),ReentrantLock(),false)
+    RootDistributedPopulationModel(FSDPFFNOModel(service,:H,metadata,0),levels),server
+end
+
+@testset "production inversion accepts only multi-GPU FSDP" begin
+    context=serial_context()
+    @test_throws ArgumentError FFNOInversion._require_production_population_backend(
+        LocalDistributedPopulationModel(MockPopulationModel(),1),context)
+    @test_throws ArgumentError FFNOInversion._require_production_population_backend(
+        RootDistributedPopulationModel(MockPopulationModel(),1),context)
+    composite=CompositeDistributedPopulationModel(Dict(
+        :not_fsdp=>RootDistributedPopulationModel(MockPopulationModel(),1)))
+    @test_throws ArgumentError FFNOInversion._require_production_population_backend(
+        composite,context)
+    backend,server=fake_fsdp_population_backend()
+    @test FFNOInversion._require_production_population_backend(backend,context)===nothing
+    close_distributed_population_model!(backend,context); wait(server)
+end
 
 @testset "Phase 6 two-input/two-output executable route" begin
     mktempdir() do directory
@@ -22,12 +81,15 @@ using HDF5
         context=serial_context(); distributed=distribute_atmosphere(Float64,atmosphere,context)
         force=ForceBalanceOptions(max_iterations=4,relative_tolerance=5.0,force_tolerance=5.0,
             height_tolerance_m=1e9,relaxation=0.5,pressure_sweeps=4)
-        model=HybridForwardModel(LocalDistributedPopulationModel(MockPopulationModel(1e10),1),
+        truth_backend,truth_server=fake_fsdp_population_backend(value=1.0f10,
+            temperature_scaled=true)
+        model=HybridForwardModel(truth_backend,
             NonPRD(),MockIntensitySynthesizer(),IdentityObservation(),IdealGasEOS(),
             ReferenceOpacity500(kappa_m2_kg=0.02),HE3DBoundaryState(fill(1e-10,nx,ny),fill(1.0,nx,ny),:top),
             force,CapabilityManifest())
         workspace=HybridForwardWorkspace(Float64,distributed,wavelength,StokesSet(:I),1)
         truth=forward!(workspace,model,distributed,context).spectrum
+        close_distributed_population_model!(truth_backend,context); wait(truth_server)
         h5open(observation_path,"w") do file
             file["intensity"]=FFNOInversion._with_time_slyx(truth.data)
             file["sigma"]=FFNOInversion._with_time_slyx(fill(1e8,size(truth.data)))
@@ -97,12 +159,16 @@ threads_per_rank = $(Threads.nthreads())
         inputs=read_inversion_inputs(config)
         @test inputs.atmosphere.temperature==temperature
         @test inputs.observation.spectrum.data==truth.data
-        factory=InversionModelFactory(1,(cfg,dist,ws,pressure,ctx)->HybridForwardModel(
-            LocalDistributedPopulationModel(MockPopulationModel(1e10),1),NonPRD(),
-            MockIntensitySynthesizer(),IdentityObservation(),IdealGasEOS(),
-            ReferenceOpacity500(kappa_m2_kg=0.02),
-            HE3DBoundaryState(fill(1e-10,size(pressure)),pressure,:top),force,CapabilityManifest()))
+        server_ref=Ref{Any}()
+        factory=InversionModelFactory(1,(cfg,dist,ws,pressure,ctx)->begin
+            backend,server=fake_fsdp_population_backend(value=1.0f10,
+                temperature_scaled=true); server_ref[]=server
+            HybridForwardModel(backend,NonPRD(),MockIntensitySynthesizer(),IdentityObservation(),
+                IdealGasEOS(),ReferenceOpacity500(kappa_m2_kg=0.02),
+                HE3DBoundaryState(fill(1e-10,size(pressure)),pressure,:top),force,CapabilityManifest())
+        end)
         result=run_inversion_files!(config_path,factory)
+        wait(server_ref[])
         @test isfile(synthesis_path) && isfile(output_atmosphere_path)
         @test result.objective.components.total<1e-20
         h5open(synthesis_path) do file

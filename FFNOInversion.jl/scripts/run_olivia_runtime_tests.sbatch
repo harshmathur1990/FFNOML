@@ -8,7 +8,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem-per-gpu=8G
 #SBATCH --network=job_vni
-#SBATCH --time=00:20:00
+#SBATCH --time=02:30:00
 #SBATCH --signal=B:TERM@120
 #SBATCH --output=olivia-runtime-%j.out
 #SBATCH --error=olivia-runtime-%j.err
@@ -119,11 +119,11 @@ diagnostics_root=${OLIVIA_DIAGNOSTICS_DIR:-${OLIVIA_REPO_DIR}/olivia-runtime-evi
 mkdir -p "${diagnostics_root}"
 summary=${diagnostics_root}/summary.tsv
 printf 'test\texpectation\tresult\texit_code\ttimeout_seconds\trequired_marker\n' > "${summary}"
-test_group=${OLIVIA_TEST_GROUP:-safe}
+test_group=${OLIVIA_TEST_GROUP:-regression}
 case "${test_group}" in
-    safe|phase6|internal_timeout|external_timeout|recovery) ;;
+    regression|internal_timeout|external_timeout|recovery) ;;
     *)
-        echo "Unknown OLIVIA_TEST_GROUP=${test_group}; expected safe, phase6, internal_timeout, external_timeout, or recovery" >&2
+        echo "Unknown OLIVIA_TEST_GROUP=${test_group}; expected regression, internal_timeout, external_timeout, or recovery" >&2
         exit 2
         ;;
 esac
@@ -335,9 +335,22 @@ done
 for required_file in Project.toml src/FFNOInversion.jl \
         test/olivia_mpi_probe.jl test/olivia_hybrid_gpu_probe.jl \
         test/olivia_phase6_solver_probe.jl test/olivia_phase6_memory_probe.jl \
-        test/olivia_gpu_collective_probe.py scripts/olivia_nested_gpu_step.sh; do
+        test/olivia_phase1_to_phase6_regression.jl \
+        test/olivia_fsdp_service_probe.jl test/olivia_gpu_collective_probe.py \
+        scripts/olivia_nested_gpu_step.sh scripts/ffno_fsdp_service.sh \
+        scripts/validate_muspel_reference.jl scripts/validate_phase4_topology.jl \
+        scripts/validate_phase4_restart.jl scripts/validate_phase5_mpi.jl \
+        scripts/validate_phase6_mpi.jl; do
     if [[ ! -f "${OLIVIA_REPO_DIR}/${required_file}" ]]; then
         echo "Missing required repository file: ${OLIVIA_REPO_DIR}/${required_file}" \
+            | tee -a "${diagnostics_root}/preflight.txt"
+        exit 2
+    fi
+done
+for required_parent_file in ffno_fsdp_runtime.py ffno_fsdp_service.py \
+        distributed_inference.py ffno_model_factory.py; do
+    if [[ ! -f "${OLIVIA_REPO_DIR}/../${required_parent_file}" ]]; then
+        echo "Missing required FFNOML file: ${OLIVIA_REPO_DIR}/../${required_parent_file}" \
             | tee -a "${diagnostics_root}/preflight.txt"
         exit 2
     fi
@@ -424,9 +437,24 @@ mpi_command=(srun --kill-on-bad-exit=1 --mpi=pmix --gres=none
     --cpu-bind=cores --cpus-per-task="${SLURM_CPUS_PER_TASK}"
     env CUDA_VISIBLE_DEVICES=-1
     "${OLIVIA_JULIA}" --project="${JULIA_PROJECT}" --startup-file=no --threads="${OLIVIA_JULIA_THREADS}")
+julia_command=(env CUDA_VISIBLE_DEVICES=-1
+    "${OLIVIA_JULIA}" --project="${JULIA_PROJECT}" --startup-file=no --threads="${OLIVIA_JULIA_THREADS}")
 
 case "${test_group}" in
-    safe)
+    regression)
+        run_case phase1_to_phase6_julia_tests success 900 OLIVIA_PHASE1_TO_PHASE6_JULIA_TESTS_OK reusable \
+            "${julia_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_phase1_to_phase6_regression.jl"
+        run_case phase3_muspel_reference success 1200 PHASE3_MUSPEL_REFERENCE_OK reusable \
+            "${julia_command[@]}" "${OLIVIA_REPO_DIR}/scripts/validate_muspel_reference.jl" \
+            "${OLIVIA_REPO_DIR}/.."
+        run_case phase4_topology_parity success 600 PHASE4_FULL_FIELD_PARITY_OK reusable \
+            "${julia_command[@]}" "${OLIVIA_REPO_DIR}/scripts/validate_phase4_topology.jl"
+        run_case phase4_restart_parity success 600 PHASE4_RESTART_TOPOLOGY_PARITY_OK reusable \
+            "${julia_command[@]}" "${OLIVIA_REPO_DIR}/scripts/validate_phase4_restart.jl"
+        run_case phase5_mpi_topology_restart success 600 PHASE5_MPI_TOPOLOGY_RESTART_OK reusable \
+            "${julia_command[@]}" "${OLIVIA_REPO_DIR}/scripts/validate_phase5_mpi.jl"
+        run_case phase6_mpi_topology_restart success 600 PHASE6_MPI_TOPOLOGY_RESTART_OK reusable \
+            "${julia_command[@]}" "${OLIVIA_REPO_DIR}/scripts/validate_phase6_mpi.jl"
         run_case cpu_mpi_success success 90 OLIVIA_MPI_PROBE_OK reusable \
             "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_mpi_probe.jl" success
         run_case cpu_mpi_intentional_stall timeout 30 intentional_cpu_stall_enter reusable \
@@ -437,8 +465,6 @@ case "${test_group}" in
             "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_hybrid_gpu_probe.jl" success
         run_case hybrid_gpu_failure_recovery success 240 intentional_gpu_process_failure reusable \
             "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_hybrid_gpu_probe.jl" failure
-        ;;
-    phase6)
         run_case phase6_solver_mpi success 180 OLIVIA_PHASE6_SOLVER_OK reusable \
             "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_phase6_solver_probe.jl" success
         run_case phase6_rejected_trial_recovery success 120 OLIVIA_PHASE6_REJECTION_RECOVERY_OK reusable \
@@ -447,8 +473,10 @@ case "${test_group}" in
             "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_phase6_memory_probe.jl"
         run_case phase6_rank0_gpu_autograd_vjp success 240 OLIVIA_GPU_VJP_PROBE_OK reusable \
             "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_hybrid_gpu_probe.jl" vjp
-        run_case phase6_production_ffno_vjp success 600 OLIVIA_PRODUCTION_FFNO_VJP_OK reusable \
+        run_case phase6_production_fsdp_ffno_vjp success 600 OLIVIA_PRODUCTION_FSDP_FFNO_VJP_OK reusable \
             "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_hybrid_gpu_probe.jl" ffno_vjp
+        run_case phase6_persistent_fsdp_service success 900 OLIVIA_FSDP_SERVICE_INTEGRATION_OK reusable \
+            "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_fsdp_service_probe.jl"
         ;;
     internal_timeout)
         run_case hybrid_gpu_pre_internal_timeout_success success 240 OLIVIA_GPU_PROBE_OK reusable \
