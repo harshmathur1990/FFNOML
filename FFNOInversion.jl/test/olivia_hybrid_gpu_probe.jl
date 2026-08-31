@@ -2,8 +2,8 @@ using FFNOInversion
 using Sockets
 
 mode=length(ARGS)==1 ? Symbol(ARGS[1]) : error(
-    "usage: olivia_hybrid_gpu_probe.jl success|failure|stall|vjp")
-mode in (:success,:failure,:stall,:vjp) || error("unknown hybrid probe mode: $mode")
+    "usage: olivia_hybrid_gpu_probe.jl success|failure|stall|vjp|ffno_vjp")
+mode in (:success,:failure,:stall,:vjp,:ffno_vjp) || error("unknown hybrid probe mode: $mode")
 
 context=initialize_parallel(options=ParallelOptions(enabled=true,threads_per_rank=Threads.nthreads()))
 diagnostics_root=get(ENV,"OLIVIA_CASE_DIAGNOSTICS",pwd())
@@ -25,6 +25,7 @@ watchdog=Threads.@spawn begin
     end
 end
 
+probe_failed=Ref(false)
 try
     launcher_path=get(ENV,"OLIVIA_GPU_PROBE_LAUNCHER",
         joinpath(dirname(@__DIR__),"scripts","olivia_nested_gpu_step.sh"))
@@ -58,9 +59,22 @@ try
         barrier(context)
         isroot(context) && println("OLIVIA_HYBRID_GPU_PROBE_OK mode=$mode ranks=$(context.size)")
     end
+catch exception
+    probe_failed[]=true
+    record("hybrid_probe_exception";
+        details="exception=$(repr(sprint(showerror,exception,catch_backtrace())))")
+    rethrow()
 finally
     stop_watchdog[]=true
     wait(watchdog)
-    record("finalizing")
-    finalize_parallel!(context)
+    if probe_failed[]
+        # MPI_Finalize after one rank fails can mask the original exception
+        # with a libfabric/OFI teardown abort.  Let srun terminate the peers;
+        # the failing rank's durable log above remains the primary evidence.
+        record("finalize_skipped_after_exception")
+    else
+        barrier(context)
+        record("finalizing")
+        finalize_parallel!(context)
+    end
 end

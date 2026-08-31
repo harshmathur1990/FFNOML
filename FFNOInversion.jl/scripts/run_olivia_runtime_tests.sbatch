@@ -299,6 +299,14 @@ run_case() {
         "${status}" "${timeout_seconds}" "${required_marker}" >> "${summary}"
     echo "${label}: ${result} (exit=${status})"
     if [[ "${result}" != PASS ]]; then
+        echo "----- ${label} stdout tail -----"
+        tail -n 80 "${case_dir}/stdout.log" || true
+        echo "----- ${label} stderr tail -----"
+        tail -n 120 "${case_dir}/stderr.log" || true
+        echo "----- ${label} durable rank failures -----"
+        grep --recursive --line-number --extended-regexp \
+            '(_exception|python_failure|finalize_skipped_after_exception)' \
+            "${case_dir}" 2>/dev/null || true
         failures=$((failures+1))
     fi
 }

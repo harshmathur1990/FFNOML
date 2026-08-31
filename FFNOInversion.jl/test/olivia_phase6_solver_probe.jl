@@ -74,6 +74,7 @@ watchdog=Threads.@spawn begin
     end
 end
 
+probe_failed=Ref(false)
 try
     nx,ny=5,4
     grid=Grid3D([-5.0,-3.0,-1.0],collect(0.0:50e3:(nx-1)*50e3),collect(0.0:50e3:(ny-1)*50e3))
@@ -152,9 +153,22 @@ try
         record("rejection_recovery_success";details="rejected_trials=4")
         isroot(context) && println("OLIVIA_PHASE6_REJECTION_RECOVERY_OK ranks=$(context.size) rejected_trials=4")
     end
+catch exception
+    probe_failed[]=true
+    record("solver_exception";
+        details="exception=$(repr(sprint(showerror,exception,catch_backtrace())))")
+    rethrow()
 finally
     stop_watchdog[]=true
     wait(watchdog)
-    record("finalizing")
-    finalize_parallel!(context)
+    if probe_failed[]
+        # Do not enter MPI_Finalize after rank-local failure: on Olivia the
+        # OFI teardown abort otherwise hides the exception that caused ranks
+        # to diverge.  The scheduler kills remaining ranks on the nonzero exit.
+        record("finalize_skipped_after_exception")
+    else
+        barrier(context)
+        record("finalizing")
+        finalize_parallel!(context)
+    end
 end
