@@ -46,7 +46,7 @@ export OLIVIA_JULIA OLIVIA_PYTHON
 # Resolve the package root independently of the directory from which sbatch was
 # invoked. The established Olivia checkout is the default; OLIVIA_REPO_DIR is
 # only needed when deliberately testing another checkout.
-default_olivia_repo=/cluster/work/projects/nn2834k/harshm/FNOML/FFNOInversion.jl
+default_olivia_repo=/cluster/work/projects/nn2834k/harshm/FFNOML/FFNOInversion.jl
 if [[ -n "${OLIVIA_REPO_DIR:-}" ]]; then
     repository_candidate=${OLIVIA_REPO_DIR}
 elif [[ -f "${default_olivia_repo}/Project.toml" &&
