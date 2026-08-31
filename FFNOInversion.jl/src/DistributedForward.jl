@@ -57,7 +57,13 @@ function gather_atmosphere(distributed::DistributedAtmosphere,context::ParallelC
 end
 
 function _local_boundary(boundary::HE3DBoundaryState,tile::Tile2D)
-    cut(value)=value isa Number ? value : copy(@view value[tile.xrange,tile.yrange])
+    cut(value)=if value isa Number
+        value
+    elseif size(value)==(length(tile.xrange),length(tile.yrange))
+        copy(value)
+    else
+        copy(@view value[tile.xrange,tile.yrange])
+    end
     HE3DBoundaryState(cut(boundary.rho0),cut(boundary.p0),boundary.boundary)
 end
 
@@ -196,6 +202,15 @@ end
 struct RootDistributedPopulationModel{M} <: AbstractDistributedPopulationModel
     root_model::M; levels::Int
 end
+struct CompositeDistributedPopulationModel{M<:AbstractDict} <: AbstractDistributedPopulationModel
+    models::M
+    function CompositeDistributedPopulationModel(models::M) where {M<:AbstractDict}
+        isempty(models) && throw(ArgumentError("composite population model cannot be empty"))
+        all(value->value isa AbstractDistributedPopulationModel,values(models)) || throw(ArgumentError(
+            "every composite population entry must be a distributed population model"))
+        new{M}(models)
+    end
+end
 
 function predict_distributed_populations!(out,backend::LocalDistributedPopulationModel,distributed,context)
     predict_populations!(out,backend.model,distributed.local_atmosphere)
@@ -216,8 +231,18 @@ function predict_distributed_populations!(out,backend::RootDistributedPopulation
     out.=permutedims(field.values,(1,3,4,2)); out
 end
 
-mutable struct HybridForwardWorkspace{T<:AbstractFloat}
-    populations::Array{T,4}
+function predict_distributed_populations!(out::AbstractDict,backend::CompositeDistributedPopulationModel,
+        distributed,context)
+    Set(keys(out))==Set(keys(backend.models)) || throw(ArgumentError(
+        "population workspace species differ from composite model"))
+    for species in sort!(collect(keys(backend.models));by=string)
+        predict_distributed_populations!(out[species],backend.models[species],distributed,context)
+    end
+    out
+end
+
+mutable struct HybridForwardWorkspace{T<:AbstractFloat,P}
+    populations::P
     intrinsic::SpectralCube{T,Array{T,4}}
     output::SpectralCube{T,Array{T,4}}
     synthesis_cache::ThreadedSynthesisCache{T}
@@ -236,6 +261,15 @@ function HybridForwardWorkspace(::Type{T},distributed::DistributedAtmosphere,wav
     a=distributed.local_atmosphere; nz,nx,ny=size(a.temperature); nλ=length(wavelength)
     cube()=SpectralCube(zeros(T,nλ,length(stokes.components),nx,ny),T.(wavelength),stokes)
     HybridForwardWorkspace(zeros(T,nz,nx,ny,levels),cube(),cube(),ThreadedSynthesisCache(T,nz,nλ))
+end
+
+function HybridForwardWorkspace(::Type{T},distributed::DistributedAtmosphere,wavelength,stokes,
+        levels::AbstractDict) where T
+    a=distributed.local_atmosphere; nz,nx,ny=size(a.temperature); nλ=length(wavelength)
+    cube()=SpectralCube(zeros(T,nλ,length(stokes.components),nx,ny),T.(wavelength),stokes)
+    populations=Dict{Symbol,Array{T,4}}(Symbol(species)=>zeros(T,nz,nx,ny,Int(count))
+        for (species,count) in levels)
+    HybridForwardWorkspace(populations,cube(),cube(),ThreadedSynthesisCache(T,nz,nλ))
 end
 
 struct HybridForwardModel{P,R,S,O,E,K,B,F}
@@ -262,7 +296,8 @@ function _convolve_padded_owned(padded,kernel,axis,lx,ly)
 end
 
 function _distributed_observation!(output,intrinsic,model::GaussianPSFObservation,distributed,context)
-    T=eltype(intrinsic.data); spectral=_convolve_axis(intrinsic.data,
+    T=eltype(intrinsic.data)
+    spectral=model.spectral_fwhm_m==0 ? copy(intrinsic.data) : _convolve_axis(intrinsic.data,
         _kernel(T,T(model.spectral_fwhm_m),_uniform_spacing(intrinsic.wavelength_m)),1)
     tile=distributed.tile; global_shape=(size(spectral,1),size(spectral,2),length(distributed.global_grid.x),length(distributed.global_grid.y))
     kx=_kernel(T,T(model.spatial_fwhm_x_m),T(model.dx_m)); rx=(length(kx)-1)÷2
@@ -310,7 +345,9 @@ function distributed_memory_report(distributed::DistributedAtmosphere,workspace:
     if a.magnetic_field!==nothing
         atmosphere_bytes+=sum(_array_bytes(getfield(a.magnetic_field,name)) for name in (:Bx,:By,:Bz))
     end
-    workspace_bytes=_array_bytes(workspace.populations)+_array_bytes(workspace.intrinsic.data)+
+    population_bytes=workspace.populations isa AbstractDict ?
+        sum(_array_bytes(value) for value in values(workspace.populations)) : _array_bytes(workspace.populations)
+    workspace_bytes=population_bytes+_array_bytes(workspace.intrinsic.data)+
         _array_bytes(workspace.output.data)+sum(_array_bytes(ws.extinction)+_array_bytes(ws.emissivity)
             for ws in workspace.synthesis_cache.workspaces)
     local_entry=Dict{String,Any}(

@@ -1,6 +1,7 @@
 module FFNOInversion
 
 using Dates
+using HDF5
 using LinearAlgebra
 using Libdl
 using Serialization
@@ -25,8 +26,10 @@ include("Regularization.jl")
 include("DistributedForward.jl")
 include("Solvers.jl")
 include("Gradients.jl")
+include("ProductionGradients.jl")
 include("ScalableSolvers.jl")
 include("IO.jl")
+include("Execution.jl")
 
 export Grid3D, MagneticField3D, Atmosphere3D, HE3DBoundaryState
 export ParallelOptions, ParallelContext, Tile2D, DistributedField
@@ -43,7 +46,7 @@ export AbstractOpacity500, WittmannOpacity500, ReferenceOpacity500, opacity500!
 export ForceBalanceOptions, ForceBalanceDiagnostics, lorentz_force!, reconstruct_force_balance!
 export StokesSet, SpectralCube, ObservationCube, CapabilityManifest
 export NodeField, expand_nodes
-export AbstractPopulationModel, predict_populations!, MockPopulationModel
+export AbstractPopulationModel, predict_populations!, population_vjp!, MockPopulationModel
 export FFNO_INPUT_CHANNELS, PopulationMetadata, population_features, PythonFFNOModel, RecordedPopulationModel, load_python_ffno_model
 export save_population_record, load_population_record
 export AbstractRedistributionModel, NonPRD, MockPRD
@@ -58,7 +61,7 @@ export GaussianPSFObservation, build_inversion_weights
 export ForwardWorkspace, MockForwardModel, forward!
 export DistributedAtmosphere, distribute_atmosphere, gather_atmosphere
 export reconstruct_force_balance_distributed!, AbstractDistributedPopulationModel
-export LocalDistributedPopulationModel, RootDistributedPopulationModel, predict_distributed_populations!
+export LocalDistributedPopulationModel, RootDistributedPopulationModel, CompositeDistributedPopulationModel, predict_distributed_populations!
 export HybridForwardWorkspace, HybridForwardModel, HybridForwardTimings, gather_spectrum, distributed_chi2, distributed_regularization_penalty
 export distributed_memory_report
 export distribute_observation
@@ -74,11 +77,15 @@ export MatrixFreeLinearization, apply_jvp, apply_vjp, DotProductReport, dot_prod
 export node_expansion_vjp, accumulate_control_vjp!
 export AbstractObjectiveGradient, ObjectiveGradientEvaluation, FiniteDifferenceObjectiveGradient
 export objective_gradient!, TaylorRemainderSample, GradientTaylorReport, gradient_taylor_validation
+export AtmosphereCotangent, HybridAdjointObjectiveGradient
+export observation_vjp!, synthesis_vjp!, predict_distributed_populations_vjp!
 export LBFGSSolverOptions, LBFGSIterationRecord, LBFGSSolverState, LBFGSInversionResult
 export lbfgs_invert!, write_lbfgs_diagnostics
 export AtmosphereInputConfig, ObservedDataConfig, WeightInputConfig, OutputConfig, SynthesisGridConfig, SpectralSourceConfig, SpectralRegionConfig, wavelengths, RunConfig
 export ControlMapConfig, build_control_layout
 export load_config, dry_run_summary
 export checkpoint!, restore_checkpoint
+export InversionInputBundle, InversionModelFactory, InversionRunResult
+export read_inversion_inputs, write_inversion_outputs, run_inversion!, run_inversion_files!
 
 end

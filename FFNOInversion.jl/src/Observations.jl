@@ -60,8 +60,8 @@ function apply_observation!(output::SpectralCube{T}, model::GaussianPSFObservati
     size(output.data) == size(intrinsic.data) || throw(DimensionMismatch("PSF output must retain the full synthesis-grid shape"))
     output.stokes.components == intrinsic.stokes.components || throw(DimensionMismatch("Stokes sets differ"))
     output.wavelength_m == intrinsic.wavelength_m || throw(DimensionMismatch("wavelength grids differ"))
-    spectral_spacing = _uniform_spacing(intrinsic.wavelength_m)
-    degraded = _convolve_axis(intrinsic.data,_kernel(T,T(model.spectral_fwhm_m),spectral_spacing),1)
+    degraded = model.spectral_fwhm_m==0 ? copy(intrinsic.data) : _convolve_axis(intrinsic.data,
+        _kernel(T,T(model.spectral_fwhm_m),_uniform_spacing(intrinsic.wavelength_m)),1)
     degraded = _convolve_axis(degraded,_kernel(T,T(model.spatial_fwhm_x_m),T(model.dx_m)),3)
     degraded = _convolve_axis(degraded,_kernel(T,T(model.spatial_fwhm_y_m),T(model.dy_m)),4)
     copyto!(output.data,degraded)

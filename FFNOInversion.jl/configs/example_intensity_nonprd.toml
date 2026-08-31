@@ -1,6 +1,8 @@
 [inputs]
 observation_file = "inputs/observations.h5"
 initial_atmosphere_file = "inputs/initial_atmosphere.h5"
+# Select one time plane from files whose leading dimension is time.
+time_index = 1
 
 [outputs]
 synthesis_file = "outputs/synthesis.h5"

@@ -1,5 +1,13 @@
 abstract type AbstractPopulationModel end
 function predict_populations! end
+"""Reverse one population inference without materializing its Jacobian.
+
+`feature_bar` follows `FFNO_INPUT_CHANNELS`, `z_bar` follows the atmospheric
+height cube, and `population_bar` has the canonical `(nz,nx,ny,nlevel)`
+layout.  Production FFNO implementations execute this action on the same
+persistent backend used for inference.
+"""
+function population_vjp! end
 
 const FFNO_INPUT_CHANNELS=(:temperature,:vx,:vy,:vz,:log10_ne,:log10_rho)
 

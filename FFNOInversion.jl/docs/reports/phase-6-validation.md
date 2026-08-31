@@ -1,53 +1,64 @@
-# Phase 6 validation - in progress
+# Phase 6 validation - implementation complete, target GPU regression pending
 
-Date: 2026-08-26
+Date: 2026-08-31
 
-## Implemented
+## Implemented production path
 
 - Generic matrix-free JVP/VJP actions with dot-product validation.
 - Exact distributed adjoint of coarse-node expansion, including MPI reduction and physical-to-scaled control conversion.
-- Bounded finite-difference objective gradient retained as an oracle.
-- First-order Taylor-remainder validation for complete objective gradients.
-- Synchronized bounded L-BFGS with projected gradients, limited memory, Armijo backtracking, forward-call accounting, safe rejected-trial restoration, atomic checkpoint/restart, and TOML/CSV diagnostics.
-- Solver configuration supports `lbfgs` and the retained `prototype_pattern_search` baseline without obsolete method-specific keys in the example configuration.
+- Exact transposes for the distributed spectral/spatial Gaussian observation operator and the scalar formal solver.
+- Analytic opacity/emissivity pullbacks for FFNO transitions and the Julia Kurucz LTE path.
+- A cell-local numerical pullback for the Muspel opacity primitives and a column-local numerical fallback for the opaque Wittmann Kurucz C backend. Neither fallback repeats the formal solution, force balance, FFNO inference or complete forward model.
+- Persistent PyTorch FFNO VJP support in `ffno_runtime.py`, exposed through PythonCall and the existing rank-0 GPU control/status service.
+- Separate H and Ca population workspaces and composite distributed population backends, allowing simultaneous FFNO species plus Kurucz LTE contributors.
+- A complete `HybridAdjointObjectiveGradient` that chains weighted chi-square, PSF, formal transfer, line physics, population inference, force reconstruction and regularization into scaled coarse-control gradients.
+- The HE3D/MHS plus regularization composite uses bounded centered perturbations of the CPU reconstruction only. It performs one complete forward/GPU evaluation per gradient and does not construct a dense Jacobian.
+- Synchronized bounded L-BFGS with projected gradients, limited memory, Armijo backtracking, safe rejected-trial restoration, atomic checkpoint/restart and forward-call accounting.
+- Canonical HDF5 input/output and one executable MPI route from the two scientific inputs to the two scientific outputs. File axes `(time,z,y,x)` and `(time,Stokes,wavelength,y,x)` are converted to the internal canonical layouts without interpolation.
 
 ## Local evidence
 
-The complete local suite passes 206 assertions. The node-expansion pullback passes its dot-product test below `1e-12` relative error. The six-control exact-model objective pullback agrees with centered finite differences and its Taylor remainder converges at second order.
+The complete local suite passes 220 assertions. The production PSF and formal-solver pullbacks pass directional dot-product checks. A simultaneous two-species FFNO-transition plus Kurucz-LTE objective gradient agrees with the complete centered finite-difference oracle to `3.67e-10` relative error. Its Taylor remainder is second order, and bounded L-BFGS reduces the mixed objective in 22 complete forward evaluations.
 
-Bounded L-BFGS recovers all four temperature and two velocity controls to below `1e-6` absolute error, reaches an objective below `1e-14`, and uses fewer complete forward evaluations than the Phase 5 pattern-search baseline. A deliberately reversed gradient causes every line-search trial to be rejected; the solver restores the accepted atmosphere and exits with `line_search_failed`. Interrupted execution reproduces uninterrupted controls, gradients, history, objective, and forward-evaluation count.
+The HDF5 executable test reads one atmosphere file and one observation file, runs the sole MPI/hybrid inversion path, and writes one synthesis file and one recovered-atmosphere file. It verifies the declared time/Stokes/wavelength/y/x axis contract and population output.
 
-The MPI validator passes for one and four ranks. Both topologies make the same line-search decisions. Normal MPI reduction roundoff is below the asserted tolerance. A one-rank checkpoint restarts on four ranks and reproduces the uninterrupted one-rank result and forward-evaluation count.
+The MPI validator passes for one and four ranks. It now additionally exercises the production gather -> rank-0 population VJP -> scatter route with no population model on non-root ranks. Both topologies return the exact cotangent, make the same optimizer decisions, and a one-rank checkpoint restarts on four ranks with the uninterrupted result and forward-evaluation count.
 
 Commands:
 
 ```text
 julia --project=. test/runtests.jl
 julia --project=. scripts/validate_phase6_mpi.jl
+julia --project=. scripts/invert.jl CONFIG.toml MODEL_FACTORY.jl
 ```
 
-## Remaining before Phase 6 acceptance
+## Olivia evidence received
 
-- Wire configuration, two-input ingestion, solver selection, final two-output writing and the production gradient backend into one executable inversion entry point. At present `lbfgs_invert!` is called only by tests and validators.
-- Implement and test the rank-0 FFNO GPU VJP service through the existing GPU control/status protocol.
-- Implement and chain pullbacks for force balance/EOS/opacity, Muspel non-LTE synthesis, Kurucz LTE synthesis, the distributed observation PSF, weighted data objective, and vertical/horizontal regularization.
-- Run a Taylor and dot-product test for every enabled custom pullback and a complete real-physics gradient against the centered finite-difference oracle.
-- Run the solver on the real small-volume mixed FFNO plus Kurucz path and retain a forward-call comparison against Phase 5.
-- Demonstrate full-domain peak memory and GPU/MPI runtime behavior on Olivia target hardware, including rejected-trial and failure recovery.
+Job `2072078` exited normally and passed all four original Phase 6 target-runtime cases:
 
-## Olivia tests prepared
+- distributed L-BFGS and checkpoint/restart;
+- rejected-trial restoration;
+- configurable 800 by 800 rank-owned layout memory;
+- CUDA autograd VJP plus NCCL checksum.
 
-The runtime harness now has a dedicated `phase6` allocation containing four
-tests: the distributed exact-model L-BFGS solver with checkpoint/restart,
-rejected-trial restoration,
-a configurable 800 by 800 full-layout rank-owned memory allocation, and a
-rank-0-controlled CUDA autograd VJP with an NCCL checksum. Every case has a
-hard external timeout, five-second scheduler/heartbeat sampling, orphaned-step
-cleanup and a diagnostic archive.
+The job completed in 154 seconds with a maximum reported step RSS of 10.7 GiB under a 24 GiB per-rank test limit. The harness produced periodic diagnostics and a compressed evidence archive.
 
-These tests provide target-runtime evidence for implemented infrastructure.
-They deliberately do not count as FFNO, force-balance, Muspel, Kurucz, PSF or
-regularization gradient evidence because those production pullbacks do not yet
-exist.
+## Post-implementation Olivia regression prepared
 
-Phase 6 has begun and its solver/gradient architecture is operational, but the phase is not yet complete.
+The Phase 6 Olivia group now contains a fifth bounded test, `phase6_production_ffno_vjp`. It loads the real H checkpoint into the persistent GPU backend, applies the new population VJP, and compares a directional derivative with centered finite differences. It has a 600 second external timeout, periodic Python tracebacks and the existing scheduler cleanup/diagnostic archive.
+
+Run:
+
+```text
+bash scripts/submit_olivia_phase6_tests.sh
+```
+
+Required new marker:
+
+```text
+OLIVIA_PRODUCTION_FFNO_VJP_OK
+```
+
+## Phase assessment
+
+Phase 6 implementation is complete: the production gradient, scalable solver, MPI rank-0 VJP service, mixed NLTE/LTE test, executable two-input/two-output route and local/MPI validation artifacts exist. Final target-hardware sign-off requires rerunning the updated Olivia Phase 6 group once and retaining the new real-checkpoint VJP marker. No further Phase 6 source implementation is currently identified.

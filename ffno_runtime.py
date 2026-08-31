@@ -98,6 +98,62 @@ class PersistentFFNOBackend:
         # [1,Cout,nz,nx,ny] -> canonical Julia [nz,nx,ny,Cout]
         return populations[0].permute(1,2,3,0).float().cpu().numpy()
 
+    def vjp(self, features, z_scale, dx, dy, population_cotangent):
+        """Apply the exact PyTorch VJP of linear populations.
+
+        The public arrays retain the Julia canonical layouts; only the
+        persistent GPU backend performs the channel-first/batch transforms.
+        No parameter gradients or dense population Jacobian are constructed.
+        """
+        torch = self.torch
+        features = np.asarray(features, dtype=np.float32)
+        z_scale = np.asarray(z_scale, dtype=np.float32)
+        population_cotangent = np.asarray(population_cotangent, dtype=np.float32)
+        if features.ndim != 4 or features.shape[0] != len(INPUT_CHANNELS):
+            raise ValueError("features must have shape (6,nz,nx,ny)")
+        if tuple(features.shape[1:]) != tuple(z_scale.shape):
+            raise ValueError("z_scale must have shape (nz,nx,ny)")
+        expected = tuple(z_scale.shape) + (len(self.level_names),)
+        if tuple(population_cotangent.shape) != expected:
+            raise ValueError(
+                f"population_cotangent has shape {population_cotangent.shape}; expected {expected}"
+            )
+        if not (
+            np.isfinite(features).all()
+            and np.isfinite(z_scale).all()
+            and np.isfinite(population_cotangent).all()
+        ):
+            raise ValueError("FFNO VJP request contains NaN or Inf")
+
+        x = torch.as_tensor(features, device=self.device)[None].requires_grad_(True)
+        z = torch.as_tensor(z_scale, device=self.device)[None].requires_grad_(True)
+        dx_tensor = torch.as_tensor(float(dx), dtype=torch.float32, device=self.device)
+        dy_tensor = torch.as_tensor(float(dy), dtype=torch.float32, device=self.device)
+        pred_normalized = self.model(
+            (x - self.mean_x) / self.std_x, z, dx_tensor, dy_tensor
+        )
+        pred_log = pred_normalized * self.std_y + self.mean_y
+        populations = torch.pow(10.0, pred_log)
+        cotangent = torch.as_tensor(population_cotangent, device=self.device)
+        cotangent = cotangent.permute(3, 0, 1, 2)[None]
+        feature_gradient, z_gradient = torch.autograd.grad(
+            populations,
+            (x, z),
+            grad_outputs=cotangent,
+            allow_unused=True,
+        )
+        if feature_gradient is None:
+            feature_gradient = torch.zeros_like(x)
+        if z_gradient is None:
+            z_gradient = torch.zeros_like(z)
+        if not torch.isfinite(feature_gradient).all() or not torch.isfinite(z_gradient).all():
+            raise RuntimeError("FFNO VJP returned NaN or Inf")
+        self.call_count += 1
+        return {
+            "features": feature_gradient[0].float().detach().cpu().numpy(),
+            "z_scale": z_gradient[0].float().detach().cpu().numpy(),
+        }
+
 
 def create_persistent_backend(**kwargs):
     return PersistentFFNOBackend(**kwargs)

@@ -54,6 +54,68 @@ function FFNOInversion.add_opacity_emissivity!(chi,eta,model::MuspelLineOpacityM
     end
 end
 
+function _cell_pairing(model,wavelength,chi_bar,eta_bar,temp,ne,vz,hi,proton,nu,nl)
+    line=model.line
+    alpha_c=Muspel.α_cont(model.continuum,temp,ne,hi,proton)
+    j_c=alpha_c*Muspel.blackbody_λ(line.λ0,temp)
+    gamma=Muspel.calc_broadening(line.γ,temp,ne,hi)
+    dwidth=Muspel.doppler_width(line.λ0,line.mass,temp)
+    gamma_energy=6.62607015e-34*299792458.0/(4pi*line.λ0*1e-9)
+    result=zero(promote_type(typeof(temp),eltype(chi_bar)))
+    for l in eachindex(wavelength)
+        lambda_nm=wavelength[l]*1e9
+        a=Muspel.damping(gamma,lambda_nm,dwidth)
+        v=(lambda_nm-line.λ0+line.λ0*vz/299792458.0)/dwidth
+        profile=real(model.voigt(a,abs(v)))/(sqrt(pi)*dwidth)
+        factor=gamma_energy*profile
+        alpha=factor*(nl*line.Blu-nu*line.Bul)*1e9+
+            (model.include_continuum ? alpha_c : 0)
+        emiss=factor*nu*line.Aul*1e-3+(model.include_continuum ? j_c : 0)
+        result+=chi_bar[l]*alpha+eta_bar[l]*emiss
+    end
+    result
+end
+
+"""Cell-local numerical VJP for Muspel's cached opacity primitives.
+
+Only the scalar opacity/emissivity preparation is perturbed. The formal solve,
+the distributed forward model and FFNO inference are not repeated.
+"""
+function FFNOInversion.add_opacity_emissivity_vjp!(atmosphere_bar,population_bar,
+        population_lookup,chi_bar,eta_bar,model::MuspelLineOpacityModel,wavelength,
+        atmosphere,x,y,populations)
+    populations===nothing && throw(ArgumentError("Muspel VJP requires line populations"))
+    hydrogen=model.hydrogen_populations; hydrogen_bar=population_lookup(hydrogen)
+    line=model.line
+    for k in axes(chi_bar,1)
+        temp=Float32(atmosphere.temperature[k,x,y]); ne=Float32(atmosphere.ne[k,x,y])
+        vz=Float32(atmosphere.vz[k,x,y]); hi=Float32(sum(@view hydrogen[k,x,y,1:5]))
+        proton=Float32(hydrogen[k,x,y,6]); nu=Float32(populations[k,x,y,model.upper_level])
+        nl=Float32(populations[k,x,y,model.lower_level])
+        cb=@view chi_bar[k,:]; eb=@view eta_bar[k,:]
+        values=Float32[temp,ne,vz,hi,proton,nu,nl]
+        derivatives=zeros(Float64,length(values))
+        for q in eachindex(values)
+            center=values[q]
+            scale=q==3 ? max(abs(center),1f3) : max(abs(center),1f0)
+            h=1f-3*scale
+            q!=3 && center>0 && (h=min(h,center/2))
+            plus=copy(values); minus=copy(values); plus[q]+=h; minus[q]-=h
+            fp=_cell_pairing(model,wavelength,cb,eb,plus...)
+            fm=_cell_pairing(model,wavelength,cb,eb,minus...)
+            derivatives[q]=(fp-fm)/(2h)
+        end
+        atmosphere_bar.temperature[k,x,y]+=derivatives[1]
+        atmosphere_bar.ne[k,x,y]+=derivatives[2]
+        atmosphere_bar.vz[k,x,y]+=derivatives[3]
+        @views hydrogen_bar[k,x,y,1:5].+=derivatives[4]
+        hydrogen_bar[k,x,y,6]+=derivatives[5]
+        population_bar[k,x,y,model.upper_level]+=derivatives[6]
+        population_bar[k,x,y,model.lower_level]+=derivatives[7]
+    end
+    nothing
+end
+
 function FFNOInversion.formal_solve!(out,::MuspelFormalSolver,chi,eta,z)
     n=size(chi,1); source=Vector{eltype(out)}(undef,n); tmp=similar(source)
     for l in axes(chi,2)

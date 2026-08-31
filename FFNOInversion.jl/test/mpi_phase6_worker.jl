@@ -37,6 +37,18 @@ function FFNOInversion.objective_gradient!(::MPIPhase6VJP,
     ObjectiveGradientEvaluation(evaluation,gradient,1)
 end
 
+struct MPIRootPopulationVJP <: AbstractPopulationModel end
+function FFNOInversion.predict_populations!(out,::MPIRootPopulationVJP,atmosphere,cache=nothing)
+    @views out[:,:,:,1].=atmosphere.temperature
+    @views out[:,:,:,2].=2 .* atmosphere.temperature
+    out
+end
+function FFNOInversion.population_vjp!(feature_bar,z_bar,::MPIRootPopulationVJP,atmosphere,population_bar)
+    fill!(feature_bar,0); fill!(z_bar,0)
+    @views feature_bar[1,:,:,:].=population_bar[:,:,:,1].+2 .* population_bar[:,:,:,2]
+    feature_bar,z_bar
+end
+
 function phase6_layout(temperature,vz)
     temp=NodeField(reshape(Float64.(temperature),2,2,1),[-5.0,-1.0])
     velocity=NodeField(reshape(Float64.(vz),2,1,1),[-5.0,-1.0])
@@ -65,6 +77,19 @@ try
     truth_layout=phase6_layout([5000,6000,5500,6500],[-1000,1000])
     apply_control_maps!(distributed,truth_layout,initial_parameters(truth_layout))
     truth=forward!(workspace,model,distributed,context)
+
+    # Exercise the production gather -> rank-0 VJP -> scatter route. Only rank
+    # zero owns the model, while every rank supplies and receives tile arrays.
+    root_vjp=RootDistributedPopulationModel(isroot(context) ? MPIRootPopulationVJP() : nothing,2)
+    vjp_populations=zeros(Float64,size(distributed.local_atmosphere.temperature)...,2)
+    predict_distributed_populations!(vjp_populations,root_vjp,distributed,context)
+    population_bar=similar(vjp_populations); @views population_bar[:,:,:,1].=1; @views population_bar[:,:,:,2].=2
+    atmosphere_bar=AtmosphereCotangent(distributed.local_atmosphere)
+    predict_distributed_populations_vjp!(atmosphere_bar,root_vjp,distributed,population_bar,context)
+    all(atmosphere_bar.temperature.==5) || error("rank-0 population VJP returned an incorrect temperature cotangent")
+    all(iszero,atmosphere_bar.z) || error("rank-0 population VJP returned an unexpected z cotangent")
+    isroot(context) && println("MPI_PHASE6_ROOT_POPULATION_VJP_OK ranks=$(context.size)")
+
     observation=ObservationCube(SpectralCube(copy(truth.spectrum.data),wavelength,StokesSet(:I)),
         fill(0.02,size(truth.spectrum.data)),ones(size(truth.spectrum.data)))
     regularization=RegularizationSpec(vertical=VerticalRegularizationSpec(ntuple(_->0,7),0.0,ntuple(_->1.0,7)),

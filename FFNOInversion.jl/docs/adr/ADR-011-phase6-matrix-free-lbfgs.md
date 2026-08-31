@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted for the initial Phase 6 implementation slice. Phase 6 as a whole remains in progress until every enabled production pullback and the target-hardware memory gate pass.
+Accepted. The production pullback chain and bounded L-BFGS implementation are complete. Olivia job 2072078 passed the target solver, recovery, layout-memory and CUDA/NCCL infrastructure gates; the updated real-checkpoint FFNO VJP case remains a post-change target regression.
 
 ## Decision
 
@@ -18,4 +18,4 @@ L-BFGS checkpoints contain only coarse controls, scaled gradients, limited-memor
 
 The exact-model test supplies a hand-derived VJP for the deterministic intensity fixture. It validates the gradient contract, distributed control-map adjoint, Taylor behavior, synchronized optimizer, rejection recovery, restart, and forward-call efficiency. `FiniteDifferenceObjectiveGradient` is retained for tests and debugging, not as the production large-control gradient.
 
-Phase 6 is not accepted until custom pullbacks for the enabled HE3D/MHS and EOS path, rank-0 FFNO GPU service, Muspel/Kurucz synthesis, observation PSF, data objective, and regularization are chained and individually tested. GPU and full-domain memory evidence must come from Olivia.
+The enabled chain now includes rank-0 FFNO VJPs, distributed observation and node adjoints, scalar transfer, FFNO/Kurucz line physics, Muspel/Wittmann local fallbacks, and a force-balance/regularization composite action. The complete mixed objective is tested against the centered oracle and by Taylor remainder. GPU checkpoint behavior remains guarded by the bounded Olivia production-VJP regression.

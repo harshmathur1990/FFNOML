@@ -14,8 +14,14 @@ include("helpers.jl")
     out=zeros(Float64,4,2,3,2)
     predict_populations!(out,model,a); first=copy(out)
     predict_populations!(out,model,a)
+    population_bar=reshape(collect(1.0:length(out)),size(out))
+    feature_bar=zeros(Float64,6,shape...); z_bar=zeros(Float64,shape)
+    population_vjp!(feature_bar,z_bar,model,a,population_bar)
     module_object=pyimport("python_ffno_fixture")
     @test pyconvert(Int,module_object.factory_calls)==1
-    @test model.calls==2 && out==first
+    @test model.calls==3 && out==first
     @test all(@view(out[:,:,:,2]).==3 .* a.temperature)
+    @test @view(feature_bar[1,:,:,:]) == @view(population_bar[:,:,:,1]) .+
+        3 .* @view(population_bar[:,:,:,2])
+    @test all(iszero,z_bar)
 end

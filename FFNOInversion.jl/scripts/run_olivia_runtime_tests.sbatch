@@ -439,6 +439,8 @@ case "${test_group}" in
             "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_phase6_memory_probe.jl"
         run_case phase6_rank0_gpu_autograd_vjp success 240 OLIVIA_GPU_VJP_PROBE_OK reusable \
             "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_hybrid_gpu_probe.jl" vjp
+        run_case phase6_production_ffno_vjp success 600 OLIVIA_PRODUCTION_FFNO_VJP_OK reusable \
+            "${mpi_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_hybrid_gpu_probe.jl" ffno_vjp
         ;;
     internal_timeout)
         run_case hybrid_gpu_pre_internal_timeout_success success 240 OLIVIA_GPU_PROBE_OK reusable \

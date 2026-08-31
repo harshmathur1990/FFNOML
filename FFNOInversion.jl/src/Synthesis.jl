@@ -97,8 +97,9 @@ function synthesize!(cube::SpectralCube{T},model::MixedIntensitySynthesizer,redi
         work=threaded.workspaces[Threads.threadid()]
         fill!(work.extinction,zero(T)); fill!(work.emissivity,zero(T))
         for contributor in model.contributors
+            contributor_populations=contributor.populations===nothing ? populations : contributor.populations
             add_opacity_emissivity!(work.extinction,work.emissivity,contributor.model,cube.wavelength_m,
-                                    atmosphere,x,y,contributor.populations)
+                                    atmosphere,x,y,contributor_populations)
         end
         formal_solve!(@view(cube.data[:,1,x,y]),model.solver,work.extinction,work.emissivity,@view(atmosphere.z[:,x,y]))
     end

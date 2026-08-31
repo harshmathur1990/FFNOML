@@ -81,6 +81,7 @@ struct RunConfig{T<:AbstractFloat}
     parallel::ParallelOptions
     controls::Vector{ControlMapConfig{T}}
     solver::Union{PrototypeSolverOptions,LBFGSSolverOptions}
+    time_index::Int
 end
 
 function _regions(cfg)
@@ -128,8 +129,10 @@ function _regularization(section)
     vertical_raw = get(section,"vertical",Dict{String,Any}())
     vertical = VerticalRegularizationSpec(Int.(get(vertical_raw,"types",fill(0,7))),
         Float64(get(vertical_raw,"regularize",0.0)),Float64.(get(vertical_raw,"weights",fill(1.0,7))))
-    horizontal = Dict(Symbol(k)=>Float64(v) for (k,v) in get(section,"horizontal",Dict{String,Any}()))
-    scales = Dict(Symbol(k)=>Float64(v) for (k,v) in get(section,"scales",Dict{String,Any}()))
+    horizontal = Dict{Symbol,Float64}(Symbol(k)=>Float64(v) for (k,v) in
+        get(section,"horizontal",Dict{String,Any}()))
+    scales = Dict{Symbol,Float64}(Symbol(k)=>Float64(v) for (k,v) in
+        get(section,"scales",Dict{String,Any}()))
     RegularizationSpec(vertical=vertical,horizontal=horizontal,scales=scales,
         horizontal_order=Int(get(section,"horizontal_order",1)))
 end
@@ -288,8 +291,10 @@ function load_config(path::AbstractString)
         gpu_status_timeout_seconds=gpu_status_timeout_seconds,
         gpu_diagnostic_interval_seconds=gpu_diagnostic_interval_seconds,
         gpu_diagnostics_directory=gpu_diagnostics_directory)
+    time_index=Int(get(inputs,"time_index",1)); time_index>0 || throw(ArgumentError(
+        "inputs.time_index must be positive"))
     RunConfig(atmosphere,observed,weights,outputs,SynthesisGridConfig(wavelength_m,dx_m,dy_m),regions,
-        observation_model,stokes,redistribution,regularization,parallel,controls,solver)
+        observation_model,stokes,redistribution,regularization,parallel,controls,solver,time_index)
 end
 
 function dry_run_summary(config::RunConfig)
@@ -300,7 +305,7 @@ function dry_run_summary(config::RunConfig)
     nsources=sum(length(r.sources) for r in config.regions)
     controlvars=join(getfield.(config.controls,:variable),',')
     solver_name=config.solver isa LBFGSSolverOptions ? "bounded_lbfgs" : "prototype_pattern_search"
-    "observation_input=$(config.observed.file) atmosphere_input=$(config.atmosphere.file) synthesis_output=$(config.outputs.synthesis_file) atmosphere_output=$(config.outputs.atmosphere_file) logtau=$(config.atmosphere.logtau500_dataset) dx_m=$(config.synthesis.dx_m) dy_m=$(config.synthesis.dy_m) spectral_regions=$(length(config.regions)) spectral_sources=$nsources synthesis_wavelengths=$nlambda full_grid_psf=true zero_weight_exclusion=true stokes=$(join(config.stokes.components,',')) redistribution=$(config.redistribution) force_balance=$mode controls=$controlvars solver=$solver_name max_iterations=$(config.solver.max_iterations) checkpoint=$(config.solver.checkpoint_path) regularized=$(join(regvars,',')) mpi=$(config.parallel.enabled) decomposition=$(config.parallel.decomposition) threads_per_rank=$(config.parallel.threads_per_rank) gpu_launcher_rank=$(config.parallel.gpu_launcher_rank) gpu_connect_timeout_seconds=$(config.parallel.gpu_connect_timeout_seconds) gpu_status_timeout_seconds=$(config.parallel.gpu_status_timeout_seconds) gpu_diagnostic_interval_seconds=$(config.parallel.gpu_diagnostic_interval_seconds)"
+    "observation_input=$(config.observed.file) atmosphere_input=$(config.atmosphere.file) synthesis_output=$(config.outputs.synthesis_file) atmosphere_output=$(config.outputs.atmosphere_file) time_index=$(config.time_index) logtau=$(config.atmosphere.logtau500_dataset) dx_m=$(config.synthesis.dx_m) dy_m=$(config.synthesis.dy_m) spectral_regions=$(length(config.regions)) spectral_sources=$nsources synthesis_wavelengths=$nlambda full_grid_psf=true zero_weight_exclusion=true stokes=$(join(config.stokes.components,',')) redistribution=$(config.redistribution) force_balance=$mode controls=$controlvars solver=$solver_name max_iterations=$(config.solver.max_iterations) checkpoint=$(config.solver.checkpoint_path) regularized=$(join(regvars,',')) mpi=$(config.parallel.enabled) decomposition=$(config.parallel.decomposition) threads_per_rank=$(config.parallel.threads_per_rank) gpu_launcher_rank=$(config.parallel.gpu_launcher_rank) gpu_connect_timeout_seconds=$(config.parallel.gpu_connect_timeout_seconds) gpu_status_timeout_seconds=$(config.parallel.gpu_status_timeout_seconds) gpu_diagnostic_interval_seconds=$(config.parallel.gpu_diagnostic_interval_seconds)"
 end
 
 function checkpoint!(path::AbstractString,state;manifest::CapabilityManifest=CapabilityManifest())
