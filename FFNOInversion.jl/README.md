@@ -24,7 +24,7 @@ The TOML file configures these four paths but is not itself a scientific data in
 - vertical and horizontal regularization of selected recovered atmospheric variables;
 - deterministic mock forward model, weighted residual packing, configuration dry-run and restart checkpoints.
 
-Phase 1 provides iterative HE3D/MHS reconstruction, an in-memory Wittmann EOS adapter, Lorentz-force diagnostics, and a production 500 nm mass-opacity backend using STiC's continuum routine. The constant-opacity backend remains only for manufactured tests.
+Phase 1 provides iterative HE3D/MHS reconstruction, an in-memory Wittmann EOS adapter, Lorentz-force diagnostics, and a native Julia production continuum-opacity backend. The constant-opacity backend remains only for manufactured tests.
 
 Phase 2 defines and validates the six-channel population request, level metadata, units, positivity and canonical array layouts. `RecordedPopulationModel` remains available for deterministic CPU tests. The inversion application has one production FFNO implementation: the persistent multi-GPU FSDP service introduced by Phase 6.
 

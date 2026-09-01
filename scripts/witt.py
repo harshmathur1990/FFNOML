@@ -5,7 +5,33 @@ Coded in python by J. de la Cruz Rodriguez (ISP-SU 2017)
 import numpy as np
 from math import *
 import os
-import xdrlib
+try:
+    import xdrlib
+except ModuleNotFoundError:  # Removed from the standard library in Python 3.13.
+    import struct
+
+    class _XDRUnpacker:
+        def __init__(self, data):
+            self.data = data
+            self.offset = 0
+
+        def _unpack(self, format_string, size):
+            value = struct.unpack_from(format_string, self.data, self.offset)[0]
+            self.offset += size
+            return value
+
+        def unpack_uint(self):
+            return self._unpack(">I", 4)
+
+        def unpack_double(self):
+            return self._unpack(">d", 8)
+
+        @staticmethod
+        def unpack_farray(count, unpack_item):
+            return [unpack_item() for _ in range(count)]
+
+    class xdrlib:
+        Unpacker = _XDRUnpacker
 import witt as this
 
 

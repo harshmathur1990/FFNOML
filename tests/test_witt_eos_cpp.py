@@ -50,7 +50,6 @@ class WittEOSCppTests(unittest.TestCase):
             "-fPIC",
             "-pthread",
             str(source_path),
-            str(ROOT.parent / "stic" / "src" / "cop.cc"),
             "-o",
             str(cls.lib_path),
         ]
@@ -80,14 +79,17 @@ class WittEOSCppTests(unittest.TestCase):
             ctypes.c_int,
         ]
         cls.lib.witt_ne_from_pgas.restype = ctypes.c_int
-        cls.lib.witt_opacity500_mass_from_pgas.argtypes = [
+        cls.lib.witt_continuum_state_from_pgas.argtypes = [
             ctypes.c_char_p,
+            np.ctypeslib.ndpointer(dtype=np.float64, ndim=1, flags="C_CONTIGUOUS"),
+            np.ctypeslib.ndpointer(dtype=np.float64, ndim=1, flags="C_CONTIGUOUS"),
+            np.ctypeslib.ndpointer(dtype=np.float64, ndim=1, flags="C_CONTIGUOUS"),
             np.ctypeslib.ndpointer(dtype=np.float64, ndim=1, flags="C_CONTIGUOUS"),
             np.ctypeslib.ndpointer(dtype=np.float64, ndim=1, flags="C_CONTIGUOUS"),
             np.ctypeslib.ndpointer(dtype=np.float64, ndim=1, flags="C_CONTIGUOUS"),
             ctypes.c_size_t,
         ]
-        cls.lib.witt_opacity500_mass_from_pgas.restype = ctypes.c_int
+        cls.lib.witt_continuum_state_from_pgas.restype = ctypes.c_int
 
         sys.path.insert(0, str(SCRIPTS))
         from witt import witt
@@ -190,31 +192,37 @@ class WittEOSCppTests(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(cpp)))
         self.assertLess(float(rel.max()), 1e-6)
 
-    def test_cpp_opacity500_matches_python_continuum(self):
+    def test_cpp_continuum_state_matches_python(self):
         temperature = np.ascontiguousarray(
             [3500.0, 4500.0, 5770.0, 8000.0, 12000.0], dtype=np.float64
         )
         pgas_pa = np.ascontiguousarray([0.1, 1.0, 10.0, 100.0, 1000.0])
-        actual = np.empty(temperature.size, dtype=np.float64)
-        status = self.lib.witt_opacity500_mass_from_pgas(
-            self.pf_path, temperature, pgas_pa, actual, temperature.size
+        rho = np.empty(temperature.size, dtype=np.float64)
+        xna = np.empty_like(rho)
+        xne = np.empty_like(rho)
+        partials = np.empty(17 * temperature.size, dtype=np.float64)
+        status = self.lib.witt_continuum_state_from_pgas(
+            self.pf_path, temperature, pgas_pa, rho, xna, xne, partials,
+            temperature.size
         )
         self.assertEqual(status, 0)
 
-        expected = np.empty_like(actual)
+        expected_rho = np.empty_like(rho)
+        expected_xne = np.empty_like(xne)
+        expected_partials = np.empty((temperature.size, 17), dtype=np.float64)
         for i, (temp, pressure_pa) in enumerate(zip(temperature, pgas_pa)):
             pressure_cgs = pressure_pa * 10.0
             pe = self.py_eos.pe_from_pg(float(temp), float(pressure_cgs))
-            rho_si = self.py_eos.rho_from_pg(float(temp), float(pressure_cgs)) * 1e3
-            extinction_cm = self.py_eos.contOpacity(
-                float(temp), float(pressure_cgs), pe, np.array([5000.0])
-            )[0]
-            expected[i] = extinction_cm * 100.0 / rho_si
-
-        relative = np.abs(actual - expected) / expected
-        self.assertTrue(np.all(np.isfinite(actual)))
-        self.assertTrue(np.all(actual > 0.0))
-        self.assertLess(float(relative.max()), 3e-4)
+            expected_rho[i] = self.py_eos.rho_from_pg(float(temp), float(pressure_cgs)) * 1e3
+            expected_xne[i] = pe / (self.py_eos.BK * float(temp))
+            expected_partials[i] = self.py_eos.getBackgroundPartials(
+                float(temp), float(pressure_cgs), pe, divide_by_u=True
+            )
+        self.assertLess(float(np.max(np.abs(rho-expected_rho)/expected_rho)), 3e-4)
+        self.assertLess(float(np.max(np.abs(xne-expected_xne)/expected_xne)), 3e-4)
+        actual_partials = partials.reshape(temperature.size, 17)
+        scale = np.maximum(np.abs(expected_partials), 1e-300)
+        self.assertLess(float(np.max(np.abs(actual_partials-expected_partials)/scale)), 3e-4)
 
 
 @unittest.skipUnless(HAS_NUMPY, "NumPy is required to import the FITS converter")

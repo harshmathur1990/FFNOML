@@ -13,13 +13,6 @@
 #include <thread>
 #include <vector>
 
-void cop(double T, double TKEV, double TK, double HKT, double TLOG,
-         double XNA, double XNE, double *WLGRID, double *OPACITY, double *SCATTER,
-         double H1, double H2, double HMIN, double HE1, double HE2, double HE3,
-         double C1, double AL1, double SI1, double SI2, double CA1, double CA2,
-         double MG1, double MG2, double FE1, double N1, double O1,
-         int nWLGRID, int NLINES, int NTOTALLIST);
-
 namespace {
 
 constexpr double BK = 1.3806488E-16;
@@ -140,32 +133,14 @@ public:
         ne_m3 = pe / (BK * temp) * 1.0e6;
     }
 
-    double opacity500_mass_si(double temp, double pgas_pa) const {
+    void continuum_state_si(double temp, double pgas_pa, double& rho_kg_m3,
+                            double& xna_cm3, double& xne_cm3, double* n) const {
         const double pgas = pgas_pa * 10.0;
         const double pe = pe_from_pg(temp, pgas);
-        const double rho = rho_from_pe(temp, pe) * 1.0e3;
-        double n[17] = {};
+        rho_kg_m3 = rho_from_pe(temp, pe) * 1.0e3;
+        xna_cm3 = (pgas-pe)/(BK*temp);
+        xne_cm3 = pe/(BK*temp);
         background_partials(temp, pgas, pe, n);
-        const double tk = BK*temp, tkev = tk/EV, htk = HH/tk;
-        double wavelength_angstrom = 5000.0, extinction_cm = 0.0, scattering_cm = 0.0;
-        cop(temp,tkev,tk,htk,std::log(temp),(pgas-pe)/tk,pe/tk,
-            &wavelength_angstrom,&extinction_cm,&scattering_cm,
-            n[0],n[1],n[2],n[3],n[4],n[5],n[6],n[7],n[8],n[9],n[10],n[11],
-            n[12],n[13],n[14],n[15],n[16],1,0,0);
-        return extinction_cm*100.0/rho;
-    }
-
-    double continuum_extinction_si(double temp, double pgas_pa,
-                                   double wavelength_angstrom) const {
-        const double pgas=pgas_pa*10.0, pe=pe_from_pg(temp,pgas);
-        double n[17]={}; background_partials(temp,pgas,pe,n);
-        const double tk=BK*temp,tkev=tk/EV,htk=HH/tk;
-        double opacity=0.0,scattering=0.0;
-        cop(temp,tkev,tk,htk,std::log(temp),(pgas-pe)/tk,pe/tk,
-            &wavelength_angstrom,&opacity,&scattering,
-            n[0],n[1],n[2],n[3],n[4],n[5],n[6],n[7],n[8],n[9],n[10],n[11],
-            n[12],n[13],n[14],n[15],n[16],1,0,0);
-        return (opacity+scattering)*100.0;
     }
 
     double kurucz_lower_population_m3(double temp,double pgas_pa,int atomic_number,
@@ -635,29 +610,30 @@ extern "C" int witt_thermodynamics_from_pgas(
     }
 }
 
-extern "C" int witt_opacity500_mass_from_pgas(
+extern "C" int witt_continuum_state_from_pgas(
     const char* pf_path, const double* temp, const double* pgas_pa,
-    double* kappa_m2_kg, std::size_t n
+    double* rho_kg_m3, double* xna_cm3, double* xne_cm3,
+    double* partials, std::size_t n
 ) {
     try {
         WittEOS eos(pf_path);
         for (std::size_t i=0;i<n;++i)
-            kappa_m2_kg[i]=eos.opacity500_mass_si(temp[i],pgas_pa[i]);
+            eos.continuum_state_si(temp[i],pgas_pa[i],rho_kg_m3[i],xna_cm3[i],
+                                   xne_cm3[i],partials+17*i);
         return 0;
     } catch (...) {
         return 1;
     }
 }
 
-extern "C" int witt_kurucz_state_from_pgas(
+extern "C" int witt_kurucz_populations_from_pgas(
     const char* pf_path,const double* temp,const double* pgas_pa,
-    double wavelength_angstrom,int atomic_number,int stage,double energy_j,double statistical_weight,
-    double* continuum_m_inv,double* lower_population_m3,double* neutral_hydrogen_m3,std::size_t n
+    int atomic_number,int stage,double energy_j,double statistical_weight,
+    double* lower_population_m3,double* neutral_hydrogen_m3,std::size_t n
 ) {
     try {
         WittEOS eos(pf_path);
         for(std::size_t i=0;i<n;++i) {
-            continuum_m_inv[i]=eos.continuum_extinction_si(temp[i],pgas_pa[i],wavelength_angstrom);
             lower_population_m3[i]=eos.kurucz_lower_population_m3(temp[i],pgas_pa[i],atomic_number,stage,energy_j,statistical_weight);
             neutral_hydrogen_m3[i]=eos.neutral_hydrogen_m3(temp[i],pgas_pa[i]);
         }
@@ -673,16 +649,15 @@ extern "C" void witt_destroy_backend(void* backend) {
     delete static_cast<WittEOS*>(backend);
 }
 
-extern "C" int witt_kurucz_state(
+extern "C" int witt_kurucz_populations(
     void* backend,const double* temp,const double* pgas_pa,
-    double wavelength_angstrom,int atomic_number,int stage,double energy_j,double statistical_weight,
-    double* continuum_m_inv,double* lower_population_m3,double* neutral_hydrogen_m3,std::size_t n
+    int atomic_number,int stage,double energy_j,double statistical_weight,
+    double* lower_population_m3,double* neutral_hydrogen_m3,std::size_t n
 ) {
     try {
         if(!backend) return 1;
         const WittEOS& eos=*static_cast<WittEOS*>(backend);
         for(std::size_t i=0;i<n;++i) {
-            continuum_m_inv[i]=eos.continuum_extinction_si(temp[i],pgas_pa[i],wavelength_angstrom);
             lower_population_m3[i]=eos.kurucz_lower_population_m3(temp[i],pgas_pa[i],atomic_number,stage,energy_j,statistical_weight);
             neutral_hydrogen_m3[i]=eos.neutral_hydrogen_m3(temp[i],pgas_pa[i]);
         }

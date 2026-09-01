@@ -14,6 +14,7 @@ include("Parallel.jl")
 include("Diagnostics.jl")
 include("Nodes.jl")
 include("EOS.jl")
+include("ContinuumOpacity.jl")
 include("Opacity500.jl")
 include("ForceBalance.jl")
 include("PopulationModels.jl")
@@ -43,6 +44,7 @@ export GPUControlDiagnostics, initialize_gpu_control_diagnostics, stop_diagnosti
 export diagnostic_event!, diagnostic_checkpoint!, set_diagnostic_context!, record_diagnostic_failure!
 export HE3DMode, MHSMode, select_force_balance
 export AbstractEOS, WittmannEOS, IdealGasEOS, thermodynamics!
+export ContinuumState, continuum_state, continuum_extinction_cm, continuum_extinction_m
 export AbstractOpacity500, WittmannOpacity500, ReferenceOpacity500, opacity500!
 export ForceBalanceOptions, ForceBalanceDiagnostics, lorentz_force!, reconstruct_force_balance!
 export StokesSet, SpectralCube, ObservationCube, CapabilityManifest

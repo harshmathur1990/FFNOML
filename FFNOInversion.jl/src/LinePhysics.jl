@@ -211,20 +211,18 @@ function _add_wittmann_kurucz!(χ,η,model,wavelength,atmosphere,x,y)
     nz=size(atmosphere.temperature,1); temp=Float64.(atmosphere.temperature[:,x,y]); pgas=Float64.(atmosphere.pgas[:,x,y])
     continuum=zeros(Float64,nz); lower=zeros(Float64,nz); nh=zeros(Float64,nz)
     state=model.eos isa WittmannKuruczState ? model.eos : WittmannKuruczState(model.eos)
-    fn=Libdl.dlsym(state.library_handle,:witt_kurucz_state)
+    fn=Libdl.dlsym(state.library_handle,:witt_kurucz_populations)
+    continuum_state_column=model.include_continuum ? continuum_state(state.eos,temp,pgas) : nothing
     continuum_done=false
     for line in model.lines
         line.atomic_number>0 || throw(ArgumentError("production Kurucz synthesis requires K94 species metadata"))
-        status=ccall(fn,Cint,(Ptr{Cvoid},Ptr{Cdouble},Ptr{Cdouble},Cdouble,Cint,Cint,Cdouble,Cdouble,Ptr{Cdouble},Ptr{Cdouble},Ptr{Cdouble},Csize_t),
-            state.backend,temp,pgas,line.wavelength0_m*1e10,line.atomic_number,line.ion_stage,
-            line.lower_energy_j,line.lower_g,continuum,lower,nh,nz)
+        status=ccall(fn,Cint,(Ptr{Cvoid},Ptr{Cdouble},Ptr{Cdouble},Cint,Cint,Cdouble,Cdouble,Ptr{Cdouble},Ptr{Cdouble},Csize_t),
+            state.backend,temp,pgas,line.atomic_number,line.ion_stage,
+            line.lower_energy_j,line.lower_g,lower,nh,nz)
         status==0 || throw(ErrorException("Wittmann Kurucz state calculation failed"))
         if model.include_continuum && !continuum_done
             @inbounds for l in eachindex(wavelength)
-                status=ccall(fn,Cint,(Ptr{Cvoid},Ptr{Cdouble},Ptr{Cdouble},Cdouble,Cint,Cint,Cdouble,Cdouble,Ptr{Cdouble},Ptr{Cdouble},Ptr{Cdouble},Csize_t),
-                    state.backend,temp,pgas,wavelength[l]*1e10,line.atomic_number,line.ion_stage,
-                    line.lower_energy_j,line.lower_g,continuum,lower,nh,nz)
-                status==0 || throw(ErrorException("Wittmann continuum calculation failed"))
+                continuum.=continuum_extinction_m(continuum_state_column,temp,wavelength[l]*1e10)
                 for k in 1:nz
                     χ[k,l]+=continuum[k]; η[k,l]+=continuum[k]*planck_lambda(wavelength[l],temp[k])*1e-12
                 end

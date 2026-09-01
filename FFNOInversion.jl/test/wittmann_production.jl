@@ -1,6 +1,6 @@
 include("helpers.jl")
 
-@testset "Wittmann/STiC production opacity" begin
+@testset "Wittmann/native-Julia production opacity" begin
     mktempdir() do dir
         suffix=Sys.isapple() ? ".dylib" : Sys.iswindows() ? ".dll" : ".so"
         library=joinpath(dir,"libwitt_test"*suffix)

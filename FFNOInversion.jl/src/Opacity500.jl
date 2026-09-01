@@ -1,6 +1,6 @@
 abstract type AbstractOpacity500 end
 
-"""Production 500 nm mass-opacity adapter backed by Wittmann/STiC `cop`."""
+"""Production 500 nm mass-opacity using Wittmann populations and native Julia continuum physics."""
 struct WittmannOpacity500 <: AbstractOpacity500
     eos::WittmannEOS
 end
@@ -8,12 +8,10 @@ end
 function opacity500!(kappa::Array{Float64,3},model::WittmannOpacity500,
                      temperature::Array{Float64,3},pgas::Array{Float64,3},rho,ne)
     size(kappa)==size(temperature)==size(pgas)==size(rho)==size(ne) || throw(DimensionMismatch("opacity arrays differ"))
-    handle=Libdl.dlopen(model.eos.library)
-    function_pointer=Libdl.dlsym(handle,:witt_opacity500_mass_from_pgas)
-    status=ccall(function_pointer,Cint,(Cstring,Ptr{Cdouble},Ptr{Cdouble},Ptr{Cdouble},Csize_t),
-        model.eos.partition_functions,temperature,pgas,kappa,length(kappa))
-    status==0 || throw(ErrorException("Wittmann/STiC 500 nm opacity failed for one or more cells"))
-    all(isfinite,kappa)&&all(>(0),kappa) || throw(ErrorException("Wittmann/STiC returned invalid 500 nm opacity"))
+    state=continuum_state(model.eos,vec(temperature),vec(pgas))
+    extinction=continuum_extinction_m(state,vec(temperature),5000.0)
+    kappa .= reshape(extinction,size(kappa))./reshape(state.rho_kg_m3,size(kappa))
+    all(isfinite,kappa)&&all(>(0),kappa) || throw(ErrorException("native continuum returned invalid 500 nm opacity"))
     kappa
 end
 

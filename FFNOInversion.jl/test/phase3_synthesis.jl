@@ -40,7 +40,10 @@ using Libdl
         @test all(line->line.atomic_number==26,cache.lines)
         @test all(line->line.ion_stage==0,cache.lines)
         @test cache.lines[1].wavelength0_m > 630.1e-9 # K94 air wavelengths become vacuum
-        lib=joinpath(@__DIR__,"..","deps","libwitt_ffno.$(Libdl.dlext)")
+        backend_dir=mktempdir()
+        lib=joinpath(backend_dir,"libwitt_ffno.$(Libdl.dlext)")
+        build=joinpath(@__DIR__,"..","scripts","build_wittmann_backend.jl")
+        run(`$(Base.julia_cmd()) --project=$(joinpath(@__DIR__,"..")) $build $lib`)
         pf=normpath(joinpath(@__DIR__,"..","..","scripts","pf_Kurucz.input"))
         if isfile(lib) && isfile(pf)
             model=KuruczLTEModel(cache.lines,WittmannEOS(lib,pf))

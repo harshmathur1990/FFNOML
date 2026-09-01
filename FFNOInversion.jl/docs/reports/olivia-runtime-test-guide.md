@@ -43,7 +43,7 @@ No `testdata` directory and no `config.py` change are required. The real-referen
 - `3D_sim_train_H.pt` in that same training directory;
 - atoms under `/cluster/work/projects/nn2834k/harshm/multi3d/input/atoms`.
 
-The Wittmann production test also requires the STiC checkout at `/cluster/work/projects/nn2834k/harshm/stic` by default. Set `FFNO_STIC_ROOT` when `src/cop.cc` is in another STiC checkout.
+The Wittmann production build has no STiC checkout requirement. Continuum opacity is implemented in Julia; `FFNO_STIC_ORACLE_ROOT` is used only by the optional direct-parity test when an original `src/cop.cc` checkout is available.
 
 Set `FFNO_REFERENCE_ATMOSPHERE_DIR` only if the Bifrost snapshot is stored elsewhere.
 
