@@ -2,7 +2,7 @@
 
 julia_version = "1.12.3"
 manifest_format = "2.0"
-project_hash = "49a00cd8745e028041b785f429e623a862a10bd4"
+project_hash = "5b90d6cef86a32e005181a2f929243403bb01b8f"
 
 [[deps.Accessors]]
 deps = ["CompositionsBase", "ConstructionBase", "Dates", "InverseFunctions", "MacroTools"]
@@ -150,7 +150,7 @@ uuid = "f43a241f-c20a-4ad4-852c-f6b1247861c6"
 version = "1.7.0"
 
 [[deps.FFNOInversion]]
-deps = ["Dates", "HDF5", "Libdl", "LinearAlgebra", "MPI", "MPIPreferences", "Muspel", "Serialization", "Sockets", "TOML"]
+deps = ["AtomicData", "Dates", "HDF5", "Libdl", "LinearAlgebra", "MPI", "MPIPreferences", "Muspel", "Serialization", "Sockets", "TOML"]
 path = "."
 uuid = "5f657311-4af4-4e09-9b93-d21004ee51b8"
 version = "0.1.0"

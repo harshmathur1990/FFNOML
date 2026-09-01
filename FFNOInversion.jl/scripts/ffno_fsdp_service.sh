@@ -21,7 +21,7 @@ service_script=$(realpath "${OLIVIA_REPO_DIR}/../ffno_fsdp_service.py")
 manifest=$(realpath "${manifest}")
 
 echo "Launching persistent FFNO FSDP service nodes=${SLURM_NNODES} gpus_per_node=${gpus_per_node}"
-exec srun --overlap --exact --kill-on-bad-exit=1 --mpi=none --network=no_vni --cpu-bind=none \
+exec srun --overlap --exact --kill-on-bad-exit=1 --mpi=none --cpu-bind=none \
     --nodes="${SLURM_NNODES}" --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 \
     --gpus-per-node="${gpus_per_node}" --cpus-per-task="${cpus_per_node}" \
     env FFNO_FSDP_SERVICE_SCRIPT="${service_script}" \

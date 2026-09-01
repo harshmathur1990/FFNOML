@@ -4,6 +4,7 @@ version = "0.1.0"
 authors = ["FFNOML contributors"]
 
 [deps]
+AtomicData = "6b77412b-f4b7-4495-8b9c-778517285205"
 Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
 HDF5 = "f67ccb44-e63f-5c2f-98bd-6dc0ccc4ba2f"
 Libdl = "8f399da3-3557-5675-b5ff-fb832c97cbdb"
@@ -22,6 +23,7 @@ FFNOInversionMuspelExt = "Muspel"
 Muspel = {url = "https://github.com/harshmathur1990/Muspel.jl.git", rev = "01ec68da389be75c9ce31494a910095d3590499a"}
 
 [compat]
+AtomicData = "0.1"
 HDF5 = "0.17.3"
 MPI = "0.20"
 MPIPreferences = "0.1"

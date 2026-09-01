@@ -101,7 +101,7 @@ export FI_CXI_DISABLE_HOST_REGISTER=${FI_CXI_DISABLE_HOST_REGISTER:-1}
 export FI_CXI_DEFAULT_CQ_SIZE=${FI_CXI_DEFAULT_CQ_SIZE:-131072}
 export FI_CXI_RDZV_PROTO=${FI_CXI_RDZV_PROTO:-alt_read}
 export FI_CXI_RDZV_EAGER_SIZE=${FI_CXI_RDZV_EAGER_SIZE:-0}
-export FI_CXI_RDZV_THRESHOLD=${FI_CXI_RDZV_THRESHOLD:-0}
+export FI_CXI_RDZV_THRESHOLD=${OLIVIA_FI_CXI_RDZV_THRESHOLD:-0}
 export FI_CXI_RDZV_GET_MIN=${FI_CXI_RDZV_GET_MIN:-0}
 export FI_CXI_DEFAULT_TX_SIZE=${FI_CXI_DEFAULT_TX_SIZE:-2048}
 export NCCL_CROSS_NIC=${NCCL_CROSS_NIC:-1}
@@ -109,7 +109,7 @@ export NCCL_NET_GDR_LEVEL=${NCCL_NET_GDR_LEVEL:-PHB}
 export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-hsn0,hsn1,hsn2,hsn3}
 export FI_CXI_RX_MATCH_MODE=${FI_CXI_RX_MATCH_MODE:-hybrid}
 export NCCL_PROTO=${NCCL_PROTO:-^LL128}
-export FI_PROVIDER=${FI_PROVIDER:-cxi}
+export FI_PROVIDER=${OLIVIA_FI_PROVIDER:-cxi}
 export OMPI_MCA_pml=${OMPI_MCA_pml:-cm}
 export OMPI_MCA_mtl=${OMPI_MCA_mtl:-ofi}
 export OMPI_MCA_mtl_ofi_av=${OMPI_MCA_mtl_ofi_av:-table}
@@ -135,7 +135,7 @@ snapshot_scheduler() {
     {
         date -u +%Y-%m-%dT%H:%M:%SZ
         scontrol show job "${SLURM_JOB_ID}" || true
-        squeue --steps --jobs="${SLURM_JOB_ID}" --noheader --format='%i %t %M %N' || true
+        squeue --steps --jobs="${SLURM_JOB_ID}" --noheader --format='%i %T %M %N' || true
         timeout 8s sstat --allsteps --jobs="${SLURM_JOB_ID}" \
             --format='JobID,AveCPU,MaxRSS,MaxVMSize,NTasks,NodeList' || true
         timeout 8s sacct --jobs="${SLURM_JOB_ID}" \

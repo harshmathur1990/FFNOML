@@ -26,6 +26,8 @@ All five jobs must exit normally. If one fails, later `afterok` jobs do not prov
 
 Inversion jobs source `/cluster/home/harshm/loadnvidiampi.sh` by default. Set `OLIVIA_ENV_SCRIPT` only for an alternate MPI-compatible environment. The worker resolves Julia and Python to absolute paths and verifies them on every node before testing.
 
+The runtime worker forces Olivia's documented `cxi` provider and HPE's NCCL/CXI settings after sourcing the environment script. Set `OLIVIA_FI_PROVIDER` or `OLIVIA_FI_CXI_RDZV_THRESHOLD` only for a deliberate transport experiment. Nested `torchrun` steps inherit the allocation's Slingshot network configuration.
+
 Instantiate the package environment once on a login node. The manifest pins Muspel to Git commit `01ec68d`, which supports a three-dimensional height array:
 
 ```sh
@@ -40,6 +42,8 @@ No `testdata` directory and no `config.py` change are required. The real-referen
 - the H and Ca population/intensity files under `/cluster/work/projects/nn2834k/harshm/FFNOML/training_FFNO3D_zscale_expand_lognlte`;
 - `3D_sim_train_H.pt` in that same training directory;
 - atoms under `/cluster/work/projects/nn2834k/harshm/multi3d/input/atoms`.
+
+The Wittmann production test also requires the STiC checkout at `/cluster/work/projects/nn2834k/harshm/stic` by default. Set `FFNO_STIC_ROOT` when `src/cop.cc` is in another STiC checkout.
 
 Set `FFNO_REFERENCE_ATMOSPHERE_DIR` only if the Bifrost snapshot is stored elsewhere.
 

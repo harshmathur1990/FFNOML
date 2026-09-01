@@ -36,7 +36,7 @@ export NCCL_DEBUG=${NCCL_DEBUG:-INFO}
 
 echo "nested_gpu_step mode=${mode} nodes=${SLURM_NNODES} gpus_per_node=${gpus_per_node} master=${MASTER_ADDR}:${MASTER_PORT}"
 
-srun --overlap --exact --kill-on-bad-exit=1 --mpi=none --network=no_vni --cpu-bind=none \
+srun --overlap --exact --kill-on-bad-exit=1 --mpi=none --cpu-bind=none \
     --nodes="${SLURM_NNODES}" \
     --ntasks="${SLURM_NNODES}" \
     --ntasks-per-node=1 \
