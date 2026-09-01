@@ -19,21 +19,28 @@ using Libdl
             @test all(isfinite,extinction) && all(extinction.>0)
         end
 
-        # The original source is an oracle only; production never needs STiC.
-        stic_root=abspath(get(ENV,"FFNO_STIC_ORACLE_ROOT",joinpath(@__DIR__,"..","..","..","stic")))
-        cop_source=joinpath(stic_root,"src","cop.cc")
-        if isfile(cop_source) && !Sys.iswindows()
-            oracle=joinpath(dir,"libcop_oracle"*suffix)
-            run(`$(get(ENV,"CXX","c++")) -O2 -std=c++17 -shared -fPIC -I$(dirname(cop_source)) $(joinpath(@__DIR__,"cop_oracle.cpp")) $cop_source -o $oracle`)
-            handle=Libdl.dlopen(oracle); fn=Libdl.dlsym(handle,:ffno_cop_oracle)
-            expected=zeros(length(wavelengths),length(temperatures)); scattering=similar(expected)
-            ccall(fn,Cvoid,(Ptr{Cdouble},Ptr{Cdouble},Ptr{Cdouble},Ptr{Cdouble},Csize_t,Ptr{Cdouble},Csize_t,Ptr{Cdouble},Ptr{Cdouble}),
-                temperatures,state.xna_cm3,state.xne_cm3,state.partials,length(temperatures),wavelengths,length(wavelengths),expected,scattering)
-            actual=[first(continuum_extinction_cm(temperatures[i],wavelengths[j],state.xna_cm3[i],state.xne_cm3[i],view(state.partials,:,i))) for j=eachindex(wavelengths),i=eachindex(temperatures)]
-            @test maximum(abs.(actual.-expected)./max.(abs.(expected),1e-300)) < 2e-12
-            @test all(scattering.>=0)
-        else
-            @info "STiC oracle checkout absent; direct cop.cc parity test skipped" stic_root
+        @testset "optional STiC cop.cc oracle parity" begin
+            # The original source is an oracle only; production never needs STiC.
+            stic_root=abspath(get(ENV,"FFNO_STIC_ORACLE_ROOT",joinpath(@__DIR__,"..","..","..","stic")))
+            cop_source=joinpath(stic_root,"src","cop.cc")
+            stic_found=isfile(cop_source) && isfile(joinpath(stic_root,"src","cop.h"))
+            if !stic_found
+                @info "STiC not found; direct cop.cc parity test skipped" stic_root
+                @test_skip stic_found
+            elseif Sys.iswindows()
+                @info "STiC found, but the direct cop.cc parity test is unsupported on Windows; skipped" stic_root
+                @test_skip !Sys.iswindows()
+            else
+                oracle=joinpath(dir,"libcop_oracle"*suffix)
+                run(`$(get(ENV,"CXX","c++")) -O2 -std=c++17 -shared -fPIC -I$(dirname(cop_source)) $(joinpath(@__DIR__,"cop_oracle.cpp")) $cop_source -o $oracle`)
+                handle=Libdl.dlopen(oracle); fn=Libdl.dlsym(handle,:ffno_cop_oracle)
+                expected=zeros(length(wavelengths),length(temperatures)); scattering=similar(expected)
+                ccall(fn,Cvoid,(Ptr{Cdouble},Ptr{Cdouble},Ptr{Cdouble},Ptr{Cdouble},Csize_t,Ptr{Cdouble},Csize_t,Ptr{Cdouble},Ptr{Cdouble}),
+                    temperatures,state.xna_cm3,state.xne_cm3,state.partials,length(temperatures),wavelengths,length(wavelengths),expected,scattering)
+                actual=[first(continuum_extinction_cm(temperatures[i],wavelengths[j],state.xna_cm3[i],state.xne_cm3[i],view(state.partials,:,i))) for j=eachindex(wavelengths),i=eachindex(temperatures)]
+                @test maximum(abs.(actual.-expected)./max.(abs.(expected),1e-300)) < 2e-12
+                @test all(scattering.>=0)
+            end
         end
     end
 end
