@@ -216,3 +216,6 @@ __marimo__/
 .streamlit/secrets.toml
 
 .DS_Store
+testdata/
+tmp/
+training_FFNO3D_zscale_expand_lognlte/
