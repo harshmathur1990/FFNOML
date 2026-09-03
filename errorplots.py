@@ -181,13 +181,15 @@ def plot_departure_coefficient_scatter_by_height(
     figsize=(13, 8),
     ncols=3,
     max_points_per_level=250_000,
+    poster=False,
 ):
     """Compare predicted and true departure coefficients at every level.
 
     Both axes are logarithmic and points are colored by vertical-grid index.
     Large cubes are sampled evenly across depth indices to preserve visible
     color separation; pass ``None`` for ``max_points_per_level`` to plot all
-    valid cells.
+    valid cells. Set ``poster=True`` for a tightly packed presentation that
+    omits axis labels, depth colorbars, legends, and grid lines.
     """
 
     pred = np.asarray(pred)
@@ -213,8 +215,21 @@ def plot_departure_coefficient_scatter_by_height(
 
     nrows = int(np.ceil(nlevels / ncols))
     fig, axes = plt.subplots(
-        nrows, ncols, figsize=figsize, squeeze=False, constrained_layout=True
+        nrows,
+        ncols,
+        figsize=figsize,
+        squeeze=False,
+        layout="compressed" if poster else "constrained",
     )
+    if poster:
+        # Compressed layout is designed for fixed-aspect axes. Keep just
+        # enough padding to prevent ticks and titles from touching.
+        fig.get_layout_engine().set(
+            w_pad=0.01,
+            h_pad=0.01,
+            wspace=0.01,
+            hspace=0.01,
+        )
     depth_indices = np.repeat(np.arange(ndepth), nx * ny)
 
     for ilevel in range(nlevels):
@@ -284,14 +299,15 @@ def plot_departure_coefficient_scatter_by_height(
             )
             ax.set_xlim(lower, upper)
             ax.set_ylim(lower, upper)
-            # Anchor the colorbar to the axes itself so its height follows the
-            # square plotting box instead of the taller subplot layout slot.
-            colorbar_ax = ax.inset_axes((1.03, 0.0, 0.045, 1.0))
-            colorbar = fig.colorbar(points, cax=colorbar_ax)
-            colorbar.set_label("Depth index", fontsize=13)
-            colorbar.ax.tick_params(labelsize=11)
-            colorbar.ax.yaxis.set_major_locator(MaxNLocator(integer=True))
-            ax.legend(loc="upper left", fontsize=10)
+            if not poster:
+                # Anchor the colorbar to the axes itself so its height follows
+                # the square plotting box instead of the taller subplot slot.
+                colorbar_ax = ax.inset_axes((1.03, 0.0, 0.045, 1.0))
+                colorbar = fig.colorbar(points, cax=colorbar_ax)
+                colorbar.set_label("Depth index", fontsize=13)
+                colorbar.ax.tick_params(labelsize=11)
+                colorbar.ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+                ax.legend(loc="upper left", fontsize=10)
         else:
             ax.text(
                 0.5,
@@ -313,10 +329,11 @@ def plot_departure_coefficient_scatter_by_height(
             else f"Level {ilevel + 1}"
         )
         ax.set_title(title, fontsize=14)
-        ax.set_xlabel("Actual departure coefficient", fontsize=13)
-        ax.set_ylabel("Predicted departure coefficient", fontsize=13)
+        if not poster:
+            ax.set_xlabel("Actual departure coefficient", fontsize=13)
+            ax.set_ylabel("Predicted departure coefficient", fontsize=13)
         ax.tick_params(axis="both", which="both", labelsize=11)
-        ax.grid(True, which="both", alpha=0.2)
+        ax.grid(not poster, which="both", alpha=0.2)
 
     for j in range(nlevels, nrows * ncols):
         fig.delaxes(axes[j // ncols, j % ncols])
@@ -896,7 +913,7 @@ def compute_and_print_quantitative_metrics(
 #     return outpath, axes
 
 
-def make_snapshot_plot(dataset, output_dir, show=False):
+def make_snapshot_plot(dataset, output_dir, show=False, poster=False):
     pred_nlte, pred_z_scale = load_prediction_file(dataset["PRED_FILE"])
     _, true_z_scale, lte, nlte, level_names = load_true_multi3d_departures(dataset)
     pred_dep = compute_departure_coefficients(lte, pred_nlte)
@@ -940,10 +957,13 @@ def make_snapshot_plot(dataset, output_dir, show=False):
         true_plot,
         pred_z_axis,
         level_names=level_names,
+        poster=poster,
     )
+    scatter_variant = "_poster" if poster else ""
     scatter_outpath = os.path.join(
         output_dir,
-        f"departure_coefficient_scatter_{dataset['NAME']}_{active_atom_names_tag()}.pdf",
+        f"departure_coefficient_scatter_{dataset['NAME']}_"
+        f"{active_atom_names_tag()}{scatter_variant}.pdf",
     )
     scatter_fig.savefig(scatter_outpath, dpi=200, bbox_inches="tight")
     print(f"Saved {scatter_outpath}")
@@ -1002,8 +1022,8 @@ def main():
     args = parse_args()
 
     for dataset in build_plot_jobs():
-        print_snapshot_quantitative_metrics(dataset)
-        # make_snapshot_plot(dataset, output_dir=MODEL_DIR, show=args.show)
+        # print_snapshot_quantitative_metrics(dataset)
+        make_snapshot_plot(dataset, output_dir=MODEL_DIR, show=args.show)
 
 
 if __name__ == "__main__":

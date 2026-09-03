@@ -851,7 +851,12 @@ def get_data_for_line_core_intensity_plots():
     return plot_data
 
 
-def make_line_core_intensity_compare_plots():
+def make_line_core_intensity_compare_plots(poster=False):
+    """Plot ML and Multi3D line-core intensities for the four snapshots.
+
+    Set ``poster=True`` for a compact version without axis labels, ticks,
+    or the intensity colorbar, and with uppercase panel labels.
+    """
     plt.close('all')
 
     plt.clf()
@@ -862,7 +867,19 @@ def make_line_core_intensity_compare_plots():
 
     matplotlib.rc('font', **font)
 
-    fig, axs = plt.subplots(2, 4, figsize=(7, 3.5), constrained_layout=True)
+    fig, axs = plt.subplots(
+        2,
+        4,
+        figsize=(7, 3.5),
+        layout="compressed" if poster else "constrained",
+    )
+    if poster:
+        fig.get_layout_engine().set(
+            w_pad=0.01,
+            h_pad=0.01,
+            wspace=0.01,
+            hspace=0.01,
+        )
     plot_data = get_data_for_line_core_intensity_plots()
     profile_selections = _get_representative_profile_selections()
     image = None
@@ -870,7 +887,11 @@ def make_line_core_intensity_compare_plots():
     for index, data in enumerate(plot_data):
         row = index // 2
         first_column = 2 * (index % 2)
-        panel_label = f"{chr(ord('a') + index)})"
+        panel_label = (
+            chr(ord("A") + index)
+            if poster
+            else f"{chr(ord('a') + index)})"
+        )
 
         for column, source, title in (
             (first_column, "ml", "ML"),
@@ -903,8 +924,20 @@ def make_line_core_intensity_compare_plots():
                 markeredgewidth=1.3,
             )
             ax.set_title(title)
-            ax.set_xlabel("x [Mm]")
-            if column in (0, 2):
+            if poster:
+                ax.tick_params(
+                    axis="both",
+                    which="both",
+                    bottom=False,
+                    top=False,
+                    left=False,
+                    right=False,
+                    labelbottom=False,
+                    labelleft=False,
+                )
+            else:
+                ax.set_xlabel("x [Mm]")
+            if not poster and column in (0, 2):
                 ax.set_ylabel("y [Mm]")
             if source == "ml":
                 ax.text(
@@ -918,13 +951,17 @@ def make_line_core_intensity_compare_plots():
                     fontweight="bold",
                 )
 
-    if image is not None:
+    if image is not None and not poster:
         fig.colorbar(image, ax=axs, label="Line-core intensity", shrink=0.8)
 
+    output_variant = "_poster" if poster else ""
     fig.savefig(
-        plot_output_dir() / f"line_core_intensity_comparison_{paper_plot_tag()}.pdf",
+        plot_output_dir()
+        / f"line_core_intensity_comparison_{paper_plot_tag()}{output_variant}.pdf",
         dpi=300,
         format="pdf",
+        bbox_inches="tight" if poster else None,
+        pad_inches=0.01 if poster else 0.1,
     )
 
 
@@ -989,7 +1026,12 @@ def get_data_for_zero_shot_super_resolution_plots():
     return plot_data
 
 
-def make_zero_shot_super_resolution_plots():
+def make_zero_shot_super_resolution_plots(poster=False):
+    """Plot coarse and zero-shot super-resolved line-core intensities.
+
+    Set ``poster=True`` for a compact version without axis labels, ticks,
+    or the intensity colorbar, and with uppercase panel labels.
+    """
     plt.close('all')
 
     plt.clf()
@@ -1000,14 +1042,30 @@ def make_zero_shot_super_resolution_plots():
 
     matplotlib.rc('font', **font)
 
-    fig, axs = plt.subplots(2, 4, figsize=(7, 3.5), constrained_layout=True)
+    fig, axs = plt.subplots(
+        2,
+        4,
+        figsize=(7, 3.5),
+        layout="compressed" if poster else "constrained",
+    )
+    if poster:
+        fig.get_layout_engine().set(
+            w_pad=0.01,
+            h_pad=0.01,
+            wspace=0.01,
+            hspace=0.01,
+        )
     plot_data = get_data_for_zero_shot_super_resolution_plots()
     image = None
 
     for index, data in enumerate(plot_data):
         row = index // 2
         first_column = 2 * (index % 2)
-        panel_label = f"{chr(ord('a') + index)})"
+        panel_label = (
+            chr(ord("A") + index)
+            if poster
+            else f"{chr(ord('a') + index)})"
+        )
 
         for column, source, title in (
             (first_column, "lowres", "coarse"),
@@ -1033,8 +1091,20 @@ def make_zero_shot_super_resolution_plots():
                 aspect="equal",
             )
             ax.set_title(title)
-            ax.set_xlabel("x [Mm]")
-            if column in (0, 2):
+            if poster:
+                ax.tick_params(
+                    axis="both",
+                    which="both",
+                    bottom=False,
+                    top=False,
+                    left=False,
+                    right=False,
+                    labelbottom=False,
+                    labelleft=False,
+                )
+            else:
+                ax.set_xlabel("x [Mm]")
+            if not poster and column in (0, 2):
                 ax.set_ylabel("y [Mm]")
             if source == "lowres":
                 ax.text(
@@ -1048,13 +1118,17 @@ def make_zero_shot_super_resolution_plots():
                     fontweight="bold",
                 )
 
-    if image is not None:
+    if image is not None and not poster:
         fig.colorbar(image, ax=axs, label="Line-core intensity", shrink=0.8)
 
+    output_variant = "_poster" if poster else ""
     fig.savefig(
-        plot_output_dir() / f"zero_shot_super_resolution_{paper_plot_tag()}.pdf",
+        plot_output_dir()
+        / f"zero_shot_super_resolution_{paper_plot_tag()}{output_variant}.pdf",
         dpi=300,
         format="pdf",
+        bbox_inches="tight" if poster else None,
+        pad_inches=0.01 if poster else 0.1,
     )
 
 
@@ -1220,8 +1294,13 @@ def _get_representative_profile_selections():
     return selections
 
 
-def make_line_profile_sample_comparison_plots():
-    """Show the four profiles marked in the line-core comparison figure."""
+def make_line_profile_sample_comparison_plots(poster=False):
+    """Show the four profiles marked in the line-core comparison figure.
+
+    In poster mode, replace each descriptive panel title with its uppercase
+    panel letter and identify the output with a ``_poster`` suffix. All other
+    plot styling is unchanged.
+    """
     plt.close("all")
     matplotlib.rc("font", size=8)
 
@@ -1251,12 +1330,15 @@ def make_line_profile_sample_comparison_plots():
             label="ML",
         )
         ax.set_xlim(-200.0, 200.0)
-        ax.set_title(
-            f"{chr(ord('a') + panel_index)}) "
-            f"{_line_profile_short_name(name)}\n"
-            f"x = {x_position:.2f} Mm, y = {y_position:.2f} Mm",
-            loc="left",
-        )
+        if poster:
+            panel_title = chr(ord("A") + panel_index)
+        else:
+            panel_title = (
+                f"{chr(ord('a') + panel_index)}) "
+                f"{_line_profile_short_name(name)}\n"
+                f"x = {x_position:.2f} Mm, y = {y_position:.2f} Mm"
+            )
+        ax.set_title(panel_title, loc="left")
         if panel_index % 2 == 0:
             ax.set_ylabel("Intensity")
         if panel_index >= 2:
@@ -1264,8 +1346,10 @@ def make_line_profile_sample_comparison_plots():
         if panel_index == 0:
             ax.legend(frameon=False, ncol=2, loc="lower right")
 
+    output_variant = "_poster" if poster else ""
     fig.savefig(
-        plot_output_dir() / f"line_profile_samples_{paper_plot_tag()}.pdf",
+        plot_output_dir()
+        / f"line_profile_samples_{paper_plot_tag()}{output_variant}.pdf",
         dpi=300,
         format="pdf",
     )
@@ -1283,8 +1367,13 @@ def _centers_to_edges(centers):
     ))
 
 
-def make_line_profile_statistical_comparison_plots():
-    """Plot the spatial distribution of profile errors at each wavelength."""
+def make_line_profile_statistical_comparison_plots(poster=False):
+    """Plot the spatial distribution of profile errors at each wavelength.
+
+    In poster mode, replace each descriptive panel title with its uppercase
+    panel letter and identify the output with a ``_poster`` suffix. All other
+    plot styling is unchanged.
+    """
     plt.close("all")
     matplotlib.rc("font", size=8)
 
@@ -1375,11 +1464,15 @@ def make_line_profile_statistical_comparison_plots():
         ax.set_ylim(-error_limit, error_limit)
         ax.yaxis.set_major_locator(matplotlib.ticker.MultipleLocator(5.0))
         ax.yaxis.set_minor_locator(matplotlib.ticker.MultipleLocator(1.0))
-        ax.set_title(
-            f"{chr(ord('a') + panel_index)}) "
-            f"{_line_profile_short_name(histogram['name'])}",
-            loc="left",
+        panel_title = (
+            chr(ord("A") + panel_index)
+            if poster
+            else (
+                f"{chr(ord('a') + panel_index)}) "
+                f"{_line_profile_short_name(histogram['name'])}"
+            )
         )
+        ax.set_title(panel_title, loc="left")
         if panel_index % 2 == 0:
             ax.set_ylabel(
                 r"$(I_{\rm ML}-I_{\rm Multi3D})/I_{\rm wing}$ [%]"
@@ -1397,8 +1490,10 @@ def make_line_profile_statistical_comparison_plots():
             shrink=0.9,
         )
 
+    output_variant = "_poster" if poster else ""
     fig.savefig(
-        plot_output_dir() / f"line_profile_statistics_{paper_plot_tag()}.pdf",
+        plot_output_dir()
+        / f"line_profile_statistics_{paper_plot_tag()}{output_variant}.pdf",
         dpi=300,
         format="pdf",
     )
