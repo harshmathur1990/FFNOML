@@ -218,4 +218,5 @@ __marimo__/
 .DS_Store
 testdata/
 tmp/
+IO/
 training_FFNO3D_zscale_expand_lognlte/
