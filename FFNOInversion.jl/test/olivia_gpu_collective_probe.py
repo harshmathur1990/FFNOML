@@ -145,11 +145,15 @@ try:
         from distributed_inference import partition_range
         from ffno_fsdp_runtime import DistributedFSDPBackend
 
-        checkpoint = (
-            repository.parent
-            / "training_FFNO3D_zscale_expand_lognlte"
-            / "3D_sim_train_H.pt"
-        )
+        run_root = Path(os.environ.get("FFNOML_RUN_DIR", repository.parent)).resolve()
+        checkpoint = Path(
+            os.environ.get(
+                "FFNO_TEST_CHECKPOINT",
+                run_root
+                / "training_FFNO3D_zscale_expand_lognlte"
+                / "3D_sim_train_H.pt",
+            )
+        ).resolve()
         if not checkpoint.is_file():
             raise FileNotFoundError(f"production FFNO checkpoint is missing: {checkpoint}")
         level_names = [f"H level {index}" for index in range(1, 7)]

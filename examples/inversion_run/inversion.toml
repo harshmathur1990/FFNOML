@@ -1,0 +1,140 @@
+[inputs]
+observation_file = "inputs/observations.h5"
+initial_atmosphere_file = "inputs/initial_atmosphere.h5"
+time_index = 1
+
+[outputs]
+synthesis_file = "outputs/synthesis.h5"
+atmosphere_file = "outputs/inverted_atmosphere.h5"
+
+[atmosphere]
+pressure_top_pa = 0.1
+
+[atmosphere.datasets]
+logtau500 = "logtau_500"
+temperature = "temperature"
+vx = "vx"
+vy = "vy"
+vz = "vz"
+# Bx = "Bx"
+# By = "By"
+# Bz = "Bz"
+
+[grid]
+dx_m = 48000.0
+dy_m = 48000.0
+
+[[regions]]
+start_angstrom = 8540.23102
+step_angstrom = 0.04267
+count = 88
+normalization = 4.227725e-05
+psf_type = "none"
+
+[[regions.sources]]
+mode = "ffno"
+species = "CA"
+line = "ca_ii_8542"
+
+[[regions.sources]]
+mode = "kurucz_lte"
+linelist_file = "inputs/kurucz_8542.list"
+
+[[regions]]
+start_angstrom = 6301.24942
+step_angstrom = 0.01007
+count = 46
+normalization = 4.054384e-05
+psf_type = "none"
+
+[[regions.sources]]
+mode = "kurucz_lte"
+linelist_file = "inputs/kurucz_6302.list"
+
+[physics]
+redistribution = "non_prd"
+
+[observation]
+stokes = ["I"]
+
+[observation.datasets]
+intensity = "intensity"
+sigma = "sigma"
+wavelength_weights = "wavelength_weights"
+spatial_weights = "spatial_weights"
+
+[observation.gaussian_psf]
+spatial_fwhm_x_m = 96000.0
+spatial_fwhm_y_m = 96000.0
+
+[regularization]
+horizontal_order = 1
+
+[regularization.vertical]
+types = [4, 1, 3, 0, 0, 0, 1]
+regularize = 1.0
+weights = [1.0, 1.0, 1.0, 0.1, 0.1, 0.1, 1.0]
+
+[regularization.horizontal]
+temperature = 1.0e-3
+vx = 1.0e-4
+vy = 1.0e-4
+vz = 1.0e-4
+
+[regularization.scales]
+temperature = 1000.0
+vlos = 1000.0
+vturb = 1000.0
+B = 0.1
+inc = 1.0
+azi = 1.0
+pgas_boundary = 0.1
+vx = 1000.0
+vy = 1000.0
+vz = 1000.0
+
+[inversion]
+
+[[inversion.controls]]
+variable = "temperature"
+log_tau_nodes = [-5.0, -3.0, -1.0, 1.0]
+control_nx = 8
+control_ny = 8
+lower = 2500.0
+upper = 12000.0
+scale = 1000.0
+
+[[inversion.controls]]
+variable = "vz"
+log_tau_nodes = [-5.0, -3.0, -1.0, 1.0]
+control_nx = 8
+control_ny = 8
+lower = -30000.0
+upper = 30000.0
+scale = 1000.0
+
+[solver]
+method = "lbfgs"
+max_iterations = 50
+history_length = 10
+gradient_tolerance = 1.0e-6
+step_tolerance = 1.0e-10
+objective_tolerance = 1.0e-12
+initial_step = 1.0
+backtracking_factor = 0.5
+armijo_coefficient = 1.0e-4
+maximum_line_search_trials = 20
+maximum_forward_evaluations = 100000
+curvature_tolerance = 1.0e-10
+checkpoint_every = 1
+checkpoint_path = "outputs/inversion.checkpoint"
+
+[parallel]
+enabled = true
+decomposition = "cartesian_2d"
+threads_per_rank = 8
+gpu_launcher_rank = 0
+gpu_connect_timeout_seconds = 180.0
+gpu_status_timeout_seconds = 300.0
+gpu_diagnostic_interval_seconds = 30.0
+gpu_diagnostics_directory = ""

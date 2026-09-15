@@ -24,8 +24,9 @@ end
 backend=nothing; probe_failed=Ref(false)
 try
     repository=dirname(@__DIR__)
-    checkpoint=normpath(joinpath(repository,"..","training_FFNO3D_zscale_expand_lognlte",
-        "3D_sim_train_H.pt"))
+    run_root=abspath(get(ENV,"FFNOML_RUN_DIR",joinpath(repository,"..")))
+    checkpoint=abspath(get(ENV,"FFNO_TEST_CHECKPOINT",joinpath(run_root,
+        "training_FFNO3D_zscale_expand_lognlte","3D_sim_train_H.pt")))
     metadata=PopulationMetadata(FFNO_INPUT_CHANNELS,Tuple("H level $index" for index in 1:6),
         "901dcd28a6ee651c12a26a60effdd28c7ea211b596a30b87654435e87803c755")
     spec=FSDPModelSpec(:H,checkpoint,metadata)

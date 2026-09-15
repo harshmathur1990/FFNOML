@@ -44,11 +44,15 @@ OLIVIA_PYTHON=$(command -v "${python_candidate}") || {
 export OLIVIA_JULIA OLIVIA_PYTHON
 
 # Resolve the package root independently of the directory from which sbatch was
-# invoked. The established Olivia checkout is the default; OLIVIA_REPO_DIR is
-# only needed when deliberately testing another checkout.
+# invoked. Prefer the checkout containing this batch script.
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+script_repository=$(dirname "${script_dir}")
 default_olivia_repo=/cluster/work/projects/nn2834k/harshm/FFNOML/FFNOInversion.jl
 if [[ -n "${OLIVIA_REPO_DIR:-}" ]]; then
     repository_candidate=${OLIVIA_REPO_DIR}
+elif [[ -f "${script_repository}/Project.toml" &&
+        -f "${script_repository}/src/FFNOInversion.jl" ]]; then
+    repository_candidate=${script_repository}
 elif [[ -f "${default_olivia_repo}/Project.toml" &&
         -f "${default_olivia_repo}/src/FFNOInversion.jl" ]]; then
     repository_candidate=${default_olivia_repo}
@@ -68,6 +72,14 @@ export OLIVIA_REPO_DIR
 OLIVIA_REPO_DIR=$(cd "${repository_candidate}" && pwd)
 export OLIVIA_REPO_DIR
 cd "${OLIVIA_REPO_DIR}" || exit 2
+
+test_run_root=${OLIVIA_TEST_RUN_DIR:-${SLURM_SUBMIT_DIR}}
+mkdir -p "${test_run_root}"
+test_run_root=$(cd -- "${test_run_root}" && pwd)
+export OLIVIA_TEST_RUN_DIR=${test_run_root}
+export FFNOML_RUN_DIR=${FFNOML_RUN_DIR:-${test_run_root}}
+export TMPDIR=${OLIVIA_TEST_TMPDIR:-${test_run_root}/tmp/slurm-${SLURM_JOB_ID}}
+mkdir -p "${TMPDIR}"
 
 export JULIA_PROJECT=${OLIVIA_JULIA_PROJECT:-${OLIVIA_REPO_DIR}}
 if [[ -n "${OLIVIA_JULIA_DEPOT:-}" ]]; then
@@ -115,7 +127,7 @@ export OMPI_MCA_mtl=${OMPI_MCA_mtl:-ofi}
 export OMPI_MCA_mtl_ofi_av=${OMPI_MCA_mtl_ofi_av:-table}
 export PRTE_MCA_ras_base_launch_orted_on_hn=${PRTE_MCA_ras_base_launch_orted_on_hn:-1}
 
-diagnostics_root=${OLIVIA_DIAGNOSTICS_DIR:-${OLIVIA_REPO_DIR}/olivia-runtime-evidence-${SLURM_JOB_ID}}
+diagnostics_root=${OLIVIA_DIAGNOSTICS_DIR:-${test_run_root}/olivia-runtime-evidence-${SLURM_JOB_ID}}
 mkdir -p "${diagnostics_root}"
 summary=${diagnostics_root}/summary.tsv
 printf 'test\texpectation\tresult\texit_code\ttimeout_seconds\trequired_marker\n' > "${summary}"

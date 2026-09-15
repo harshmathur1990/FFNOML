@@ -4,13 +4,23 @@ This is the only Olivia acceptance workflow for the inversion package. It runs e
 
 ## Submit
 
-The helper can be invoked from any working directory:
+The bootstrap helper can be invoked from any working directory on an Olivia
+login node. It performs the filesystem setup and all submissions:
 
 ```sh
-bash /cluster/work/projects/nn2834k/harshm/FFNOML/FFNOInversion.jl/scripts/submit_olivia_regression.sh
+bash /cluster/work/projects/nn2834k/harshm/FFNOML/FFNOInversion.jl/scripts/bootstrap_olivia_regression.sh \
+  --run-dir /path/to/hot/ffnoml_runtime_tests \
+  --model-assets /permanent/training_FFNO3D_zscale_expand_lognlte \
+  --atmosphere-dir /permanent/bifrost_data/en024048_hion/385 \
+  --atom-dir /permanent/multi3d/input/atoms \
+  --muspel-dir /permanent/julia-sources/Muspel.jl \
+  --julia-depot /permanent/julia-depot-1.12.2
 ```
 
-The default checkout is `/cluster/work/projects/nn2834k/harshm/FFNOML/FFNOInversion.jl`; `OLIVIA_REPO_DIR` is unnecessary for that checkout. Set it only to test another package directory. Additional `sbatch` arguments passed to the helper are forwarded to every allocation.
+The checkout is resolved from the submission helper itself. Set
+`OLIVIA_REPO_DIR` only to test another package directory. `--run-dir` selects
+the test run root. Additional `sbatch` arguments after a literal `--` are
+forwarded to every allocation.
 
 The helper submits five `afterok`-chained allocations:
 
@@ -28,24 +38,34 @@ Inversion jobs source `/cluster/home/harshm/loadnvidiampi.sh` by default. Set `O
 
 The runtime worker forces Olivia's documented `cxi` provider and HPE's NCCL/CXI settings after sourcing the environment script. Set `OLIVIA_FI_PROVIDER` or `OLIVIA_FI_CXI_RDZV_THRESHOLD` only for a deliberate transport experiment. Nested `torchrun` steps inherit the allocation's Slingshot network configuration.
 
-Instantiate the package environment once on a login node. The manifest pins Muspel to Git commit `01ec68d`, which supports a three-dimensional height array:
+The bootstrap helper submits package instantiation and precompilation to a
+compute-node Slurm allocation; it does not run Julia on the login node. The
+manifest pins Muspel to Git commit `01ec68d`, which supports a three-dimensional
+height array. When the selected Muspel directory does not yet exist, the helper
+clones that revision over SSH from the login node. The compute job uses the
+local checkout, so it needs no GitHub access for Muspel. Package installation is
+idempotent: packages already present in the selected depot are reused. Other
+Julia dependencies and artifacts must already be cached in that depot if
+compute nodes cannot reach Julia's package servers. The regression chain is
+submitted immediately with an `afterok` dependency on setup, so it can run only
+after setup succeeds.
 
-```sh
-JULIA_DEPOT_PATH=/cluster/work/projects/nn2834k/harshm/julia-depot-1.12.2 \
-    julia --project=/cluster/work/projects/nn2834k/harshm/FFNOML/FFNOInversion.jl \
-    -e 'using Pkg; Pkg.instantiate()'
-```
-
-No `testdata` directory and no `config.py` change are required. The real-reference case uses these existing paths by default:
+No `testdata` directory and no `config.py` change are required. The bootstrap
+helper validates and creates symlinks for these model/reference assets under
+the test run root:
 
 - `/cluster/work/projects/nn2834k/harshm/bifrost_data/en024048_hion/385/{mesh,atm3d}`;
-- the H and Ca population/intensity files under `/cluster/work/projects/nn2834k/harshm/FFNOML/training_FFNO3D_zscale_expand_lognlte`;
-- `3D_sim_train_H.pt` in that same training directory;
+- the H and Ca population/intensity reference files under
+  `training_FFNO3D_zscale_expand_lognlte/`;
+- `3D_sim_train_H.pt` in that same run-directory folder;
 - atoms under `/cluster/work/projects/nn2834k/harshm/multi3d/input/atoms`.
 
 The Wittmann production build has no STiC checkout requirement. Continuum opacity is implemented in Julia; `FFNO_STIC_ORACLE_ROOT` is used only by the optional direct-parity test when an original `src/cop.cc` checkout is available.
 
-Set `FFNO_REFERENCE_ATMOSPHERE_DIR` only if the Bifrost snapshot is stored elsewhere.
+Set `FFNO_REFERENCE_ATMOSPHERE_DIR` and `FFNO_ATOM_DIR` to the permanent
+snapshot and atom directories. `FFNO_TEST_CHECKPOINT` and
+`FFNO_REFERENCE_MODEL_DIR` can override the corresponding paths under the run
+root. See `examples/runtime_test_run` for the complete layout.
 
 The worker configures MPI.jl to use the system OpenMPI selected by `loadnvidiampi.sh`, with `srun` and the OpenMPI ABI. It keeps outer Julia ranks CUDA-blind with `CUDA_VISIBLE_DEVICES=-1`; only the overlapping torchrun step receives GPUs from Slurm.
 

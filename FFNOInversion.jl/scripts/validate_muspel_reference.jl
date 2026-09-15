@@ -12,7 +12,11 @@ atmosphere_dir = abspath(get(ENV,"FFNO_REFERENCE_ATMOSPHERE_DIR",
     joinpath(root,"..","bifrost_data","en024048_hion","385")))
 atmos = read_atmos_multi3d(joinpath(atmosphere_dir,"mesh"),
                            joinpath(atmosphere_dir,"atm3d"))
-atom_dir = normpath(joinpath(root,"..","multi3d","input","atoms"))
+atom_dir = abspath(get(ENV,"FFNO_ATOM_DIR",
+    joinpath(root,"..","multi3d","input","atoms")))
+run_root = abspath(get(ENV,"FFNOML_RUN_DIR",root))
+model_dir = abspath(get(ENV,"FFNO_REFERENCE_MODEL_DIR",
+    joinpath(run_root,"training_FFNO3D_zscale_expand_lognlte")))
 background = [joinpath(AtomicData.get_atom_dir(),name) for name in
     ("Al.yaml","C.yaml","Ca.yaml","Fe.yaml","H_6.yaml","He.yaml","KI.yaml",
      "Mg.yaml","N.yaml","Na.yaml","NiI.yaml","O.yaml","S.yaml","Si.yaml")]
@@ -24,14 +28,14 @@ for (name,atom_name,lower,upper) in cases
     sigma = get_σ_itp(atmos,line.λ0,background)
     column = atmos[:,1,1]; buffer = RTBuffer(atmos.nz,line.nλ,Float32)
     calc_line_prep!(line,buffer,column,sigma)
-    population_path = joinpath(root,"training_FFNO3D_zscale_expand_lognlte",
+    population_path = joinpath(model_dir,
         "output_3D_sim_s5_en024048_hion_385_FFNO3D_$(name).hdf5")
     h5open(population_path) do file
         populations = file["nlte_populations"]
         calc_line_1D!(line,buffer,line.λ,column,populations[upper,:,1,1],
                       populations[lower,:,1,1],voigt)
     end
-    intensity_path = joinpath(root,"training_FFNO3D_zscale_expand_lognlte",
+    intensity_path = joinpath(model_dir,
         "intensity_ml_en024048_hion_385_FFNO3D_$(name).h5")
     reference = h5open(intensity_path) do file
         file["$name/intensity"][:,1,1]

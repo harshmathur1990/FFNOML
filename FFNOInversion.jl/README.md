@@ -85,6 +85,14 @@ julia --project=. scripts/validate_phase6_mpi.jl
 # Canonical two-input/two-output executable
 julia --project=. scripts/invert.jl configs/example_intensity_nonprd.toml MODEL_FACTORY.jl
 
-# Submit every Phase 1-6 test plus timeout/recovery tests on Olivia
-bash scripts/submit_olivia_regression.sh
+# Prepare a separate run directory, install Julia packages on a compute node,
+# and submit every Phase 1-6 plus timeout/recovery test on Olivia
+bash scripts/bootstrap_olivia_regression.sh --help
 ```
+
+Production and regression jobs should be submitted from a separate run
+directory. Checked-in layouts and Olivia commands are provided under
+`../examples/inversion_run` and `../examples/runtime_test_run`. The source
+checkout remains the Julia/Python code location; scientific inputs, checkpoints,
+diagnostics, temporary files, Slurm logs, and outputs live under the run root.
+Use `scripts/submit_olivia_inversion.sh` from a prepared inversion run directory.

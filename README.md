@@ -64,6 +64,37 @@ Important sections:
 - `MULTI_GPU`, `DEVICE`, `CUDA`, `TILED`: runtime behavior
 - `EXPAND_FROM_CHECKPOINT`, `ZERO_INIT_NEW_BLOCKS`: model expansion settings for `--train --expand`
 
+### Separate run directory (Olivia)
+
+The repository and run files do not need to live in the same directory. `DATA_DIR`
+continues to locate permanent Bifrost/MULTI3D source data, while the environment
+variable `FFNOML_RUN_DIR` anchors both:
+
+- `IO/` for generated or symlinked input datasets
+- `training_FFNO3D_zscale_expand_lognlte/` for checkpoints and other model outputs
+
+The Slurm scripts set `FFNOML_RUN_DIR` to the submission directory by default and
+locate the Python code from the batch script itself. For example:
+
+```bash
+repo=/path/to/project/FFNOML
+run=/path/to/hot/ffnoml_run1
+
+mkdir -p "$run/IO" "$run/training_FFNO3D_zscale_expand_lognlte"
+# Add the required symlinks under "$run/IO" here.
+cd "$run"
+sbatch "$repo/train_gpu.sh"
+```
+
+This places Slurm logs, the combined `output-<job-id>.txt` log, and model outputs
+under the disposable run directory. To submit from elsewhere, pass an explicit
+run root, for example `sbatch --export=ALL,FFNOML_RUN_DIR="$run" "$repo/train_gpu.sh"`.
+Without `FFNOML_RUN_DIR`, non-Slurm Python runs retain the old behavior and use
+the repository directory.
+
+Ready-to-copy layouts for Python runs, production Julia inversions, and Olivia
+runtime tests are available under [`examples/`](examples/README.md).
+
 The currently implemented model names are:
 
 - `FFNO3D`
