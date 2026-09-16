@@ -47,14 +47,22 @@ julia_executable=$(command -v "${julia_candidate}") || {
 }
 
 mkdir -p "${OLIVIA_JULIA_DEPOT}"
+export JULIA_PROJECT=${julia_project}
 export JULIA_DEPOT_PATH=${OLIVIA_JULIA_DEPOT}
 
 echo "Package dir: ${package_dir}"
-echo "Julia project: ${julia_project}"
+echo "Julia project: ${JULIA_PROJECT}"
 echo "Julia depot: ${JULIA_DEPOT_PATH}"
 echo "Julia: ${julia_executable}"
 
-"${julia_executable}" --project="${julia_project}" --startup-file=no -e '
+"${julia_executable}" --project="${JULIA_PROJECT}" --startup-file=no -e '
+using MPIPreferences
+MPIPreferences.use_system_binary(mpiexec="srun", abi="OpenMPI")
+'
+
+# MPIPreferences affects MPI-dependent JLL artifact selection. Start a fresh
+# Julia process before instantiating so HDF5_jll installs its OpenMPI variant.
+"${julia_executable}" --project="${JULIA_PROJECT}" --startup-file=no -e '
 using Pkg
 Pkg.instantiate()
 Pkg.precompile()
