@@ -2,8 +2,12 @@ using MPI
 using Serialization
 using FFNOInversion
 
+active_project=Base.active_project()
+active_project===nothing && error("Phase 4 topology validation requires an active Julia project")
+project_directory=dirname(active_project)
+
 function run_topology(ranks,threads,path)
-    command=`$(MPI.mpiexec()) -n $ranks $(Base.julia_cmd()) --project=$(dirname(@__DIR__)) --threads=$threads $(joinpath(dirname(@__DIR__),"test","mpi_phase4_worker.jl"))`
+    command=`$(MPI.mpiexec()) -n $ranks $(Base.julia_cmd()) --project=$project_directory --threads=$threads $(joinpath(dirname(@__DIR__),"test","mpi_phase4_worker.jl"))`
     output=read(addenv(command,"PHASE4_RESULT_PATH"=>path),String)
     matched=match(r"MPI_PHASE4_OK ranks=(\d+) threads=(\d+) checksum=([^ ]+) reg=([^ ]+) seconds=([^\n]+)",output)
     matched===nothing && error("Phase 4 worker did not report success:\n$output")

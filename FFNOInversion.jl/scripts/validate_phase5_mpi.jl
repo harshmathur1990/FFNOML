@@ -3,10 +3,13 @@ using Serialization
 using FFNOInversion
 
 root=dirname(@__DIR__); worker=joinpath(root,"test","mpi_phase5_worker.jl")
+active_project=Base.active_project()
+active_project===nothing && error("Phase 5 validation requires an active Julia project")
+project_directory=dirname(active_project)
 directory=mktempdir(); checkpoint=joinpath(directory,"phase5.checkpoint")
 
 function launch(ranks,result;iterations=8,restart=false,checkpoint_path="")
-    command=`$(MPI.mpiexec()) -n $ranks $(Base.julia_cmd()) --project=$root --threads=2 $worker`
+    command=`$(MPI.mpiexec()) -n $ranks $(Base.julia_cmd()) --project=$project_directory --threads=2 $worker`
     environment=Dict("PHASE5_RESULT_PATH"=>result,"PHASE5_MAX_ITERATIONS"=>string(iterations),
         "PHASE5_RESTART"=>(restart ? "1" : "0"),"PHASE5_CHECKPOINT_PATH"=>checkpoint_path)
     run(addenv(command,environment))

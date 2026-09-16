@@ -264,6 +264,7 @@ link_asset "${package_dir}/src" "${julia_project}/src"
 if [[ -d "${package_dir}/ext" ]]; then
     link_asset "${package_dir}/ext" "${julia_project}/ext"
 fi
+link_asset "${package_dir}/scripts" "${julia_project}/scripts"
 
 export OLIVIA_TEST_RUN_DIR=${run_dir}
 export FFNOML_RUN_DIR=${run_dir}

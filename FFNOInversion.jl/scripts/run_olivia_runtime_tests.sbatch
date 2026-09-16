@@ -375,7 +375,7 @@ done
 set +o errexit
 timeout --signal=TERM --kill-after=15s 180s \
     "${OLIVIA_JULIA}" --project="${JULIA_PROJECT}" --startup-file=no -e \
-    'using MPIPreferences; MPIPreferences.use_system_binary(mpiexec="srun", abi="OpenMPI")' \
+    'using MPIPreferences; MPIPreferences.use_system_binary(mpiexec=`srun --mpi=pmix`, abi="OpenMPI")' \
     >> "${diagnostics_root}/preflight.txt" 2>&1
 mpi_preference_status=$?
 set -o errexit
