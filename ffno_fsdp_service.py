@@ -50,6 +50,12 @@ def broadcast_command(command, device):
     return values[0]
 
 
+def run_p2p(operations):
+    """Run one matched P2P batch without serializing the NCCL process group."""
+    for request in dist.batch_isend_irecv(operations):
+        request.wait()
+
+
 def scatter_h(global_value, global_shape, h_axis, device):
     rank = dist.get_rank()
     world = dist.get_world_size()
@@ -59,6 +65,8 @@ def scatter_h(global_value, global_shape, h_axis, device):
     local_shape[h_axis] = h1 - h0
     if rank == 0:
         local = None
+        operations = []
+        send_buffers = []
         for destination in range(world):
             d0, d1 = partition_range(h_global, destination, world)
             selection = [slice(None)] * len(global_shape)
@@ -69,10 +77,12 @@ def scatter_h(global_value, global_shape, h_axis, device):
             if destination == 0:
                 local = part
             else:
-                dist.send(part, dst=destination)
+                send_buffers.append(part)
+                operations.append(dist.P2POp(dist.isend, part, destination))
+        run_p2p(operations)
         return local
     local = torch.empty(tuple(local_shape), dtype=torch.float32, device=device)
-    dist.recv(local, src=0)
+    run_p2p([dist.P2POp(dist.irecv, local, 0)])
     return local
 
 
@@ -84,9 +94,11 @@ def gather_h(local_value, global_shape, h_axis, device):
         np.ascontiguousarray(local_value, dtype=np.float32)
     ).to(device)
     if rank != 0:
-        dist.send(local, dst=0)
+        run_p2p([dist.P2POp(dist.isend, local, 0)])
         return None
     global_value = np.empty(global_shape, dtype=np.float32, order="F")
+    parts = {}
+    operations = []
     for source in range(world):
         h0, h1 = partition_range(h_global, source, world)
         local_shape = list(global_shape)
@@ -94,11 +106,15 @@ def gather_h(local_value, global_shape, h_axis, device):
         part = local if source == 0 else torch.empty(
             tuple(local_shape), dtype=torch.float32, device=device
         )
+        parts[source] = part
         if source != 0:
-            dist.recv(part, src=source)
+            operations.append(dist.P2POp(dist.irecv, part, source))
+    run_p2p(operations)
+    for source in range(world):
+        h0, h1 = partition_range(h_global, source, world)
         selection = [slice(None)] * len(global_shape)
         selection[h_axis] = slice(h0, h1)
-        global_value[tuple(selection)] = part.detach().cpu().numpy()
+        global_value[tuple(selection)] = parts[source].detach().cpu().numpy()
     return global_value
 
 

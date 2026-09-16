@@ -203,8 +203,16 @@ try:
             48000.0,
             48000.0,
         )
+        # The VJP cotangent is the derivative of the global mean log
+        # population. Difference that same objective directly in float64 so
+        # the check does not introduce avoidable float32 cancellation.
+        global_population_count = np.prod(global_shape) * len(level_names)
         finite_difference_local = float(
-            np.sum((plus - minus) * cotangent) / (2.0 * step)
+            np.sum(
+                np.log(plus.astype(np.float64))
+                - np.log(minus.astype(np.float64))
+            )
+            / (2.0 * step * global_population_count)
         )
         totals = torch.tensor(
             [analytic_local, finite_difference_local],

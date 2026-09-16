@@ -238,20 +238,29 @@ class DistributedFSDPBackend:
         cotangent = torch.as_tensor(
             population_cotangent, device=self.device
         ).permute(3, 0, 1, 2)[None]
-        feature_gradient, z_gradient = torch.autograd.grad(
-            populations,
-            (x, z),
-            grad_outputs=cotangent,
-            allow_unused=False,
-        )
+        # A backward pass must reach the FSDP parameter accumulators even
+        # though this API only returns input gradients.  Restricting
+        # torch.autograd.grad() to (x, z) can prune those accumulators and skip
+        # FSDP's post-backward reshard/cleanup hooks, corrupting later service
+        # calls.  Run the ordinary backward lifecycle, retain the leaf input
+        # gradients, and discard the unused parameter gradients immediately.
+        self.model.zero_grad(set_to_none=True)
+        torch.autograd.backward(populations, grad_tensors=cotangent)
+        feature_gradient = x.grad
+        z_gradient = z.grad
+        if feature_gradient is None or z_gradient is None:
+            raise RuntimeError("FSDP FFNO VJP did not produce input gradients")
         if (
             not torch.isfinite(feature_gradient).all()
             or not torch.isfinite(z_gradient).all()
         ):
             raise RuntimeError("FSDP FFNO VJP returned NaN or Inf")
         torch.cuda.synchronize(self.device)
+        feature_gradient = feature_gradient[0].float().detach().cpu().numpy()
+        z_gradient = z_gradient[0].float().detach().cpu().numpy()
+        self.model.zero_grad(set_to_none=True)
         self.call_count += 1
         return {
-            "features": feature_gradient[0].float().detach().cpu().numpy(),
-            "z_scale": z_gradient[0].float().detach().cpu().numpy(),
+            "features": feature_gradient,
+            "z_scale": z_gradient,
         }
