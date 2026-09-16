@@ -57,7 +57,10 @@ echo "Julia: ${julia_executable}"
 
 "${julia_executable}" --project="${JULIA_PROJECT}" --startup-file=no -e '
 using MPIPreferences
-MPIPreferences.use_system_binary(mpiexec=`srun --mpi=pmix`, abi="OpenMPI")
+MPIPreferences.use_system_binary(
+    mpiexec=`srun --mpi=pmix --exact --cpus-per-task=2 --cpu-bind=cores`,
+    abi="OpenMPI",
+)
 '
 
 # MPIPreferences affects MPI-dependent JLL artifact selection. Start a fresh

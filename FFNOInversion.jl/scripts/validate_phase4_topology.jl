@@ -8,7 +8,12 @@ project_directory=dirname(active_project)
 
 function run_topology(ranks,threads,path)
     command=`$(MPI.mpiexec()) -n $ranks $(Base.julia_cmd()) --project=$project_directory --threads=$threads $(joinpath(dirname(@__DIR__),"test","mpi_phase4_worker.jl"))`
-    output=read(addenv(command,"PHASE4_RESULT_PATH"=>path),String)
+    environment=Dict("PHASE4_RESULT_PATH"=>path)
+    if ranks==1
+        environment["OMPI_MCA_pml"]="ob1"
+        environment["OMPI_MCA_btl"]="sm,self"
+    end
+    output=read(addenv(command,environment),String)
     matched=match(r"MPI_PHASE4_OK ranks=(\d+) threads=(\d+) checksum=([^ ]+) reg=([^ ]+) seconds=([^\n]+)",output)
     matched===nothing && error("Phase 4 worker did not report success:\n$output")
     (output=output,result=open(deserialize,path),seconds=parse(Float64,matched.captures[5]))

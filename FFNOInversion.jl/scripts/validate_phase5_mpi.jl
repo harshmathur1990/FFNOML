@@ -12,6 +12,10 @@ function launch(ranks,result;iterations=8,restart=false,checkpoint_path="")
     command=`$(MPI.mpiexec()) -n $ranks $(Base.julia_cmd()) --project=$project_directory --threads=2 $worker`
     environment=Dict("PHASE5_RESULT_PATH"=>result,"PHASE5_MAX_ITERATIONS"=>string(iterations),
         "PHASE5_RESTART"=>(restart ? "1" : "0"),"PHASE5_CHECKPOINT_PATH"=>checkpoint_path)
+    if ranks==1
+        environment["OMPI_MCA_pml"]="ob1"
+        environment["OMPI_MCA_btl"]="sm,self"
+    end
     run(addenv(command,environment))
     open(deserialize,result)
 end

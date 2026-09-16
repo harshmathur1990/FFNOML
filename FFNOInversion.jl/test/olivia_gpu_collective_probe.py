@@ -164,7 +164,9 @@ try:
             level_names=level_names,
             require_multi_gpu=True,
         )
-        global_shape = (4, max(8, world), 8)
+        # rfft(W) has W // 2 + 1 frequency bins. Ensure there is at least one
+        # frequency slab per distributed rank; cuFFT rejects zero-width tensors.
+        global_shape = (4, max(8, world), max(8, 2 * (world - 1)))
         h0, h1 = partition_range(global_shape[1], global_rank, world)
         local_shape = (global_shape[0], h1 - h0, global_shape[2])
         features = np.zeros((6,) + local_shape, dtype=np.float32)

@@ -6,7 +6,12 @@ project_directory=dirname(active_project)
 worker=joinpath(dirname(@__DIR__),"test","mpi_phase4_restart_worker.jl")
 function run_worker(ranks,mode,path)
     command=`$(MPI.mpiexec()) -n $ranks $(Base.julia_cmd()) --project=$project_directory --threads=2 $worker`
-    read(addenv(command,"PHASE4_RESTART_MODE"=>mode,"PHASE4_RESTART_PATH"=>path),String)
+    environment=Dict("PHASE4_RESTART_MODE"=>mode,"PHASE4_RESTART_PATH"=>path)
+    if ranks==1
+        environment["OMPI_MCA_pml"]="ob1"
+        environment["OMPI_MCA_btl"]="sm,self"
+    end
+    read(addenv(command,environment),String)
 end
 
 mktempdir() do directory
