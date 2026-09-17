@@ -18,6 +18,11 @@ import torch.distributed as dist
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import ShardingStrategy
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+    CheckpointImpl,
+    CheckpointWrapper,
+    checkpoint_wrapper,
+)
 
 from distributed_inference import enable_distributed_inference
 from models.ffno_model import FFNOBlock3dBalanced
@@ -111,9 +116,27 @@ class DistributedFSDPBackend:
         raw_model.eval()
         raw_model = enable_distributed_inference(raw_model)
 
+        checkpointed_blocks = bool(raw_model.checkpoint_blocks)
+        if checkpointed_blocks:
+            raw_model.blocks = torch.nn.ModuleList(
+                checkpoint_wrapper(
+                    block,
+                    checkpoint_impl=CheckpointImpl.NO_REENTRANT,
+                )
+                for block in raw_model.blocks
+            )
+            raw_model.external_block_checkpointing = True
+
         auto_wrap_policy = partial(
             transformer_auto_wrap_policy,
-            transformer_layer_cls={FFNOBlock3dBalanced},
+            # FSDP must wrap the checkpoint wrapper, producing
+            # FSDP(checkpoint(block)). Wrapping the inner block instead would
+            # produce the unsupported checkpoint(FSDP(block)) composition.
+            transformer_layer_cls=(
+                {CheckpointWrapper}
+                if checkpointed_blocks
+                else {FFNOBlock3dBalanced}
+            ),
         )
         self.model = FSDP(
             raw_model,
@@ -173,6 +196,11 @@ class DistributedFSDPBackend:
         if tuple(features.shape[1:]) != tuple(z_scale.shape):
             raise ValueError(
                 "local z_scale must have shape (nz,nx_local,ny)"
+            )
+        if features.shape[-1] // 2 + 1 < self.world_size:
+            raise ValueError(
+                "FFNO rfft width must provide at least one frequency bin per "
+                f"distributed rank: ny={features.shape[-1]} world={self.world_size}"
             )
         if not np.isfinite(features).all() or not np.isfinite(z_scale).all():
             raise ValueError("FSDP FFNO request contains NaN or Inf")

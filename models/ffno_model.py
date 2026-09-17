@@ -545,6 +545,11 @@ class FFNO3D(nn.Module):
         super().__init__()
 
         self.checkpoint_blocks = checkpoint_blocks
+        # DistributedFSDPBackend wraps each block with PyTorch's composable
+        # checkpoint wrapper before FSDP is applied. In that configuration the
+        # block call must not be checkpointed a second time around the FSDP
+        # module, while lift/head checkpointing remains enabled.
+        self.external_block_checkpointing = False
 
         self.lift = nn.Sequential(
             nn.Conv3d(in_channels, width, 1, bias=False),
@@ -581,7 +586,12 @@ class FFNO3D(nn.Module):
         # mode, rather than train/eval mode, is the correct switch: no-grad
         # prediction avoids recomputation, while autograd VJPs retain only the
         # block inputs and recompute each FSDP-wrapped block during backward.
-        if self.checkpoint_blocks and torch.is_grad_enabled() and not collect_stats:
+        if (
+            self.checkpoint_blocks
+            and not self.external_block_checkpointing
+            and torch.is_grad_enabled()
+            and not collect_stats
+        ):
             return checkpoint(
                 lambda t, z: blk(
                     t, z, dx, dy, collect_stats=False, branch_mask=None

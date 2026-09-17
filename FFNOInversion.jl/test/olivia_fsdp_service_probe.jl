@@ -35,7 +35,11 @@ try
         diagnostics_directory=diagnostics_root)
     record("fsdp_service_ready")
 
-    nx,ny,nz=8,8,4
+    service_world=isroot(context) ? backend.models[:H].root_model.service.world_size : nothing
+    service_world=mpi_broadcast(service_world,context)
+    # rfft(ny) has ny ÷ 2 + 1 bins. Every distributed GPU rank must own at
+    # least one bin or cuFFT/NCCL can stall on an empty frequency slab.
+    nx,ny,nz=max(8,service_world),max(8,2*(service_world-1)),4
     grid=Grid3D(collect(range(-5.0,-1.0,length=nz)),collect(0.0:48e3:(nx-1)*48e3),
         collect(0.0:48e3:(ny-1)*48e3))
     root_atmosphere=if isroot(context)
