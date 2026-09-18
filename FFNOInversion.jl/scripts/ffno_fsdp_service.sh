@@ -31,10 +31,30 @@ exec srun --overlap --exact --kill-on-bad-exit=1 --mpi=none --network=no_vni --c
         FFNO_FSDP_RENDEZVOUS_ID="${rendezvous_id}" \
         FFNO_FSDP_NPROC_PER_NODE="${gpus_per_node}" \
     bash -c '
+        # A nested overlapping srun is not guaranteed to assign SLURM_PROCID=0
+        # to the first host in SLURM_JOB_NODELIST.  The Julia client advertises
+        # that first host, so derive torchrun node_rank from the hostname order
+        # instead of the nested step task order.  This keeps global Torch rank 0
+        # (the TCP listener) on the advertised host.
+        current_host=$(hostname -s)
+        node_rank=""
+        index=0
+        while IFS= read -r candidate; do
+            if [[ "${candidate}" == "${current_host}" ]]; then
+                node_rank=${index}
+                break
+            fi
+            index=$((index + 1))
+        done < <(scontrol show hostnames "${SLURM_JOB_NODELIST}")
+        if [[ -z "${node_rank}" ]]; then
+            echo "could not map host ${current_host} into ${SLURM_JOB_NODELIST}" >&2
+            exit 2
+        fi
+        echo "FSDP service torchrun worker: host=${current_host} node_rank=${node_rank} CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
         exec "${OLIVIA_PYTHON}" -m torch.distributed.run \
         --nnodes="${SLURM_NNODES}" \
         --nproc_per_node="${FFNO_FSDP_NPROC_PER_NODE}" \
-        --node_rank="${SLURM_PROCID}" \
+        --node_rank="${node_rank}" \
         --rdzv_id="${FFNO_FSDP_RENDEZVOUS_ID}" \
         --rdzv_backend=c10d \
         --rdzv_endpoint="${FFNO_FSDP_MASTER_ADDR}:${FFNO_FSDP_MASTER_PORT}" \
