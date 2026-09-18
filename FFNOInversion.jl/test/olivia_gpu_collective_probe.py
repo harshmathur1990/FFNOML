@@ -180,55 +180,98 @@ try:
         populations = backend.predict_local(features, z_scale, 48000.0, 48000.0)
         cotangent = 1.0 / np.maximum(populations, np.finfo(np.float32).tiny)
         cotangent /= np.prod(global_shape) * len(level_names)
-        result = backend.vjp_local(
-            features, z_scale, 48000.0, 48000.0, cotangent
-        )
         feature_direction = np.zeros_like(features)
         feature_direction[0] = 1.0
         z_direction = np.full_like(z_scale, 100.0)
-        analytic_local = float(
-            np.sum(result["features"] * feature_direction)
-            + np.sum(result["z_scale"] * z_direction)
-        )
         # The model evaluates in float32, so one finite-difference step can sit
         # in either the cancellation-dominated or truncation-dominated regime.
         # Sweep several small physical perturbations and retain the best
         # agreement, without relaxing the actual 5% directional tolerance.
         steps = (0.25, 0.5, 1.0, 2.0, 4.0)
         global_population_count = np.prod(global_shape) * len(level_names)
-        finite_difference_locals = []
-        for step in steps:
+
+        def directional_finite_difference(feature_delta, z_delta, step):
             plus = backend.predict_local(
-                features + step * feature_direction,
-                z_scale + step * z_direction,
+                features + step * feature_delta,
+                z_scale + step * z_delta,
                 48000.0,
                 48000.0,
             )
             minus = backend.predict_local(
-                features - step * feature_direction,
-                z_scale - step * z_direction,
+                features - step * feature_delta,
+                z_scale - step * z_delta,
                 48000.0,
                 48000.0,
             )
             # The VJP cotangent is the derivative of the global mean log
             # population. Difference that same objective in float64 to avoid
             # introducing additional host-side summation cancellation.
-            finite_difference_locals.append(float(
+            return float(
                 np.sum(
                     np.log(plus.astype(np.float64))
                     - np.log(minus.astype(np.float64))
                 )
                 / (2.0 * step * global_population_count)
+            )
+
+        # Evaluate finite differences before backward. Besides being the usual
+        # ordering for a directional check, this lets the repeated base forward
+        # below detect any FSDP post-backward state corruption explicitly.
+        finite_difference_locals = []
+        for step in steps:
+            finite_difference_locals.append(directional_finite_difference(
+                feature_direction, z_direction, step
             ))
+        component_step = 4.0
+        zero_features = np.zeros_like(features)
+        zero_z = np.zeros_like(z_scale)
+        feature_finite_difference_local = directional_finite_difference(
+            feature_direction, zero_z, component_step
+        )
+        z_finite_difference_local = directional_finite_difference(
+            zero_features, z_direction, component_step
+        )
+
+        result = backend.vjp_local(
+            features, z_scale, 48000.0, 48000.0, cotangent
+        )
+        analytic_feature_local = float(
+            np.sum(result["features"] * feature_direction)
+        )
+        analytic_z_local = float(np.sum(result["z_scale"] * z_direction))
+        analytic_local = analytic_feature_local + analytic_z_local
+        repeated_populations = backend.predict_local(
+            features, z_scale, 48000.0, 48000.0
+        )
+        repeat_log_error_local = float(np.max(np.abs(
+            np.log(repeated_populations.astype(np.float64))
+            - np.log(populations.astype(np.float64))
+        )))
         totals = torch.tensor(
-            [analytic_local, *finite_difference_locals],
+            [
+                analytic_local,
+                analytic_feature_local,
+                analytic_z_local,
+                feature_finite_difference_local,
+                z_finite_difference_local,
+                *finite_difference_locals,
+            ],
             dtype=torch.float64,
             device="cuda",
         )
         dist.all_reduce(totals, op=dist.ReduceOp.SUM)
+        repeat_log_error = torch.tensor(
+            repeat_log_error_local, dtype=torch.float64, device="cuda"
+        )
+        dist.all_reduce(repeat_log_error, op=dist.ReduceOp.MAX)
         reduced = [float(value) for value in totals.cpu()]
         analytic = reduced[0]
-        finite_differences = reduced[1:]
+        analytic_feature = reduced[1]
+        analytic_z = reduced[2]
+        feature_finite_difference = reduced[3]
+        z_finite_difference = reduced[4]
+        finite_differences = reduced[5:]
+        repeat_log_error = float(repeat_log_error.cpu())
         relative_errors = [
             abs(analytic - finite_difference) / max(
                 abs(analytic), abs(finite_difference), 1.0e-8
@@ -265,18 +308,33 @@ try:
                 f"maximum_local={maximum_local_parameters} "
                 f"full={description['full_parameter_count']}"
             )
+        if not np.isfinite(repeat_log_error) or repeat_log_error > 1.0e-6:
+            raise RuntimeError(
+                "production FSDP FFNO changed predictions after VJP: "
+                f"maximum_log_difference={repeat_log_error}"
+            )
         if not np.isfinite(relative_error) or relative_error > 5.0e-2:
             raise RuntimeError(
                 "production FSDP FFNO VJP directional check failed: "
                 f"analytic={analytic} finite_difference={finite_difference} "
                 f"relative_error={relative_error} best_step={step} "
-                f"step_sweep={dict(zip(steps, finite_differences))}"
+                f"step_sweep={dict(zip(steps, finite_differences))} "
+                f"feature_analytic={analytic_feature} "
+                f"feature_finite_difference={feature_finite_difference} "
+                f"z_analytic={analytic_z} "
+                f"z_finite_difference={z_finite_difference} "
+                f"post_vjp_log_difference={repeat_log_error}"
             )
         record(
             "production_fsdp_ffno_vjp_complete",
             analytic=analytic,
             finite_difference=finite_difference,
             relative_error=relative_error,
+            feature_analytic=analytic_feature,
+            feature_finite_difference=feature_finite_difference,
+            z_analytic=analytic_z,
+            z_finite_difference=z_finite_difference,
+            post_vjp_log_difference=repeat_log_error,
             finite_difference_step=step,
             finite_difference_sweep=",".join(
                 f"{candidate}:{value}" for candidate, value in zip(
