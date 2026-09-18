@@ -187,8 +187,8 @@ try:
         # in either the cancellation-dominated or truncation-dominated regime.
         # Sweep several small physical perturbations and retain the best
         # agreement, without relaxing the actual 5% directional tolerance.
-        steps = (0.25, 0.5, 1.0, 2.0, 4.0)
-        global_population_count = np.prod(global_shape) * len(level_names)
+        steps = (1.0, 2.0, 4.0, 8.0, 16.0)
+        cotangent64 = cotangent.astype(np.float64)
 
         def directional_finite_difference(feature_delta, z_delta, step):
             plus = backend.predict_local(
@@ -203,15 +203,16 @@ try:
                 48000.0,
                 48000.0,
             )
-            # The VJP cotangent is the derivative of the global mean log
-            # population. Difference that same objective in float64 to avoid
-            # introducing additional host-side summation cancellation.
+            # vjp_local differentiates the population output against the fixed
+            # cotangent supplied above.  Difference that exact scalar objective;
+            # replacing it by mean(log(population)) is equivalent only in the
+            # infinitesimal limit and produced a biased float32 finite-step check.
             return float(
                 np.sum(
-                    np.log(plus.astype(np.float64))
-                    - np.log(minus.astype(np.float64))
+                    cotangent64
+                    * (plus.astype(np.float64) - minus.astype(np.float64))
                 )
-                / (2.0 * step * global_population_count)
+                / (2.0 * step)
             )
 
         # Evaluate finite differences before backward. Besides being the usual
@@ -222,7 +223,7 @@ try:
             finite_difference_locals.append(directional_finite_difference(
                 feature_direction, z_direction, step
             ))
-        component_step = 4.0
+        component_step = 8.0
         zero_features = np.zeros_like(features)
         zero_z = np.zeros_like(z_scale)
         feature_finite_difference_local = directional_finite_difference(
