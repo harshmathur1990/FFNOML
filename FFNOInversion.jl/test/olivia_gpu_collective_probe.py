@@ -180,14 +180,30 @@ try:
         populations = backend.predict_local(features, z_scale, 48000.0, 48000.0)
         cotangent = 1.0 / np.maximum(populations, np.finfo(np.float32).tiny)
         cotangent /= np.prod(global_shape) * len(level_names)
+        result = backend.vjp_local(
+            features, z_scale, 48000.0, 48000.0, cotangent
+        )
+        repeated_populations = backend.predict_local(
+            features, z_scale, 48000.0, 48000.0
+        )
+        repeat_log_error_local = float(np.max(np.abs(
+            np.log(repeated_populations.astype(np.float64))
+            - np.log(populations.astype(np.float64))
+        )))
+
+        # A uniform physical direction nearly cancels for this checkpoint: its
+        # true temperature contribution is about 3e-8, below the roughly 1e-5
+        # float32 differencing noise observed on Olivia.  Use bounded signs of
+        # the computed gradients to form a well-conditioned direction while
+        # retaining the original temperature and z-scale perturbation units.
+        # The finite difference still independently checks the VJP magnitudes.
         feature_direction = np.zeros_like(features)
-        feature_direction[0] = 1.0
-        z_direction = np.full_like(z_scale, 100.0)
-        # The model evaluates in float32, so one finite-difference step can sit
-        # in either the cancellation-dominated or truncation-dominated regime.
-        # Sweep several small physical perturbations and retain the best
-        # agreement, without relaxing the actual 5% directional tolerance.
-        steps = (1.0, 2.0, 4.0, 8.0, 16.0)
+        feature_direction[0] = np.sign(result["features"][0])
+        z_direction = 100.0 * np.sign(result["z_scale"])
+        # The model evaluates in float32, so sweep several small physical
+        # perturbations and retain the best agreement without relaxing the 5%
+        # directional tolerance.
+        steps = (0.25, 0.5, 1.0, 2.0, 4.0)
         cotangent64 = cotangent.astype(np.float64)
 
         def directional_finite_difference(feature_delta, z_delta, step):
@@ -215,15 +231,12 @@ try:
                 / (2.0 * step)
             )
 
-        # Evaluate finite differences before backward. Besides being the usual
-        # ordering for a directional check, this lets the repeated base forward
-        # below detect any FSDP post-backward state corruption explicitly.
         finite_difference_locals = []
         for step in steps:
             finite_difference_locals.append(directional_finite_difference(
                 feature_direction, z_direction, step
             ))
-        component_step = 8.0
+        component_step = 1.0
         zero_features = np.zeros_like(features)
         zero_z = np.zeros_like(z_scale)
         feature_finite_difference_local = directional_finite_difference(
@@ -233,21 +246,11 @@ try:
             zero_features, z_direction, component_step
         )
 
-        result = backend.vjp_local(
-            features, z_scale, 48000.0, 48000.0, cotangent
-        )
         analytic_feature_local = float(
             np.sum(result["features"] * feature_direction)
         )
         analytic_z_local = float(np.sum(result["z_scale"] * z_direction))
         analytic_local = analytic_feature_local + analytic_z_local
-        repeated_populations = backend.predict_local(
-            features, z_scale, 48000.0, 48000.0
-        )
-        repeat_log_error_local = float(np.max(np.abs(
-            np.log(repeated_populations.astype(np.float64))
-            - np.log(populations.astype(np.float64))
-        )))
         totals = torch.tensor(
             [
                 analytic_local,
