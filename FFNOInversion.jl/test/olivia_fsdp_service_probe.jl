@@ -31,7 +31,7 @@ try
         "901dcd28a6ee651c12a26a60effdd28c7ea211b596a30b87654435e87803c755")
     spec=FSDPModelSpec(:H,checkpoint,metadata)
     record("fsdp_service_launch_enter")
-    backend=launch_fsdp_population_models([spec],context;timeout_seconds=300,
+    global backend=launch_fsdp_population_models([spec],context;timeout_seconds=300,
         diagnostics_directory=diagnostics_root)
     record("fsdp_service_ready")
 

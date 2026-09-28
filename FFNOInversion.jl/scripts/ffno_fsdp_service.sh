@@ -34,8 +34,9 @@ exec srun --overlap --exact --kill-on-bad-exit=1 --mpi=none --network=no_vni --c
         # A nested overlapping srun is not guaranteed to assign SLURM_PROCID=0
         # to the first host in SLURM_JOB_NODELIST.  The Julia client advertises
         # that first host, so derive torchrun node_rank from the hostname order
-        # instead of the nested step task order.  This keeps global Torch rank 0
-        # (the TCP listener) on the advertised host.
+        # instead of the nested step task order. Static rendezvous below is
+        # essential: c10d rendezvous ignores --node_rank and can place the TCP
+        # listener on a different host from the one advertised to Julia.
         current_host=$(hostname -s)
         node_rank=""
         index=0
@@ -56,6 +57,6 @@ exec srun --overlap --exact --kill-on-bad-exit=1 --mpi=none --network=no_vni --c
         --nproc_per_node="${FFNO_FSDP_NPROC_PER_NODE}" \
         --node_rank="${node_rank}" \
         --rdzv_id="${FFNO_FSDP_RENDEZVOUS_ID}" \
-        --rdzv_backend=c10d \
+        --rdzv_backend=static \
         --rdzv_endpoint="${FFNO_FSDP_MASTER_ADDR}:${FFNO_FSDP_MASTER_PORT}" \
         "${FFNO_FSDP_SERVICE_SCRIPT}" "${FFNO_FSDP_SERVICE_MANIFEST}"'

@@ -46,6 +46,13 @@ using Sockets
     population_vjp!(feature_bar,z_bar,model,atmosphere,fill(3.0,shape...,1))
     @test all(feature_bar.==4) && all(z_bar.==5)
     @test model.calls==2
-    close_fsdp_service!(service)
+    # Exercise the probe's composite cleanup path, including models sharing
+    # one persistent service. The server expects exactly one SHUTDOWN.
+    composite=CompositeDistributedPopulationModel(Dict(
+        :H=>RootDistributedPopulationModel(model,1),
+        :shared=>RootDistributedPopulationModel(model,1)))
+    close_distributed_population_model!(composite,serial_context())
+    @test service.closed && !isopen(socket)
+    close_fsdp_service!(service) # closing an already closed service is harmless
     wait(server)
 end
