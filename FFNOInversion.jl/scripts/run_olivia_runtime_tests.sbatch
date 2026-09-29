@@ -254,8 +254,13 @@ run_case() {
 
     echo "===== ${label}: expectation=${expectation} timeout=${timeout_seconds}s ====="
     set +o errexit
-    timeout --signal=TERM --kill-after=15s "${timeout_seconds}s" "$@" \
-        > "${case_dir}/stdout.log" 2> "${case_dir}/stderr.log" &
+    # Slurm can return 137 when an internally failing rank kills its peers,
+    # even though this watchdog never fired. Keep timeout's own diagnostics
+    # separate from the command so the two causes cannot be confused.
+    LC_ALL=C timeout --verbose --signal=TERM --kill-after=15s "${timeout_seconds}s" \
+        bash -c 'command_stderr=$1; shift; exec "$@" 2>"${command_stderr}"' \
+        bash "${case_dir}/stderr.log" "$@" \
+        > "${case_dir}/stdout.log" 2> "${case_dir}/watchdog.log" &
     local command_pid=$!
     sample_case "${command_pid}" "${case_dir}/scheduler-samples.txt" &
     local sampler_pid=$!
@@ -263,6 +268,12 @@ run_case() {
     local status=$?
     wait "${sampler_pid}" 2>/dev/null || true
     set -o errexit
+
+    local watchdog_fired=0
+    if grep --quiet --extended-regexp 'sending signal (TERM|KILL) to command' \
+            "${case_dir}/watchdog.log"; then
+        watchdog_fired=1
+    fi
 
     snapshot_scheduler "${case_dir}/scheduler-after-command.txt"
     if [[ ${status} -ne 0 ]]; then
@@ -277,7 +288,7 @@ run_case() {
     capture_node_health "${case_dir}/node-health-after.txt"
 
     local result=FAIL
-    if [[ ${cleanup_ready} -eq 1 && "${expectation}" == success && ${status} -eq 0 ]]; then
+    if [[ ${cleanup_ready} -eq 1 && ${watchdog_fired} -eq 0 && "${expectation}" == success && ${status} -eq 0 ]]; then
         if [[ "${required_marker}" == - ]] || grep --recursive --quiet --fixed-strings \
                 "${required_marker}" "${case_dir}"; then
             result=PASS
@@ -286,7 +297,7 @@ run_case() {
                 >> "${case_dir}/validation-error.txt"
         fi
     elif [[ ${cleanup_ready} -eq 1 && "${expectation}" == controlled_failure && ${status} -ne 0 &&
-            ${status} -ne 124 && ${status} -ne 137 ]]; then
+            ${watchdog_fired} -eq 0 && ${status} -ne 124 ]]; then
         if [[ "${required_marker}" != - ]] && grep --recursive --quiet --fixed-strings \
                 "${required_marker}" "${case_dir}"; then
             result=PASS
@@ -294,7 +305,7 @@ run_case() {
             echo "controlled failure did not contain required marker: ${required_marker}" \
                 >> "${case_dir}/validation-error.txt"
         fi
-    elif [[ ${cleanup_ready} -eq 1 && "${expectation}" == timeout && ( ${status} -eq 124 || ${status} -eq 137 ) ]]; then
+    elif [[ ${cleanup_ready} -eq 1 && ${watchdog_fired} -eq 1 && "${expectation}" == timeout && ( ${status} -eq 124 || ${status} -eq 137 ) ]]; then
         if [[ "${required_marker}" != - ]] && grep --recursive --quiet --fixed-strings \
                 "${required_marker}" "${case_dir}"; then
             result=PASS
@@ -311,6 +322,8 @@ run_case() {
         "${status}" "${timeout_seconds}" "${required_marker}" >> "${summary}"
     echo "${label}: ${result} (exit=${status})"
     if [[ "${result}" != PASS ]]; then
+        echo "----- ${label} watchdog diagnostics -----"
+        cat "${case_dir}/watchdog.log" || true
         echo "----- ${label} stdout tail -----"
         tail -n 80 "${case_dir}/stdout.log" || true
         echo "----- ${label} stderr tail -----"
@@ -429,6 +442,10 @@ fi
     date -u +%Y-%m-%dT%H:%M:%SZ
     echo "submit_dir=${SLURM_SUBMIT_DIR}"
     echo "repository=${OLIVIA_REPO_DIR}"
+    if command -v git >/dev/null 2>&1; then
+        echo "repository_commit=$(git -C "${OLIVIA_REPO_DIR}" rev-parse HEAD 2>/dev/null || echo unavailable)"
+        git -C "${OLIVIA_REPO_DIR}" diff --stat HEAD -- . || true
+    fi
     echo "job=${SLURM_JOB_ID} nodes=${SLURM_NNODES} nodelist=${SLURM_JOB_NODELIST}"
     echo "test_group=${test_group}"
     echo "julia_project=${JULIA_PROJECT} julia_threads=${OLIVIA_JULIA_THREADS}"
