@@ -29,16 +29,7 @@ source "${environment_script}"
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 package_dir=${OLIVIA_REPO_DIR:-$(dirname "${script_dir}")}
 package_dir=$(cd -- "${package_dir}" && pwd)
-julia_project=${OLIVIA_JULIA_PROJECT:-${package_dir}}
-[[ -r "${julia_project}/Project.toml" && -r "${julia_project}/Manifest.toml" ]] || {
-  echo "Cannot read Julia project/manifest under: ${julia_project}" >&2
-  exit 2
-}
-local_muspel_dir=${OLIVIA_LOCAL_MUSPEL_DIR:-}
-if [[ -n "${local_muspel_dir}" && ! -r "${local_muspel_dir}/Project.toml" ]]; then
-  echo "Cannot read local Muspel checkout: ${local_muspel_dir}" >&2
-  exit 2
-fi
+julia_project=${OLIVIA_JULIA_PROJECT:-${FFNOML_RUN_DIR:-${SLURM_SUBMIT_DIR}}/julia-environment}
 
 julia_candidate=${OLIVIA_JULIA:-julia}
 julia_executable=$(command -v "${julia_candidate}") || {
@@ -54,6 +45,19 @@ echo "Package dir: ${package_dir}"
 echo "Julia project: ${JULIA_PROJECT}"
 echo "Julia depot: ${JULIA_DEPOT_PATH}"
 echo "Julia: ${julia_executable}"
+
+# Preparation uses only Julia stdlibs and permanent inputs, even after work cleanup.
+"${julia_executable}" --startup-file=no \
+  "${package_dir}/scripts/prepare_olivia_environment.jl" "${package_dir}" "${julia_project}"
+
+# Without a repository manifest, resolve/install first so MPIPreferences can load.
+# The permanent depot is reused; uncached versions require package-server access.
+if [[ ! -r "${julia_project}/Manifest.toml" ]]; then
+  "${julia_executable}" --project="${JULIA_PROJECT}" --startup-file=no -e '
+using Pkg
+Pkg.instantiate(; allow_autoprecomp=false)
+'
+fi
 
 "${julia_executable}" --project="${JULIA_PROJECT}" --startup-file=no -e '
 using MPIPreferences

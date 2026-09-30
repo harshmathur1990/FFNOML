@@ -90,7 +90,7 @@ package_dir=$(cd -- "${package_dir}" && pwd)
 setup_script=${script_dir}/setup_olivia_environment.sbatch
 submit_script=${script_dir}/submit_olivia_regression.sh
 
-for required_file in "${package_dir}/Project.toml" "${package_dir}/Manifest.toml" \
+for required_file in "${package_dir}/Project.toml" \
         "${setup_script}" "${submit_script}"; do
     [[ -r "${required_file}" ]] || {
         echo "Missing required repository file: ${required_file}" >&2
@@ -228,43 +228,8 @@ done
 link_asset "${atmosphere_dir}" "${reference_dir}/atmosphere"
 link_asset "${atom_dir}" "${reference_dir}/atoms"
 
-# Keep package resolution and LocalPreferences.toml in the disposable run
-# directory. The source and extension code remain in the permanent checkout.
-cp -- "${package_dir}/Project.toml" "${julia_project}/Project.toml"
-cp -- "${package_dir}/Manifest.toml" "${julia_project}/Manifest.toml"
-grep -q '^\[\[deps\.Muspel\]\]$' "${julia_project}/Manifest.toml" || {
-    echo "Run-local Manifest.toml has no Muspel entry" >&2
-    exit 2
-}
-manifest_tmp=$(mktemp "${julia_project}/Manifest.toml.XXXXXX")
-awk -v muspel_path="${muspel_dir}" '
-    /^\[\[deps\.Muspel\]\]$/ {
-        in_muspel = 1
-        path_written = 0
-        print
-        next
-    }
-    in_muspel && /^\[\[/ {
-        if (!path_written) {
-            print "path = \"" muspel_path "\""
-            path_written = 1
-        }
-        in_muspel = 0
-    }
-    in_muspel && /^(git-tree-sha1|repo-rev|repo-url) =/ { next }
-    { print }
-    END {
-        if (in_muspel && !path_written) {
-            print "path = \"" muspel_path "\""
-        }
-    }
-' "${julia_project}/Manifest.toml" > "${manifest_tmp}"
-mv -- "${manifest_tmp}" "${julia_project}/Manifest.toml"
-link_asset "${package_dir}/src" "${julia_project}/src"
-if [[ -d "${package_dir}/ext" ]]; then
-    link_asset "${package_dir}/ext" "${julia_project}/ext"
-fi
-link_asset "${package_dir}/scripts" "${julia_project}/scripts"
+# The setup allocation reconstructs the project from the permanent checkout.
+# Nothing under this run directory is needed to recreate its Julia environment.
 
 export OLIVIA_TEST_RUN_DIR=${run_dir}
 export FFNOML_RUN_DIR=${run_dir}

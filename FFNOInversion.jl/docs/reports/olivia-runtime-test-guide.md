@@ -38,6 +38,13 @@ Inversion jobs source `/cluster/home/harshm/loadnvidiampi.sh` by default. Set `O
 
 The runtime worker forces Olivia's documented `cxi` provider and HPE's NCCL/CXI settings after sourcing the environment script. Set `OLIVIA_FI_PROVIDER` or `OLIVIA_FI_CXI_RDZV_THRESHOLD` only for a deliberate transport experiment. Nested `torchrun` steps inherit the allocation's Slingshot network configuration.
 
+The setup job recreates its run-local Julia environment from the permanent
+repository, including fresh MPI preferences. It reuses the permanent Julia depot
+and requires no previous work-directory environment. The repository manifest
+preserves resolved versions; if absent, setup generates a manifest from
+`Project.toml` (which may select different versions and require network access).
+After work-directory cleanup, rerun bootstrap with the same permanent asset paths.
+
 The bootstrap helper submits package instantiation and precompilation to a
 compute-node Slurm allocation; it does not run Julia on the login node. The
 manifest pins Muspel to Git commit `01ec68d`, which supports a three-dimensional

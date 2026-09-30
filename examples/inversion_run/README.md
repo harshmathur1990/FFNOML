@@ -11,7 +11,7 @@ Required links:
 
 - `inputs/initial_atmosphere.h5`
 - `inputs/observations.h5`
-- `inputs/kurucz_8542.list` and `inputs/kurucz_6302.list`
+- `inputs/kurucz_6302.list` (for the LTE Fe 6302 region)
 - `inputs/atoms/atom.h6_tiago2.yaml` and `atom.ca2.yaml`
 - `inputs/pf_Kurucz.input`
 - `inputs/wittmann/libwitt_ffno.so` on Olivia
@@ -34,7 +34,7 @@ ln -s "$repo/scripts/pf_Kurucz.input" "$run/inputs/pf_Kurucz.input"
 ln -s /permanent/lib/libwitt_ffno.so "$run/inputs/wittmann/libwitt_ffno.so"
 ln -s /permanent/models/3D_sim_train_H.pt "$run/training_FFNO3D_zscale_expand_lognlte/3D_sim_train_H.pt"
 ln -s /permanent/models/3D_sim_train_CA.pt "$run/training_FFNO3D_zscale_expand_lognlte/3D_sim_train_CA.pt"
-# Add the two Kurucz line-list links in inputs/ as well.
+ln -s /permanent/inputs/kurucz_6302.list "$run/inputs/kurucz_6302.list"
 
 cd "$run"
 bash "$repo/FFNOInversion.jl/scripts/submit_olivia_inversion.sh"

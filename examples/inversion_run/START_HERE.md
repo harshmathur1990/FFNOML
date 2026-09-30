@@ -9,13 +9,12 @@ node interpolation, derivatives, or fitting are needed.
 ## 1. Make a separate run folder
 
 Run these commands in one Bash session on the login node. Change the paths if
-your checkout or previously prepared Julia environment lives elsewhere.
+your checkout or permanent Julia depot lives elsewhere.
 Use a new run folder for each experiment; output files with the same names are overwritten.
 
 ```bash
 repo=/cluster/projects/nn2834k/harshm/FFNOML
 run=/cluster/work/projects/nn2834k/harshm/ffnoml_forward_001
-tested=/cluster/work/projects/nn2834k/harshm/ffnoml_runtime_tests
 mkdir -p "$run"
 cp -R "$repo/examples/inversion_run/." "$run/"
 export FFNOML_RUN_DIR="$run"
@@ -45,7 +44,6 @@ ffnoml_forward_001/
 ├── model_factory.jl             # loads the physics and FFNO models
 ├── inputs/
 │   ├── initial_atmosphere.h5
-│   ├── kurucz_8542.list
 │   ├── kurucz_6302.list
 │   ├── pf_Kurucz.input
 │   ├── atoms/atom.h6_tiago2.yaml
@@ -61,7 +59,6 @@ ffnoml_forward_001/
 atoms=/cluster/projects/nn2834k/harshm/multi3d/input/atoms
 models=/cluster/projects/nn2834k/harshm/train_outputs/training_FFNO3D_zscale_expand_lognlte
 ln -s /path/to/initial_atmosphere.h5 "$run/inputs/initial_atmosphere.h5"
-ln -s /path/to/kurucz_8542.list "$run/inputs/kurucz_8542.list"
 ln -s /path/to/kurucz_6302.list "$run/inputs/kurucz_6302.list"
 ln -s "$atoms/atom.h6_tiago2.yaml" "$run/inputs/atoms/atom.h6_tiago2.yaml"
 ln -s "$atoms/atom.ca2.yaml" "$run/inputs/atoms/atom.ca2.yaml"
@@ -96,9 +93,9 @@ through force balance/EOS, rather than read as full input fields.
 
 Before submission, set:
 
-- `pressure_top_pa` in `[atmosphere]`, and export `FFNO_TOP_DENSITY_KG_M3` in the shell, to appropriate **top boundary values for your atmosphere**. The example values, 0.1 Pa and 1e-10 kg/m³, are placeholders.
+- `pressure_top_pa` in `[atmosphere]`, to an appropriate **top pressure for your atmosphere**; 0.1 Pa is an example. The current factory also accepts `FFNO_TOP_DENSITY_KG_M3` (default 1e-10 kg/m³) as an initialization guess, used at the top only on the first force-balance iteration; subsequent density comes from the EOS.
 - `[grid] dx_m` and `dy_m` to the actual horizontal spacing in metres.
-- `[[regions]]` wavelengths (Å), counts, normalization and line lists. The example synthesizes Ca II 8542 plus LTE blends, and an LTE Fe 6302 region.
+- `[[regions]]` wavelengths (Å), counts, normalization and line lists. The example synthesizes Ca II 8542 through FFNO and an LTE Fe 6302 region; only the latter needs a Kurucz line list.
 - `[observation.gaussian_psf]`: the example applies a **96 km spatial blur**. Set both spatial FWHM values to `0.0` for unblurred spectra. This section controls synthetic output even without observations.
 
 Keep `mode = "forward"`, `stokes = ["I"]`, and `redistribution = "non_prd"`
@@ -106,28 +103,28 @@ for this starter run. Do not add nodes or a solver to `forward.toml`.
 
 ## 4. Prepare Julia and submit
 
-Reuse the validated dependency manifest and MPI preferences, with the current
-package definition/source, in a run-local environment. This leaves the old test
-environment untouched. Run once for this new folder:
+The setup job recreates a disposable project from the permanent repository's
+`Project.toml` and `Manifest.toml`, reuses the home-directory depot, and writes
+Olivia MPI preferences. It needs no old regression folder. If the repository
+manifest is absent, Julia generates one (versions can change, and uncached
+packages require network access). Keep the repository manifest for repeatability.
 
 ```bash
 export OLIVIA_JULIA_PROJECT="$run/julia-environment"
-mkdir -p "$OLIVIA_JULIA_PROJECT"
-cp "$tested/julia-environment/Manifest.toml" "$OLIVIA_JULIA_PROJECT/"
-cp "$tested/julia-environment/LocalPreferences.toml" "$OLIVIA_JULIA_PROJECT/"
-cp "$OLIVIA_REPO_DIR/Project.toml" "$OLIVIA_JULIA_PROJECT/"
-for part in src ext scripts; do
-  ln -s "$OLIVIA_REPO_DIR/$part" "$OLIVIA_JULIA_PROJECT/$part"
-done
+export OLIVIA_LOCAL_MUSPEL_DIR=/cluster/projects/nn2834k/harshm/julia-sources/Muspel.jl
 cd "$run"
 sbatch "$OLIVIA_REPO_DIR/scripts/setup_olivia_environment.sbatch"
 ```
+
+The local Muspel checkout must match the revision pinned in `Project.toml`.
+If work storage is purged, recreate the run folder/asset links and rerun these
+steps; the permanent repository, Muspel checkout and home depot remain the inputs.
 
 Wait for the setup job to finish successfully; its `.out` must contain
 `FFNO_OLIVIA_JULIA_ENVIRONMENT_READY`. Then submit the actual synthesis:
 
 ```bash
-# Replace this example density with your chosen physical boundary value.
+# Optional density initialization guess; this is not a fixed density boundary.
 export FFNO_TOP_DENSITY_KG_M3=1e-10
 export FFNO_INVERSION_CONFIG="$run/forward.toml"
 bash "$OLIVIA_REPO_DIR/scripts/submit_olivia_inversion.sh"

@@ -38,10 +38,6 @@ mode = "ffno"
 species = "CA"
 line = "ca_ii_8542"
 
-[[regions.sources]]
-mode = "kurucz_lte"
-linelist_file = "inputs/kurucz_8542.list"
-
 [[regions]]
 start_angstrom = 6301.24942
 step_angstrom = 0.01007
