@@ -2,10 +2,11 @@
 #SBATCH --job-name=ffno-invert
 #SBATCH --partition=accel
 #SBATCH --account=nn2834k
-#SBATCH --nodes=2
-#SBATCH --ntasks-per-node=1
+#SBATCH --nodes=1
+#SBATCH --ntasks=16
+#SBATCH --ntasks-per-node=16
 #SBATCH --gpus-per-node=4
-#SBATCH --cpus-per-task=8
+#SBATCH --cpus-per-task=16
 #SBATCH --mem-per-gpu=40G
 #SBATCH --network=job_vni
 #SBATCH --time=1-00:00:00
@@ -86,8 +87,10 @@ echo "Run dir: ${FFNOML_RUN_DIR}"
 echo "Config: ${config_file}"
 echo "Factory: ${factory_file}"
 
+# Use 16 Julia MPI ranks x 16 threads = all 256 CPUs. The four GPUs are
+# consumed independently by the nested torchrun/FSDP service.
 srun --kill-on-bad-exit=1 --mpi=pmix --gres=none \
-  --nodes="${SLURM_NNODES}" --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 \
+  --nodes="${SLURM_NNODES}" --ntasks="${SLURM_NTASKS}" \
   --cpu-bind=cores --cpus-per-task="${SLURM_CPUS_PER_TASK}" \
   env CUDA_VISIBLE_DEVICES=-1 \
   "${OLIVIA_JULIA}" --project="${JULIA_PROJECT}" --startup-file=no \
