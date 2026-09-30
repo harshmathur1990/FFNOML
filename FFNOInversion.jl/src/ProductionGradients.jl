@@ -437,7 +437,7 @@ end
 
 function _reconstruct_trial!(problem,layout,parameters,context)
     _restore_trial_reference!(problem)
-    apply_control_maps!(problem.distributed,layout,parameters)
+    apply_control_maps!(problem,layout,parameters)
     reconstruct_force_balance_distributed!(problem.distributed,problem.model.boundary,
         problem.model.eos,problem.model.opacity,context;options=problem.model.force_options)
 end
@@ -458,6 +458,8 @@ function _force_regularization_vjp!(gradient,backend::HybridAdjointObjectiveGrad
     for coordinate in eachindex(center)
         hp=min(T(backend.force_balance_step),upper[coordinate]-center[coordinate])
         hm=min(T(backend.force_balance_step),center[coordinate]-lower[coordinate])
+        physical_hp,physical_hm=_coordinate_step_limits(problem,layout,parameters,coordinate,context)
+        hp=min(hp,physical_hp); hm=min(hm,physical_hm)
         tolerance=eps(T)*max(abs(center[coordinate]),one(T))*10
         if hp>tolerance && hm>tolerance
             plus=copy(center); plus[coordinate]+=hp
@@ -489,6 +491,7 @@ end
 function objective_gradient!(backend::HybridAdjointObjectiveGradient,
         problem::DistributedInversionProblem,layout::ControlMapLayout{T},parameters,context) where T
     evaluation=evaluate_objective!(problem,layout,parameters,context)
+    isfinite(evaluation.components.total) || throw(ArgumentError("cannot differentiate an infeasible atmosphere"))
     synthetic=problem.workspace.output.data; observation=problem.observation
     output_bar=similar(synthetic)
     @. output_bar=(T(2)/problem.active_residual_count)*observation.inversion_weights^2*

@@ -164,11 +164,14 @@ struct DistributedInversionProblem{M,W,D,O,R,T,A}
     dy_m::T
     thermodynamic_reference::A
     active_residual_count::Int
+    control_reference::Dict{Symbol,Array{T,3}}
+    reference_id::String
+    correction_signature::String
 end
 
 function DistributedInversionProblem(model,workspace,distributed::DistributedAtmosphere,
         observation::ObservationCube,regularization::RegularizationSpec,dx_m::Real,dy_m::Real,
-        context::ParallelContext)
+        context::ParallelContext;control_layout=nothing,reference_id="")
     size(workspace.output.data)==size(observation.spectrum.data) || throw(DimensionMismatch(
         "rank-local synthesis and observation shapes differ"))
     dx_m>0 && dy_m>0 || throw(ArgumentError("objective pixel spacings must be positive"))
@@ -178,9 +181,20 @@ function DistributedInversionProblem(model,workspace,distributed::DistributedAtm
     a=distributed.local_atmosphere
     reference=_ThermodynamicTrialReference(_trial_copy(a.pgas),_trial_copy(a.rho),_trial_copy(a.ne),_trial_copy(a.z))
     T=eltype(a.temperature)
+    controls=Dict{Symbol,Array{T,3}}()
+    if control_layout!==nothing
+        for spec in control_layout.specs
+            controls[spec.variable]=copy(_control_destination(a,spec.variable))
+        end
+        valid=all(all(v->isfinite(v)&&spec.lower<=v<=spec.upper,controls[spec.variable]) for spec in control_layout.specs)
+        allreduce_sum(valid ? 1 : 0,context)==context.size || throw(ArgumentError(
+            "starting atmosphere violates physical control bounds; it will not be clipped"))
+        isempty(reference_id) && throw(ArgumentError("correction mapping requires a reference atmosphere ID"))
+    end
+    signature=control_layout===nothing ? "absolute-v1" : "corrections-v1:" * _layout_signature(control_layout)
     DistributedInversionProblem{typeof(model),typeof(workspace),typeof(distributed),typeof(observation),
         typeof(regularization),T,typeof(reference)}(model,workspace,distributed,observation,regularization,
-        T(dx_m),T(dy_m),reference,active)
+        T(dx_m),T(dy_m),reference,active,controls,String(reference_id),signature)
 end
 
 function _restore_trial_reference!(problem::DistributedInversionProblem)
@@ -195,6 +209,39 @@ function _restore_trial_reference!(problem::DistributedInversionProblem)
         end
     end
     atmosphere
+end
+
+"""Apply node *increments* to an immutable rank-owned starting field.
+
+The packed coordinates retain physical node units for solver scaling/bounds;
+`parameters - spec.initial` are the corrections and are initially zero.
+The bare distributed overload remains an absolute-field interpolation utility.
+"""
+function apply_control_maps!(problem::DistributedInversionProblem,layout::ControlMapLayout,parameters)
+    isempty(problem.control_reference) && return apply_control_maps!(problem.distributed,layout,parameters)
+    problem.correction_signature=="corrections-v1:" * _layout_signature(layout) || throw(ArgumentError(
+        "correction layout changed; start a fresh problem and optimizer history when refining nodes"))
+    _check_parameter_length(layout,parameters)
+    for (spec,indices) in zip(layout.specs,layout.ranges)
+        delta=reshape(parameters[indices],size(spec.initial)).-spec.initial
+        correction=expand_nodes(NodeField(delta,spec.log_tau_nodes),problem.distributed.global_grid,problem.distributed.tile)
+        destination=_control_destination(problem.distributed.local_atmosphere,spec.variable)
+        destination.=problem.control_reference[spec.variable].+correction
+    end
+    problem.distributed
+end
+
+function _physical_controls_valid(problem,layout,context)
+    isempty(problem.control_reference) && return true
+    valid=all(all(v->isfinite(v)&&spec.lower<=v<=spec.upper,
+        _control_destination(problem.distributed.local_atmosphere,spec.variable)) for spec in layout.specs)
+    allreduce_sum(valid ? 1 : 0,context)==context.size
+end
+
+_checkpoint_mapping(problem)=(mapping=problem.correction_signature,reference_id=problem.reference_id)
+function _check_checkpoint_mapping(payload,problem)
+    hasproperty(payload,:control_mapping) && payload.control_mapping==_checkpoint_mapping(problem) ||
+        throw(ArgumentError("checkpoint atmosphere reference or control representation differs; old checkpoints require a fresh run"))
 end
 
 struct ObjectiveComponents{T<:AbstractFloat}
@@ -220,7 +267,11 @@ function evaluate_objective!(problem::DistributedInversionProblem,layout::Contro
     trial=collect(parameters); project_parameters!(trial,layout)
     trial==parameters || throw(ArgumentError("objective parameters violate declared bounds"))
     _restore_trial_reference!(problem)
-    apply_control_maps!(problem.distributed,layout,trial)
+    apply_control_maps!(problem,layout,trial)
+    if !_physical_controls_valid(problem,layout,context)
+        T=eltype(parameters)
+        return ObjectiveEvaluation(ObjectiveComponents(T(Inf),T(Inf),zero(T),Dict{Symbol,T}()),nothing,nothing)
+    end
     forward_result=forward!(problem.workspace,problem.model,problem.distributed,context)
     data=distributed_chi2(forward_result.spectrum,problem.observation,context)/problem.active_residual_count
     reg=distributed_regularization_penalty(problem.distributed,problem.regularization,
@@ -318,32 +369,31 @@ end
 
 function _layout_signature(layout::ControlMapLayout)
     join((string(spec.variable,"|",size(spec.initial),"|",join(repr.(spec.log_tau_nodes),","),
-        "|",repr(spec.lower),"|",repr(spec.upper),"|",repr(spec.scale)) for spec in layout.specs),";")
+        "|",repr(spec.lower),"|",repr(spec.upper),"|",repr(spec.scale),"|",join(repr.(vec(spec.initial)),",")) for spec in layout.specs),";")
 end
 
-function _save_prototype_checkpoint(path,layout,state,manifest,context)
+function _save_prototype_checkpoint(path,layout,state,manifest,context,problem)
     isempty(path) && return nothing
     if isroot(context)
         mkpath(dirname(abspath(path)))
-        checkpoint!(path,(kind=:phase5_prototype,layout_signature=_layout_signature(layout),state=state);
+        checkpoint!(path,(kind=:phase5_prototype,layout_signature=_layout_signature(layout),control_mapping=_checkpoint_mapping(problem),state=state);
             manifest=manifest)
     end
     barrier(context); path
 end
 
-function _restore_prototype_checkpoint(path,layout,manifest,context)
+function _restore_prototype_checkpoint(path,layout,manifest,context,problem)
     isempty(path) && throw(ArgumentError("restart requires checkpoint_path"))
-    payload=if isroot(context)
+    payload=_checkpoint_read_collectively(context) do
         restored=restore_checkpoint(path;expected=manifest)
         state_payload=restored.state
+        _check_checkpoint_mapping(state_payload,problem)
         state_payload.kind===:phase5_prototype || throw(ArgumentError("checkpoint is not a Phase 5 prototype state"))
         state_payload.layout_signature==_layout_signature(layout) || throw(ArgumentError(
             "checkpoint control-map layout differs from requested layout"))
         state_payload.state
-    else
-        nothing
     end
-    mpi_broadcast(payload,context)
+    payload
 end
 
 function _candidate(layout,state,coordinate,direction)
@@ -364,7 +414,7 @@ function prototype_invert!(problem::DistributedInversionProblem,layout::ControlM
         manifest::CapabilityManifest=problem.model.capabilities)
     _validate(options)
     state,current=if restart
-        restored=_restore_prototype_checkpoint(options.checkpoint_path,layout,manifest,context)
+        restored=_restore_prototype_checkpoint(options.checkpoint_path,layout,manifest,context,problem)
         restored_current=evaluate_objective!(problem,layout,restored.parameters,context)
         isapprox(restored_current.components.total,restored.objective;rtol=1e-12,atol=1e-12) ||
             throw(ErrorException("restart objective differs from checkpointed objective"))
@@ -415,12 +465,12 @@ function prototype_invert!(problem::DistributedInversionProblem,layout::ControlM
             decision.coordinate,decision.direction))
         state.converged=maximum(state.scaled_steps)<=options.minimum_step
         if iteration%options.checkpoint_every==0 || state.converged
-            _save_prototype_checkpoint(options.checkpoint_path,layout,state,manifest,context)
+            _save_prototype_checkpoint(options.checkpoint_path,layout,state,manifest,context,problem)
         end
         state.converged && break
     end
     current=evaluate_objective!(problem,layout,state.parameters,context)
-    isempty(options.checkpoint_path) || _save_prototype_checkpoint(options.checkpoint_path,layout,state,manifest,context)
+    isempty(options.checkpoint_path) || _save_prototype_checkpoint(options.checkpoint_path,layout,state,manifest,context,problem)
     PrototypeInversionResult(state,current)
 end
 
@@ -464,4 +514,36 @@ function centered_directional_validation(problem::DistributedInversionProblem,
     relative=length(estimates)<2 ? zero(T) : abs(estimates[end].derivative-estimates[end-1].derivative)/
         max(abs(estimates[end].derivative),abs(estimates[end-1].derivative),eps(T))
     DirectionalDerivativeReport(estimates,T(relative))
+end
+
+function _checkpoint_read_collectively(read_state,context)
+    result=mpi_broadcast(if isroot(context)
+        try
+            (ok=true,value=read_state(),message="")
+        catch exception
+            (ok=false,value=nothing,message=sprint(showerror,exception))
+        end
+    else
+        nothing
+    end,context)
+    result.ok || throw(ArgumentError(result.message))
+    result.value
+end
+
+"""Start a refined correction stage from the accepted full atmosphere.
+
+This preserves unresolved structure exactly. Pass the returned problem/layout
+into a fresh solver; optimizer history and old checkpoints are not transferable.
+"""
+function refine_control_maps(problem::DistributedInversionProblem,layout::ControlMapLayout,
+        parameters::AbstractVector,context::ParallelContext;kwargs...)
+    isempty(problem.control_reference) && throw(ArgumentError("refinement stage requires a correction-based problem"))
+    accepted=evaluate_objective!(problem,layout,parameters,context)
+    isfinite(accepted.components.total) || throw(ArgumentError("cannot refine an infeasible atmosphere"))
+    refined=refine_control_maps(layout,parameters;kwargs...)
+    reference_id=bytes2hex(SHA.sha256(problem.reference_id * ":" * _layout_signature(layout) * ":" * join(repr.(parameters),",")))
+    next_problem=DistributedInversionProblem(problem.model,problem.workspace,problem.distributed,
+        problem.observation,problem.regularization,problem.dx_m,problem.dy_m,context;
+        control_layout=refined.layout,reference_id=reference_id)
+    (problem=next_problem,layout=refined.layout,parameters=refined.parameters)
 end

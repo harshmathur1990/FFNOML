@@ -99,8 +99,11 @@ try
         fill(0.02,size(truth_result.spectrum.data)),ones(size(truth_result.spectrum.data)))
     regularization=RegularizationSpec(vertical=VerticalRegularizationSpec(ntuple(_->0,7),0.0,ntuple(_->1.0,7)),
         horizontal=Dict{Symbol,Float64}(),scales=Dict{Symbol,Float64}(),horizontal_order=1)
-    problem=DistributedInversionProblem(model,workspace,distributed,observation,regularization,50e3,50e3,context)
     layout=control_layout(fill(4500.0,4),[0.0,0.0]); initial=initial_parameters(layout)
+    apply_control_maps!(distributed,layout,initial)
+    distributed.local_atmosphere.temperature[2,:,:].+=200.0
+    problem=DistributedInversionProblem(model,workspace,distributed,observation,regularization,50e3,50e3,context;
+        control_layout=layout,reference_id="olivia-phase6-structured-reference-v1")
     record("solver_enter";details="mode=$mode ranks=$(context.size) controls=$(length(initial))")
 
     if mode==:success
@@ -146,7 +149,7 @@ try
         length(result.state.history)==1 && !result.state.history[1].accepted || error(
             "rejected iteration was not recorded")
         result.state.history[1].rejected_trials==4 || error("not all injected trials were rejected")
-        expected=expand_nodes(parameter_nodefield(layout,initial,:temperature),distributed.global_grid,distributed.tile)
+        expected=problem.control_reference[:temperature]
         distributed.local_atmosphere.temperature==expected || error(
             "atmosphere was not restored after rejected trials")
         barrier(context)

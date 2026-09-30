@@ -1,5 +1,21 @@
 using HDF5
 using Sockets
+using TOML
+
+struct ForbiddenForwardGradient <: AbstractObjectiveGradient end
+FFNOInversion.objective_gradient!(::ForbiddenForwardGradient,args...)=error("forward run attempted a gradient")
+
+mutable struct StartingAtmosphereGradient <: AbstractObjectiveGradient
+    temperature::Array{Float64,3}
+    calls::Int
+end
+function FFNOInversion.objective_gradient!(backend::StartingAtmosphereGradient,problem,layout,parameters,context)
+    evaluation=evaluate_objective!(problem,layout,parameters,context)
+    @test problem.distributed.local_atmosphere.temperature==backend.temperature
+    backend.calls+=1
+    ObjectiveGradientEvaluation(evaluation,zeros(length(parameters)),1)
+end
+
 
 function fake_fsdp_population_backend(;levels=1,value=1.0f10,temperature_scaled=false)
     listener=listen(ip"127.0.0.1",0); port=Int(getsockname(listener)[2])
@@ -67,12 +83,13 @@ end
         output_atmosphere_path=joinpath(directory,"atmosphere.h5")
         config_path=joinpath(directory,"run.toml")
         logtau=[-5.0,-3.0,-1.0]; nx=2; ny=2; shape=(3,nx,ny)
-        temperature=fill(5500.0,shape)
+        temperature=reshape(collect(5100.0:100.0:6200.0),shape)
         zeros3=zeros(shape); grid=Grid3D(logtau,[0.0,40e3],[0.0,40e3])
         atmosphere=Atmosphere3D(grid,temperature,copy(zeros3),copy(zeros3),copy(zeros3),copy(zeros3))
         h5open(atmosphere_path,"w") do file
             file["logtau_500"]=logtau
             file["temperature"]=FFNOInversion._with_time_zyx(temperature)
+            file["vturb"]=FFNOInversion._with_time_zyx(fill(800.0,shape))
             file["vx"]=FFNOInversion._with_time_zyx(zeros3)
             file["vy"]=FFNOInversion._with_time_zyx(zeros3)
             file["vz"]=FFNOInversion._with_time_zyx(zeros3)
@@ -110,6 +127,7 @@ pressure_top_pa = 1.0
 [atmosphere.datasets]
 logtau500 = \"logtau_500\"
 temperature = \"temperature\"
+vturb = \"vturb\"
 vx = \"vx\"
 vy = \"vy\"
 vz = \"vz\"
@@ -158,7 +176,8 @@ threads_per_rank = $(Threads.nthreads())
         config=load_config(config_path)
         inputs=read_inversion_inputs(config)
         @test inputs.atmosphere.temperature==temperature
-        @test inputs.observation.spectrum.data==truth.data
+        @test all(inputs.atmosphere.vturb.==800)
+        @test inputs.observation===nothing
         server_ref=Ref{Any}()
         factory=InversionModelFactory(1,(cfg,dist,ws,pressure,ctx)->begin
             backend,server=fake_fsdp_population_backend(value=1.0f10,
@@ -167,16 +186,53 @@ threads_per_rank = $(Threads.nthreads())
                 IdealGasEOS(),ReferenceOpacity500(kappa_m2_kg=0.02),
                 HE3DBoundaryState(fill(1e-10,size(pressure)),pressure,:top),force,CapabilityManifest())
         end)
-        result=run_inversion_files!(config_path,factory)
+        result=run_inversion_files!(config_path,factory;gradient_backend=ForbiddenForwardGradient())
         wait(server_ref[])
         @test isfile(synthesis_path) && isfile(output_atmosphere_path)
-        @test result.objective.components.total<1e-20
+        @test result.objective===nothing && result.solver===nothing
+        @test result.atmosphere.temperature==temperature
+        @test result.synthesis.data≈truth.data
+        @test result.atmosphere.pgas!==nothing && result.atmosphere.ne!==nothing
         h5open(synthesis_path) do file
             @test size(read(file["intensity"]))==(1,1,4,ny,nx)
         end
         h5open(output_atmosphere_path) do file
             @test size(read(file["temperature"]))==(1,3,ny,nx)
             @test haskey(file,"populations")
+            @test !haskey(attributes(file),"solver_termination")
         end
+        # Explicit mode needs no observation or controls; malformed ignored
+        # optimizer/node settings must not affect forward-only synthesis.
+        inversion_document=TOML.parsefile(config_path)
+        inversion_document["solver"]["max_iterations"]=1
+        open(config_path,"w") do io; TOML.print(io,inversion_document); end
+        initial_gradient=StartingAtmosphereGradient(copy(temperature),0)
+        inverted=run_inversion_files!(config_path,factory;gradient_backend=initial_gradient)
+        wait(server_ref[])
+        @test initial_gradient.calls==1
+        @test inverted.atmosphere.temperature==temperature
+        @test inverted.synthesis.data==result.synthesis.data
+        document=TOML.parsefile(config_path)
+        document["mode"]="forward"
+        delete!(document["inputs"],"observation_file")
+        delete!(document,"observation")
+        document["inversion"]=Dict("controls"=>"ignored")
+        document["solver"]=Dict("method"=>"ignored")
+        open(config_path,"w") do io; TOML.print(io,document); end
+        explicit=run_inversion_files!(config_path,factory;gradient_backend=ForbiddenForwardGradient())
+        wait(server_ref[])
+        @test explicit.synthesis.data==result.synthesis.data
+        @test explicit.populations==result.populations
+        @test explicit.atmosphere.temperature==temperature
+        @test explicit.atmosphere.z==result.atmosphere.z
+        h5open(synthesis_path) do file
+            @test !haskey(file,"objective_total")
+            @test read(attributes(file)["execution_mode"])=="forward"
+        end
+        # Zero iterations has exactly the same semantics without mode=forward.
+        delete!(document,"mode")
+        document["solver"]=Dict("max_iterations"=>0)
+        open(config_path,"w") do io; TOML.print(io,document); end
+        @test load_config(config_path).mode===:forward
     end
 end

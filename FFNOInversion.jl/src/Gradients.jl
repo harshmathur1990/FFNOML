@@ -162,10 +162,13 @@ function objective_gradient!(backend::FiniteDifferenceObjectiveGradient,
     _check_parameter_length(layout,parameters)
     center=scaled_parameters(layout,parameters); lower,upper=_scaled_bounds(layout)
     central=evaluate_objective!(problem,layout,parameters,context); f0=T(central.components.total)
+    isfinite(f0) || throw(ArgumentError("cannot differentiate an infeasible atmosphere"))
     gradient=zeros(T,length(center)); evaluations=1
     for coordinate in eachindex(center)
         hp=min(T(backend.step),upper[coordinate]-center[coordinate])
         hm=min(T(backend.step),center[coordinate]-lower[coordinate])
+        physical_hp,physical_hm=_coordinate_step_limits(problem,layout,parameters,coordinate,context)
+        hp=min(hp,physical_hp); hm=min(hm,physical_hm)
         tolerance=eps(T)*max(abs(center[coordinate]),one(T))*10
         if hp>tolerance && hm>tolerance
             plus=copy(center); plus[coordinate]+=hp
@@ -234,4 +237,26 @@ function gradient_taylor_validation(backend::AbstractObjectiveGradient,
         push!(orders,log(e1/e2)/log(samples[i].step/samples[i+1].step))
     end
     GradientTaylorReport(gradient_evaluation,T(derivative),samples,orders)
+end
+
+# Feasible one-coordinate finite-difference steps in scaled units. Physical
+# bounds apply to every affected voxel, including unresolved baseline structure.
+function _coordinate_step_limits(problem,layout,parameters,coordinate,context)
+    isempty(problem.control_reference) && return (Inf,Inf)
+    index=findfirst(r->coordinate in r,layout.ranges)
+    spec=layout.specs[index]; indices=layout.ranges[index]
+    delta=reshape(parameters[indices],size(spec.initial)).-spec.initial
+    grid=problem.distributed.global_grid; tile=problem.distributed.tile
+    values=problem.control_reference[spec.variable].+expand_nodes(NodeField(delta,spec.log_tau_nodes),grid,tile)
+    basis=zeros(eltype(parameters),size(spec.initial))
+    basis[coordinate-first(indices)+1]=spec.scale
+    response=expand_nodes(NodeField(basis,spec.log_tau_nodes),grid,tile)
+    hp=Inf; hm=Inf
+    for i in eachindex(values)
+        w=response[i]
+        w>0 || continue
+        hp=min(hp,max(0,(spec.upper-values[i])/w))
+        hm=min(hm,max(0,(values[i]-spec.lower)/w))
+    end
+    (-allreduce_max(-hp,context),-allreduce_max(-hm,context))
 end

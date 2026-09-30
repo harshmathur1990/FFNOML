@@ -7,6 +7,7 @@ struct AtmosphereInputConfig{T<:AbstractFloat}
     vz_dataset::String
     pressure_top::Union{T,String}
     magnetic_datasets::Union{Nothing,NTuple{3,String}}
+    vturb_dataset::Union{Nothing,String}
 end
 
 struct ObservedDataConfig
@@ -69,8 +70,9 @@ end
 
 struct RunConfig{T<:AbstractFloat}
     atmosphere::AtmosphereInputConfig{T}
-    observed::ObservedDataConfig
-    weights::WeightInputConfig
+    mode::Symbol
+    observed::Union{Nothing,ObservedDataConfig}
+    weights::Union{Nothing,WeightInputConfig}
     outputs::OutputConfig
     synthesis::SynthesisGridConfig{T}
     regions::Vector{SpectralRegionConfig{T}}
@@ -235,7 +237,13 @@ function load_config(path::AbstractString)
     cfg = TOML.parsefile(path)
     inputs = _required(cfg,"inputs"); outputs_raw = _required(cfg,"outputs")
     atmos = _required(cfg,"atmosphere"); grid = _required(cfg,"grid")
-    obs = _required(cfg,"observation")
+    requested_mode=Symbol(get(cfg,"mode","inversion"))
+    requested_mode in (:forward,:inversion) || throw(ArgumentError("mode must be forward or inversion"))
+    solver_raw=get(cfg,"solver",Dict{String,Any}())
+    forward_only=requested_mode===:forward || get(solver_raw,"max_iterations",nothing)==0
+    mode=forward_only ? :forward : :inversion
+    solver=forward_only ? LBFGSSolverOptions(max_iterations=0) : _solver(solver_raw)
+    obs = get(cfg,"observation",Dict{String,Any}())
     physics = _required(cfg,"physics")
 
     dx_m,dy_m = Float64(_required(grid,"dx_m")),Float64(_required(grid,"dy_m"))
@@ -253,11 +261,15 @@ function load_config(path::AbstractString)
     pressure_top isa Float64 && pressure_top <= 0 && throw(ArgumentError("pressure_top_pa must be positive"))
     atmosphere = AtmosphereInputConfig(String(_required(inputs,"initial_atmosphere_file")),String(_required(datasets,"logtau500")),
         String(_required(datasets,"temperature")),String(_required(datasets,"vx")),String(_required(datasets,"vy")),
-        String(_required(datasets,"vz")),pressure_top,magnetic)
+        String(_required(datasets,"vz")),pressure_top,magnetic,
+        haskey(datasets,"vturb") ? String(datasets["vturb"]) : nothing)
 
-    data = _required(obs,"datasets")
-    observed = ObservedDataConfig(String(_required(inputs,"observation_file")),String(_required(data,"intensity")),String(_required(data,"sigma")))
-    weights = WeightInputConfig(String(_required(data,"wavelength_weights")),String(_required(data,"spatial_weights")))
+    observed=nothing; weights=nothing
+    if !forward_only
+        data = _required(obs,"datasets")
+        observed = ObservedDataConfig(String(_required(inputs,"observation_file")),String(_required(data,"intensity")),String(_required(data,"sigma")))
+        weights = WeightInputConfig(String(_required(data,"wavelength_weights")),String(_required(data,"spatial_weights")))
+    end
     outputs = OutputConfig(String(_required(outputs_raw,"synthesis_file")),String(_required(outputs_raw,"atmosphere_file")))
     outputs.synthesis_file == outputs.atmosphere_file && throw(ArgumentError("synthesis_file and atmosphere_file must differ"))
 
@@ -268,10 +280,8 @@ function load_config(path::AbstractString)
     psf = get(obs,"gaussian_psf",Dict{String,Any}())
     observation_model = GaussianPSFObservation(Float64(get(psf,"spectral_fwhm_nm",0.0))*1e-9,
         Float64(get(psf,"spatial_fwhm_x_m",0.0)),Float64(get(psf,"spatial_fwhm_y_m",0.0)),dx_m,dy_m)
-    regularization = _regularization(get(cfg,"regularization",Dict{String,Any}()))
-    inversion_raw=_required(cfg,"inversion")
-    controls=_controls(inversion_raw)
-    solver=_solver(get(cfg,"solver",Dict{String,Any}()))
+    regularization = forward_only ? _regularization(Dict{String,Any}()) : _regularization(get(cfg,"regularization",Dict{String,Any}()))
+    controls=forward_only ? ControlMapConfig{Float64}[] : _controls(_required(cfg,"inversion"))
     parallel_raw = get(cfg,"parallel",Dict{String,Any}())
     decomposition = Symbol(lowercase(String(get(parallel_raw,"decomposition","cartesian_2d"))))
     decomposition == :cartesian_2d || throw(ArgumentError("parallel.decomposition must be cartesian_2d"))
@@ -293,7 +303,7 @@ function load_config(path::AbstractString)
         gpu_diagnostics_directory=gpu_diagnostics_directory)
     time_index=Int(get(inputs,"time_index",1)); time_index>0 || throw(ArgumentError(
         "inputs.time_index must be positive"))
-    RunConfig(atmosphere,observed,weights,outputs,SynthesisGridConfig(wavelength_m,dx_m,dy_m),regions,
+    RunConfig(atmosphere,mode,observed,weights,outputs,SynthesisGridConfig(wavelength_m,dx_m,dy_m),regions,
         observation_model,stokes,redistribution,regularization,parallel,controls,solver,time_index)
 end
 
@@ -305,7 +315,7 @@ function dry_run_summary(config::RunConfig)
     nsources=sum(length(r.sources) for r in config.regions)
     controlvars=join(getfield.(config.controls,:variable),',')
     solver_name=config.solver isa LBFGSSolverOptions ? "bounded_lbfgs" : "prototype_pattern_search"
-    "observation_input=$(config.observed.file) atmosphere_input=$(config.atmosphere.file) synthesis_output=$(config.outputs.synthesis_file) atmosphere_output=$(config.outputs.atmosphere_file) time_index=$(config.time_index) logtau=$(config.atmosphere.logtau500_dataset) dx_m=$(config.synthesis.dx_m) dy_m=$(config.synthesis.dy_m) spectral_regions=$(length(config.regions)) spectral_sources=$nsources synthesis_wavelengths=$nlambda full_grid_psf=true zero_weight_exclusion=true stokes=$(join(config.stokes.components,',')) redistribution=$(config.redistribution) force_balance=$mode controls=$controlvars solver=$solver_name max_iterations=$(config.solver.max_iterations) checkpoint=$(config.solver.checkpoint_path) regularized=$(join(regvars,',')) mpi=$(config.parallel.enabled) decomposition=$(config.parallel.decomposition) threads_per_rank=$(config.parallel.threads_per_rank) gpu_launcher_rank=$(config.parallel.gpu_launcher_rank) gpu_connect_timeout_seconds=$(config.parallel.gpu_connect_timeout_seconds) gpu_status_timeout_seconds=$(config.parallel.gpu_status_timeout_seconds) gpu_diagnostic_interval_seconds=$(config.parallel.gpu_diagnostic_interval_seconds)"
+    "mode=$(config.mode) observation_input=$(config.observed===nothing ? "none" : config.observed.file) atmosphere_input=$(config.atmosphere.file) synthesis_output=$(config.outputs.synthesis_file) atmosphere_output=$(config.outputs.atmosphere_file) time_index=$(config.time_index) logtau=$(config.atmosphere.logtau500_dataset) dx_m=$(config.synthesis.dx_m) dy_m=$(config.synthesis.dy_m) spectral_regions=$(length(config.regions)) spectral_sources=$nsources synthesis_wavelengths=$nlambda full_grid_psf=true zero_weight_exclusion=true stokes=$(join(config.stokes.components,',')) redistribution=$(config.redistribution) force_balance=$mode controls=$controlvars solver=$solver_name max_iterations=$(config.solver.max_iterations) checkpoint=$(config.solver.checkpoint_path) regularized=$(join(regvars,',')) mpi=$(config.parallel.enabled) decomposition=$(config.parallel.decomposition) threads_per_rank=$(config.parallel.threads_per_rank) gpu_launcher_rank=$(config.parallel.gpu_launcher_rank) gpu_connect_timeout_seconds=$(config.parallel.gpu_connect_timeout_seconds) gpu_status_timeout_seconds=$(config.parallel.gpu_status_timeout_seconds) gpu_diagnostic_interval_seconds=$(config.parallel.gpu_diagnostic_interval_seconds)"
 end
 
 function checkpoint!(path::AbstractString,state;manifest::CapabilityManifest=CapabilityManifest())

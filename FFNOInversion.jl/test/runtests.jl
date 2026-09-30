@@ -21,3 +21,5 @@ include("phase6_production_gradient.jl")
 include("phase6_execution.jl")
 include("phase6_fsdp_protocol.jl")
 include("fsdp_only_architecture.jl")
+
+include("correction_mapping.jl")

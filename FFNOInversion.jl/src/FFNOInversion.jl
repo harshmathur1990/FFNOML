@@ -5,6 +5,7 @@ using HDF5
 using LinearAlgebra
 using Libdl
 using Serialization
+using SHA
 using Sockets
 using TOML
 import MPI

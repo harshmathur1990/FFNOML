@@ -18,8 +18,9 @@ command -v sbatch >/dev/null 2>&1 || {
 
 mkdir -p "${run_dir}"
 run_dir=$(cd -- "${run_dir}" && pwd)
-[[ -r "${run_dir}/inversion.toml" ]] || {
-  echo "Missing ${run_dir}/inversion.toml" >&2
+config_file=${FFNO_INVERSION_CONFIG:-${run_dir}/inversion.toml}
+[[ -r "${config_file}" ]] || {
+  echo "Missing ${config_file}" >&2
   exit 2
 }
 [[ -r "${run_dir}/model_factory.jl" ]] || {

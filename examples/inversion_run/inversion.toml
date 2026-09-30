@@ -13,6 +13,7 @@ pressure_top_pa = 0.1
 [atmosphere.datasets]
 logtau500 = "logtau_500"
 temperature = "temperature"
+# vturb = "vturb" # optional; defaults to zero if not configured
 vx = "vx"
 vy = "vy"
 vz = "vz"

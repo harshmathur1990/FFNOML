@@ -94,8 +94,11 @@ try
         fill(0.02,size(truth.spectrum.data)),ones(size(truth.spectrum.data)))
     regularization=RegularizationSpec(vertical=VerticalRegularizationSpec(ntuple(_->0,7),0.0,ntuple(_->1.0,7)),
         horizontal=Dict{Symbol,Float64}(),scales=Dict{Symbol,Float64}(),horizontal_order=1)
-    problem=DistributedInversionProblem(model,workspace,distributed,observation,regularization,50e3,50e3,context)
     initial_layout=phase6_layout(fill(4500.0,4),[0.0,0.0])
+    apply_control_maps!(distributed,initial_layout,initial_parameters(initial_layout))
+    distributed.local_atmosphere.temperature[2,:,:].+=200.0
+    problem=DistributedInversionProblem(model,workspace,distributed,observation,regularization,50e3,50e3,context;
+        control_layout=initial_layout,reference_id="phase6-structured-reference-v1")
     iterations=parse(Int,get(ENV,"PHASE6_MAX_ITERATIONS","8"))
     checkpoint_path=get(ENV,"PHASE6_CHECKPOINT_PATH","")
     restart=get(ENV,"PHASE6_RESTART","0")=="1"

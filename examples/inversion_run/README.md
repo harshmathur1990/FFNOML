@@ -1,5 +1,8 @@
 # FFNOInversion.jl run directory
 
+**Start here:** [Short forward/inversion starter guide](START_HERE.md), including
+the folder layout, scientific inputs, Olivia setup, submission, and outputs.
+
 This is the per-run layout for a production inversion. The checked-in files are
 a template; the scientific inputs and platform library must be symlinked from
 permanent storage.
@@ -41,3 +44,19 @@ bash "$repo/FFNOInversion.jl/scripts/submit_olivia_inversion.sh"
 `FFNO_TOP_DENSITY_KG_M3` to the appropriate boundary density before submission;
 the default in the template is only a starting value and must be checked for the
 chosen atmosphere.
+
+For atmosphere-to-spectrum synthesis without fitting, use `forward.toml`:
+
+```bash
+cd "$run"
+export FFNO_INVERSION_CONFIG="$run/forward.toml"
+bash "$repo/FFNOInversion.jl/scripts/submit_olivia_inversion.sh"
+```
+
+This needs the atmosphere and model/physics assets listed above, but no
+`inputs/observations.h5`. It returns `outputs/synthesis.h5` and
+`outputs/forward_atmosphere.h5`. Alternatively set `max_iterations = 0` in an
+inversion configuration; nodes and observations will be ignored. This is still
+force-balance/EOS reconstruction followed by FFNO populations and synthesis,
+with no optimization or gradient work. The example factory currently loads both
+H and Ca assets even when only one species contributes to the configured lines.

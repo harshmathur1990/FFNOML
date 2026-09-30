@@ -64,30 +64,29 @@ struct LBFGSInversionResult{T<:AbstractFloat,E}
     evaluation::E
 end
 
-function _save_lbfgs_checkpoint(path,layout,state,manifest,history_length,context)
+function _save_lbfgs_checkpoint(path,layout,state,manifest,history_length,context,problem)
     isempty(path) && return nothing
     if isroot(context)
         mkpath(dirname(abspath(path)))
         checkpoint!(path,(kind=:phase6_lbfgs,layout_signature=_layout_signature(layout),
-            history_length=history_length,state=state);manifest=manifest)
+            control_mapping=_checkpoint_mapping(problem),history_length=history_length,state=state);manifest=manifest)
     end
     barrier(context); path
 end
 
-function _restore_lbfgs_checkpoint(path,layout,manifest,history_length,context)
+function _restore_lbfgs_checkpoint(path,layout,manifest,history_length,context,problem)
     isempty(path) && throw(ArgumentError("restart requires checkpoint_path"))
-    payload=if isroot(context)
+    payload=_checkpoint_read_collectively(context) do
         restored=restore_checkpoint(path;expected=manifest); state_payload=restored.state
+        _check_checkpoint_mapping(state_payload,problem)
         state_payload.kind===:phase6_lbfgs || throw(ArgumentError("checkpoint is not a Phase 6 L-BFGS state"))
         state_payload.layout_signature==_layout_signature(layout) || throw(ArgumentError(
             "checkpoint control-map layout differs from requested layout"))
         state_payload.history_length==history_length || throw(ArgumentError(
             "checkpoint L-BFGS history length differs from requested solver"))
         state_payload.state
-    else
-        nothing
     end
-    mpi_broadcast(payload,context)
+    payload
 end
 
 function _projected_gradient(x,g,lower,upper)
@@ -156,7 +155,7 @@ function lbfgs_invert!(problem::DistributedInversionProblem,layout::ControlMapLa
     _validate(options); lower,upper=_scaled_bounds(layout)
     state,current=if restart
         restored=_restore_lbfgs_checkpoint(options.checkpoint_path,layout,manifest,
-            options.history_length,context)
+            options.history_length,context,problem)
         restored.schema_version==v"1.0.0" || throw(ArgumentError(
             "unsupported L-BFGS checkpoint schema $(restored.schema_version)"))
         evaluation=evaluate_objective!(problem,layout,restored.parameters,context)
@@ -237,7 +236,7 @@ function lbfgs_invert!(problem::DistributedInversionProblem,layout::ControlMapLa
                 :maximum_forward_evaluations : :line_search_failed
             push!(state.history,LBFGSIterationRecord(iteration,state.forward_evaluations,state.objective,
                 state.data_term,state.regularization_term,T(gradient_norm),zero(T),trials,rejected,false))
-            _save_lbfgs_checkpoint(options.checkpoint_path,layout,state,manifest,options.history_length,context)
+            _save_lbfgs_checkpoint(options.checkpoint_path,layout,state,manifest,options.history_length,context,problem)
             break
         end
 
@@ -270,7 +269,7 @@ function lbfgs_invert!(problem::DistributedInversionProblem,layout::ControlMapLa
             state.converged=true; state.termination=:objective_tolerance
         end
         if iteration%options.checkpoint_every==0 || state.converged
-            _save_lbfgs_checkpoint(options.checkpoint_path,layout,state,manifest,options.history_length,context)
+            _save_lbfgs_checkpoint(options.checkpoint_path,layout,state,manifest,options.history_length,context,problem)
         end
         state.converged && break
     end
@@ -278,7 +277,7 @@ function lbfgs_invert!(problem::DistributedInversionProblem,layout::ControlMapLa
         state.termination=:maximum_iterations
     end
     isempty(options.checkpoint_path) ||
-        _save_lbfgs_checkpoint(options.checkpoint_path,layout,state,manifest,options.history_length,context)
+        _save_lbfgs_checkpoint(options.checkpoint_path,layout,state,manifest,options.history_length,context,problem)
     LBFGSInversionResult(state,current)
 end
 

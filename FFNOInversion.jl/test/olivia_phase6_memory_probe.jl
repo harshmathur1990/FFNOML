@@ -46,8 +46,17 @@ try
     distributed=DistributedAtmosphere(atmosphere,global_grid,tile)
     wavelength=collect(range(630.0e-9,630.3e-9,length=nlambda))
     workspace=HybridForwardWorkspace(Float64,distributed,wavelength,StokesSet(:I),levels)
+    # Account for the immutable rank-owned fields used by the example's
+    # temperature/velocity correction maps, in addition to forward workspaces.
+    control_reference=Dict(:temperature=>copy(atmosphere.temperature),:vz=>copy(atmosphere.vz))
+    reference_bytes=sum(sizeof,values(control_reference))
+    maximum_reference=allreduce_max(reference_bytes,context)
     report=distributed_memory_report(distributed,workspace,context)
+    if isroot(context)
+        report["maximum_owned_bytes"]+=maximum_reference
+    end
     GC.gc(); rss_bytes=Sys.maxrss()
+    length(control_reference)==2 || error("missing correction reference fields")
     maximum_rss=allreduce_max(rss_bytes,context)
     limit_bytes=round(Int,limit_gib*1024^3)
     if isroot(context)
@@ -57,6 +66,7 @@ try
         maximum_rss<=limit_bytes || error("rank peak RSS $maximum_rss exceeds limit $limit_bytes")
         open(joinpath(diagnostics_root,"phase6-memory-summary.toml"),"w") do io
             println(io,"global_nx = $nx\nglobal_ny = $ny\nnz = $nz\nnlambda = $nlambda\nlevels = $levels")
+            println(io,"control_reference_bytes = $maximum_reference")
             println(io,"rank_count = $(context.size)\nmaximum_owned_bytes = $maximum_owned")
             println(io,"maximum_rss_bytes = $maximum_rss\nlimit_bytes = $limit_bytes")
         end

@@ -2,6 +2,9 @@
 
 Spatially coupled Julia inversion layer implementing Phases 0-6 of the project planning PDF.
 
+For your first atmosphere-to-spectrum run, use the
+[short starter guide](../examples/inversion_run/START_HERE.md).
+
 ## Run contract
 
 One inversion run has exactly two scientific inputs and two scientific outputs:
@@ -96,3 +99,42 @@ directory. Checked-in layouts and Olivia commands are provided under
 checkout remains the Julia/Python code location; scientific inputs, checkpoints,
 diagnostics, temporary files, Slurm logs, and outputs live under the run root.
 Use `scripts/submit_olivia_inversion.sh` from a prepared inversion run directory.
+
+## Forward synthesis and correction-based inversion
+
+Set top-level `mode = "forward"` or `[solver] max_iterations = 0` to synthesize
+from the supplied atmosphere. Both select the same forward-only branch, without
+an observation file, control layout, objective, regularization, or gradients.
+Node and optimizer settings are ignored in this mode. Wavelengths, instrumental
+profiles, EOS/force balance, and the persistent multi-GPU FSDP backend remain the
+same as inversion. See `examples/inversion_run/forward.toml`.
+
+Temperature, velocities, optional magnetic fields, and optional configured
+`[atmosphere.datasets] vturb = "vturb"` are preserved on the input grid.
+Microturbulence defaults to zero only when no dataset is configured. Pressure,
+density, electron density and height are reconstructed by force balance/EOS.
+The two output files contain spectra and the resulting atmosphere/populations.
+Forward products omit objective and solver-termination fields; both products
+record execution mode and TOML provenance.
+
+For inversion (`mode = "inversion"`, the default, with positive iterations),
+observations and controls are required. The full atmospheric mapping is
+`A = A_start + interpolate(p - p_initial)`. The optimizer still packs physical
+node coordinates `p` for unit scaling and node bounds; their differences are the
+corrections. Initially the difference is zero, so the first objective/gradient
+uses the unsmoothed input atmosphere. Baseline fields are immutable rank-owned
+copies, never replicated global atmospheric arrays. Every trial is reconstructed
+from that baseline, rather than accumulating trial updates.
+
+Full-grid physical bounds are checked before expensive synthesis. Infeasible
+trials are rejected (no clipping), and bounded finite-difference components use
+feasible one-sided steps where needed. The starting atmosphere must already
+satisfy the specified physical bounds. Checkpoints bind to the baseline checksum,
+node initialization and correction representation; old checkpoints must start a
+fresh run. `refine_control_maps(problem, layout, parameters, context; ...)`
+creates a new stage based on the accepted full atmosphere, preserving its fine
+structure. Use the returned problem/layout with fresh optimizer history.
+
+The lower-level `apply_control_maps!(distributed, ...)` remains an absolute-field
+interpolation utility for constructing fixtures. Application inversion uses
+`apply_control_maps!(problem, ...)` and the correction mapping exclusively.

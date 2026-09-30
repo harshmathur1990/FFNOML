@@ -84,10 +84,14 @@ function read_inversion_inputs(config::RunConfig{T}) where T
         end
         x=T.(0:nx-1).*config.synthesis.dx_m; y=T.(0:ny-1).*config.synthesis.dy_m
         grid=Grid3D(T.(logtau),x,y)
-        atmosphere=Atmosphere3D(grid,T.(temperature),T.(vx),T.(vy),T.(vz),zeros(T,nz,nx,ny);
+        vturb=config.atmosphere.vturb_dataset===nothing ? zeros(T,nz,nx,ny) :
+            T.(_zyx_to_zxy(_time_slice(_read_dataset(file,config.atmosphere.vturb_dataset),
+                config.time_index,3,"vturb")))
+        atmosphere=Atmosphere3D(grid,T.(temperature),T.(vx),T.(vy),T.(vz),vturb;
             magnetic_field=magnetic)
         (atmosphere=atmosphere,pressure=pressure)
     end
+    config.mode===:forward && return InversionInputBundle(atmosphere_data.atmosphere,nothing,atmosphere_data.pressure)
     observation=h5open(config.observed.file,"r") do file
         intensity=T.(_slyx_to_lsxy(_time_slice(_read_dataset(file,config.observed.intensity_dataset),
             config.time_index,4,"observed intensity")))
@@ -128,9 +132,13 @@ function write_inversion_outputs(config::RunConfig,result::InversionRunResult)
     h5open(config.outputs.synthesis_file,"w") do file
         file["intensity"]=_with_time_slyx(result.synthesis.data)
         file["wavelength_m"]=result.synthesis.wavelength_m
-        file["objective_total"]=result.objective.components.total
-        file["objective_data"]=result.objective.components.data
-        file["objective_regularization"]=result.objective.components.regularization
+        if result.objective!==nothing
+            file["objective_total"]=result.objective.components.total
+            file["objective_data"]=result.objective.components.data
+            file["objective_regularization"]=result.objective.components.regularization
+        end
+        attributes(file)["execution_mode"]=string(config.mode)
+        attributes(file)["provenance_toml"]=sprint(io->TOML.print(io,result.provenance;sorted=true))
         attributes(file)["axis_order"]="time,stokes,wavelength,y,x"
     end
     atmosphere=result.atmosphere
@@ -153,8 +161,12 @@ function write_inversion_outputs(config::RunConfig,result::InversionRunResult)
             file["populations"]=permutedims(result.populations,(4,1,3,2))
         end
         attributes(file)["axis_order"]="time,z,y,x; populations=level,z,y,x"
-        attributes(file)["solver_termination"]=hasproperty(result.solver.state,:termination) ?
-            string(result.solver.state.termination) : (result.solver.state.converged ? "converged" : "maximum_iterations")
+        attributes(file)["execution_mode"]=string(config.mode)
+        attributes(file)["provenance_toml"]=sprint(io->TOML.print(io,result.provenance;sorted=true))
+        if result.solver!==nothing
+            attributes(file)["solver_termination"]=hasproperty(result.solver.state,:termination) ?
+                string(result.solver.state.termination) : (result.solver.state.converged ? "converged" : "maximum_iterations")
+        end
     end
     (synthesis=config.outputs.synthesis_file,atmosphere=config.outputs.atmosphere_file)
 end
@@ -207,10 +219,12 @@ end
 function run_inversion!(config::RunConfig,root_inputs,
         factory::InversionModelFactory,context::ParallelContext;
         gradient_backend::AbstractObjectiveGradient=HybridAdjointObjectiveGradient(),restart=false)
+    config.mode===:forward && restart && throw(ArgumentError("forward mode does not accept optimizer restart"))
     metadata=mpi_broadcast(if isroot(context)
         root_inputs isa InversionInputBundle || throw(ArgumentError("rank 0 must provide InversionInputBundle"))
         (atmosphere_shape=size(root_inputs.atmosphere.temperature),
-            observation_shape=size(root_inputs.observation.spectrum.data))
+            observation_shape=config.mode===:forward ? nothing : size(root_inputs.observation.spectrum.data),
+            reference_id=_atmosphere_reference_id(root_inputs.atmosphere))
     else nothing end,context)
     distributed=distribute_atmosphere(Float64,isroot(context) ? root_inputs.atmosphere : nothing,context)
     pressure_field=distribute_field(Float64,isroot(context) ? root_inputs.pressure_top : nothing,
@@ -219,13 +233,20 @@ function run_inversion!(config::RunConfig,root_inputs,
     workspace=HybridForwardWorkspace(Float64,distributed,config.synthesis.wavelength_m,config.stokes,levels)
     model=factory.build_model(config,distributed,workspace,pressure_field,context)
     model isa HybridForwardModel || throw(ArgumentError("model factory must return HybridForwardModel"))
-    _require_production_population_backend(model.populations,context)
     try
+        _require_production_population_backend(model.populations,context)
+        if config.mode===:forward
+            forward!(workspace,model,distributed,context)
+            return InversionRunResult(nothing,gather_spectrum(workspace.output,distributed,context),
+                gather_atmosphere(distributed,context),_gather_populations(workspace.populations,distributed,context),
+                nothing,parallel_provenance(context,distributed.tile;capabilities=["intensity","non_prd","forward","fsdp_distributed_h_slab"]))
+        end
         local_observation=distribute_observation(Float64,isroot(context) ? root_inputs.observation : nothing,
             metadata.observation_shape,config.synthesis.wavelength_m,config.stokes,context)
         layout=mpi_broadcast(isroot(context) ? build_control_layout(root_inputs.atmosphere,config.controls) : nothing,context)
         problem=DistributedInversionProblem(model,workspace,distributed,local_observation,
-            config.regularization,config.synthesis.dx_m,config.synthesis.dy_m,context)
+            config.regularization,config.synthesis.dx_m,config.synthesis.dy_m,context;
+            control_layout=layout,reference_id=metadata.reference_id)
         solver=if config.solver isa LBFGSSolverOptions
             lbfgs_invert!(problem,layout,gradient_backend,context;options=config.solver,restart=restart)
         else
@@ -251,9 +272,32 @@ function run_inversion_files!(config_path::AbstractString,factory::InversionMode
     try
         inputs=isroot(context) ? read_inversion_inputs(config) : nothing
         result=run_inversion!(config,inputs,factory,context;gradient_backend=gradient_backend,restart=restart)
-        isroot(context) && write_inversion_outputs(config,result)
+        if isroot(context)
+            result.provenance["configuration_hash"]=bytes2hex(open(SHA.sha256,config_path))
+            result.provenance["reference_atmosphere_sha256"]=_atmosphere_reference_id(inputs.atmosphere)
+            result.provenance["execution_mode"]=string(config.mode)
+            result.provenance["control_mapping"]=config.mode===:forward ? "none" : "starting_atmosphere_plus_node_corrections"
+            write_inversion_outputs(config,result)
+        end
         result
     finally
         finalize_parallel!(context)
     end
+end
+
+# Hash the full independent input fields in canonical order without another
+# full-domain copy. The ID is independent of the MPI decomposition.
+function _atmosphere_reference_id(atmosphere)
+    hash=SHA.SHA2_256_CTX()
+    for value in (atmosphere.grid.log_tau500,atmosphere.grid.x,atmosphere.grid.y,
+            atmosphere.temperature,atmosphere.vx,atmosphere.vy,atmosphere.vz,atmosphere.vturb)
+        SHA.update!(hash,codeunits(string(size(value))))
+        SHA.update!(hash,reinterpret(UInt8,vec(value)))
+    end
+    if atmosphere.magnetic_field!==nothing
+        for name in (:Bx,:By,:Bz)
+            SHA.update!(hash,reinterpret(UInt8,vec(getfield(atmosphere.magnetic_field,name))))
+        end
+    end
+    bytes2hex(SHA.digest!(hash))
 end
