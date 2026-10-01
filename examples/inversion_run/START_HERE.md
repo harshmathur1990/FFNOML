@@ -130,9 +130,13 @@ export FFNO_INVERSION_CONFIG="$run/forward.toml"
 bash "$OLIVIA_REPO_DIR/scripts/submit_olivia_inversion.sh"
 ```
 
-The default allocation is **2 nodes × 4 GPUs**, with one threaded Julia MPI rank
-per node. Submission prints the job ID. Run on Slurm, not directly on the login
-node. Another account can pass `--account=YOUR_ACCOUNT` to both submissions.
+The submission helper first reports the selected mode, files, spectral lines,
+outputs, and SLURM resources. It validates the configuration, required HDF5
+datasets and shapes, model-factory assets, and MPI topology; it calls `sbatch`
+only after printing `Sanity check OK`. The default allocation is **8 nodes × 4
+GPUs**, with two threaded Julia MPI ranks per node. Submission then prints the
+job ID. Run on Slurm, not directly on the login node. Another account can pass
+`--account=YOUR_ACCOUNT` to both submissions.
 
 ## 5. Check the result; later switch to inversion
 

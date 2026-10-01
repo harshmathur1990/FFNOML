@@ -2,6 +2,7 @@ using Test
 using FFNOInversion
 
 include("olivia_environment_setup.jl")
+include("submission_preflight.jl")
 include("unit_types.jl")
 include("unit_nodes.jl")
 include("parallel_runtime.jl")

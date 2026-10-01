@@ -40,6 +40,12 @@ cd "$run"
 bash "$repo/FFNOInversion.jl/scripts/submit_olivia_inversion.sh"
 ```
 
+Before calling `sbatch`, the submission helper prints the selected mode,
+configuration and factory, HDF5 inputs, requested spectral regions and line
+sources, outputs, and default SLURM topology. It checks the required datasets,
+compatible input shapes, line lists, PSFs, factory assets, and rank layout.
+Submission proceeds only after it prints `Sanity check OK`.
+
 The Olivia batch script derives the Julia thread count and the runtime
 `threads_per_rank` value from SLURM's `cpus-per-task`. Do not hard-code
 `threads_per_rank` in a copied run configuration; it is only needed for

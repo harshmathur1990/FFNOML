@@ -4,7 +4,7 @@
 #SBATCH --account=nn2834k
 #SBATCH --nodes=8
 #SBATCH --ntasks=16
-#SBATCH --ntasks-per-node=16
+#SBATCH --ntasks-per-node=2
 #SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=16
 #SBATCH --mem-per-gpu=40G

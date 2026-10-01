@@ -4,6 +4,12 @@ include(joinpath(@__DIR__, "..", "scripts", "prepare_olivia_environment.jl"))
 
 @testset "Olivia thread topology has one source of truth" begin
     batch = read(joinpath(@__DIR__, "..", "scripts", "run_olivia_inversion.sbatch"),String)
+    topology = Dict{String,Int}()
+    for line in eachline(IOBuffer(batch))
+        matched = match(r"^#SBATCH --(nodes|ntasks|ntasks-per-node)=(\d+)$",line)
+        isnothing(matched) || (topology[matched.captures[1]] = parse(Int,matched.captures[2]))
+    end
+    @test topology["nodes"] * topology["ntasks-per-node"] == topology["ntasks"]
     @test occursin("FFNO_THREADS_PER_RANK=\"\${SLURM_CPUS_PER_TASK}\"",batch)
     @test occursin("--threads=\"\${SLURM_CPUS_PER_TASK}\"",batch)
 end
