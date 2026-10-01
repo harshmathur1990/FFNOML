@@ -2,7 +2,7 @@
 #SBATCH --job-name=ffno-invert
 #SBATCH --partition=accel
 #SBATCH --account=nn2834k
-#SBATCH --nodes=1
+#SBATCH --nodes=8
 #SBATCH --ntasks=16
 #SBATCH --ntasks-per-node=16
 #SBATCH --gpus-per-node=4
