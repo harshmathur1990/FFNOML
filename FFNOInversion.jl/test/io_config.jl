@@ -35,6 +35,15 @@
     @test cfg.parallel.gpu_connect_timeout_seconds == 30.0
     @test cfg.parallel.gpu_status_timeout_seconds == 0.0
     @test cfg.parallel.gpu_diagnostic_interval_seconds == 30.0
+    withenv("FFNO_THREADS_PER_RANK"=>"7") do
+        @test load_config(path).parallel.threads_per_rank == 7
+    end
+    withenv("FFNO_THREADS_PER_RANK"=>"not-an-integer") do
+        @test_throws ArgumentError load_config(path)
+    end
+    withenv("FFNO_THREADS_PER_RANK"=>"0") do
+        @test_throws ArgumentError load_config(path)
+    end
     @test getfield.(cfg.controls,:variable) == [:temperature,:vz]
     @test cfg.controls[1].control_nx == 8
     @test cfg.controls[2].lower == -30000.0

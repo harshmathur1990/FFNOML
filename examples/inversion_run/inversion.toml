@@ -129,7 +129,6 @@ checkpoint_path = "outputs/inversion.checkpoint"
 [parallel]
 enabled = true
 decomposition = "cartesian_2d"
-threads_per_rank = 8
 gpu_launcher_rank = 0
 gpu_connect_timeout_seconds = 180.0
 gpu_status_timeout_seconds = 300.0

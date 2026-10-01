@@ -40,6 +40,11 @@ cd "$run"
 bash "$repo/FFNOInversion.jl/scripts/submit_olivia_inversion.sh"
 ```
 
+The Olivia batch script derives the Julia thread count and the runtime
+`threads_per_rank` value from SLURM's `cpus-per-task`. Do not hard-code
+`threads_per_rank` in a copied run configuration; it is only needed for
+non-SLURM launches where it defaults to Julia's active thread count.
+
 `model_factory.jl` uses these relative paths through `FFNOML_RUN_DIR`. Set
 `FFNO_TOP_DENSITY_KG_M3` to the appropriate boundary density before submission;
 the default in the template is only a starting value and must be checked for the

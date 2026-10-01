@@ -92,7 +92,7 @@ echo "Factory: ${factory_file}"
 srun --kill-on-bad-exit=1 --mpi=pmix --gres=none \
   --nodes="${SLURM_NNODES}" --ntasks="${SLURM_NTASKS}" \
   --cpu-bind=cores --cpus-per-task="${SLURM_CPUS_PER_TASK}" \
-  env CUDA_VISIBLE_DEVICES=-1 \
+  env CUDA_VISIBLE_DEVICES=-1 FFNO_THREADS_PER_RANK="${SLURM_CPUS_PER_TASK}" \
   "${OLIVIA_JULIA}" --project="${JULIA_PROJECT}" --startup-file=no \
     --threads="${SLURM_CPUS_PER_TASK}" \
     "${OLIVIA_REPO_DIR}/scripts/invert.jl" "${config_file}" "${factory_file}"

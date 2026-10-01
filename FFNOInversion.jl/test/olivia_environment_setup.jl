@@ -2,6 +2,12 @@ using Test
 using TOML
 include(joinpath(@__DIR__, "..", "scripts", "prepare_olivia_environment.jl"))
 
+@testset "Olivia thread topology has one source of truth" begin
+    batch = read(joinpath(@__DIR__, "..", "scripts", "run_olivia_inversion.sbatch"),String)
+    @test occursin("FFNO_THREADS_PER_RANK=\"\${SLURM_CPUS_PER_TASK}\"",batch)
+    @test occursin("--threads=\"\${SLURM_CPUS_PER_TASK}\"",batch)
+end
+
 @testset "Disposable Olivia environment" begin
     mktempdir() do root
         package = joinpath(root, "permanent-package")

@@ -285,7 +285,17 @@ function load_config(path::AbstractString)
     parallel_raw = get(cfg,"parallel",Dict{String,Any}())
     decomposition = Symbol(lowercase(String(get(parallel_raw,"decomposition","cartesian_2d"))))
     decomposition == :cartesian_2d || throw(ArgumentError("parallel.decomposition must be cartesian_2d"))
-    threads_per_rank = Int(get(parallel_raw,"threads_per_rank",Threads.nthreads()))
+    configured_threads = Int(get(parallel_raw,"threads_per_rank",Threads.nthreads()))
+    runtime_threads = get(ENV,"FFNO_THREADS_PER_RANK","")
+    threads_per_rank = if isempty(runtime_threads)
+        configured_threads
+    else
+        try
+            parse(Int,runtime_threads)
+        catch
+            throw(ArgumentError("FFNO_THREADS_PER_RANK must be a positive integer, got $(repr(runtime_threads))"))
+        end
+    end
     threads_per_rank > 0 || throw(ArgumentError("parallel.threads_per_rank must be positive"))
     gpu_launcher_rank = Int(get(parallel_raw,"gpu_launcher_rank",0))
     gpu_launcher_rank >= 0 || throw(ArgumentError("parallel.gpu_launcher_rank must be non-negative"))
