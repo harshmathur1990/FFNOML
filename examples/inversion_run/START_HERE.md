@@ -74,8 +74,10 @@ that its accelerator Julia process can load it.
 ## 3. Check the atmosphere and edit `forward.toml`
 
 The reader expects these dataset names by default; change `[atmosphere.datasets]`
-if your HDF5 uses different names. Array order here is the order read by Julia's
-HDF5 interface; check this when creating files using another language.
+if your HDF5 uses different names. Set `storage_order = "python"` in
+`[atmosphere]` for NumPy/h5py or C-written datasets; this reverses their
+row-major dimensions before time/depth validation. Omit it, or use `"julia"`,
+for files written with HDF5.jl.
 
 | Dataset | Shape | Units |
 | --- | --- | --- |
@@ -93,6 +95,7 @@ through force balance/EOS, rather than read as full input fields.
 Before submission, set:
 
 - `pressure_top_pa` in `[atmosphere]`, to an appropriate **top pressure for your atmosphere**; 0.1 Pa is an example. The current factory also accepts `FFNO_TOP_DENSITY_KG_M3` (default 1e-10 kg/m³) as an initialization guess, used at the top only on the first force-balance iteration; subsequent density comes from the EOS.
+- `storage_order = "python"` when the atmosphere file was written by NumPy/h5py or C; the supplied template uses this setting.
 - `[grid] dx_m` and `dy_m` to the actual horizontal spacing in metres.
 - `[[regions]]` wavelengths (Å), counts, normalization and line lists. The example synthesizes Ca II 8542 through FFNO and an LTE Fe 6302 region; only the latter needs a Kurucz line list.
 - `[observation.gaussian_psf]`: the example applies a **96 km spatial blur**. Set both spatial FWHM values to `0.0` for unblurred spectra. This section controls synthetic output even without observations.

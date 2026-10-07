@@ -15,6 +15,12 @@ function _dataset_shape(file,name::AbstractString,label::AbstractString)
     Tuple(size(file[name]))
 end
 
+function _atmosphere_shape(shape::Tuple,storage_order::Symbol)
+    storage_order===:julia && return shape
+    storage_order===:python && return Tuple(reverse(shape))
+    throw(ArgumentError("unsupported atmosphere storage order: $storage_order"))
+end
+
 function _selected_shape(shape::Tuple,time_index::Int,plain_ndims::Int,label::AbstractString)
     if length(shape)==plain_ndims
         return shape
@@ -29,7 +35,9 @@ end
 function _validate_hdf5_inputs(config,run_dir)
     atmosphere_path=_required_file("initial atmosphere",_run_path(run_dir,config.atmosphere.file))
     atmosphere_shape=h5open(atmosphere_path,"r") do file
-        logtau_shape=_selected_shape(_dataset_shape(file,config.atmosphere.logtau500_dataset,"logtau500"),
+        storage_order=config.atmosphere.storage_order
+        logtau_shape=_selected_shape(_atmosphere_shape(
+            _dataset_shape(file,config.atmosphere.logtau500_dataset,"logtau500"),storage_order),
             config.time_index,1,"logtau500")
         fields=(
             temperature=config.atmosphere.temperature_dataset,
@@ -37,27 +45,31 @@ function _validate_hdf5_inputs(config,run_dir)
             vy=config.atmosphere.vy_dataset,
             vz=config.atmosphere.vz_dataset,
         )
-        selected=Dict(name=>_selected_shape(_dataset_shape(file,dataset,string(name)),
+        selected=Dict(name=>_selected_shape(_atmosphere_shape(
+            _dataset_shape(file,dataset,string(name)),storage_order),
             config.time_index,3,string(name)) for (name,dataset) in pairs(fields))
         all(==(selected[:temperature]),values(selected)) || throw(DimensionMismatch(
             "atmosphere temperature/vx/vy/vz shapes differ: $selected"))
         logtau_shape[1]==selected[:temperature][1] || throw(DimensionMismatch(
             "logtau500 depth $(logtau_shape[1]) differs from atmosphere depth $(selected[:temperature][1])"))
         if config.atmosphere.vturb_dataset!==nothing
-            vturb_shape=_selected_shape(_dataset_shape(file,config.atmosphere.vturb_dataset,"vturb"),
+            vturb_shape=_selected_shape(_atmosphere_shape(
+                _dataset_shape(file,config.atmosphere.vturb_dataset,"vturb"),storage_order),
                 config.time_index,3,"vturb")
             vturb_shape==selected[:temperature] || throw(DimensionMismatch("vturb shape differs from temperature"))
         end
         if config.atmosphere.magnetic_datasets!==nothing
             for name in config.atmosphere.magnetic_datasets
-                magnetic_shape=_selected_shape(_dataset_shape(file,name,"magnetic field"),
+                magnetic_shape=_selected_shape(_atmosphere_shape(
+                    _dataset_shape(file,name,"magnetic field"),storage_order),
                     config.time_index,3,"magnetic field")
                 magnetic_shape==selected[:temperature] || throw(DimensionMismatch(
                     "magnetic field '$name' shape differs from temperature"))
             end
         end
         if config.atmosphere.pressure_top isa String
-            pressure_shape=_dataset_shape(file,config.atmosphere.pressure_top,"pressure_top")
+            pressure_shape=_atmosphere_shape(
+                _dataset_shape(file,config.atmosphere.pressure_top,"pressure_top"),storage_order)
             if !isempty(pressure_shape)
                 selected_pressure=_selected_shape(pressure_shape,config.time_index,2,"pressure_top")
                 selected_pressure==selected[:temperature][2:3] || throw(DimensionMismatch(
@@ -212,6 +224,7 @@ function run_submission_preflight(config_path::AbstractString,factory_path::Abst
         end
     end
     println(io,"  Mode:           ",uppercase(string(config.mode)))
+    println(io,"  Atmosphere storage order: ",uppercase(string(config.atmosphere.storage_order)))
     println(io,"  Atmosphere:     ",atmosphere_path," shape=",atmosphere_shape," (z,y,x)")
     println(io,"  Observations:   ",isnothing(observation_path) ? "not required for forward mode" : observation_path)
     println(io,"  Spectral regions:")

@@ -17,6 +17,7 @@ include(joinpath(@__DIR__,"..","scripts","preflight_olivia_inversion.jl"))
         atmosphere_file = "outputs/atmosphere.h5"
         [atmosphere]
         pressure_top_pa = 0.1
+        storage_order = "python"
         [atmosphere.datasets]
         logtau500 = "logtau_500"
         temperature = "temperature"
@@ -59,16 +60,20 @@ include(joinpath(@__DIR__,"..","scripts","preflight_olivia_inversion.jl"))
             config_path,factory_path,run_dir,batch_path;io=devnull)
 
         values=reshape(collect(1.0:24.0),2,3,4)
+        python_stored_values=permutedims(values,(3,2,1))
         h5open(atmosphere_path,"w") do file
             file["logtau_500"]=[-1.0,0.0]
             for name in ("temperature","vx","vy","vz")
-                file[name]=values
+                file[name]=python_stored_values
             end
         end
         output=IOBuffer()
         config=run_submission_preflight(config_path,factory_path,run_dir,batch_path;io=output)
         report=String(take!(output))
         @test config.mode===:forward
+        @test config.atmosphere.storage_order===:python
+        @test occursin("Atmosphere storage order: PYTHON",report)
+        @test occursin("shape=(2, 3, 4) (z,y,x)",report)
         @test occursin("Mode:           FORWARD",report)
         @test occursin("FFNO CA/ca_ii_8542",report)
         @test occursin("Kurucz LTE",report)

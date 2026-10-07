@@ -9,6 +9,7 @@ atmosphere_file = "outputs/inverted_atmosphere.h5"
 
 [atmosphere]
 pressure_top_pa = 0.1
+storage_order = "python"
 
 [atmosphere.datasets]
 logtau500 = "logtau_500"

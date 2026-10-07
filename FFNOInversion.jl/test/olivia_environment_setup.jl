@@ -25,6 +25,7 @@ end
     accelerator_environment=read(joinpath(scripts,"..","..","examples","inversion_run","olivia_runtime_environment.sh"),String)
     @test occursin("module load \"\${FFNO_PREFLIGHT_STACK_MODULE:-NRIS/Login}\"",preflight)
     @test occursin("julia-depot-ffno-login-1.12.2",preflight)
+    @test occursin("must be one absolute directory",preflight)
     @test occursin("Pkg.instantiate(; allow_autoprecomp=false)",preflight)
     @test first(findfirst("Pkg.instantiate",preflight)) <
         first(findfirst("exec \"\${julia_executable}\"",preflight))

@@ -1,3 +1,5 @@
+using TOML
+
 @testset "configuration and checkpoints" begin
     path = joinpath(@__DIR__,"..","configs","example_intensity_nonprd.toml")
     cfg = load_config(path)
@@ -7,6 +9,7 @@
     @test occursin("full_grid_psf=true",summary)
     @test occursin("zero_weight_exclusion=true",summary)
     @test cfg.atmosphere.logtau500_dataset == "logtau_500"
+    @test cfg.atmosphere.storage_order == :julia
     @test cfg.atmosphere.temperature_dataset == "temperature"
     @test cfg.atmosphere.pressure_top == 0.1
     @test cfg.observed.file == "inputs/observations.h5"
@@ -52,8 +55,18 @@
     @test cfg.solver.history_length == 10
     @test cfg.solver.checkpoint_path == "outputs/inversion.checkpoint"
     @test occursin("solver=bounded_lbfgs",summary)
+    @test occursin("atmosphere_storage_order=julia",summary)
     @test FFNOInversion._solver(Dict{String,Any}("method"=>"prototype_pattern_search")) isa PrototypeSolverOptions
     @test occursin("controls=temperature,vz",summary)
+    mktempdir() do directory
+        document=TOML.parsefile(path)
+        document["atmosphere"]["storage_order"]="invalid"
+        invalid_path=joinpath(directory,"invalid-storage-order.toml")
+        open(invalid_path,"w") do io
+            TOML.print(io,document)
+        end
+        @test_throws ArgumentError load_config(invalid_path)
+    end
     control_atmosphere=test_atmosphere()
     control_layout=build_control_layout(control_atmosphere,[ControlMapConfig(:temperature,[-5.0,-1.0],2,2,3000.0,8000.0,1000.0)])
     @test parameter_nodefield(control_layout,initial_parameters(control_layout),:temperature).values==fill(5000.0,2,2,2)

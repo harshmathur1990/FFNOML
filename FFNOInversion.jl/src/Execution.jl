@@ -44,31 +44,44 @@ function _time_slice(value,time_index,without_time_ndims,name)
     throw(DimensionMismatch("$name needs $without_time_ndims dimensions, optionally preceded by time"))
 end
 
+function _from_atmosphere_storage(value,storage_order::Symbol)
+    storage_order===:julia && return value
+    storage_order===:python || throw(ArgumentError("unsupported atmosphere storage order: $storage_order"))
+    ndims(value)<=1 ? value : permutedims(value,reverse(1:ndims(value)))
+end
+
 _zyx_to_zxy(value)=permutedims(value,(1,3,2))
 _syx_to_xys(value)=permutedims(value,(2,1))
 _slyx_to_lsxy(value)=permutedims(value,(2,1,4,3))
 
 """Read the configured observation and initial-atmosphere HDF5 files.
 
-File axes follow the user contract: atmosphere `(time,z,y,x)` and observation
-`(time,Stokes,wavelength,y,x)`. Internal axes are `(z,x,y)` and
-`(wavelength,Stokes,x,y)`.
+Logical file axes follow the user contract: atmosphere `(time,z,y,x)` and
+observation `(time,Stokes,wavelength,y,x)`. With `storage_order=:python`, the
+HDF5.jl-visible atmosphere dimensions are reversed before this contract is
+applied. Internal axes are `(z,x,y)` and `(wavelength,Stokes,x,y)`.
 """
 function read_inversion_inputs(config::RunConfig{T}) where T
     atmosphere_data=h5open(config.atmosphere.file,"r") do file
-        logtau_raw=_read_dataset(file,config.atmosphere.logtau500_dataset)
+        storage_order=config.atmosphere.storage_order
+        logtau_raw=_from_atmosphere_storage(
+            _read_dataset(file,config.atmosphere.logtau500_dataset),storage_order)
         logtau=ndims(logtau_raw)==1 ? vec(logtau_raw) : vec(_time_slice(logtau_raw,config.time_index,1,"logtau500"))
-        temperature=_zyx_to_zxy(_time_slice(_read_dataset(file,config.atmosphere.temperature_dataset),
+        temperature=_zyx_to_zxy(_time_slice(_from_atmosphere_storage(
+            _read_dataset(file,config.atmosphere.temperature_dataset),storage_order),
             config.time_index,3,"temperature"))
-        vx=_zyx_to_zxy(_time_slice(_read_dataset(file,config.atmosphere.vx_dataset),config.time_index,3,"vx"))
-        vy=_zyx_to_zxy(_time_slice(_read_dataset(file,config.atmosphere.vy_dataset),config.time_index,3,"vy"))
-        vz=_zyx_to_zxy(_time_slice(_read_dataset(file,config.atmosphere.vz_dataset),config.time_index,3,"vz"))
+        vx=_zyx_to_zxy(_time_slice(_from_atmosphere_storage(
+            _read_dataset(file,config.atmosphere.vx_dataset),storage_order),config.time_index,3,"vx"))
+        vy=_zyx_to_zxy(_time_slice(_from_atmosphere_storage(
+            _read_dataset(file,config.atmosphere.vy_dataset),storage_order),config.time_index,3,"vy"))
+        vz=_zyx_to_zxy(_time_slice(_from_atmosphere_storage(
+            _read_dataset(file,config.atmosphere.vz_dataset),storage_order),config.time_index,3,"vz"))
         size(temperature)==size(vx)==size(vy)==size(vz) || throw(DimensionMismatch(
             "initial-atmosphere parameter arrays differ"))
         nz,nx,ny=size(temperature); length(logtau)==nz || throw(DimensionMismatch(
             "logtau500 length differs from atmospheric depth"))
         pressure=if config.atmosphere.pressure_top isa String
-            raw=_read_dataset(file,config.atmosphere.pressure_top)
+            raw=_from_atmosphere_storage(_read_dataset(file,config.atmosphere.pressure_top),storage_order)
             selected=ndims(raw)==0 ? fill(T(raw[]),ny,nx) : _time_slice(raw,config.time_index,2,"pressure_top")
             T.(_syx_to_xys(selected))
         else
@@ -78,14 +91,16 @@ function read_inversion_inputs(config::RunConfig{T}) where T
             nothing
         else
             names=config.atmosphere.magnetic_datasets
-            arrays=map(name->T.(_zyx_to_zxy(_time_slice(_read_dataset(file,name),
+            arrays=map(name->T.(_zyx_to_zxy(_time_slice(_from_atmosphere_storage(
+                _read_dataset(file,name),storage_order),
                 config.time_index,3,"magnetic field"))),names)
             MagneticField3D(arrays...)
         end
         x=T.(0:nx-1).*config.synthesis.dx_m; y=T.(0:ny-1).*config.synthesis.dy_m
         grid=Grid3D(T.(logtau),x,y)
         vturb=config.atmosphere.vturb_dataset===nothing ? zeros(T,nz,nx,ny) :
-            T.(_zyx_to_zxy(_time_slice(_read_dataset(file,config.atmosphere.vturb_dataset),
+            T.(_zyx_to_zxy(_time_slice(_from_atmosphere_storage(
+                _read_dataset(file,config.atmosphere.vturb_dataset),storage_order),
                 config.time_index,3,"vturb")))
         atmosphere=Atmosphere3D(grid,T.(temperature),T.(vx),T.(vy),T.(vz),vturb;
             magnetic_field=magnetic)

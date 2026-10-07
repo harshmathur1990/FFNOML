@@ -86,13 +86,14 @@ end
         temperature=reshape(collect(5100.0:100.0:6200.0),shape)
         zeros3=zeros(shape); grid=Grid3D(logtau,[0.0,40e3],[0.0,40e3])
         atmosphere=Atmosphere3D(grid,temperature,copy(zeros3),copy(zeros3),copy(zeros3),copy(zeros3))
+        python_storage(value)=permutedims(value,reverse(1:ndims(value)))
         h5open(atmosphere_path,"w") do file
             file["logtau_500"]=logtau
-            file["temperature"]=FFNOInversion._with_time_zyx(temperature)
-            file["vturb"]=FFNOInversion._with_time_zyx(fill(800.0,shape))
-            file["vx"]=FFNOInversion._with_time_zyx(zeros3)
-            file["vy"]=FFNOInversion._with_time_zyx(zeros3)
-            file["vz"]=FFNOInversion._with_time_zyx(zeros3)
+            file["temperature"]=python_storage(FFNOInversion._with_time_zyx(temperature))
+            file["vturb"]=python_storage(FFNOInversion._with_time_zyx(fill(800.0,shape)))
+            file["vx"]=python_storage(FFNOInversion._with_time_zyx(zeros3))
+            file["vy"]=python_storage(FFNOInversion._with_time_zyx(zeros3))
+            file["vz"]=python_storage(FFNOInversion._with_time_zyx(zeros3))
         end
         wavelength=collect(range(656.24e-9,656.32e-9,length=4))
         context=serial_context(); distributed=distribute_atmosphere(Float64,atmosphere,context)
@@ -124,6 +125,7 @@ synthesis_file = \"$synthesis_path\"
 atmosphere_file = \"$output_atmosphere_path\"
 [atmosphere]
 pressure_top_pa = 1.0
+storage_order = "python"
 [atmosphere.datasets]
 logtau500 = \"logtau_500\"
 temperature = \"temperature\"

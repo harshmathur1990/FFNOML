@@ -62,6 +62,8 @@ non-SLURM launches where it defaults to Julia's active thread count.
 `FFNO_TOP_DENSITY_KG_M3` value in `olivia_runtime_environment.sh` for the
 appropriate boundary-density initialization; the template value is only a
 starting point and must be checked for the chosen atmosphere.
+The supplied configurations set `[atmosphere].storage_order = "python"` so
+NumPy/h5py array dimensions are converted before validation and reading.
 
 For atmosphere-to-spectrum synthesis without fitting, use `forward.toml`:
 
