@@ -20,6 +20,9 @@ end
     preflight=read(joinpath(scripts,"run_olivia_login_preflight.sh"),String)
     runtime=read(joinpath(scripts,"run_olivia_inversion.sbatch"),String)
     setup=read(joinpath(scripts,"setup_olivia_environment.sbatch"),String)
+    guide=read(joinpath(scripts,"..","..","examples","inversion_run","START_HERE.md"),String)
+    readme=read(joinpath(scripts,"..","..","examples","inversion_run","README.md"),String)
+    accelerator_environment=read(joinpath(scripts,"..","..","examples","inversion_run","olivia_runtime_environment.sh"),String)
     @test occursin("module load \"\${FFNO_PREFLIGHT_STACK_MODULE:-NRIS/CPU}\"",preflight)
     @test occursin("unset OLIVIA_ENV_SCRIPT OLIVIA_JULIA OLIVIA_PYTHON",preflight)
     @test !occursin("OLIVIA_JULIA",submission)
@@ -27,6 +30,14 @@ end
     @test occursin("\"\${preflight_runner}\"",submission)
     @test occursin("source \"\${runtime_environment}\"",runtime)
     @test occursin("source \"\${runtime_environment}\"",setup)
+    @test occursin("build_wittmann_backend.jl",setup)
+    @test occursin("Wittmann EOS load check OK",setup)
+    @test occursin("inputs/wittmann/libwitt_ffno.so",setup)
+    @test occursin("export OLIVIA_CXX=c++",accelerator_environment)
+    @test first(findfirst("source \"\${environment_script}\"",setup)) <
+        first(findfirst("build_wittmann_backend.jl",setup))
+    @test !occursin("c++ -O3",guide)
+    @test !occursin("/permanent/lib/libwitt_ffno.so",readme)
 end
 
 @testset "Disposable Olivia environment" begin

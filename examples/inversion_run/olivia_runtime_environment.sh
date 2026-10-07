@@ -8,6 +8,7 @@ export OLIVIA_REPO_DIR=/cluster/projects/nn2834k/harshm/FFNOML/FFNOInversion.jl
 export OLIVIA_ENV_SCRIPT=/cluster/home/harshm/loadnvidiampi.sh
 export OLIVIA_JULIA=/cluster/software/NRIS/neoverse_v2/software/Julia/1.12.2/bin/julia
 export OLIVIA_PYTHON=/cluster/home/harshm/nvidiaenv/bin/python3
+export OLIVIA_CXX=c++
 export OLIVIA_JULIA_DEPOT=/cluster/home/harshm/julia-depot-1.12.2
 export OLIVIA_JULIA_PROJECT="${FFNOML_RUN_DIR}/julia-environment"
 export OLIVIA_LOCAL_MUSPEL_DIR=/cluster/projects/nn2834k/harshm/julia-sources/Muspel.jl
