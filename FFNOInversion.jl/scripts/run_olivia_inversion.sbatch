@@ -19,15 +19,16 @@ set -o pipefail
 
 : "${SLURM_JOB_ID:?submit this file with sbatch}"
 
-script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-export OLIVIA_REPO_DIR=${OLIVIA_REPO_DIR:-$(dirname "${script_dir}")}
-OLIVIA_REPO_DIR=$(cd -- "${OLIVIA_REPO_DIR}" && pwd)
-export OLIVIA_REPO_DIR
-
 FFNOML_RUN_DIR=${FFNOML_RUN_DIR:-${SLURM_SUBMIT_DIR}}
 mkdir -p "${FFNOML_RUN_DIR}"
 FFNOML_RUN_DIR=$(cd -- "${FFNOML_RUN_DIR}" && pwd)
 export FFNOML_RUN_DIR
+
+: "${FFNO_SUBMITTED_REPO_DIR:?submission helper did not export the repository path}"
+submitted_repository=$(cd -- "${FFNO_SUBMITTED_REPO_DIR}" && pwd) || {
+  echo "Cannot enter submitted FFNOInversion repository: ${FFNO_SUBMITTED_REPO_DIR}" >&2
+  exit 2
+}
 
 runtime_environment=${FFNO_RUNTIME_ENV_FILE:-${FFNOML_RUN_DIR}/olivia_runtime_environment.sh}
 [[ -r "${runtime_environment}" ]] || {
@@ -35,6 +36,10 @@ runtime_environment=${FFNO_RUNTIME_ENV_FILE:-${FFNOML_RUN_DIR}/olivia_runtime_en
   exit 2
 }
 source "${runtime_environment}"
+# The submitted checkout is authoritative. Never trust a stale OLIVIA_REPO_DIR
+# inherited from the login shell or hard-coded in a copied runtime file.
+export OLIVIA_REPO_DIR=${submitted_repository}
+echo "Submitted repository: ${OLIVIA_REPO_DIR}"
 
 module --quiet reset
 environment_script=${OLIVIA_ENV_SCRIPT:-/cluster/home/harshm/loadnvidiampi.sh}
@@ -55,7 +60,7 @@ export OLIVIA_JULIA
 export JULIA_PROJECT=${OLIVIA_JULIA_PROJECT:-${FFNOML_RUN_DIR}/julia-environment}
 export JULIA_DEPOT_PATH=${OLIVIA_JULIA_DEPOT:-${JULIA_DEPOT_PATH:-${HOME}/.julia}}
 
-initializer=${script_dir}/initialize_olivia_environment.sh
+initializer=${OLIVIA_REPO_DIR}/scripts/initialize_olivia_environment.sh
 [[ -x "${initializer}" ]] || {
   echo "Cannot execute accelerator runtime initializer: ${initializer}" >&2
   exit 2

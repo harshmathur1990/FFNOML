@@ -30,7 +30,7 @@ command -v sbatch >/dev/null 2>&1 || {
   echo "Cannot execute accelerator runtime initializer: ${initializer}" >&2
   exit 2
 }
-package_dir=$(dirname -- "${script_dir}")
+package_dir=$(cd -- "$(dirname -- "${script_dir}")" && pwd)
 repository_root=$(dirname -- "${package_dir}")
 for initializer_input in \
     "${script_dir}/build_wittmann_backend.jl" \
@@ -77,5 +77,5 @@ echo "Submitting validated ${config_file}..."
 sbatch --chdir="${run_dir}" \
   --output="${run_dir}/slurm-%j.out" \
   --error="${run_dir}/slurm-%j.err" \
-  --export="ALL,FFNOML_RUN_DIR=${run_dir},FFNO_RUNTIME_ENV_FILE=${runtime_environment},FFNO_INVERSION_CONFIG=${config_file},FFNO_INVERSION_FACTORY=${factory_file}" \
+  --export="ALL,FFNO_SUBMITTED_REPO_DIR=${package_dir},FFNOML_RUN_DIR=${run_dir},FFNO_RUNTIME_ENV_FILE=${runtime_environment},FFNO_INVERSION_CONFIG=${config_file},FFNO_INVERSION_FACTORY=${factory_file}" \
   "$@" "${batch_script}"
