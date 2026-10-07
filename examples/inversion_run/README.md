@@ -46,9 +46,9 @@ configuration and factory, HDF5 inputs, requested spectral regions and line
 sources, outputs, and default SLURM topology. It checks the required datasets,
 compatible input shapes, line lists, PSFs, factory assets, and rank layout.
 Submission proceeds only after it prints `Sanity check OK`.
-The helper uses a clean `NRIS/CPU` Julia environment for this login-node
-preflight. Accelerator Julia, Python, MPI/CUDA, depot, Muspel, and model
-initialization settings live in `olivia_runtime_environment.sh`; that file is
+The helper uses the `NRIS/Login` stack and a separate persistent Julia depot for
+this login-node preflight. Accelerator Julia, Python, MPI/CUDA, depot, Muspel,
+and model initialization settings live in `olivia_runtime_environment.sh`; that file is
 sourced only by the production job after Slurm starts it. The job prepares its
 Julia environment and native EOS library before launching distributed ranks;
 there is no separate setup submission.

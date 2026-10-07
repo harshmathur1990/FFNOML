@@ -114,8 +114,9 @@ The submission helper first reports the selected mode, files, spectral lines,
 outputs, and SLURM resources. It validates the configuration, required HDF5
 datasets and shapes, model-factory assets, and MPI topology; it calls `sbatch`
 only after printing `Sanity check OK`. This preflight resets inherited Julia
-settings and loads the x86-64 `NRIS/CPU` and CPU Julia modules on the login node;
-it never loads the accelerator runtime environment.
+settings, loads Olivia's `NRIS/Login` stack, and instantiates dependencies in
+the separate login-only depot `~/julia-depot-ffno-login-1.12.2`; it never loads
+the accelerator runtime environment or depot.
 
 After the allocation starts, the same production job first recreates its
 disposable Julia project, writes Olivia MPI preferences, instantiates and

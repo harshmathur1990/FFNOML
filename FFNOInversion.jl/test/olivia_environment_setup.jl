@@ -23,7 +23,11 @@ end
     guide=read(joinpath(scripts,"..","..","examples","inversion_run","START_HERE.md"),String)
     readme=read(joinpath(scripts,"..","..","examples","inversion_run","README.md"),String)
     accelerator_environment=read(joinpath(scripts,"..","..","examples","inversion_run","olivia_runtime_environment.sh"),String)
-    @test occursin("module load \"\${FFNO_PREFLIGHT_STACK_MODULE:-NRIS/CPU}\"",preflight)
+    @test occursin("module load \"\${FFNO_PREFLIGHT_STACK_MODULE:-NRIS/Login}\"",preflight)
+    @test occursin("julia-depot-ffno-login-1.12.2",preflight)
+    @test occursin("Pkg.instantiate(; allow_autoprecomp=false)",preflight)
+    @test first(findfirst("Pkg.instantiate",preflight)) <
+        first(findfirst("exec \"\${julia_executable}\"",preflight))
     @test occursin("unset OLIVIA_ENV_SCRIPT OLIVIA_JULIA OLIVIA_PYTHON",preflight)
     @test !occursin("OLIVIA_JULIA",submission)
     @test !occursin("OLIVIA_PYTHON",submission)

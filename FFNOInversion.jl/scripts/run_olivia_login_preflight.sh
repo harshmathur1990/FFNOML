@@ -11,14 +11,17 @@ package_dir=$(dirname "${script_dir}")
 preflight_script=${script_dir}/preflight_olivia_inversion.jl
 
 # Never inherit accelerator-node Julia paths or package selections from the
-# login shell. A dedicated CPU preflight depot may be selected explicitly.
-preflight_depot=${FFNO_PREFLIGHT_JULIA_DEPOT:-}
+# login shell. Keep login-node packages and compiled caches in their own depot.
+preflight_depot=${FFNO_PREFLIGHT_JULIA_DEPOT:-${HOME}/julia-depot-ffno-login-1.12.2}
 unset JULIA_PROJECT JULIA_DEPOT_PATH JULIA_LOAD_PATH
 unset OLIVIA_ENV_SCRIPT OLIVIA_JULIA OLIVIA_PYTHON OLIVIA_JULIA_DEPOT OLIVIA_JULIA_PROJECT
-[[ -z "${preflight_depot}" ]] || export JULIA_DEPOT_PATH="${preflight_depot}"
+mkdir -p "${preflight_depot}"
+export JULIA_DEPOT_PATH="${preflight_depot}"
+export JULIA_LOAD_PATH="@:@stdlib"
+export JULIA_PKG_PRECOMPILE_AUTO=0
 
 module --quiet reset
-module load "${FFNO_PREFLIGHT_STACK_MODULE:-NRIS/CPU}"
+module load "${FFNO_PREFLIGHT_STACK_MODULE:-NRIS/Login}"
 module load "${FFNO_PREFLIGHT_JULIA_MODULE:-Julia/1.12.2}"
 
 julia_candidate=${FFNO_PREFLIGHT_JULIA:-julia}
@@ -28,6 +31,12 @@ julia_executable=$(command -v "${julia_candidate}") || {
 }
 preflight_project=${FFNO_PREFLIGHT_JULIA_PROJECT:-${package_dir}}
 
-echo "Preflight environment: stack=${FFNO_PREFLIGHT_STACK_MODULE:-NRIS/CPU} Julia=${julia_executable}"
+echo "Preflight environment: stack=${FFNO_PREFLIGHT_STACK_MODULE:-NRIS/Login} Julia=${julia_executable}"
+echo "Preflight Julia depot: ${JULIA_DEPOT_PATH}"
+echo "Ensuring login-node preflight dependencies are installed..."
+"${julia_executable}" --project="${preflight_project}" --startup-file=no -e '
+using Pkg
+Pkg.instantiate(; allow_autoprecomp=false)
+'
 exec "${julia_executable}" --project="${preflight_project}" --startup-file=no \
   "${preflight_script}" "$@"
