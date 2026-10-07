@@ -38,80 +38,10 @@ environment_script=${OLIVIA_ENV_SCRIPT:-/cluster/home/harshm/loadnvidiampi.sh}
 source "${environment_script}"
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-package_dir=${OLIVIA_REPO_DIR:-$(dirname "${script_dir}")}
-package_dir=$(cd -- "${package_dir}" && pwd)
-julia_project=${OLIVIA_JULIA_PROJECT:-${FFNOML_RUN_DIR}/julia-environment}
+export OLIVIA_REPO_DIR=${OLIVIA_REPO_DIR:-$(dirname "${script_dir}")}
+OLIVIA_REPO_DIR=$(cd -- "${OLIVIA_REPO_DIR}" && pwd)
+export OLIVIA_REPO_DIR
 
-julia_candidate=${OLIVIA_JULIA:-julia}
-julia_executable=$(command -v "${julia_candidate}") || {
-  echo "Cannot resolve Julia executable: ${julia_candidate}" >&2
-  exit 2
-}
-
-mkdir -p "${OLIVIA_JULIA_DEPOT}"
-export JULIA_PROJECT=${julia_project}
-export JULIA_DEPOT_PATH=${OLIVIA_JULIA_DEPOT}
-
-echo "Package dir: ${package_dir}"
-echo "Julia project: ${JULIA_PROJECT}"
-echo "Julia depot: ${JULIA_DEPOT_PATH}"
-echo "Julia: ${julia_executable}"
-
-# This library is loaded by Julia on accelerator nodes, so it must never be
-# compiled by the x86-64 login-node preflight. Build it natively here, verify
-# that accelerator Julia can load it, and only then replace the run copy.
-wittmann_library=${FFNO_WITTMANN_LIBRARY:-${FFNOML_RUN_DIR}/inputs/wittmann/libwitt_ffno.so}
-wittmann_directory=$(dirname -- "${wittmann_library}")
-mkdir -p "${wittmann_directory}"
-wittmann_staging=$(mktemp "${wittmann_library}.slurm-${SLURM_JOB_ID}.XXXXXX")
-trap 'rm -f -- "${wittmann_staging}"' EXIT
-
-compiler_candidate=${OLIVIA_CXX:-c++}
-compiler_executable=$(command -v "${compiler_candidate}") || {
-  echo "Cannot resolve accelerator C++ compiler: ${compiler_candidate}" >&2
-  exit 2
-}
-echo "C++ compiler: ${compiler_executable}"
-echo "Building accelerator Wittmann EOS library: ${wittmann_library}"
-CXX="${compiler_executable}" "${julia_executable}" --startup-file=no \
-  "${package_dir}/scripts/build_wittmann_backend.jl" "${wittmann_staging}"
-"${julia_executable}" --startup-file=no -e '
-using Libdl
-library = only(ARGS)
-handle = Libdl.dlopen(library)
-Libdl.dlclose(handle)
-println("Wittmann EOS load check OK: ", library)
-' "${wittmann_staging}"
-mv -f -- "${wittmann_staging}" "${wittmann_library}"
-trap - EXIT
-file "${wittmann_library}"
-
-# Preparation uses only Julia stdlibs and permanent inputs, even after work cleanup.
-"${julia_executable}" --startup-file=no \
-  "${package_dir}/scripts/prepare_olivia_environment.jl" "${package_dir}" "${julia_project}"
-
-# Without a repository manifest, resolve/install first so MPIPreferences can load.
-# The permanent depot is reused; uncached versions require package-server access.
-if [[ ! -r "${julia_project}/Manifest.toml" ]]; then
-  "${julia_executable}" --project="${JULIA_PROJECT}" --startup-file=no -e '
-using Pkg
-Pkg.instantiate(; allow_autoprecomp=false)
-'
-fi
-
-"${julia_executable}" --project="${JULIA_PROJECT}" --startup-file=no -e '
-using MPIPreferences
-MPIPreferences.use_system_binary(
-    mpiexec=`srun --mpi=pmix --exact --cpus-per-task=2 --cpu-bind=cores`,
-    abi="OpenMPI",
-)
-'
-
-# MPIPreferences affects MPI-dependent JLL artifact selection. Start a fresh
-# Julia process before instantiating so HDF5_jll installs its OpenMPI variant.
-"${julia_executable}" --project="${JULIA_PROJECT}" --startup-file=no -e '
-using Pkg
-Pkg.instantiate()
-Pkg.precompile()
-println("FFNO_OLIVIA_JULIA_ENVIRONMENT_READY")
-'
+# Kept for the multi-job regression harness. Production inversion submission
+# performs this initializer inside run_olivia_inversion.sbatch instead.
+"${script_dir}/initialize_olivia_environment.sh"

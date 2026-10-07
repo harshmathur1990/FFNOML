@@ -139,6 +139,14 @@ function _factory_assets(run_dir,declared)
     sort!(unique(assets);by=first)
 end
 
+function _generated_factory_assets(run_dir,declared)
+    declared===nothing && return Pair{String,String}[]
+    declared isa AbstractDict || throw(ArgumentError(
+        "FFNO generated model assets must be a dictionary"))
+    sort!(unique(string(label)=>_run_path(run_dir,string(path))
+        for (label,path) in declared);by=first)
+end
+
 function run_submission_preflight(config_path::AbstractString,factory_path::AbstractString,
         run_dir::AbstractString,batch_script::AbstractString;io::IO=stdout)
     run_dir=abspath(run_dir)
@@ -173,6 +181,9 @@ function run_submission_preflight(config_path::AbstractString,factory_path::Abst
     declared_assets=included_factory isa NamedTuple && hasproperty(included_factory,:assets) ?
         included_factory.assets : nothing
     factory_assets=_factory_assets(run_dir,declared_assets)
+    declared_generated_assets=included_factory isa NamedTuple &&
+        hasproperty(included_factory,:generated_assets) ? included_factory.generated_assets : nothing
+    generated_factory_assets=_generated_factory_assets(run_dir,declared_generated_assets)
     if factory.population_levels isa AbstractDict
         requested=unique(source.species for region in config.regions for source in region.sources
             if source.mode===:ffno)
@@ -191,6 +202,12 @@ function run_submission_preflight(config_path::AbstractString,factory_path::Abst
     if !isempty(factory_assets)
         println(io,"  Model assets:")
         for (label,path) in factory_assets
+            println(io,"    ",label,": ",path)
+        end
+    end
+    if !isempty(generated_factory_assets)
+        println(io,"  Generated inside allocated job:")
+        for (label,path) in generated_factory_assets
             println(io,"    ",label,": ",path)
         end
     end

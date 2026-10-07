@@ -18,16 +18,16 @@ const ATOM_FILES = Dict(
     :H => required_path("inputs", "atoms", "atom.h6_tiago2.yaml"),
     :CA => required_path("inputs", "atoms", "atom.ca2.yaml"),
 )
-const EOS_LIBRARY = required_path("inputs", "wittmann", "libwitt_ffno.$(Libdl.dlext)")
+const EOS_LIBRARY = joinpath(RUN_DIR, "inputs", "wittmann", "libwitt_ffno.$(Libdl.dlext)")
 const PARTITION_FUNCTIONS = required_path("inputs", "pf_Kurucz.input")
 const FFNO_INVERSION_ASSETS = Dict(
     "H checkpoint" => CHECKPOINTS[:H],
     "Ca checkpoint" => CHECKPOINTS[:CA],
     "H atom" => ATOM_FILES[:H],
     "Ca atom" => ATOM_FILES[:CA],
-    "EOS library" => EOS_LIBRARY,
     "partition functions" => PARTITION_FUNCTIONS,
 )
+const FFNO_INVERSION_GENERATED_ASSETS = Dict("EOS library" => EOS_LIBRARY)
 
 const LEVELS = Dict(:H => 6, :CA => 6)
 const LEVEL_NAMES = Dict(
@@ -89,4 +89,5 @@ function build_production_model(config, distributed, workspace, local_pressure_t
 end
 
 const FFNO_INVERSION_FACTORY = InversionModelFactory(LEVELS, build_production_model)
-(;factory=FFNO_INVERSION_FACTORY,assets=FFNO_INVERSION_ASSETS)
+(;factory=FFNO_INVERSION_FACTORY,assets=FFNO_INVERSION_ASSETS,
+  generated_assets=FFNO_INVERSION_GENERATED_ASSETS)

@@ -44,6 +44,24 @@ environment_script=${OLIVIA_ENV_SCRIPT:-/cluster/home/harshm/loadnvidiampi.sh}
 }
 source "${environment_script}"
 
+# Initialize the accelerator-native Julia runtime before creating outputs or
+# starting any application work. Login-node validation has already completed.
+julia_candidate=${OLIVIA_JULIA:-julia}
+OLIVIA_JULIA=$(command -v "${julia_candidate}") || {
+  echo "Cannot resolve Julia executable: ${julia_candidate}" >&2
+  exit 2
+}
+export OLIVIA_JULIA
+export JULIA_PROJECT=${OLIVIA_JULIA_PROJECT:-${FFNOML_RUN_DIR}/julia-environment}
+export JULIA_DEPOT_PATH=${OLIVIA_JULIA_DEPOT:-${JULIA_DEPOT_PATH:-${HOME}/.julia}}
+
+initializer=${script_dir}/initialize_olivia_environment.sh
+[[ -x "${initializer}" ]] || {
+  echo "Cannot execute accelerator runtime initializer: ${initializer}" >&2
+  exit 2
+}
+"${initializer}"
+
 mkdir -p "${FFNOML_RUN_DIR}/outputs" "${FFNOML_RUN_DIR}/diagnostics"
 export FFNO_GPU_DIAGNOSTICS_DIR=${FFNO_GPU_DIAGNOSTICS_DIR:-${FFNOML_RUN_DIR}/diagnostics/slurm-${SLURM_JOB_ID}}
 export TMPDIR=${FFNO_INVERSION_TMPDIR:-${FFNOML_RUN_DIR}/tmp/slurm-${SLURM_JOB_ID}}
@@ -54,19 +72,12 @@ factory_file=${FFNO_INVERSION_FACTORY:-${FFNOML_RUN_DIR}/model_factory.jl}
 [[ -r "${config_file}" ]] || { echo "Missing inversion config: ${config_file}" >&2; exit 2; }
 [[ -r "${factory_file}" ]] || { echo "Missing model factory: ${factory_file}" >&2; exit 2; }
 
-julia_candidate=${OLIVIA_JULIA:-julia}
 python_candidate=${OLIVIA_PYTHON:-python3}
-OLIVIA_JULIA=$(command -v "${julia_candidate}") || {
-  echo "Cannot resolve Julia executable: ${julia_candidate}" >&2
-  exit 2
-}
 OLIVIA_PYTHON=$(command -v "${python_candidate}") || {
   echo "Cannot resolve Python executable: ${python_candidate}" >&2
   exit 2
 }
-export OLIVIA_JULIA OLIVIA_PYTHON
-export JULIA_PROJECT=${OLIVIA_JULIA_PROJECT:-${FFNOML_RUN_DIR}/julia-environment}
-export JULIA_DEPOT_PATH=${OLIVIA_JULIA_DEPOT:-${JULIA_DEPOT_PATH:-${HOME}/.julia}}
+export OLIVIA_PYTHON
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
 export OPENBLAS_NUM_THREADS=${OPENBLAS_NUM_THREADS:-1}
 export MKL_NUM_THREADS=${MKL_NUM_THREADS:-1}

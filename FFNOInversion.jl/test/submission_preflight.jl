@@ -47,8 +47,11 @@ include(joinpath(@__DIR__,"..","scripts","preflight_olivia_inversion.jl"))
         write(factory_path,"""
         using FFNOInversion
         FFNO_INVERSION_ASSETS = Dict("fixture line list"=>joinpath(ENV["FFNOML_RUN_DIR"],"lines.list"))
+        FFNO_INVERSION_GENERATED_ASSETS = Dict(
+            "generated fixture"=>joinpath(ENV["FFNOML_RUN_DIR"],"generated","missing.so"))
         FFNO_INVERSION_FACTORY = InversionModelFactory(Dict(:CA=>6), (args...)->nothing)
-        (;factory=FFNO_INVERSION_FACTORY,assets=FFNO_INVERSION_ASSETS)
+        (;factory=FFNO_INVERSION_FACTORY,assets=FFNO_INVERSION_ASSETS,
+          generated_assets=FFNO_INVERSION_GENERATED_ASSETS)
         """)
         write(line_list_path,"test line list\n")
 
@@ -70,6 +73,8 @@ include(joinpath(@__DIR__,"..","scripts","preflight_olivia_inversion.jl"))
         @test occursin("FFNO CA/ca_ii_8542",report)
         @test occursin("Kurucz LTE",report)
         @test occursin("fixture line list",report)
+        @test occursin("Generated inside allocated job:",report)
+        @test occursin("generated fixture",report)
         @test occursin("nodes=8 ranks=16 ranks/node=2 CPUs/rank=16 GPUs/node=4",report)
         @test occursin("Sanity check OK",report)
         @test isdir(joinpath(run_dir,"outputs"))

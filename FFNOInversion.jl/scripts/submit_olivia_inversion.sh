@@ -7,6 +7,7 @@ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 batch_script=${script_dir}/run_olivia_inversion.sbatch
 preflight_script=${script_dir}/preflight_olivia_inversion.jl
 preflight_runner=${script_dir}/run_olivia_login_preflight.sh
+initializer=${script_dir}/initialize_olivia_environment.sh
 run_dir=${FFNOML_RUN_DIR:-${PWD}}
 
 command -v sbatch >/dev/null 2>&1 || {
@@ -25,6 +26,21 @@ command -v sbatch >/dev/null 2>&1 || {
   echo "Cannot execute login-node preflight runner: ${preflight_runner}" >&2
   exit 2
 }
+[[ -x "${initializer}" ]] || {
+  echo "Cannot execute accelerator runtime initializer: ${initializer}" >&2
+  exit 2
+}
+package_dir=$(dirname -- "${script_dir}")
+repository_root=$(dirname -- "${package_dir}")
+for initializer_input in \
+    "${script_dir}/build_wittmann_backend.jl" \
+    "${script_dir}/prepare_olivia_environment.jl" \
+    "${repository_root}/scripts/witt_eos_cpp.cpp"; do
+  [[ -r "${initializer_input}" ]] || {
+    echo "Missing accelerator initializer input: ${initializer_input}" >&2
+    exit 2
+  }
+done
 
 mkdir -p "${run_dir}"
 run_dir=$(cd -- "${run_dir}" && pwd)
@@ -47,13 +63,6 @@ runtime_environment=${FFNO_RUNTIME_ENV_FILE:-${run_dir}/olivia_runtime_environme
   echo "Missing accelerator runtime environment: ${runtime_environment}" >&2
   exit 2
 }
-runtime_project=${run_dir}/julia-environment
-[[ -r "${runtime_project}/Project.toml" ]] || {
-  echo "Missing accelerator Julia environment: ${runtime_project}/Project.toml" >&2
-  echo "Run setup_olivia_environment.sbatch successfully before submitting." >&2
-  exit 2
-}
-
 echo "Checking submission inputs before requesting an allocation..."
 FFNOML_RUN_DIR="${run_dir}" "${preflight_runner}" \
   "${config_file}" "${factory_file}" "${run_dir}" "${batch_script}"
