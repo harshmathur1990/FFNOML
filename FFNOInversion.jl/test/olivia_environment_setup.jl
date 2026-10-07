@@ -23,6 +23,7 @@ end
     guide=read(joinpath(scripts,"..","..","examples","inversion_run","START_HERE.md"),String)
     readme=read(joinpath(scripts,"..","..","examples","inversion_run","README.md"),String)
     accelerator_environment=read(joinpath(scripts,"..","..","examples","inversion_run","olivia_runtime_environment.sh"),String)
+    model_factory=read(joinpath(scripts,"..","..","examples","inversion_run","model_factory.jl"),String)
     @test occursin("module load \"\${FFNO_PREFLIGHT_STACK_MODULE:-NRIS/Login}\"",preflight)
     @test occursin("julia-depot-ffno-login-1.12.2",preflight)
     @test occursin("must be one absolute directory",preflight)
@@ -53,6 +54,10 @@ end
     @test !occursin("setup_olivia_environment.sbatch",guide)
     @test !occursin("c++ -O3",guide)
     @test !occursin("/permanent/lib/libwitt_ffno.so",readme)
+    @test occursin("top_density_map = fill(top_density, size(local_pressure_top))",model_factory)
+    @test occursin("HE3DBoundaryState(top_density_map, local_pressure_top, :top)",model_factory)
+    @test first(findfirst("top_density_map = fill",model_factory)) <
+        first(findfirst("launch_fsdp_population_models",model_factory))
 end
 
 @testset "Disposable Olivia environment" begin

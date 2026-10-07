@@ -44,6 +44,22 @@ function build_production_model(config, distributed, workspace, local_pressure_t
     specs = [FSDPModelSpec(species, CHECKPOINTS[species], metadata(species))
              for species in (:H, :CA)]
 
+    eos = WittmannEOS(EOS_LIBRARY, PARTITION_FUNCTIONS)
+    opacity = WittmannOpacity500(eos)
+    top_density = parse(Float64, get(ENV, "FFNO_TOP_DENSITY_KG_M3", "1e-10"))
+    isfinite(top_density) && top_density > 0 ||
+        throw(ArgumentError("FFNO_TOP_DENSITY_KG_M3 must be finite and positive"))
+    local_pressure_top isa AbstractMatrix ||
+        throw(ArgumentError("local_pressure_top must be a local two-dimensional boundary map"))
+    expected_shape = (size(distributed.local_atmosphere.temperature, 2),
+                      size(distributed.local_atmosphere.temperature, 3))
+    size(local_pressure_top) == expected_shape || throw(DimensionMismatch(
+        "local pressure-top shape $(size(local_pressure_top)) differs from local horizontal shape $expected_shape"
+    ))
+    top_density_map = fill(top_density, size(local_pressure_top))
+    boundary = HE3DBoundaryState(top_density_map, local_pressure_top, :top)
+    force_options = ForceBalanceOptions()
+
     diagnostics = get(ENV, "FFNO_GPU_DIAGNOSTICS_DIR", joinpath(RUN_DIR, "diagnostics"))
     populations = launch_fsdp_population_models(
         specs,
@@ -51,12 +67,6 @@ function build_production_model(config, distributed, workspace, local_pressure_t
         timeout_seconds=max(180.0, config.parallel.gpu_connect_timeout_seconds),
         diagnostics_directory=diagnostics,
     )
-
-    eos = WittmannEOS(EOS_LIBRARY, PARTITION_FUNCTIONS)
-    opacity = WittmannOpacity500(eos)
-    top_density = parse(Float64, get(ENV, "FFNO_TOP_DENSITY_KG_M3", "1e-10"))
-    boundary = HE3DBoundaryState(top_density, local_pressure_top, :top)
-    force_options = ForceBalanceOptions()
 
     try
         # Muspel caches are built from a thermodynamically complete initial state.
