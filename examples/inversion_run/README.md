@@ -45,23 +45,27 @@ configuration and factory, HDF5 inputs, requested spectral regions and line
 sources, outputs, and default SLURM topology. It checks the required datasets,
 compatible input shapes, line lists, PSFs, factory assets, and rank layout.
 Submission proceeds only after it prints `Sanity check OK`.
+The helper uses a clean `NRIS/CPU` Julia environment for this login-node
+preflight. Accelerator Julia, Python, MPI/CUDA, depot, Muspel, and model
+initialization settings live in `olivia_runtime_environment.sh`; that file is
+sourced only by the setup and production jobs after Slurm starts them.
 
 The Olivia batch script derives the Julia thread count and the runtime
 `threads_per_rank` value from SLURM's `cpus-per-task`. Do not hard-code
 `threads_per_rank` in a copied run configuration; it is only needed for
 non-SLURM launches where it defaults to Julia's active thread count.
 
-`model_factory.jl` uses these relative paths through `FFNOML_RUN_DIR`. Set
-`FFNO_TOP_DENSITY_KG_M3` to the appropriate boundary density before submission;
-the default in the template is only a starting value and must be checked for the
-chosen atmosphere.
+`model_factory.jl` uses these relative paths through `FFNOML_RUN_DIR`. Edit the
+`FFNO_TOP_DENSITY_KG_M3` value in `olivia_runtime_environment.sh` for the
+appropriate boundary-density initialization; the template value is only a
+starting point and must be checked for the chosen atmosphere.
 
 For atmosphere-to-spectrum synthesis without fitting, use `forward.toml`:
 
 ```bash
 cd "$run"
-export FFNO_INVERSION_CONFIG="$run/forward.toml"
-bash "$repo/FFNOInversion.jl/scripts/submit_olivia_inversion.sh"
+FFNO_INVERSION_CONFIG="$run/forward.toml" \
+  bash "$repo/FFNOInversion.jl/scripts/submit_olivia_inversion.sh"
 ```
 
 This needs the atmosphere and model/physics assets listed above, but no

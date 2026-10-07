@@ -8,8 +8,8 @@ node interpolation, derivatives, or fitting are needed.
 
 ## 1. Make a separate run folder
 
-Run these commands in one Bash session on the login node. Change the paths if
-your checkout or permanent Julia depot lives elsewhere.
+Run these commands on the login node. Change the paths if your checkout or run
+directory lives elsewhere.
 Use a new run folder for each experiment; output files with the same names are overwritten.
 
 ```bash
@@ -17,17 +17,13 @@ repo=/cluster/projects/nn2834k/harshm/FFNOML
 run=/cluster/work/projects/nn2834k/harshm/ffnoml_forward_001
 mkdir -p "$run"
 cp -R "$repo/examples/inversion_run/." "$run/"
-export FFNOML_RUN_DIR="$run"
-export OLIVIA_REPO_DIR="$repo/FFNOInversion.jl"
-export OLIVIA_ENV_SCRIPT=/cluster/home/harshm/loadnvidiampi.sh
-export OLIVIA_JULIA=/cluster/software/NRIS/neoverse_v2/software/Julia/1.12.2/bin/julia
-export OLIVIA_PYTHON=/cluster/home/harshm/nvidiaenv/bin/python3
-export OLIVIA_JULIA_DEPOT=/cluster/home/harshm/julia-depot-1.12.2
-export JULIA_DEPOT_PATH="$OLIVIA_JULIA_DEPOT"
 ```
 
-This assumes the MPI/CUDA Python environment and cached Julia dependencies from
-the successful Olivia tests already exist. For a new installation, first follow
+Edit `$run/olivia_runtime_environment.sh` once if the Julia, Python, depot, or
+Muspel paths differ. It contains all accelerator-runtime exports and is sourced
+only after a Slurm job starts on an accelerator node. Do not source it on the
+login node. This assumes the MPI/CUDA Python environment and cached Julia
+dependencies from the successful Olivia tests already exist. For a new installation, first follow
 the [Olivia environment/acceptance guide](../../FFNOInversion.jl/docs/reports/olivia-runtime-test-guide.md).
 Its bootstrap submits setup **and five regression jobs**, not a synthesis run.
 
@@ -42,6 +38,7 @@ ffnoml_forward_001/
 ├── forward.toml                 # atmosphere, wavelengths, physics, output paths
 ├── inversion.toml               # only needed later for fitting
 ├── model_factory.jl             # loads the physics and FFNO models
+├── olivia_runtime_environment.sh # accelerator exports; never source on login
 ├── inputs/
 │   ├── initial_atmosphere.h5
 │   ├── kurucz_6302.list
@@ -110,10 +107,8 @@ manifest is absent, Julia generates one (versions can change, and uncached
 packages require network access). Keep the repository manifest for repeatability.
 
 ```bash
-export OLIVIA_JULIA_PROJECT="$run/julia-environment"
-export OLIVIA_LOCAL_MUSPEL_DIR=/cluster/projects/nn2834k/harshm/julia-sources/Muspel.jl
 cd "$run"
-sbatch "$OLIVIA_REPO_DIR/scripts/setup_olivia_environment.sbatch"
+sbatch "$repo/FFNOInversion.jl/scripts/setup_olivia_environment.sbatch"
 ```
 
 The local Muspel checkout must match the revision pinned in `Project.toml`.
@@ -124,16 +119,16 @@ Wait for the setup job to finish successfully; its `.out` must contain
 `FFNO_OLIVIA_JULIA_ENVIRONMENT_READY`. Then submit the actual synthesis:
 
 ```bash
-# Optional density initialization guess; this is not a fixed density boundary.
-export FFNO_TOP_DENSITY_KG_M3=1e-10
-export FFNO_INVERSION_CONFIG="$run/forward.toml"
-bash "$OLIVIA_REPO_DIR/scripts/submit_olivia_inversion.sh"
+FFNOML_RUN_DIR="$run" FFNO_INVERSION_CONFIG="$run/forward.toml" \
+  bash "$repo/FFNOInversion.jl/scripts/submit_olivia_inversion.sh"
 ```
 
 The submission helper first reports the selected mode, files, spectral lines,
 outputs, and SLURM resources. It validates the configuration, required HDF5
 datasets and shapes, model-factory assets, and MPI topology; it calls `sbatch`
-only after printing `Sanity check OK`. The default allocation is **8 nodes × 4
+only after printing `Sanity check OK`. This preflight resets inherited Julia
+settings and loads the x86-64 `NRIS/CPU` and CPU Julia modules on the login node;
+it never loads the accelerator runtime environment. The default allocation is **8 nodes × 4
 GPUs**, with two threaded Julia MPI ranks per node. Submission then prints the
 job ID. Run on Slurm, not directly on the login node. Another account can pass
 `--account=YOUR_ACCOUNT` to both submissions.

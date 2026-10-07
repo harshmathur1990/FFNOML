@@ -14,6 +14,21 @@ include(joinpath(@__DIR__, "..", "scripts", "prepare_olivia_environment.jl"))
     @test occursin("--threads=\"\${SLURM_CPUS_PER_TASK}\"",batch)
 end
 
+@testset "Login preflight and accelerator runtime are isolated" begin
+    scripts=joinpath(@__DIR__,"..","scripts")
+    submission=read(joinpath(scripts,"submit_olivia_inversion.sh"),String)
+    preflight=read(joinpath(scripts,"run_olivia_login_preflight.sh"),String)
+    runtime=read(joinpath(scripts,"run_olivia_inversion.sbatch"),String)
+    setup=read(joinpath(scripts,"setup_olivia_environment.sbatch"),String)
+    @test occursin("module load \"\${FFNO_PREFLIGHT_STACK_MODULE:-NRIS/CPU}\"",preflight)
+    @test occursin("unset OLIVIA_ENV_SCRIPT OLIVIA_JULIA OLIVIA_PYTHON",preflight)
+    @test !occursin("OLIVIA_JULIA",submission)
+    @test !occursin("OLIVIA_PYTHON",submission)
+    @test occursin("\"\${preflight_runner}\"",submission)
+    @test occursin("source \"\${runtime_environment}\"",runtime)
+    @test occursin("source \"\${runtime_environment}\"",setup)
+end
+
 @testset "Disposable Olivia environment" begin
     mktempdir() do root
         package = joinpath(root, "permanent-package")

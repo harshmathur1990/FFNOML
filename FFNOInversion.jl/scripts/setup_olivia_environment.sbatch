@@ -16,7 +16,18 @@ set -o nounset
 set -o pipefail
 
 : "${SLURM_JOB_ID:?submit this file with sbatch}"
-: "${OLIVIA_JULIA_DEPOT:?set OLIVIA_JULIA_DEPOT to the permanent Julia depot path}"
+
+FFNOML_RUN_DIR=${FFNOML_RUN_DIR:-${SLURM_SUBMIT_DIR}}
+FFNOML_RUN_DIR=$(cd -- "${FFNOML_RUN_DIR}" && pwd)
+export FFNOML_RUN_DIR
+
+runtime_environment=${FFNO_RUNTIME_ENV_FILE:-${FFNOML_RUN_DIR}/olivia_runtime_environment.sh}
+[[ -r "${runtime_environment}" ]] || {
+  echo "Cannot read accelerator runtime environment: ${runtime_environment}" >&2
+  exit 2
+}
+source "${runtime_environment}"
+: "${OLIVIA_JULIA_DEPOT:?olivia_runtime_environment.sh must set OLIVIA_JULIA_DEPOT}"
 
 module --quiet reset
 environment_script=${OLIVIA_ENV_SCRIPT:-/cluster/home/harshm/loadnvidiampi.sh}
@@ -29,7 +40,7 @@ source "${environment_script}"
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 package_dir=${OLIVIA_REPO_DIR:-$(dirname "${script_dir}")}
 package_dir=$(cd -- "${package_dir}" && pwd)
-julia_project=${OLIVIA_JULIA_PROJECT:-${FFNOML_RUN_DIR:-${SLURM_SUBMIT_DIR}}/julia-environment}
+julia_project=${OLIVIA_JULIA_PROJECT:-${FFNOML_RUN_DIR}/julia-environment}
 
 julia_candidate=${OLIVIA_JULIA:-julia}
 julia_executable=$(command -v "${julia_candidate}") || {
