@@ -362,7 +362,9 @@ for required_file in Project.toml src/FFNOInversion.jl \
         test/olivia_phase6_solver_probe.jl test/olivia_phase6_memory_probe.jl \
         test/olivia_phase1_to_phase6_regression.jl \
         test/olivia_fsdp_service_probe.jl test/olivia_gpu_collective_probe.py \
-        scripts/olivia_nested_gpu_step.sh scripts/ffno_fsdp_service.sh \
+        test/olivia_gloo_control_probe.py \
+        scripts/olivia_nested_gpu_step.sh scripts/run_olivia_gloo_control.sh \
+        scripts/ffno_fsdp_service.sh \
         scripts/validate_muspel_reference.jl scripts/validate_phase4_topology.jl \
         scripts/validate_phase4_restart.jl scripts/validate_phase5_mpi.jl \
         scripts/validate_phase6_mpi.jl; do
@@ -471,6 +473,8 @@ julia_command=(env CUDA_VISIBLE_DEVICES=-1
 
 case "${test_group}" in
     regression)
+        run_case gloo_control_plane success 120 OLIVIA_GLOO_CONTROL_OK reusable \
+            "${OLIVIA_REPO_DIR}/scripts/run_olivia_gloo_control.sh"
         run_case phase1_to_phase6_julia_tests success 900 OLIVIA_PHASE1_TO_PHASE6_JULIA_TESTS_OK reusable \
             "${julia_command[@]}" "${OLIVIA_REPO_DIR}/test/olivia_phase1_to_phase6_regression.jl"
         run_case phase3_muspel_reference success 1200 PHASE3_MUSPEL_REFERENCE_OK reusable \

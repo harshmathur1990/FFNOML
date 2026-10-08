@@ -70,7 +70,7 @@ function build_production_model(config, distributed, workspace, local_pressure_t
 
     try
         # Muspel caches are built from a thermodynamically complete initial state.
-        reconstruct_force_balance_distributed!(
+        force_diagnostics = reconstruct_force_balance_distributed!(
             distributed, boundary, eos, opacity, context; options=force_options
         )
         predict_distributed_populations!(workspace.populations, populations, distributed, context)
@@ -91,6 +91,7 @@ function build_production_model(config, distributed, workspace, local_pressure_t
             boundary,
             force_options,
             CapabilityManifest(),
+            prepared_force_balance=force_diagnostics,
         )
     catch
         close_distributed_population_model!(populations, context)

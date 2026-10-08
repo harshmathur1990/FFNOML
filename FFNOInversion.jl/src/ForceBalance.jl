@@ -16,7 +16,7 @@ struct ForceBalanceOptions{T<:AbstractFloat}
 end
 function ForceBalanceOptions(;gravity_m_s2=274.0,max_iterations=100,relative_tolerance=1e-6,
                              force_tolerance=1e-5,height_tolerance_m=1e-3,relaxation=0.7,
-                             pressure_sweeps=100)
+                             pressure_sweeps=10)
     values=promote(gravity_m_s2,relative_tolerance,force_tolerance,height_tolerance_m,relaxation)
     ForceBalanceOptions(values[1],max_iterations,values[2],values[3],values[4],values[5],pressure_sweeps)
 end
@@ -41,13 +41,17 @@ end
 function lorentz_force!(fx,fy,fz,B::MagneticField3D,grid::Grid3D,z)
     size(fx)==size(fy)==size(fz)==size(B.Bx) || throw(DimensionMismatch("Lorentz arrays differ"))
     zcoord=vec(dropdims(sum(z,dims=(2,3))./(size(z,2)*size(z,3)),dims=(2,3)))
-    for k in axes(fx,1),i in axes(fx,2),j in axes(fx,3)
-        jx=(_derivative(B.Bz,k,i,j,grid.y,3)-_derivative(B.By,k,i,j,zcoord,1))/MU0
-        jy=(_derivative(B.Bx,k,i,j,zcoord,1)-_derivative(B.Bz,k,i,j,grid.x,2))/MU0
-        jz=(_derivative(B.By,k,i,j,grid.x,2)-_derivative(B.Bx,k,i,j,grid.y,3))/MU0
-        fx[k,i,j]=jy*B.Bz[k,i,j]-jz*B.By[k,i,j]
-        fy[k,i,j]=jz*B.Bx[k,i,j]-jx*B.Bz[k,i,j]
-        fz[k,i,j]=jx*B.By[k,i,j]-jy*B.Bx[k,i,j]
+    nx,ny=size(fx,2),size(fx,3)
+    Threads.@threads :static for column in 1:nx*ny
+        i=(column-1)%nx+1; j=(column-1)÷nx+1
+        for k in axes(fx,1)
+            jx=(_derivative(B.Bz,k,i,j,grid.y,3)-_derivative(B.By,k,i,j,zcoord,1))/MU0
+            jy=(_derivative(B.Bx,k,i,j,zcoord,1)-_derivative(B.Bz,k,i,j,grid.x,2))/MU0
+            jz=(_derivative(B.By,k,i,j,grid.x,2)-_derivative(B.Bx,k,i,j,grid.y,3))/MU0
+            fx[k,i,j]=jy*B.Bz[k,i,j]-jz*B.By[k,i,j]
+            fy[k,i,j]=jz*B.Bx[k,i,j]-jx*B.Bz[k,i,j]
+            fz[k,i,j]=jx*B.By[k,i,j]-jy*B.Bx[k,i,j]
+        end
     end
     fx,fy,fz
 end
@@ -60,9 +64,11 @@ end
 
 function _height_from_tau!(z,kappa,rho,tau,order)
     fill!(z,0)
-    for q in 2:length(order)
-        k0,k1=order[q-1],order[q]; dtau=abs(tau[k1]-tau[k0])
-        for i in axes(z,2),j in axes(z,3)
+    nx,ny=size(z,2),size(z,3)
+    Threads.@threads :static for column in 1:nx*ny
+        i=(column-1)%nx+1; j=(column-1)÷nx+1
+        for q in 2:length(order)
+            k0,k1=order[q-1],order[q]; dtau=abs(tau[k1]-tau[k0])
             extinction=(kappa[k0,i,j]*rho[k0,i,j]+kappa[k1,i,j]*rho[k1,i,j])/2
             z[k1,i,j]=z[k0,i,j]-dtau/extinction
         end
@@ -72,9 +78,11 @@ end
 
 function _pressure_from_force!(p,rho,z,fz,pboundary,order,g)
     @views p[order[1],:,:].=pboundary
-    for q in 2:length(order)
-        k0,k1=order[q-1],order[q]
-        for i in axes(p,2),j in axes(p,3)
+    nx,ny=size(p,2),size(p,3)
+    Threads.@threads :static for column in 1:nx*ny
+        i=(column-1)%nx+1; j=(column-1)÷nx+1
+        for q in 2:length(order)
+            k0,k1=order[q-1],order[q]
             ds=abs(z[k1,i,j]-z[k0,i,j])
             p[k1,i,j]=p[k0,i,j]+(g*(rho[k0,i,j]+rho[k1,i,j])/2-(fz[k0,i,j]+fz[k1,i,j])/2)*ds
             p[k1,i,j]>0 || throw(ErrorException("non-positive pressure at depth=$k1 x=$i y=$j"))
@@ -124,14 +132,20 @@ end
 _relative_change(a,b)=maximum(abs.(a.-b)./max.(abs.(b),eps(eltype(b))))
 
 function _force_residual(p,rho,z,fx,fy,fz,grid,g)
-    scale=max(maximum(abs.(rho.*g)),maximum(sqrt.(fx.^2 .+ fy.^2 .+ fz.^2)))+eps(eltype(p)); worst=zero(eltype(p))
-    for k in axes(p,1),i in axes(p,2),j in axes(p,3)
-        rx=_derivative(p,k,i,j,grid.x,2)-fx[k,i,j]
-        ry=_derivative(p,k,i,j,grid.y,3)-fy[k,i,j]
-        rz=_derivative(p,k,i,j,vec(@view(z[:,i,j])),1)+rho[k,i,j]*g-fz[k,i,j]
-        worst=max(worst,sqrt(rx^2+ry^2+rz^2)/scale)
+    scale=max(abs(g)*maximum(abs,rho),maximum(sqrt.(fx.^2 .+ fy.^2 .+ fz.^2)))+eps(eltype(p))
+    nx,ny=size(p,2),size(p,3); column_worst=zeros(eltype(p),nx*ny)
+    Threads.@threads :static for column in 1:nx*ny
+        i=(column-1)%nx+1; j=(column-1)÷nx+1
+        local_worst=zero(eltype(p)); zcolumn=@view z[:,i,j]
+        for k in axes(p,1)
+            rx=_derivative(p,k,i,j,grid.x,2)-fx[k,i,j]
+            ry=_derivative(p,k,i,j,grid.y,3)-fy[k,i,j]
+            rz=_derivative(p,k,i,j,zcolumn,1)+rho[k,i,j]*g-fz[k,i,j]
+            local_worst=max(local_worst,sqrt(rx^2+ry^2+rz^2)/scale)
+        end
+        column_worst[column]=local_worst
     end
-    worst
+    maximum(column_worst)
 end
 
 """Iteratively reconstruct `Pgas`, `rho`, `ne`, and corrugated `z` on fixed log-tau points."""
@@ -140,6 +154,7 @@ function reconstruct_force_balance!(atmosphere::Atmosphere3D{Float64},boundary::
                                     options::ForceBalanceOptions=ForceBalanceOptions())
     boundary.boundary in (:top,:bottom) || throw(ArgumentError("Phase 1 reconstruction supports top or bottom boundaries"))
     options.max_iterations>0 || throw(ArgumentError("max_iterations must be positive"))
+    options.pressure_sweeps>0 || throw(ArgumentError("pressure_sweeps must be positive"))
     0<options.relaxation<=1 || throw(ArgumentError("relaxation must lie in (0,1]"))
     shape=size(atmosphere.temperature); nz,nx,ny=shape; tau=10.0.^atmosphere.grid.log_tau500
     top_to_bottom=tau[1]<tau[end] ? collect(1:nz) : collect(nz:-1:1)

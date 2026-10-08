@@ -91,17 +91,21 @@ function _distributed_lorentz!(fx,fy,fz,distributed::DistributedAtmosphere,z,con
     by=exchange_halos(_field(B.By,tile,(size(B.By,1),length(g.x),length(g.y))),context,1)
     bz=exchange_halos(_field(B.Bz,tile,(size(B.Bz,1),length(g.x),length(g.y))),context,1)
     zcoord=_global_zcoord(z,context,length(g.x)*length(g.y))
-    for k in axes(fx,1),i in axes(fx,2),j in axes(fx,3)
+    nx,ny=size(fx,2),size(fx,3)
+    Threads.@threads :static for column in 1:nx*ny
+        i=(column-1)%nx+1; j=(column-1)÷nx+1
         gi=first(tile.xrange)+i-1; gj=first(tile.yrange)+j-1
-        dbzdy=_horizontal_derivative(bz,k,i,j,gj,g.y,3,1)
-        dbydz=_derivative(B.By,k,i,j,zcoord,1); dbxdz=_derivative(B.Bx,k,i,j,zcoord,1)
-        dbzdx=_horizontal_derivative(bz,k,i,j,gi,g.x,2,1)
-        dbydx=_horizontal_derivative(by,k,i,j,gi,g.x,2,1)
-        dbxdy=_horizontal_derivative(bx,k,i,j,gj,g.y,3,1)
-        jx=(dbzdy-dbydz)/MU0; jy=(dbxdz-dbzdx)/MU0; jz=(dbydx-dbxdy)/MU0
-        fx[k,i,j]=jy*B.Bz[k,i,j]-jz*B.By[k,i,j]
-        fy[k,i,j]=jz*B.Bx[k,i,j]-jx*B.Bz[k,i,j]
-        fz[k,i,j]=jx*B.By[k,i,j]-jy*B.Bx[k,i,j]
+        for k in axes(fx,1)
+            dbzdy=_horizontal_derivative(bz,k,i,j,gj,g.y,3,1)
+            dbydz=_derivative(B.By,k,i,j,zcoord,1); dbxdz=_derivative(B.Bx,k,i,j,zcoord,1)
+            dbzdx=_horizontal_derivative(bz,k,i,j,gi,g.x,2,1)
+            dbydx=_horizontal_derivative(by,k,i,j,gi,g.x,2,1)
+            dbxdy=_horizontal_derivative(bx,k,i,j,gj,g.y,3,1)
+            jx=(dbzdy-dbydz)/MU0; jy=(dbxdz-dbzdx)/MU0; jz=(dbydx-dbxdy)/MU0
+            fx[k,i,j]=jy*B.Bz[k,i,j]-jz*B.By[k,i,j]
+            fy[k,i,j]=jz*B.Bx[k,i,j]-jx*B.Bz[k,i,j]
+            fz[k,i,j]=jx*B.By[k,i,j]-jy*B.Bx[k,i,j]
+        end
     end
 end
 
@@ -146,20 +150,40 @@ end
 function _distributed_force_residual(p,rho,z,fx,fy,fz,distributed,context,g)
     tile=distributed.tile; grid=distributed.global_grid; shape=(size(p,1),length(grid.x),length(grid.y))
     ph=exchange_halos(_field(p,tile,shape),context,1)
-    scale_local=max(maximum(abs.(rho.*g)),maximum(sqrt.(fx.^2 .+ fy.^2 .+ fz.^2)))
+    scale_local=max(abs(g)*maximum(abs,rho),maximum(sqrt.(fx.^2 .+ fy.^2 .+ fz.^2)))
     scale=allreduce_max(scale_local,context)+eps(eltype(p)); worst=zero(eltype(p))
-    for k in axes(p,1),i in axes(p,2),j in axes(p,3)
+    nx,ny=size(p,2),size(p,3); column_worst=zeros(eltype(p),nx*ny)
+    Threads.@threads :static for column in 1:nx*ny
+        i=(column-1)%nx+1; j=(column-1)÷nx+1
         gi=first(tile.xrange)+i-1; gj=first(tile.yrange)+j-1
-        rx=_horizontal_derivative(ph,k,i,j,gi,grid.x,2,1)-fx[k,i,j]
-        ry=_horizontal_derivative(ph,k,i,j,gj,grid.y,3,1)-fy[k,i,j]
-        rz=_derivative(p,k,i,j,vec(@view(z[:,i,j])),1)+rho[k,i,j]*g-fz[k,i,j]
-        worst=max(worst,sqrt(rx^2+ry^2+rz^2)/scale)
+        local_worst=zero(eltype(p)); zcolumn=@view z[:,i,j]
+        for k in axes(p,1)
+            rx=_horizontal_derivative(ph,k,i,j,gi,grid.x,2,1)-fx[k,i,j]
+            ry=_horizontal_derivative(ph,k,i,j,gj,grid.y,3,1)-fy[k,i,j]
+            rz=_derivative(p,k,i,j,zcolumn,1)+rho[k,i,j]*g-fz[k,i,j]
+            local_worst=max(local_worst,sqrt(rx^2+ry^2+rz^2)/scale)
+        end
+        column_worst[column]=local_worst
     end
+    worst=maximum(column_worst)
     allreduce_max(worst,context)
+end
+
+function _force_balance_log(context::ParallelContext,event::AbstractString;values...)
+    isroot(context) || return nothing
+    print(stdout,"FORCE_BALANCE event=",event)
+    for (key,value) in pairs(values)
+        print(stdout,' ',key,'=',value)
+    end
+    println(stdout); flush(stdout)
+    nothing
 end
 
 function reconstruct_force_balance_distributed!(distributed::DistributedAtmosphere{Float64},boundary::HE3DBoundaryState,
         eos::AbstractEOS,opacity::AbstractOpacity500,context::ParallelContext;options=ForceBalanceOptions())
+    options.max_iterations>0 || throw(ArgumentError("max_iterations must be positive"))
+    options.pressure_sweeps>0 || throw(ArgumentError("pressure_sweeps must be positive"))
+    0<options.relaxation<=1 || throw(ArgumentError("relaxation must lie in (0,1]"))
     a=distributed.local_atmosphere; local_boundary=_local_boundary(boundary,distributed.tile)
     shape=size(a.temperature); nz,nx,ny=shape; tau=10.0.^a.grid.log_tau500
     top_to_bottom=tau[1]<tau[end] ? collect(1:nz) : collect(nz:-1:1)
@@ -171,27 +195,46 @@ function reconstruct_force_balance_distributed!(distributed::DistributedAtmosphe
     kappa=similar(rho); pnew=similar(p); rhonew=similar(rho); nenew=similar(ne); znew=similar(z)
     fx=zeros(shape); fy=zeros(shape); fz=zeros(shape); mode=select_force_balance(a)
     pchange=rchange=fres=zchange=Inf; lorentzmax=0.0
+    _force_balance_log(context,"start";mode=mode isa HE3DMode ? "HE3D" : "MHS",
+        global_shape="$(length(distributed.global_grid.log_tau500))x$(length(distributed.global_grid.x))x$(length(distributed.global_grid.y))",
+        local_shape="$(nz)x$(nx)x$(ny)",threads=Threads.nthreads(),
+        max_iterations=options.max_iterations,pressure_sweeps=options.pressure_sweeps)
     for iteration in 1:options.max_iterations
+        iteration_start=time_ns(); stage_start=time_ns()
         thermodynamics!(rhonew,nenew,eos,a.temperature,p)
+        eos_seconds=(time_ns()-stage_start)/1e9; stage_start=time_ns()
         iteration==1 && (@views rhonew[order[1],:,:].=rhoboundary)
         opacity500!(kappa,opacity,a.temperature,p,rhonew,nenew)
+        opacity_seconds=(time_ns()-stage_start)/1e9; stage_start=time_ns()
         _height_from_tau!(znew,kappa,rhonew,tau,top_to_bottom)
+        height_seconds=(time_ns()-stage_start)/1e9; stage_start=time_ns()
         mode isa MHSMode ? _distributed_lorentz!(fx,fy,fz,distributed,znew,context) : (fill!(fx,0);fill!(fy,0);fill!(fz,0))
         lorentzmax=allreduce_max(maximum(sqrt.(fx.^2 .+ fy.^2 .+ fz.^2)),context)
+        force_seconds=(time_ns()-stage_start)/1e9; stage_start=time_ns()
         _pressure_from_force!(pnew,rhonew,znew,fz,pboundary,order,options.gravity_m_s2)
         pnew=_distributed_pressure_relax!(pnew,fx,fy,fz,rhonew,znew,distributed,pboundary,order,
             options.gravity_m_s2,context,options.pressure_sweeps)
+        pressure_seconds=(time_ns()-stage_start)/1e9; stage_start=time_ns()
         pchange=allreduce_max(_relative_change(pnew,p),context); rchange=allreduce_max(_relative_change(rhonew,rho),context)
         zchange=allreduce_max(maximum(abs.(znew.-z)),context)
         fres=_distributed_force_residual(pnew,rhonew,znew,fx,fy,fz,distributed,context,options.gravity_m_s2)
+        residual_seconds=(time_ns()-stage_start)/1e9
         @. p=options.relaxation*pnew+(1-options.relaxation)*p
         @. rho=options.relaxation*rhonew+(1-options.relaxation)*rho
         copyto!(ne,nenew); copyto!(z,znew)
+        _force_balance_log(context,"iteration";iteration=iteration,dP=pchange,drho=rchange,
+            force=fres,dz_m=zchange,eos_s=round(eos_seconds;digits=3),
+            opacity_s=round(opacity_seconds;digits=3),height_s=round(height_seconds;digits=3),
+            force_s=round(force_seconds;digits=3),pressure_s=round(pressure_seconds;digits=3),
+            residual_s=round(residual_seconds;digits=3),total_s=round((time_ns()-iteration_start)/1e9;digits=3))
         if pchange<=options.relative_tolerance && rchange<=options.relative_tolerance && fres<=options.force_tolerance && zchange<=options.height_tolerance_m
             a.pgas=p; a.rho=rho; a.ne=ne; a.z=z
+            _force_balance_log(context,"converged";iteration=iteration)
             return ForceBalanceDiagnostics(mode isa HE3DMode ? :HE3D : :MHS,iteration,true,pchange,rchange,fres,zchange,0.0,0.0,lorentzmax)
         end
     end
+    _force_balance_log(context,"failed";iterations=options.max_iterations,dP=pchange,drho=rchange,
+        force=fres,dz_m=zchange)
     throw(ErrorException("distributed force balance did not converge (dP=$pchange, drho=$rchange, dz=$zchange)"))
 end
 
@@ -272,9 +315,16 @@ function HybridForwardWorkspace(::Type{T},distributed::DistributedAtmosphere,wav
     HybridForwardWorkspace(populations,cube(),cube(),ThreadedSynthesisCache(T,nz,nλ))
 end
 
-struct HybridForwardModel{P,R,S,O,E,K,B,F}
+struct HybridForwardModel{P,R,S,O,E,K,B,F,Q}
     populations::P; redistribution::R; synthesizer::S; observation::O
     eos::E; opacity::K; boundary::B; force_options::F; capabilities::CapabilityManifest
+    prepared_force_balance::Q
+end
+
+function HybridForwardModel(populations,redistribution,synthesizer,observation,eos,opacity,
+        boundary,force_options,capabilities::CapabilityManifest;prepared_force_balance=nothing)
+    HybridForwardModel(populations,redistribution,synthesizer,observation,eos,opacity,boundary,
+        force_options,capabilities,Ref{Any}(prepared_force_balance))
 end
 
 function _distributed_observation!(output,intrinsic,model::IdentityObservation,distributed,context)
@@ -308,16 +358,23 @@ function _distributed_observation!(output,intrinsic,model::GaussianPSFObservatio
 end
 
 function forward!(workspace::HybridForwardWorkspace,model::HybridForwardModel,
-                  distributed::DistributedAtmosphere,context::ParallelContext)
+                  distributed::DistributedAtmosphere,context::ParallelContext;reuse_prepared::Bool=false)
     total_start=time_ns()
     validate_capabilities(model.capabilities,model.redistribution,workspace.output.stokes)
-    stage_start=time_ns()
-    diagnostics=reconstruct_force_balance_distributed!(distributed,model.boundary,model.eos,model.opacity,context;
-        options=model.force_options)
-    force_seconds=(time_ns()-stage_start)/1e9
-    stage_start=time_ns()
-    predict_distributed_populations!(workspace.populations,model.populations,distributed,context)
-    populations_seconds=(time_ns()-stage_start)/1e9
+    prepared=reuse_prepared ? model.prepared_force_balance[] : nothing
+    model.prepared_force_balance[]=nothing
+    diagnostics,force_seconds,populations_seconds=if prepared===nothing
+        stage_start=time_ns()
+        force=reconstruct_force_balance_distributed!(distributed,model.boundary,model.eos,model.opacity,context;
+            options=model.force_options)
+        force_elapsed=(time_ns()-stage_start)/1e9
+        stage_start=time_ns()
+        predict_distributed_populations!(workspace.populations,model.populations,distributed,context)
+        (force,force_elapsed,(time_ns()-stage_start)/1e9)
+    else
+        isroot(context) && (println(stdout,"FORWARD event=reuse_prepared_force_balance_and_populations"); flush(stdout))
+        (prepared,0.0,0.0)
+    end
     stage_start=time_ns()
     synthesize!(workspace.intrinsic,model.synthesizer,model.redistribution,distributed.local_atmosphere,
         workspace.populations,workspace.synthesis_cache)

@@ -15,14 +15,16 @@ struct ContinuumState
     partials::Matrix{Float64} # 17 × cells, ordered as WittEOS::background_partials
 end
 
-function continuum_state(eos::WittmannEOS,temp::AbstractVector,pgas::AbstractVector)
+function continuum_state(eos::WittmannEOS,temp::AbstractVector,pgas::AbstractVector;
+                         threads::Int=Threads.nthreads())
     length(temp)==length(pgas) || throw(DimensionMismatch("temperature and pressure differ"))
+    threads>0 || throw(ArgumentError("continuum-state thread count must be positive"))
     t=Float64.(temp); p=Float64.(pgas); n=length(t)
     rho=zeros(n); xna=zeros(n); xne=zeros(n); partials=zeros(17,n)
     handle=Libdl.dlopen(eos.library)
-    fn=Libdl.dlsym(handle,:witt_continuum_state_from_pgas)
-    status=ccall(fn,Cint,(Cstring,Ptr{Cdouble},Ptr{Cdouble},Ptr{Cdouble},Ptr{Cdouble},Ptr{Cdouble},Ptr{Cdouble},Csize_t),
-        eos.partition_functions,t,p,rho,xna,xne,partials,n)
+    fn=Libdl.dlsym(handle,:witt_continuum_state_from_pgas_parallel)
+    status=ccall(fn,Cint,(Cstring,Ptr{Cdouble},Ptr{Cdouble},Ptr{Cdouble},Ptr{Cdouble},Ptr{Cdouble},Ptr{Cdouble},Csize_t,Cint),
+        eos.partition_functions,t,p,rho,xna,xne,partials,n,threads)
     status==0 || throw(ErrorException("Wittmann continuum-state calculation failed"))
     ContinuumState(rho,xna,xne,partials)
 end
@@ -189,7 +191,22 @@ function continuum_extinction_cm(t::Real,wavelength_angstrom::Real,xna::Real,xne
     absorption+scattering,scattering
 end
 
-function continuum_extinction_m(state::ContinuumState,temp::AbstractVector,wavelength_angstrom::Real)
+function continuum_extinction_m(state::ContinuumState,temp::AbstractVector,wavelength_angstrom::Real;
+                                threaded::Bool=true)
     length(temp)==length(state.xne_cm3) || throw(DimensionMismatch("continuum state and temperature differ"))
-    [100*first(continuum_extinction_cm(temp[i],wavelength_angstrom,state.xna_cm3[i],state.xne_cm3[i],view(state.partials,:,i))) for i=eachindex(temp)]
+    extinction=Vector{Float64}(undef,length(temp))
+    calculate! = function(i)
+        extinction[i]=100*first(continuum_extinction_cm(temp[i],wavelength_angstrom,
+            state.xna_cm3[i],state.xne_cm3[i],view(state.partials,:,i)))
+    end
+    if threaded
+        Threads.@threads :static for i in eachindex(temp)
+            calculate!(i)
+        end
+    else
+        for i in eachindex(temp)
+            calculate!(i)
+        end
+    end
+    extinction
 end

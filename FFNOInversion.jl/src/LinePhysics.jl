@@ -212,7 +212,10 @@ function _add_wittmann_kurucz!(χ,η,model,wavelength,atmosphere,x,y)
     continuum=zeros(Float64,nz); lower=zeros(Float64,nz); nh=zeros(Float64,nz)
     state=model.eos isa WittmannKuruczState ? model.eos : WittmannKuruczState(model.eos)
     fn=Libdl.dlsym(state.library_handle,:witt_kurucz_populations)
-    continuum_state_column=model.include_continuum ? continuum_state(state.eos,temp,pgas) : nothing
+    # Mixed synthesis already distributes independent columns over Julia
+    # threads. Keep the short depth-only kernels serial within each column to
+    # avoid nesting a C++ and Julia thread team inside every column task.
+    continuum_state_column=model.include_continuum ? continuum_state(state.eos,temp,pgas;threads=1) : nothing
     continuum_done=false
     for line in model.lines
         line.atomic_number>0 || throw(ArgumentError("production Kurucz synthesis requires K94 species metadata"))
@@ -222,7 +225,7 @@ function _add_wittmann_kurucz!(χ,η,model,wavelength,atmosphere,x,y)
         status==0 || throw(ErrorException("Wittmann Kurucz state calculation failed"))
         if model.include_continuum && !continuum_done
             @inbounds for l in eachindex(wavelength)
-                continuum.=continuum_extinction_m(continuum_state_column,temp,wavelength[l]*1e10)
+                continuum.=continuum_extinction_m(continuum_state_column,temp,wavelength[l]*1e10;threaded=false)
                 for k in 1:nz
                     χ[k,l]+=continuum[k]; η[k,l]+=continuum[k]*planck_lambda(wavelength[l],temp[k])*1e-12
                 end

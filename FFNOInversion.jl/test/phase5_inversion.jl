@@ -65,6 +65,32 @@ end
     @test size(fixture.distributed.local_atmosphere.temperature)==(3,3,2)
 end
 
+@testset "Phase 5 consumes prepared factory state once" begin
+    fixture=phase5_fixture()
+    layout=phase5_layout(fill(5500.0,4),[0.0,0.0])
+    parameters=initial_parameters(layout)
+    apply_control_maps!(fixture.distributed,layout,parameters)
+    prepared=forward!(fixture.workspace,fixture.model,fixture.distributed,fixture.context)
+    fixture.model.prepared_force_balance[]=prepared.force_balance
+    observed=ObservationCube(SpectralCube(copy(prepared.spectrum.data),fixture.wave,StokesSet(:I)),
+        ones(size(prepared.spectrum.data)),ones(size(prepared.spectrum.data)))
+    local_observation=distribute_observation(Float64,observed,size(observed.spectrum.data),
+        fixture.wave,StokesSet(:I),fixture.context)
+    problem=DistributedInversionProblem(fixture.model,fixture.workspace,fixture.distributed,
+        local_observation,fixture.regularization,50e3,50e3,fixture.context;
+        control_layout=layout,reference_id="prepared-fixture")
+
+    first=evaluate_objective!(problem,layout,parameters,fixture.context)
+    @test first.timings.force_balance_seconds==0
+    @test first.timings.populations_seconds==0
+    @test fixture.model.prepared_force_balance[]===nothing
+    @test !problem.prepared_initial_available[]
+
+    second=evaluate_objective!(problem,layout,parameters,fixture.context)
+    @test second.timings.force_balance_seconds>0
+    @test second.timings.populations_seconds>0
+end
+
 
 @testset "Phase 5 exact-model recovery, directional FD, and restart" begin
     truth_layout=phase5_layout([5000,6000,5500,6500],[-1000,1000])

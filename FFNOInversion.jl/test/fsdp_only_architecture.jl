@@ -21,4 +21,12 @@ using Test
     @test occursin("require_multi_gpu",fsdp_source)
     @test occursin("FULL_SHARD_H_SLAB",service_source)
     @test occursin("PROTOCOL_VERSION = 2",service_source)
+    @test occursin("dist.new_group(backend=\"gloo\")",service_source)
+    @test occursin("group=command_group",service_source)
+
+    gloo_probe=read(joinpath(package_root,"test","olivia_gloo_control_probe.py"),String)
+    runtime_suite=read(joinpath(package_root,"scripts","run_olivia_runtime_tests.sbatch"),String)
+    @test occursin("dist.new_group(backend=\"gloo\"",gloo_probe)
+    @test occursin("OLIVIA_GLOO_CONTROL_OK",gloo_probe)
+    @test occursin("run_case gloo_control_plane success",runtime_suite)
 end

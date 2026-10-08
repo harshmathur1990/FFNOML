@@ -251,7 +251,7 @@ function run_inversion!(config::RunConfig,root_inputs,
     try
         _require_production_population_backend(model.populations,context)
         if config.mode===:forward
-            forward!(workspace,model,distributed,context)
+            forward!(workspace,model,distributed,context;reuse_prepared=true)
             return InversionRunResult(nothing,gather_spectrum(workspace.output,distributed,context),
                 gather_atmosphere(distributed,context),_gather_populations(workspace.populations,distributed,context),
                 nothing,parallel_provenance(context,distributed.tile;capabilities=["intensity","non_prd","forward","fsdp_distributed_h_slab"]))

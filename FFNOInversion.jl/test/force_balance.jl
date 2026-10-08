@@ -13,6 +13,7 @@ function phase1_atmosphere(;magnetic=false)
 end
 
 @testset "Phase 1 EOS, opacity and force balance" begin
+    @test ForceBalanceOptions().pressure_sweeps==10
     eos=IdealGasEOS(); opacity=ReferenceOpacity500(kappa_m2_kg=0.02)
     T=fill(6000.0,2,1,1); p=fill(10.0,2,1,1); rho=similar(p); ne=similar(p)
     thermodynamics!(rho,ne,eos,T,p)

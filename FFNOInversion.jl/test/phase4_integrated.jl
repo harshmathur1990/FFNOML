@@ -20,6 +20,12 @@
     @test all(isfinite,result.spectrum.data)
     @test result.timings.total_seconds>=result.timings.force_balance_seconds+
         result.timings.populations_seconds+result.timings.synthesis_seconds+result.timings.observation_seconds
+    model.prepared_force_balance[]=result.force_balance
+    prepared_result=forward!(workspace,model,distributed,context;reuse_prepared=true)
+    @test prepared_result.force_balance===result.force_balance
+    @test prepared_result.timings.force_balance_seconds==0
+    @test prepared_result.timings.populations_seconds==0
+    @test model.prepared_force_balance[]===nothing
     gathered=gather_atmosphere(distributed,context)
     @test all(gathered.pgas.>0) && all(gathered.ne.>0)
     observed=ObservationCube(SpectralCube(copy(result.spectrum.data),wave,StokesSet(:I)),

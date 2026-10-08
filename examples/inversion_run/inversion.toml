@@ -27,6 +27,18 @@ dx_m = 48000.0
 dy_m = 48000.0
 
 [[regions]]
+start_angstrom = 6561.92
+step_angstrom = 0.020
+count = 88
+normalization = 4.323060e-05
+psf_type = "none"
+
+[[regions.sources]]
+mode = "ffno"
+species = "H"
+line = "halpha"
+
+[[regions]]
 start_angstrom = 8540.23102
 step_angstrom = 0.04267
 count = 88

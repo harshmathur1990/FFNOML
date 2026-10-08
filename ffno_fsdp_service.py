@@ -44,9 +44,12 @@ def write_array(stream, value):
     stream.sendall(payload)
 
 
-def broadcast_command(command, device):
+def broadcast_command(command, command_group):
     values = [command if dist.get_rank() == 0 else None]
-    dist.broadcast_object_list(values, src=0, device=device)
+    # Command traffic is tiny and latency-insensitive.  A CPU/Gloo group lets
+    # idle workers block in a socket wait instead of spinning one host core per
+    # GPU inside an NCCL object broadcast while Julia performs force balance.
+    dist.broadcast_object_list(values, src=0, group=command_group)
     return values[0]
 
 
@@ -133,7 +136,7 @@ def build_backends(configuration):
     return backends
 
 
-def serve(configuration, backends):
+def serve(configuration, backends, command_group):
     rank = dist.get_rank()
     world = dist.get_world_size()
     local_rank = int(os.environ.get("LOCAL_RANK", rank))
@@ -175,7 +178,7 @@ def serve(configuration, backends):
                 command = tuple(fields)
         else:
             command = None
-        command = broadcast_command(command, device)
+        command = broadcast_command(command, command_group)
         operation = command[0]
         if operation in ("SHUTDOWN", "DISCONNECT"):
             if rank == 0 and operation == "SHUTDOWN":
@@ -283,9 +286,11 @@ def main():
     interval = int(os.environ.get("FFNO_FSDP_TRACEBACK_INTERVAL", "60"))
     if interval > 0:
         faulthandler.dump_traceback_later(interval, repeat=True)
+    command_group = None
     try:
+        command_group = dist.new_group(backend="gloo")
         backends = build_backends(configuration)
-        serve(configuration, backends)
+        serve(configuration, backends, command_group)
     except BaseException:
         print(
             f"FFNO_FSDP_SERVICE_FAILURE rank={dist.get_rank()}\n{traceback.format_exc()}",
@@ -296,6 +301,8 @@ def main():
     finally:
         if interval > 0:
             faulthandler.cancel_dump_traceback_later()
+        if command_group is not None:
+            dist.destroy_process_group(command_group)
         if dist.is_initialized():
             dist.destroy_process_group()
 

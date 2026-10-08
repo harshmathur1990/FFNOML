@@ -566,6 +566,42 @@ int witt_ne(
     }
 }
 
+template <typename Function>
+int parallel_cells(std::size_t n, int requested_threads, Function&& function) {
+    if (n == 0) return 0;
+    unsigned int nthreads = requested_threads > 0
+        ? static_cast<unsigned int>(requested_threads)
+        : std::thread::hardware_concurrency();
+    if (nthreads == 0) nthreads = 1;
+    nthreads = static_cast<unsigned int>(std::min<std::size_t>(nthreads, n));
+    if (nthreads == 1) {
+        try {
+            for (std::size_t index = 0; index < n; ++index) function(index);
+            return 0;
+        } catch (...) {
+            return 1;
+        }
+    }
+    std::atomic<bool> failed{false};
+    std::vector<std::thread> pool;
+    pool.reserve(nthreads);
+    const std::size_t block = (n + nthreads - 1) / nthreads;
+    for (unsigned int thread = 0; thread < nthreads; ++thread) {
+        const std::size_t begin = std::min<std::size_t>(thread * block, n);
+        const std::size_t end = std::min<std::size_t>(begin + block, n);
+        if (begin >= end) break;
+        pool.emplace_back([&, begin, end]() {
+            try {
+                for (std::size_t index = begin; index < end; ++index) function(index);
+            } catch (...) {
+                failed.store(true, std::memory_order_relaxed);
+            }
+        });
+    }
+    for (auto& thread : pool) thread.join();
+    return failed.load(std::memory_order_relaxed) ? 1 : 0;
+}
+
 }  // namespace
 
 extern "C" int witt_ne_from_rho(
@@ -602,9 +638,23 @@ extern "C" int witt_thermodynamics_from_pgas(
 ) {
     try {
         WittEOS eos(pf_path);
-        for (std::size_t i = 0; i < n; ++i)
+        return parallel_cells(n, 1, [&](std::size_t i) {
             eos.thermodynamics_from_pgas_si(temp[i],pgas_pa[i],rho_kg_m3[i],ne_m3[i]);
-        return 0;
+        });
+    } catch (...) {
+        return 1;
+    }
+}
+
+extern "C" int witt_thermodynamics_from_pgas_parallel(
+    const char* pf_path, const double* temp, const double* pgas_pa,
+    double* rho_kg_m3, double* ne_m3, std::size_t n, int threads
+) {
+    try {
+        WittEOS eos(pf_path);
+        return parallel_cells(n, threads, [&](std::size_t i) {
+            eos.thermodynamics_from_pgas_si(temp[i],pgas_pa[i],rho_kg_m3[i],ne_m3[i]);
+        });
     } catch (...) {
         return 1;
     }
@@ -617,10 +667,26 @@ extern "C" int witt_continuum_state_from_pgas(
 ) {
     try {
         WittEOS eos(pf_path);
-        for (std::size_t i=0;i<n;++i)
+        return parallel_cells(n, 1, [&](std::size_t i) {
             eos.continuum_state_si(temp[i],pgas_pa[i],rho_kg_m3[i],xna_cm3[i],
                                    xne_cm3[i],partials+17*i);
-        return 0;
+        });
+    } catch (...) {
+        return 1;
+    }
+}
+
+extern "C" int witt_continuum_state_from_pgas_parallel(
+    const char* pf_path, const double* temp, const double* pgas_pa,
+    double* rho_kg_m3, double* xna_cm3, double* xne_cm3,
+    double* partials, std::size_t n, int threads
+) {
+    try {
+        WittEOS eos(pf_path);
+        return parallel_cells(n, threads, [&](std::size_t i) {
+            eos.continuum_state_si(temp[i],pgas_pa[i],rho_kg_m3[i],xna_cm3[i],
+                                   xne_cm3[i],partials+17*i);
+        });
     } catch (...) {
         return 1;
     }

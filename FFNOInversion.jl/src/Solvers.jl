@@ -167,6 +167,7 @@ struct DistributedInversionProblem{M,W,D,O,R,T,A}
     control_reference::Dict{Symbol,Array{T,3}}
     reference_id::String
     correction_signature::String
+    prepared_initial_available::Base.RefValue{Bool}
 end
 
 function DistributedInversionProblem(model,workspace,distributed::DistributedAtmosphere,
@@ -194,7 +195,9 @@ function DistributedInversionProblem(model,workspace,distributed::DistributedAtm
     signature=control_layout===nothing ? "absolute-v1" : "corrections-v1:" * _layout_signature(control_layout)
     DistributedInversionProblem{typeof(model),typeof(workspace),typeof(distributed),typeof(observation),
         typeof(regularization),T,typeof(reference)}(model,workspace,distributed,observation,regularization,
-        T(dx_m),T(dy_m),reference,active,controls,String(reference_id),signature)
+        T(dx_m),T(dy_m),reference,active,controls,String(reference_id),signature,
+        Ref(control_layout!==nothing && hasproperty(model,:prepared_force_balance) &&
+            model.prepared_force_balance[]!==nothing))
 end
 
 function _restore_trial_reference!(problem::DistributedInversionProblem)
@@ -272,7 +275,10 @@ function evaluate_objective!(problem::DistributedInversionProblem,layout::Contro
         T=eltype(parameters)
         return ObjectiveEvaluation(ObjectiveComponents(T(Inf),T(Inf),zero(T),Dict{Symbol,T}()),nothing,nothing)
     end
-    forward_result=forward!(problem.workspace,problem.model,problem.distributed,context)
+    reuse_prepared=problem.prepared_initial_available[] && trial==initial_parameters(layout)
+    problem.prepared_initial_available[]=false
+    forward_result=forward!(problem.workspace,problem.model,problem.distributed,context;
+        reuse_prepared=reuse_prepared)
     data=distributed_chi2(forward_result.spectrum,problem.observation,context)/problem.active_residual_count
     reg=distributed_regularization_penalty(problem.distributed,problem.regularization,
         problem.dx_m,problem.dy_m,context)

@@ -22,10 +22,10 @@ function thermodynamics!(rho::Array{Float64,3},ne::Array{Float64,3},eos::Wittman
                          temperature::Array{Float64,3},pgas::Array{Float64,3})
     size(rho)==size(ne)==size(temperature)==size(pgas) || throw(DimensionMismatch("EOS arrays differ"))
     handle=Libdl.dlopen(eos.library)
-    function_pointer=Libdl.dlsym(handle,:witt_thermodynamics_from_pgas)
+    function_pointer=Libdl.dlsym(handle,:witt_thermodynamics_from_pgas_parallel)
     status=ccall(function_pointer,Cint,
-        (Cstring,Ptr{Cdouble},Ptr{Cdouble},Ptr{Cdouble},Ptr{Cdouble},Csize_t),
-        eos.partition_functions,temperature,pgas,rho,ne,length(rho))
+        (Cstring,Ptr{Cdouble},Ptr{Cdouble},Ptr{Cdouble},Ptr{Cdouble},Csize_t,Cint),
+        eos.partition_functions,temperature,pgas,rho,ne,length(rho),Threads.nthreads())
     status==0 || throw(ErrorException("Wittmann EOS failed for one or more cells"))
     all(isfinite,rho)&&all(>(0),rho) || throw(ErrorException("Wittmann EOS returned invalid density"))
     all(isfinite,ne)&&all(>(0),ne) || throw(ErrorException("Wittmann EOS returned invalid electron density"))
