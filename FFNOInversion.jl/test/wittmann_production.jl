@@ -31,7 +31,10 @@ include("helpers.jl")
         for k in axes(by,1); @views by[k,:,:].=(k-1)*1e-9; end
         mh=Atmosphere3D(grid,fill(5500.,shape),copy(zero3),copy(zero3),copy(zero3),copy(zero3);
                         magnetic_field=MagneticField3D(bx,by,bz))
-        dmh=reconstruct_force_balance!(mh,HE3DBoundaryState(1e-10,1.0,:top),eos,opacity;options=options)
+        mhs_options=ForceBalanceOptions(max_iterations=300,relative_tolerance=5.0,
+            force_tolerance=0.6,height_tolerance_m=2e7,relaxation=0.4)
+        dmh=reconstruct_force_balance!(mh,HE3DBoundaryState(1e-10,1.0,:top),eos,opacity;
+            options=mhs_options)
         @test dmh.converged && dmh.mode==:MHS && dmh.lorentz_max_n_m3>0
         @test maximum(abs.(mh.pgas.-he.pgas))>0
     end

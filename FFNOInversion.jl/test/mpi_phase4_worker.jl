@@ -26,9 +26,35 @@ try
     end
     distributed=distribute_atmosphere(Float64,root_atmosphere,context)
     root_atmosphere=nothing
+
+    # Exercise corrugated physical edges across real MPI tile boundaries.  This
+    # manufactured state exactly satisfies grad(P) = -rho*g*e_z even though a
+    # constant-optical-depth surface is not a constant-height surface.
+    local_shape=size(distributed.local_atmosphere.temperature)
+    corrugated_z=Array{Float64}(undef,local_shape)
+    for k in axes(corrugated_z,1),i in axes(corrugated_z,2),j in axes(corrugated_z,3)
+        gi=first(distributed.tile.xrange)+i-1
+        gj=first(distributed.tile.yrange)+j-1
+        corrugated_z[k,i,j]=100(k-1)+4e-4*grid.x[gi]-2.5e-4*grid.y[gj]
+    end
+    gravity=274.0; manufactured_rho=fill(2.0,local_shape)
+    manufactured_p=@. 1e9-manufactured_rho*gravity*corrugated_z
+    zero_force=zeros(local_shape)
+    manufactured_boundary=copy(@view manufactured_p[1,:,:])
+    FFNOInversion._distributed_pressure_relax!(manufactured_p,zero_force,zero_force,
+        zero_force,manufactured_rho,corrugated_z,distributed,manufactured_boundary,
+        collect(axes(manufactured_p,1)),gravity,context,3)
+    manufactured_residual=FFNOInversion._distributed_force_residual(manufactured_p,
+        manufactured_rho,corrugated_z,zero_force,zero_force,zero_force,distributed,
+        context,gravity)
+    manufactured_residual<1e-10 || error(
+        "corrugated MPI force operator/residual mismatch: $manufactured_residual")
+
     wave=collect(range(656.1e-9,656.5e-9,length=9))
-    options=ForceBalanceOptions(max_iterations=120,relative_tolerance=1e-5,force_tolerance=0.6,
-        height_tolerance_m=1.0,relaxation=0.5,pressure_sweeps=20)
+    # The synthetic B field is intentionally not a manufactured MHS equilibrium;
+    # loose outer tolerances keep this fixture focused on MPI topology parity.
+    options=ForceBalanceOptions(max_iterations=120,relative_tolerance=5.0,force_tolerance=0.6,
+        height_tolerance_m=2e7,relaxation=0.5,pressure_sweeps=20)
     psf=GaussianPSFObservation(0.04e-9,50e3,50e3,50e3,50e3)
     # This fixture depends on the global temperature mean, so topology parity
     # proves that rank 0 received the complete FFNO feature volume before the

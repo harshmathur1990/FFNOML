@@ -67,12 +67,6 @@ function _local_boundary(boundary::HE3DBoundaryState,tile::Tile2D)
     HE3DBoundaryState(cut(boundary.rho0),cut(boundary.p0),boundary.boundary)
 end
 
-function _global_zcoord(z,context,global_pixels)
-    local_sum=vec(dropdims(sum(z,dims=(2,3)),dims=(2,3)))
-    context.enabled && MPI.Allreduce!(local_sum,MPI.SUM,context.comm)
-    local_sum./global_pixels
-end
-
 @inline function _horizontal_derivative(padded,k,i,j,global_i,coords,axis,width)
     n=length(coords); n==1 && return zero(eltype(padded))
     if axis==2
@@ -85,22 +79,32 @@ end
     (padded[k,width+i,width+j+1]-padded[k,width+i,width+j-1])/(coords[global_i+1]-coords[global_i-1])
 end
 
+@inline function _distributed_physical_derivatives(a,ah,z,zh,grid,k,i,j,gi,gj)
+    aτ=_derivative(a,k,i,j,grid.log_tau500,1)
+    zτ=_derivative(z,k,i,j,grid.log_tau500,1)
+    abs(zτ)>eps(eltype(z)) || throw(ErrorException(
+        "degenerate optical-depth mapping at depth=$k global_x=$gi global_y=$gj"))
+    ax=_horizontal_derivative(ah,k,i,j,gi,grid.x,2,1)
+    ay=_horizontal_derivative(ah,k,i,j,gj,grid.y,3,1)
+    zx=_horizontal_derivative(zh,k,i,j,gi,grid.x,2,1)
+    zy=_horizontal_derivative(zh,k,i,j,gj,grid.y,3,1)
+    (ax-zx*aτ/zτ,ay-zy*aτ/zτ,aτ/zτ)
+end
+
 function _distributed_lorentz!(fx,fy,fz,distributed::DistributedAtmosphere,z,context)
     a=distributed.local_atmosphere; B=a.magnetic_field; tile=distributed.tile; g=distributed.global_grid
     bx=exchange_halos(_field(B.Bx,tile,(size(B.Bx,1),length(g.x),length(g.y))),context,1)
     by=exchange_halos(_field(B.By,tile,(size(B.By,1),length(g.x),length(g.y))),context,1)
     bz=exchange_halos(_field(B.Bz,tile,(size(B.Bz,1),length(g.x),length(g.y))),context,1)
-    zcoord=_global_zcoord(z,context,length(g.x)*length(g.y))
+    zh=exchange_halos(_field(z,tile,(size(z,1),length(g.x),length(g.y))),context,1)
     nx,ny=size(fx,2),size(fx,3)
     Threads.@threads :static for column in 1:nx*ny
         i=(column-1)%nx+1; j=(column-1)÷nx+1
         gi=first(tile.xrange)+i-1; gj=first(tile.yrange)+j-1
         for k in axes(fx,1)
-            dbzdy=_horizontal_derivative(bz,k,i,j,gj,g.y,3,1)
-            dbydz=_derivative(B.By,k,i,j,zcoord,1); dbxdz=_derivative(B.Bx,k,i,j,zcoord,1)
-            dbzdx=_horizontal_derivative(bz,k,i,j,gi,g.x,2,1)
-            dbydx=_horizontal_derivative(by,k,i,j,gi,g.x,2,1)
-            dbxdy=_horizontal_derivative(bx,k,i,j,gj,g.y,3,1)
+            dbxdx,dbxdy,dbxdz=_distributed_physical_derivatives(B.Bx,bx,z,zh,g,k,i,j,gi,gj)
+            dbydx,dbydy,dbydz=_distributed_physical_derivatives(B.By,by,z,zh,g,k,i,j,gi,gj)
+            dbzdx,dbzdy,dbzdz=_distributed_physical_derivatives(B.Bz,bz,z,zh,g,k,i,j,gi,gj)
             jx=(dbzdy-dbydz)/MU0; jy=(dbxdz-dbzdx)/MU0; jz=(dbydx-dbxdy)/MU0
             fx[k,i,j]=jy*B.Bz[k,i,j]-jz*B.By[k,i,j]
             fy[k,i,j]=jz*B.Bx[k,i,j]-jx*B.Bz[k,i,j]
@@ -111,10 +115,12 @@ end
 
 function _distributed_pressure_relax!(p,fx,fy,fz,rho,z,distributed,pboundary,order,g,context,sweeps)
     tile=distributed.tile; grid=distributed.global_grid; nz,nx,ny=size(p); boundary_k=order[1]
-    zcoord=_global_zcoord(z,context,length(grid.x)*length(grid.y)); targetz=fz.-rho.*g
+    targetz=fz.-rho.*g
     global_shape=(nz,length(grid.x),length(grid.y)); next=similar(p)
     fxh=exchange_halos(_field(fx,tile,global_shape),context,1)
     fyh=exchange_halos(_field(fy,tile,global_shape),context,1)
+    qzh=exchange_halos(_field(targetz,tile,global_shape),context,1)
+    zh=exchange_halos(_field(z,tile,global_shape),context,1)
     for _ in 1:sweeps
         ph=exchange_halos(_field(p,tile,global_shape),context,1)
         copyto!(next,p); @views next[boundary_k,:,:].=pboundary
@@ -125,19 +131,33 @@ function _distributed_pressure_relax!(p,fx,fy,fz,rho,z,distributed,pboundary,ord
                 k==boundary_k && continue
                 total=0.0; count=0
                 if gi>1
-                    total+=ph[k,i,j+1]+(fxh[k,i,j+1]+fx[k,i,j])*(grid.x[gi]-grid.x[gi-1])/2; count+=1
+                    dx=grid.x[gi]-grid.x[gi-1]; dz=z[k,i,j]-zh[k,i,j+1]
+                    total+=ph[k,i,j+1]+(fxh[k,i,j+1]+fx[k,i,j])*dx/2+
+                        (qzh[k,i,j+1]+targetz[k,i,j])*dz/2; count+=1
                 end
                 if gi<length(grid.x)
-                    total+=ph[k,i+2,j+1]-(fxh[k,i+2,j+1]+fx[k,i,j])*(grid.x[gi+1]-grid.x[gi])/2; count+=1
+                    dx=grid.x[gi+1]-grid.x[gi]; dz=zh[k,i+2,j+1]-z[k,i,j]
+                    total+=ph[k,i+2,j+1]-(fxh[k,i+2,j+1]+fx[k,i,j])*dx/2-
+                        (qzh[k,i+2,j+1]+targetz[k,i,j])*dz/2; count+=1
                 end
                 if gj>1
-                    total+=ph[k,i+1,j]+(fyh[k,i+1,j]+fy[k,i,j])*(grid.y[gj]-grid.y[gj-1])/2; count+=1
+                    dy=grid.y[gj]-grid.y[gj-1]; dz=z[k,i,j]-zh[k,i+1,j]
+                    total+=ph[k,i+1,j]+(fyh[k,i+1,j]+fy[k,i,j])*dy/2+
+                        (qzh[k,i+1,j]+targetz[k,i,j])*dz/2; count+=1
                 end
                 if gj<length(grid.y)
-                    total+=ph[k,i+1,j+2]-(fyh[k,i+1,j+2]+fy[k,i,j])*(grid.y[gj+1]-grid.y[gj])/2; count+=1
+                    dy=grid.y[gj+1]-grid.y[gj]; dz=zh[k,i+1,j+2]-z[k,i,j]
+                    total+=ph[k,i+1,j+2]-(fyh[k,i+1,j+2]+fy[k,i,j])*dy/2-
+                        (qzh[k,i+1,j+2]+targetz[k,i,j])*dz/2; count+=1
                 end
-                k>1 && (total+=p[k-1,i,j]+(targetz[k-1,i,j]+targetz[k,i,j])*(zcoord[k]-zcoord[k-1])/2; count+=1)
-                k<nz && (total+=p[k+1,i,j]-(targetz[k+1,i,j]+targetz[k,i,j])*(zcoord[k+1]-zcoord[k])/2; count+=1)
+                if k>1
+                    dz=z[k,i,j]-z[k-1,i,j]
+                    total+=p[k-1,i,j]+(targetz[k-1,i,j]+targetz[k,i,j])*dz/2; count+=1
+                end
+                if k<nz
+                    dz=z[k+1,i,j]-z[k,i,j]
+                    total+=p[k+1,i,j]-(targetz[k+1,i,j]+targetz[k,i,j])*dz/2; count+=1
+                end
                 next[k,i,j]=max(total/count,eps(eltype(p)))
             end
         end
@@ -150,18 +170,36 @@ end
 function _distributed_force_residual(p,rho,z,fx,fy,fz,distributed,context,g)
     tile=distributed.tile; grid=distributed.global_grid; shape=(size(p,1),length(grid.x),length(grid.y))
     ph=exchange_halos(_field(p,tile,shape),context,1)
+    fxh=exchange_halos(_field(fx,tile,shape),context,1)
+    fyh=exchange_halos(_field(fy,tile,shape),context,1)
+    qz=fz.-rho.*g
+    qzh=exchange_halos(_field(qz,tile,shape),context,1)
+    zh=exchange_halos(_field(z,tile,shape),context,1)
     scale_local=max(abs(g)*maximum(abs,rho),maximum(sqrt.(fx.^2 .+ fy.^2 .+ fz.^2)))
     scale=allreduce_max(scale_local,context)+eps(eltype(p)); worst=zero(eltype(p))
     nx,ny=size(p,2),size(p,3); column_worst=zeros(eltype(p),nx*ny)
     Threads.@threads :static for column in 1:nx*ny
         i=(column-1)%nx+1; j=(column-1)÷nx+1
         gi=first(tile.xrange)+i-1; gj=first(tile.yrange)+j-1
-        local_worst=zero(eltype(p)); zcolumn=@view z[:,i,j]
+        local_worst=zero(eltype(p))
         for k in axes(p,1)
-            rx=_horizontal_derivative(ph,k,i,j,gi,grid.x,2,1)-fx[k,i,j]
-            ry=_horizontal_derivative(ph,k,i,j,gj,grid.y,3,1)-fy[k,i,j]
-            rz=_derivative(p,k,i,j,zcolumn,1)+rho[k,i,j]*g-fz[k,i,j]
-            local_worst=max(local_worst,sqrt(rx^2+ry^2+rz^2)/scale)
+            if gi<length(grid.x)
+                dx=grid.x[gi+1]-grid.x[gi]; dz=zh[k,i+2,j+1]-z[k,i,j]; ds=hypot(dx,dz)
+                mismatch=ph[k,i+2,j+1]-p[k,i,j]-(fxh[k,i+2,j+1]+fx[k,i,j])*dx/2-
+                    (qzh[k,i+2,j+1]+qz[k,i,j])*dz/2
+                local_worst=max(local_worst,abs(mismatch)/(ds*scale))
+            end
+            if gj<length(grid.y)
+                dy=grid.y[gj+1]-grid.y[gj]; dz=zh[k,i+1,j+2]-z[k,i,j]; ds=hypot(dy,dz)
+                mismatch=ph[k,i+1,j+2]-p[k,i,j]-(fyh[k,i+1,j+2]+fy[k,i,j])*dy/2-
+                    (qzh[k,i+1,j+2]+qz[k,i,j])*dz/2
+                local_worst=max(local_worst,abs(mismatch)/(ds*scale))
+            end
+            if k<size(p,1)
+                dz=z[k+1,i,j]-z[k,i,j]
+                mismatch=p[k+1,i,j]-p[k,i,j]-(qz[k+1,i,j]+qz[k,i,j])*dz/2
+                local_worst=max(local_worst,abs(mismatch)/(abs(dz)*scale))
+            end
         end
         column_worst[column]=local_worst
     end
@@ -183,6 +221,8 @@ function reconstruct_force_balance_distributed!(distributed::DistributedAtmosphe
         eos::AbstractEOS,opacity::AbstractOpacity500,context::ParallelContext;options=ForceBalanceOptions())
     options.max_iterations>0 || throw(ArgumentError("max_iterations must be positive"))
     options.pressure_sweeps>0 || throw(ArgumentError("pressure_sweeps must be positive"))
+    options.lateral_boundary===:force_neumann || throw(ArgumentError("unsupported lateral boundary"))
+    options.bottom_boundary===:force_neumann || throw(ArgumentError("unsupported bottom boundary"))
     0<options.relaxation<=1 || throw(ArgumentError("relaxation must lie in (0,1]"))
     a=distributed.local_atmosphere; local_boundary=_local_boundary(boundary,distributed.tile)
     shape=size(a.temperature); nz,nx,ny=shape; tau=10.0.^a.grid.log_tau500
@@ -198,18 +238,20 @@ function reconstruct_force_balance_distributed!(distributed::DistributedAtmosphe
     _force_balance_log(context,"start";mode=mode isa HE3DMode ? "HE3D" : "MHS",
         global_shape="$(length(distributed.global_grid.log_tau500))x$(length(distributed.global_grid.x))x$(length(distributed.global_grid.y))",
         local_shape="$(nz)x$(nx)x$(ny)",threads=Threads.nthreads(),
-        max_iterations=options.max_iterations,pressure_sweeps=options.pressure_sweeps)
+        max_iterations=options.max_iterations,pressure_sweeps=options.pressure_sweeps,
+        lateral_boundary=options.lateral_boundary,bottom_boundary=options.bottom_boundary)
     for iteration in 1:options.max_iterations
         iteration_start=time_ns(); stage_start=time_ns()
         thermodynamics!(rhonew,nenew,eos,a.temperature,p)
         eos_seconds=(time_ns()-stage_start)/1e9; stage_start=time_ns()
-        iteration==1 && (@views rhonew[order[1],:,:].=rhoboundary)
         opacity500!(kappa,opacity,a.temperature,p,rhonew,nenew)
         opacity_seconds=(time_ns()-stage_start)/1e9; stage_start=time_ns()
         _height_from_tau!(znew,kappa,rhonew,tau,top_to_bottom)
         height_seconds=(time_ns()-stage_start)/1e9; stage_start=time_ns()
-        mode isa MHSMode ? _distributed_lorentz!(fx,fy,fz,distributed,znew,context) : (fill!(fx,0);fill!(fy,0);fill!(fz,0))
-        lorentzmax=allreduce_max(maximum(sqrt.(fx.^2 .+ fy.^2 .+ fz.^2)),context)
+        if mode isa MHSMode
+            _distributed_lorentz!(fx,fy,fz,distributed,znew,context)
+            lorentzmax=allreduce_max(maximum(sqrt.(fx.^2 .+ fy.^2 .+ fz.^2)),context)
+        end
         force_seconds=(time_ns()-stage_start)/1e9; stage_start=time_ns()
         _pressure_from_force!(pnew,rhonew,znew,fz,pboundary,order,options.gravity_m_s2)
         pnew=_distributed_pressure_relax!(pnew,fx,fy,fz,rhonew,znew,distributed,pboundary,order,
@@ -217,7 +259,8 @@ function reconstruct_force_balance_distributed!(distributed::DistributedAtmosphe
         pressure_seconds=(time_ns()-stage_start)/1e9; stage_start=time_ns()
         pchange=allreduce_max(_relative_change(pnew,p),context); rchange=allreduce_max(_relative_change(rhonew,rho),context)
         zchange=allreduce_max(maximum(abs.(znew.-z)),context)
-        fres=_distributed_force_residual(pnew,rhonew,znew,fx,fy,fz,distributed,context,options.gravity_m_s2)
+        fres=_distributed_force_residual(pnew,rhonew,znew,fx,fy,fz,distributed,context,
+            options.gravity_m_s2)
         residual_seconds=(time_ns()-stage_start)/1e9
         @. p=options.relaxation*pnew+(1-options.relaxation)*p
         @. rho=options.relaxation*rhonew+(1-options.relaxation)*rho
@@ -233,9 +276,15 @@ function reconstruct_force_balance_distributed!(distributed::DistributedAtmosphe
             return ForceBalanceDiagnostics(mode isa HE3DMode ? :HE3D : :MHS,iteration,true,pchange,rchange,fres,zchange,0.0,0.0,lorentzmax)
         end
     end
-    _force_balance_log(context,"failed";iterations=options.max_iterations,dP=pchange,drho=rchange,
-        force=fres,dz_m=zchange)
-    throw(ErrorException("distributed force balance did not converge (dP=$pchange, drho=$rchange, dz=$zchange)"))
+    if mode isa MHSMode
+        _force_balance_log(context,"failed";iterations=options.max_iterations,dP=pchange,drho=rchange,
+            force=fres,dz_m=zchange)
+        throw(ErrorException("distributed force balance did not converge (dP=$pchange, drho=$rchange, force=$fres, dz=$zchange)"))
+    end
+    a.pgas=p; a.rho=rho; a.ne=ne; a.z=z
+    _force_balance_log(context,"accepted_unconverged";iterations=options.max_iterations,dP=pchange,
+        drho=rchange,force=fres,dz_m=zchange)
+    ForceBalanceDiagnostics(:HE3D,options.max_iterations,false,pchange,rchange,fres,zchange,0.0,0.0,lorentzmax)
 end
 
 abstract type AbstractDistributedPopulationModel end

@@ -80,7 +80,7 @@ include(joinpath(@__DIR__,"..","scripts","preflight_olivia_inversion.jl"))
         @test occursin("fixture line list",report)
         @test occursin("Generated inside allocated job:",report)
         @test occursin("generated fixture",report)
-        @test occursin("nodes=8 ranks=16 ranks/node=2 CPUs/rank=16 GPUs/node=4",report)
+        @test occursin("nodes=8 ranks=16 ranks/node=2 CPUs/rank=128 GPUs/node=4",report)
         @test occursin("Sanity check OK",report)
         @test isdir(joinpath(run_dir,"outputs"))
 
