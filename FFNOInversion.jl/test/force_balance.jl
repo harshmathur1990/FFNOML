@@ -21,10 +21,11 @@ function phase1_atmosphere(;magnetic=false)
 end
 
 @testset "Phase 1 EOS, opacity and force balance" begin
+    @test ForceBalanceOptions().max_iterations==500
     @test ForceBalanceOptions().pressure_sweeps==10
     @test ForceBalanceOptions().pressure_max_sweeps==200
     @test ForceBalanceOptions().pressure_tolerance==1e-6
-    @test ForceBalanceOptions().bootstrap_iterations==100
+    @test ForceBalanceOptions().bootstrap_iterations==1000
     @test ForceBalanceOptions().continuation_iterations==10
     @test ForceBalanceOptions().max_backtracks==8
     @test ForceBalanceOptions().lateral_boundary==:force_neumann
@@ -37,19 +38,55 @@ end
     kappa=similar(p); opacity500!(kappa,opacity,T,p,rho,ne)
     @test all(kappa.==0.02)
 
+    bootstrap_atmosphere=phase1_atmosphere(); bootstrap_shape=size(bootstrap_atmosphere.temperature)
+    bootstrap_p=fill(1.0,bootstrap_shape); bootstrap_rho=fill(1e-10,bootstrap_shape)
+    bootstrap_ne=similar(bootstrap_rho); bootstrap_z=zeros(bootstrap_shape)
+    bootstrap_kappa=similar(bootstrap_rho); bootstrap_pnew=similar(bootstrap_p)
+    bootstrap_rhonew=similar(bootstrap_rho); bootstrap_nenew=similar(bootstrap_ne)
+    bootstrap_znew=similar(bootstrap_z); bootstrap_tau=10.0.^bootstrap_atmosphere.grid.log_tau500
+    bootstrap_order=collect(axes(bootstrap_p,1)); bootstrap_boundary=fill(1.0,size(bootstrap_p,2),size(bootstrap_p,3))
+    bootstrap_options=ForceBalanceOptions(bootstrap_iterations=2,relative_tolerance=eps(),
+        height_tolerance_m=eps(),relaxation=0.5)
+    @test_logs (:warn,r"accepting the finite, positive, monotonic, non-divergent state") begin
+        bootstrap_result=FFNOInversion._bootstrap_hse_1d!(bootstrap_p,bootstrap_rho,
+            bootstrap_ne,bootstrap_z,bootstrap_kappa,bootstrap_pnew,bootstrap_rhonew,
+            bootstrap_nenew,bootstrap_znew,bootstrap_atmosphere.temperature,eos,opacity,
+            bootstrap_tau,bootstrap_order,bootstrap_order,bootstrap_boundary,bootstrap_options)
+        @test bootstrap_result[1]==2
+        @test FFNOInversion._valid_hse_1d_state(bootstrap_p,bootstrap_rho,bootstrap_ne,
+            bootstrap_z,bootstrap_kappa,bootstrap_order)
+    end
+
     a=phase1_atmosphere(); T0=copy(a.temperature)
     d=reconstruct_force_balance!(a,HE3DBoundaryState(1e-10,1.0,:top),eos,opacity;
         options=ForceBalanceOptions(max_iterations=200,relative_tolerance=1e-5,force_tolerance=0.6,height_tolerance_m=1.0,relaxation=0.5))
     @test d.mode==:HE3D && d.converged && d.lorentz_max_n_m3==0
+    @test d.best_force_residual<=d.initial_force_residual
+    @test d.force_residual==d.best_force_residual
+    @test d.absolute_force_improvement==d.initial_force_residual-d.best_force_residual
     @test a.temperature==T0
     @test all(a.pgas.>0) && all(a.rho.>0) && all(a.ne.>0)
     @test all(diff(a.z[:,1,1]).<0)
+    reference_k0,reference_k1,reference_weight=
+        FFNOInversion._zero_logtau_bracket(a.grid.log_tau500)
+    interpolated_z0=(1-reference_weight).*a.z[reference_k0,:,:].+
+        reference_weight.*a.z[reference_k1,:,:]
+    @test maximum(abs,interpolated_z0)<1e-8
+
+    increasing_bracket=FFNOInversion._zero_logtau_bracket([-1.0,0.25,1.0])
+    @test increasing_bracket[1:2]==(1,2)
+    @test increasing_bracket[3]≈0.8
+    decreasing_bracket=FFNOInversion._zero_logtau_bracket([1.0,0.25,-1.0])
+    @test decreasing_bracket[1:2]==(3,2)
+    @test decreasing_bracket[3]≈0.8
 
     limited=phase1_atmosphere()
     accepted=reconstruct_force_balance!(limited,HE3DBoundaryState(1e-10,1.0,:top),eos,opacity;
         options=ForceBalanceOptions(max_iterations=1,relative_tolerance=eps(),force_tolerance=eps(),
             height_tolerance_m=eps(),relaxation=0.5,pressure_sweeps=1))
     @test accepted.mode==:HE3D && accepted.iterations==1
+    @test accepted.best_force_residual<=accepted.initial_force_residual
+    @test accepted.force_residual==accepted.best_force_residual
     @test limited.pgas!==nothing
 
     am=phase1_atmosphere(magnetic=true); B0=deepcopy(am.magnetic_field)
@@ -60,10 +97,14 @@ end
     @test am.magnetic_field.Bx==B0.Bx && am.magnetic_field.By==B0.By && am.magnetic_field.Bz==B0.Bz
     @test maximum(abs.(am.pgas.-a.pgas))>0
     @test maximum(abs.(am.pgas[:,:,2].-am.pgas[:,:,1]))>0
-    @test_throws ErrorException reconstruct_force_balance!(phase1_atmosphere(magnetic=true),
+    limited_mhs=phase1_atmosphere(magnetic=true)
+    accepted_mhs=reconstruct_force_balance!(limited_mhs,
         HE3DBoundaryState(1e-10,1.0,:top),eos,opacity;
         options=ForceBalanceOptions(max_iterations=1,relative_tolerance=eps(),force_tolerance=eps(),
             height_tolerance_m=eps(),relaxation=0.5,pressure_sweeps=1))
+    @test accepted_mhs.mode==:MHS && !accepted_mhs.converged
+    @test accepted_mhs.best_force_residual<=accepted_mhs.initial_force_residual
+    @test accepted_mhs.force_residual==accepted_mhs.best_force_residual
 
     shape=size(am.temperature); fx=zeros(shape);fy=zeros(shape);fz=zeros(shape)
     lorentz_force!(fx,fy,fz,am.magnetic_field,am.grid,am.z)
@@ -81,6 +122,9 @@ end
     crho=fill(2e-4,cshape); cg=10.0; cp=@. 1000.0-crho*cg*cz
     cfx=zeros(cshape); cfy=zeros(cshape); cfz=zeros(cshape)
     @test FFNOInversion._force_residual(cp,crho,cz,cfx,cfy,cfz,cgrid,cg)<1e-10
+    compatibility=FFNOInversion._force_integrability(cfx,cfy,cfz,crho,cz,cgrid,cg)
+    @test compatibility.maximum<1e-12
+    @test compatibility.rms<1e-12
     for k in 1:3,i in 1:3,j in 1:3
         dx,dy,dz=FFNOInversion._physical_derivatives(cp,cz,cgrid,k,i,j)
         @test isapprox(dx,0.0;atol=1e-12)
@@ -95,6 +139,21 @@ end
         max_sweeps=80,tolerance=1e-10,sweeps_used=inner_sweeps)
     @test inner_sweeps[]>2
     @test FFNOInversion._force_residual(perturbed,crho,cz,cfx,cfy,cfz,cgrid,cg)<residual_before
+
+    poisson=copy(cp); poisson[2,2,2]+=250.0
+    poisson_result=FFNOInversion._solve_pressure_poisson_3d!(poisson,cfx,cfy,cfz,
+        crho,cz,cgrid,copy(@view(cp[1,:,:])),collect(axes(cp,1)),cg;
+        max_iterations=200,tolerance=1e-12)
+    @test poisson_result.converged
+    @test FFNOInversion._force_residual(poisson,crho,cz,cfx,cfy,cfz,cgrid,cg)<1e-8
+    positive_poisson=copy(cp); positive_poisson[2,2,2]+=250.0
+    positive_result=FFNOInversion._solve_pressure_poisson_positive_3d!(
+        positive_poisson,cfx,cfy,cfz,crho,cz,cgrid,copy(@view(cp[1,:,:])),
+        collect(axes(cp,1)),cg;max_iterations=1000,tolerance=1e-9,
+        pressure_floor=1.0)
+    @test positive_result.converged
+    @test minimum(positive_poisson)>=1.0
+    @test FFNOInversion._force_residual(positive_poisson,crho,cz,cfx,cfy,cfz,cgrid,cg)<1e-6
 
     # Bx=a*z, Bz=B0 has analytic curl and verifies that Lorentz derivatives
     # use the corrugated geometry rather than a horizontally averaged z.

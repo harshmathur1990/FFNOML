@@ -261,6 +261,7 @@ end
 function _distributed_bootstrap_hse_1d!(p,rho,ne,z,kappa,pnew,rhonew,nenew,znew,
         temperature,eos,opacity,tau,top_to_bottom,order,pboundary,options,context)
     zero_force=zeros(eltype(p),size(p)); pchange=rchange=zchange=Inf
+    recent_metrics=Float64[]
     _force_balance_log(context,"bootstrap_start";mode="HSE1D",
         max_iterations=options.bootstrap_iterations)
     for iteration in 1:options.bootstrap_iterations
@@ -286,6 +287,8 @@ function _distributed_bootstrap_hse_1d!(p,rho,ne,z,kappa,pnew,rhonew,nenew,znew,
         @. p=options.relaxation*pnew+(1-options.relaxation)*p
         @. rho=options.relaxation*rhonew+(1-options.relaxation)*rho
         copyto!(ne,nenew); copyto!(z,znew)
+        push!(recent_metrics,_bootstrap_change_metric(pchange,rchange,zchange,options))
+        length(recent_metrics)>20 && popfirst!(recent_metrics)
         _force_balance_log(context,"bootstrap_iteration";iteration=iteration,dP=pchange,
             drho=rchange,dz_m=zchange,
             total_s=round((time_ns()-iteration_start)/1e9;digits=3))
@@ -295,9 +298,23 @@ function _distributed_bootstrap_hse_1d!(p,rho,ne,z,kappa,pnew,rhonew,nenew,znew,
             return iteration
         end
     end
+    local_valid=_valid_hse_1d_state(p,rho,ne,z,kappa,top_to_bottom)
+    invalid_ranks=allreduce_sum(local_valid ? 0 : 1,context)
+    final_metric=last(recent_metrics)
+    nondivergent=isfinite(final_metric) &&
+        final_metric<=options.backtrack_growth_limit*minimum(recent_metrics)
+    divergent_ranks=allreduce_sum(nondivergent ? 0 : 1,context)
+    if invalid_ranks==0 && divergent_ranks==0
+        _force_balance_log(context,"bootstrap_accepted_unconverged";
+            iterations=options.bootstrap_iterations,dP=pchange,drho=rchange,dz_m=zchange)
+        return options.bootstrap_iterations
+    end
     _force_balance_log(context,"bootstrap_failed";iterations=options.bootstrap_iterations,
+        invalid_ranks=invalid_ranks,divergent_ranks=divergent_ranks,
         dP=pchange,drho=rchange,dz_m=zchange)
-    throw(ErrorException("distributed 1-D HSE bootstrap did not converge (dP=$pchange, drho=$rchange, dz=$zchange)"))
+    throw(ErrorException("distributed 1-D HSE bootstrap was invalid or diverging " *
+        "(invalid_ranks=$invalid_ranks, divergent_ranks=$divergent_ranks, " *
+        "dP=$pchange, drho=$rchange, dz=$zchange)"))
 end
 
 function reconstruct_force_balance_distributed!(distributed::DistributedAtmosphere{Float64},boundary::HE3DBoundaryState,
@@ -329,7 +346,7 @@ function reconstruct_force_balance_distributed!(distributed::DistributedAtmosphe
     ptrial=similar(p); rhotrial=similar(rho); netrial=similar(ne); ztrial=similar(z)
     fx=zeros(shape); fy=zeros(shape); fz=zeros(shape); mode=select_force_balance(a)
     fxtrial=zeros(shape); fytrial=zeros(shape); fztrial=zeros(shape)
-    pchange=rchange=fres=zchange=Inf; lorentzmax=0.0; iterations=0
+    pchange=rchange=fres=zchange=Inf; lorentzmax=0.0; iterations=0; converged=false
     _force_balance_log(context,"start";mode=mode isa HE3DMode ? "HE3D" : "MHS",
         global_shape="$(length(distributed.global_grid.log_tau500))x$(length(distributed.global_grid.x))x$(length(distributed.global_grid.y))",
         local_shape="$(nz)x$(nx)x$(ny)",threads=Threads.nthreads(),
@@ -351,7 +368,9 @@ function reconstruct_force_balance_distributed!(distributed::DistributedAtmosphe
     continuation_needed=initial_3d_residual>options.force_tolerance
     _force_balance_log(context,"bootstrap_complete";initial_3d_force=initial_3d_residual,
         continuation=continuation_needed)
-    bootstrap_state=(copy(p),copy(rho),copy(ne),copy(z)); fallback_reason=nothing
+    best_state=(copy(p),copy(rho),copy(ne),copy(z)); fallback_reason=nothing
+    best_residual=initial_3d_residual; best_pchange=best_rchange=best_zchange=0.0
+    best_lorentzmax=lorentzmax
     current_residual=initial_3d_residual
     for iteration in 1:options.max_iterations
             iterations=iteration
@@ -424,6 +443,14 @@ function reconstruct_force_balance_distributed!(distributed::DistributedAtmosphe
                 break
             end
             residual_seconds=(time_ns()-stage_start)/1e9
+            if fres<best_residual
+                best_residual=fres; best_pchange=pchange; best_rchange=rchange
+                best_zchange=zchange
+                best_lorentzmax=mode isa MHSMode ? allreduce_max(
+                    maximum(sqrt.(fxtrial.^2 .+ fytrial.^2 .+ fztrial.^2)),context) : 0.0
+                copyto!(best_state[1],p); copyto!(best_state[2],rho)
+                copyto!(best_state[3],ne); copyto!(best_state[4],z)
+            end
             _force_balance_log(context,"iteration";iteration=iteration,dP=pchange,drho=rchange,
                 force=fres,dz_m=zchange,horizontal_weight=horizontal_weight,
                 relaxation=alpha,backtracks=accepted_backtracks,inner_sweeps=inner_sweeps[],
@@ -435,29 +462,34 @@ function reconstruct_force_balance_distributed!(distributed::DistributedAtmosphe
             if horizontal_weight==1 && pchange<=options.relative_tolerance &&
                     rchange<=options.relative_tolerance && fres<=options.force_tolerance &&
                     zchange<=options.height_tolerance_m
-                a.pgas=p; a.rho=rho; a.ne=ne; a.z=z
+                converged=true
                 _force_balance_log(context,"converged";iteration=iteration)
-                return ForceBalanceDiagnostics(mode isa HE3DMode ? :HE3D : :MHS,iteration,true,pchange,rchange,fres,zchange,0.0,0.0,lorentzmax)
+                break
             end
     end
-    degraded=mode isa HE3DMode && (fallback_reason!==nothing ||
-        fres>max(options.force_tolerance,initial_3d_residual))
-    if degraded
-        copyto!(p,bootstrap_state[1]); copyto!(rho,bootstrap_state[2])
-        copyto!(ne,bootstrap_state[3]); copyto!(z,bootstrap_state[4])
-        pchange=rchange=zchange=0.0; fres=initial_3d_residual
-        _force_balance_log(context,"fallback_hse1d";reason=something(fallback_reason,
-            "3-D residual increased"),force=fres)
-    end
-    if mode isa MHSMode
-        _force_balance_log(context,"failed";iterations=iterations,dP=pchange,drho=rchange,
-            force=fres,dz_m=zchange)
-        throw(ErrorException("distributed force balance did not converge after $iterations iterations (dP=$pchange, drho=$rchange, force=$fres, dz=$zchange)"))
-    end
+    absolute_improvement=max(0.0,initial_3d_residual-best_residual)
+    improvement=absolute_improvement/max(initial_3d_residual,eps(Float64))
+    accepted_3d=best_residual<initial_3d_residual*(1-sqrt(eps(Float64)))
+    copyto!(p,best_state[1]); copyto!(rho,best_state[2])
+    copyto!(ne,best_state[3]); copyto!(z,best_state[4])
+    pchange=best_pchange; rchange=best_rchange; zchange=best_zchange
+    fres=best_residual; lorentzmax=best_lorentzmax
     a.pgas=p; a.rho=rho; a.ne=ne; a.z=z
-    _force_balance_log(context,degraded ? "accepted_hse1d_fallback" : "accepted_unconverged";
-        iterations=iterations,dP=pchange,drho=rchange,force=fres,dz_m=zchange)
-    ForceBalanceDiagnostics(:HE3D,iterations,false,pchange,rchange,fres,zchange,0.0,0.0,lorentzmax)
+    if accepted_3d
+        _force_balance_log(context,converged ? "accepted_converged_3d" :
+            "accepted_best_unconverged_3d";iterations=iterations,dP=pchange,drho=rchange,
+            force=fres,dz_m=zchange,initial_force=initial_3d_residual,
+            absolute_improvement=absolute_improvement,relative_improvement=improvement,
+            reason=converged ? "converged" : something(fallback_reason,"iteration limit reached"))
+    else
+        _force_balance_log(context,"restored_hse1d_no_improvement";iterations=iterations,
+            force=fres,initial_force=initial_3d_residual,absolute_improvement=absolute_improvement,
+            relative_improvement=improvement,
+            reason=something(fallback_reason,"no improving 3-D iterate"))
+    end
+    ForceBalanceDiagnostics(mode isa HE3DMode ? :HE3D : :MHS,iterations,converged,
+        pchange,rchange,fres,zchange,0.0,0.0,lorentzmax,initial_3d_residual,
+        best_residual,absolute_improvement,improvement,accepted_3d)
 end
 
 abstract type AbstractDistributedPopulationModel end

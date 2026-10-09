@@ -83,7 +83,14 @@
     accepted=reconstruct_force_balance_distributed!(limited,HE3DBoundaryState(1e-10,1.0,:top),
         IdealGasEOS(),ReferenceOpacity500(kappa_m2_kg=0.02),context;options=limited_options)
     @test accepted.mode==:HE3D && accepted.iterations==1
+    @test accepted.best_force_residual<=accepted.initial_force_residual
+    @test accepted.force_residual==accepted.best_force_residual
     @test limited.local_atmosphere.pgas!==nothing
+    reference_k0,reference_k1,reference_weight=
+        FFNOInversion._zero_logtau_bracket(limited.global_grid.log_tau500)
+    interpolated_z0=(1-reference_weight).*limited.local_atmosphere.z[reference_k0,:,:].+
+        reference_weight.*limited.local_atmosphere.z[reference_k1,:,:]
+    @test maximum(abs,interpolated_z0)<1e-8
 
     bx=fill(1e-5,shape); by=zeros(shape); bz=fill(2e-5,shape)
     for k in axes(by,1); @views by[k,:,:].=(k-1)*1e-8; end
@@ -95,4 +102,5 @@
     mhs=reconstruct_force_balance_distributed!(distributed_mhs,HE3DBoundaryState(1e-10,1.0,:top),
         IdealGasEOS(),ReferenceOpacity500(kappa_m2_kg=0.02),context;options=mhs_options)
     @test mhs.mode==:MHS && mhs.lorentz_max_n_m3>0
+    @test mhs.best_force_residual<=mhs.initial_force_residual
 end

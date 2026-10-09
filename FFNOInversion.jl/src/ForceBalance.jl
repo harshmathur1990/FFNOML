@@ -23,10 +23,10 @@ struct ForceBalanceOptions{T<:AbstractFloat}
     lateral_boundary::Symbol
     bottom_boundary::Symbol
 end
-function ForceBalanceOptions(;gravity_m_s2=274.0,max_iterations=100,relative_tolerance=1e-6,
+function ForceBalanceOptions(;gravity_m_s2=274.0,max_iterations=500,relative_tolerance=1e-6,
                              force_tolerance=1e-5,height_tolerance_m=1e-3,relaxation=0.7,
                              pressure_sweeps=10,pressure_max_sweeps=200,
-                             pressure_tolerance=1e-6,bootstrap_iterations=100,
+                             pressure_tolerance=1e-6,bootstrap_iterations=1000,
                              continuation_iterations=10,max_backtracks=8,
                              backtrack_growth_limit=1.25,minimum_relaxation=1/256,
                              lateral_boundary=:force_neumann,
@@ -46,6 +46,8 @@ struct ForceBalanceDiagnostics{T<:AbstractFloat}
     mode::Symbol; iterations::Int; converged::Bool
     pressure_change::T; density_change::T; force_residual::T; height_change_m::T
     temperature_remap_error::T; magnetic_remap_error::T; lorentz_max_n_m3::T
+    initial_force_residual::T; best_force_residual::T
+    absolute_force_improvement::T; relative_force_improvement::T; accepted_3d::Bool
 end
 
 const MU0 = 4pi*1e-7
@@ -95,15 +97,50 @@ function _boundary_map(value,nx,ny,name)
     Float64.(value)
 end
 
+"""Return adjacent samples and the linear weight for `logtau500 = 0`.
+
+The returned weight is not clamped: grids that do not span zero use the two
+nearest endpoint samples for linear extrapolation.  Production atmospheres
+normally span zero, in which case this is ordinary interpolation.
+"""
+function _zero_logtau_bracket(logtau)
+    n=length(logtau)
+    n>=2 || throw(ArgumentError("at least two optical-depth samples are required to define z(logtau500=0)"))
+    increasing=logtau[end]>logtau[1]
+    decreasing=logtau[end]<logtau[1]
+    (increasing || decreasing) || throw(ArgumentError("logtau500 must be monotonic"))
+    if increasing
+        k1=clamp(searchsortedfirst(logtau,zero(eltype(logtau))),2,n)
+        k0=k1-1
+    else
+        reversed=reverse(logtau)
+        q1=clamp(searchsortedfirst(reversed,zero(eltype(logtau))),2,n)
+        q0=q1-1
+        k0=n-q0+1
+        k1=n-q1+1
+    end
+    denominator=logtau[k1]-logtau[k0]
+    iszero(denominator) && throw(ArgumentError("logtau500 samples must be distinct"))
+    weight=-logtau[k0]/denominator
+    k0,k1,weight
+end
+
 function _height_from_tau!(z,kappa,rho,tau,order)
     fill!(z,0)
     nx,ny=size(z,2),size(z,3)
+    logtau=log10.(tau)
+    reference_k0,reference_k1,reference_weight=_zero_logtau_bracket(logtau)
     Threads.@threads :static for column in 1:nx*ny
         i=(column-1)%nx+1; j=(column-1)÷nx+1
         for q in 2:length(order)
             k0,k1=order[q-1],order[q]; dtau=abs(tau[k1]-tau[k0])
             extinction=(kappa[k0,i,j]*rho[k0,i,j]+kappa[k1,i,j]*rho[k1,i,j])/2
             z[k1,i,j]=z[k0,i,j]-dtau/extinction
+        end
+        reference_height=(1-reference_weight)*z[reference_k0,i,j]+
+            reference_weight*z[reference_k1,i,j]
+        for k in axes(z,1)
+            z[k,i,j]-=reference_height
         end
     end
     z
@@ -194,6 +231,312 @@ function _relax_pressure_3d!(p,fx,fy,fz,rho,z,grid,pboundary,order,g,sweeps,
     p
 end
 
+@inline function _x_force_integral(fx,qz,z,grid,k,i,j)
+    dx=grid.x[i+1]-grid.x[i]; dz=z[k,i+1,j]-z[k,i,j]
+    (fx[k,i,j]+fx[k,i+1,j])*dx/2+(qz[k,i,j]+qz[k,i+1,j])*dz/2
+end
+
+@inline function _y_force_integral(fy,qz,z,grid,k,i,j)
+    dy=grid.y[j+1]-grid.y[j]; dz=z[k,i,j+1]-z[k,i,j]
+    (fy[k,i,j]+fy[k,i,j+1])*dy/2+(qz[k,i,j]+qz[k,i,j+1])*dz/2
+end
+
+@inline function _z_force_integral(qz,z,k,i,j)
+    dz=z[k+1,i,j]-z[k,i,j]
+    (qz[k,i,j]+qz[k+1,i,j])*dz/2
+end
+
+"""Discrete curl diagnostic for the requested force on physical grid faces.
+
+Returns the maximum and RMS normalized circulation. Zero means that the edge
+force is locally compatible with a scalar pressure. Coordinates in `grid`,
+including the configured physical `dx` and `dy`, enter every horizontal edge.
+"""
+function _force_integrability(fx,fy,fz,rho,z,grid,g)
+    qz=fz.-rho.*g; nz,nx,ny=size(rho)
+    sums=zeros(Float64,nx*ny); counts=zeros(Int,nx*ny); maxima=zeros(Float64,nx*ny)
+    Threads.@threads :static for column in 1:nx*ny
+        i=(column-1)%nx+1; j=(column-1)÷nx+1
+        local_sum=0.0; local_count=0; local_max=0.0
+        if i<nx && j<ny
+            for k in 1:nz
+                edges=(_x_force_integral(fx,qz,z,grid,k,i,j),
+                    _y_force_integral(fy,qz,z,grid,k,i+1,j),
+                    _x_force_integral(fx,qz,z,grid,k,i,j+1),
+                    _y_force_integral(fy,qz,z,grid,k,i,j))
+                circulation=edges[1]+edges[2]-edges[3]-edges[4]
+                ratio=abs(circulation)/(sum(abs,edges)+eps(Float64))
+                local_sum+=ratio^2; local_count+=1; local_max=max(local_max,ratio)
+            end
+        end
+        if i<nx
+            for k in 1:nz-1
+                edges=(_x_force_integral(fx,qz,z,grid,k,i,j),
+                    _z_force_integral(qz,z,k,i+1,j),
+                    _x_force_integral(fx,qz,z,grid,k+1,i,j),
+                    _z_force_integral(qz,z,k,i,j))
+                circulation=edges[1]+edges[2]-edges[3]-edges[4]
+                ratio=abs(circulation)/(sum(abs,edges)+eps(Float64))
+                local_sum+=ratio^2; local_count+=1; local_max=max(local_max,ratio)
+            end
+        end
+        if j<ny
+            for k in 1:nz-1
+                edges=(_y_force_integral(fy,qz,z,grid,k,i,j),
+                    _z_force_integral(qz,z,k,i,j+1),
+                    _y_force_integral(fy,qz,z,grid,k+1,i,j),
+                    _z_force_integral(qz,z,k,i,j))
+                circulation=edges[1]+edges[2]-edges[3]-edges[4]
+                ratio=abs(circulation)/(sum(abs,edges)+eps(Float64))
+                local_sum+=ratio^2; local_count+=1; local_max=max(local_max,ratio)
+            end
+        end
+        sums[column]=local_sum; counts[column]=local_count; maxima[column]=local_max
+    end
+    total_count=sum(counts)
+    (maximum=max(maximum(maxima),0.0),rms=sqrt(sum(sums)/max(total_count,1)),
+        faces=total_count)
+end
+
+function _pressure_poisson_system!(rhs,diagonal,fx,fy,fz,rho,z,grid,pboundary,
+        boundary_k,g,horizontal_weight)
+    fill!(rhs,0); fill!(diagonal,0); qz=fz.-rho.*g
+    nz,nx,ny=size(rhs)
+    Threads.@threads :static for column in 1:nx*ny
+        i=(column-1)%nx+1; j=(column-1)÷nx+1
+        for k in 1:nz
+            k==boundary_k && continue
+            source=0.0; degree=0.0
+            if i>1
+                dx=grid.x[i]-grid.x[i-1]; dz=z[k,i,j]-z[k,i-1,j]
+                weight=horizontal_weight/(dx^2+dz^2)
+                edge=(fx[k,i-1,j]+fx[k,i,j])*dx/2+(qz[k,i-1,j]+qz[k,i,j])*dz/2
+                degree+=weight; source+=weight*edge
+            end
+            if i<nx
+                dx=grid.x[i+1]-grid.x[i]; dz=z[k,i+1,j]-z[k,i,j]
+                weight=horizontal_weight/(dx^2+dz^2)
+                edge=(fx[k,i,j]+fx[k,i+1,j])*dx/2+(qz[k,i,j]+qz[k,i+1,j])*dz/2
+                degree+=weight; source-=weight*edge
+            end
+            if j>1
+                dy=grid.y[j]-grid.y[j-1]; dz=z[k,i,j]-z[k,i,j-1]
+                weight=horizontal_weight/(dy^2+dz^2)
+                edge=(fy[k,i,j-1]+fy[k,i,j])*dy/2+(qz[k,i,j-1]+qz[k,i,j])*dz/2
+                degree+=weight; source+=weight*edge
+            end
+            if j<ny
+                dy=grid.y[j+1]-grid.y[j]; dz=z[k,i,j+1]-z[k,i,j]
+                weight=horizontal_weight/(dy^2+dz^2)
+                edge=(fy[k,i,j]+fy[k,i,j+1])*dy/2+(qz[k,i,j]+qz[k,i,j+1])*dz/2
+                degree+=weight; source-=weight*edge
+            end
+            if k>1
+                dz=z[k,i,j]-z[k-1,i,j]; weight=inv(dz^2)
+                edge=(qz[k-1,i,j]+qz[k,i,j])*dz/2
+                degree+=weight; source+=weight*edge
+                k-1==boundary_k && (source+=weight*pboundary[i,j])
+            end
+            if k<nz
+                dz=z[k+1,i,j]-z[k,i,j]; weight=inv(dz^2)
+                edge=(qz[k,i,j]+qz[k+1,i,j])*dz/2
+                degree+=weight; source-=weight*edge
+                k+1==boundary_k && (source+=weight*pboundary[i,j])
+            end
+            rhs[k,i,j]=source; diagonal[k,i,j]=degree
+        end
+    end
+    @views rhs[boundary_k,:,:].=0; @views diagonal[boundary_k,:,:].=1
+    rhs,diagonal
+end
+
+function _apply_pressure_laplacian!(out,x,z,grid,boundary_k,horizontal_weight)
+    fill!(out,0); nz,nx,ny=size(x)
+    Threads.@threads :static for column in 1:nx*ny
+        i=(column-1)%nx+1; j=(column-1)÷nx+1
+        for k in 1:nz
+            k==boundary_k && continue
+            value=0.0; degree=0.0
+            if i>1
+                ds2=(grid.x[i]-grid.x[i-1])^2+(z[k,i,j]-z[k,i-1,j])^2
+                weight=horizontal_weight/ds2; degree+=weight; value-=weight*x[k,i-1,j]
+            end
+            if i<nx
+                ds2=(grid.x[i+1]-grid.x[i])^2+(z[k,i+1,j]-z[k,i,j])^2
+                weight=horizontal_weight/ds2; degree+=weight; value-=weight*x[k,i+1,j]
+            end
+            if j>1
+                ds2=(grid.y[j]-grid.y[j-1])^2+(z[k,i,j]-z[k,i,j-1])^2
+                weight=horizontal_weight/ds2; degree+=weight; value-=weight*x[k,i,j-1]
+            end
+            if j<ny
+                ds2=(grid.y[j+1]-grid.y[j])^2+(z[k,i,j+1]-z[k,i,j])^2
+                weight=horizontal_weight/ds2; degree+=weight; value-=weight*x[k,i,j+1]
+            end
+            if k>1
+                weight=inv((z[k,i,j]-z[k-1,i,j])^2); degree+=weight
+                k-1==boundary_k || (value-=weight*x[k-1,i,j])
+            end
+            if k<nz
+                weight=inv((z[k+1,i,j]-z[k,i,j])^2); degree+=weight
+                k+1==boundary_k || (value-=weight*x[k+1,i,j])
+            end
+            out[k,i,j]=degree*x[k,i,j]+value
+        end
+    end
+    out
+end
+
+"""Solve the physical-edge least-squares pressure projection with PCG."""
+function _solve_pressure_poisson_3d!(p,fx,fy,fz,rho,z,grid,pboundary,order,g;
+        horizontal_weight=1.0,max_iterations=1000,tolerance=1e-8)
+    boundary_k=order[1]; rhs=similar(p); diagonal=similar(p)
+    _pressure_poisson_system!(rhs,diagonal,fx,fy,fz,rho,z,grid,pboundary,
+        boundary_k,g,horizontal_weight)
+    @views p[boundary_k,:,:].=pboundary
+    applied=similar(p); residual=similar(p); preconditioned=similar(p)
+    direction=similar(p); product=similar(p)
+    _apply_pressure_laplacian!(applied,p,z,grid,boundary_k,horizontal_weight)
+    @. residual=rhs-applied
+    @views residual[boundary_k,:,:].=0
+    @. preconditioned=residual/diagonal
+    copyto!(direction,preconditioned)
+    rz=dot(vec(residual),vec(preconditioned))
+    rhs_norm=max(norm(vec(rhs)),eps(Float64)); relative=norm(vec(residual))/rhs_norm
+    relative<=tolerance && return (iterations=0,residual=relative,converged=true)
+    for iteration in 1:max_iterations
+        _apply_pressure_laplacian!(product,direction,z,grid,boundary_k,horizontal_weight)
+        denominator=dot(vec(direction),vec(product))
+        isfinite(denominator) && denominator>0 || return (
+            iterations=iteration-1,residual=relative,converged=false)
+        alpha=rz/denominator
+        @. p=p+alpha*direction
+        @. residual=residual-alpha*product
+        @views p[boundary_k,:,:].=pboundary
+        @views residual[boundary_k,:,:].=0
+        relative=norm(vec(residual))/rhs_norm
+        relative<=tolerance && return (iterations=iteration,residual=relative,converged=true)
+        @. preconditioned=residual/diagonal
+        rz_new=dot(vec(residual),vec(preconditioned))
+        beta=rz_new/rz
+        @. direction=preconditioned+beta*direction
+        @views direction[boundary_k,:,:].=0
+        rz=rz_new
+    end
+    (iterations=max_iterations,residual=relative,converged=false)
+end
+
+"""Normalized physical-edge least-squares objective used by the Poisson projection."""
+function _pressure_projection_residual(p,fx,fy,fz,rho,z,grid,g;
+        horizontal_weight=1.0)
+    qz=fz.-rho.*g; nz,nx,ny=size(p)
+    numerators=zeros(Float64,nx*ny); denominators=zeros(Float64,nx*ny)
+    Threads.@threads :static for column in 1:nx*ny
+        i=(column-1)%nx+1; j=(column-1)÷nx+1
+        numerator=0.0; denominator=0.0
+        if i<nx
+            for k in 1:nz
+                dx=grid.x[i+1]-grid.x[i]; dz=z[k,i+1,j]-z[k,i,j]
+                weight=horizontal_weight/(dx^2+dz^2)
+                edge=_x_force_integral(fx,qz,z,grid,k,i,j)
+                mismatch=p[k,i+1,j]-p[k,i,j]-edge
+                numerator+=weight*mismatch^2; denominator+=weight*edge^2
+            end
+        end
+        if j<ny
+            for k in 1:nz
+                dy=grid.y[j+1]-grid.y[j]; dz=z[k,i,j+1]-z[k,i,j]
+                weight=horizontal_weight/(dy^2+dz^2)
+                edge=_y_force_integral(fy,qz,z,grid,k,i,j)
+                mismatch=p[k,i,j+1]-p[k,i,j]-edge
+                numerator+=weight*mismatch^2; denominator+=weight*edge^2
+            end
+        end
+        for k in 1:nz-1
+            dz=z[k+1,i,j]-z[k,i,j]; weight=inv(dz^2)
+            edge=_z_force_integral(qz,z,k,i,j)
+            mismatch=p[k+1,i,j]-p[k,i,j]-edge
+            numerator+=weight*mismatch^2; denominator+=weight*edge^2
+        end
+        numerators[column]=numerator; denominators[column]=denominator
+    end
+    sqrt(sum(numerators)/max(sum(denominators),eps(Float64)))
+end
+
+"""Bound-constrained pressure projection using preconditioned projected gradients.
+
+All free cells obey `p >= pressure_floor`; the selected boundary plane remains
+fixed to `pboundary`. This is a diagnostic/robust fallback for incompatible
+force fields, where the unconstrained Poisson optimum can have negative gas
+pressure.
+"""
+function _solve_pressure_poisson_positive_3d!(p,fx,fy,fz,rho,z,grid,pboundary,
+        order,g;horizontal_weight=1.0,max_iterations=2000,tolerance=1e-8,
+        pressure_floor=minimum(pboundary))
+    pressure_floor>0 || throw(ArgumentError("pressure_floor must be positive"))
+    boundary_k=order[1]; rhs=similar(p); diagonal=similar(p)
+    _pressure_poisson_system!(rhs,diagonal,fx,fy,fz,rho,z,grid,pboundary,
+        boundary_k,g,horizontal_weight)
+    @. p=max(p,pressure_floor)
+    @views p[boundary_k,:,:].=pboundary
+    applied=similar(p); residual=similar(p); preconditioned=similar(p)
+    direction=similar(p); product=similar(p)
+    rhs_norm=max(norm(vec(rhs)),eps(Float64)); relative=Inf; rz=0.0
+    restart=true; free_cells=length(p)-size(p,2)*size(p,3)
+    for iteration in 1:max_iterations
+        _apply_pressure_laplacian!(applied,p,z,grid,boundary_k,horizontal_weight)
+        @. residual=rhs-applied
+        @. residual=ifelse(p<=pressure_floor*(1+1e-12) && residual<0,0.0,residual)
+        @views residual[boundary_k,:,:].=0
+        relative=norm(vec(residual))/rhs_norm
+        if relative<=tolerance
+            active=count(index->index[1]!=boundary_k &&
+                p[index]<=pressure_floor*(1+1e-10),CartesianIndices(p))
+            return (iterations=iteration-1,residual=relative,
+                converged=true,active_fraction=active/free_cells)
+        end
+        @. preconditioned=residual/diagonal
+        rz_new=dot(vec(residual),vec(preconditioned))
+        if restart
+            copyto!(direction,preconditioned)
+        else
+            beta=rz_new/rz
+            @. direction=preconditioned+beta*direction
+        end
+        @views direction[boundary_k,:,:].=0
+        _apply_pressure_laplacian!(product,direction,z,grid,boundary_k,horizontal_weight)
+        denominator=dot(vec(direction),vec(product))
+        if !(isfinite(denominator) && denominator>0 && isfinite(rz_new) && rz_new>0)
+            active=count(index->index[1]!=boundary_k &&
+                p[index]<=pressure_floor*(1+1e-10),CartesianIndices(p))
+            return (iterations=iteration-1,residual=relative,converged=false,
+                active_fraction=active/free_cells)
+        end
+        alpha=rz_new/denominator; bound_hit=false
+        for index in CartesianIndices(p)
+            index[1]==boundary_k && continue
+            if direction[index]<0
+                limit=(p[index]-pressure_floor)/(-direction[index])
+                if limit<alpha
+                    alpha=max(limit,0.0); bound_hit=true
+                end
+            end
+        end
+        if alpha==0
+            restart=true; rz=rz_new
+            @. direction=ifelse(p<=pressure_floor*(1+1e-12) && direction<0,0.0,direction)
+            continue
+        end
+        @. p=max(pressure_floor,p+alpha*direction)
+        @views p[boundary_k,:,:].=pboundary
+        restart=bound_hit; rz=rz_new
+    end
+    active=count(index->index[1]!=boundary_k &&
+        p[index]<=pressure_floor*(1+1e-10),CartesianIndices(p))
+    (iterations=max_iterations,residual=relative,converged=false,
+        active_fraction=active/free_cells)
+end
+
 _relative_change(a,b)=maximum(abs.(a.-b)./max.(abs.(b),eps(eltype(b))))
 
 function _blend_state!(out,candidate,current,alpha)
@@ -208,11 +551,30 @@ function _validate_force_state(stage,arrays...)
     nothing
 end
 
+function _valid_hse_1d_state(p,rho,ne,z,kappa,top_to_bottom)
+    all(>(zero(eltype(p))),p) || return false
+    all(>(zero(eltype(rho))),rho) || return false
+    all(>(zero(eltype(ne))),ne) || return false
+    all(>(zero(eltype(kappa))),kappa) || return false
+    all(isfinite,z) || return false
+    for q in 2:length(top_to_bottom)
+        upper,lower=top_to_bottom[q-1],top_to_bottom[q]
+        all(@view(z[lower,:,:]) .< @view(z[upper,:,:])) || return false
+    end
+    true
+end
+
+@inline function _bootstrap_change_metric(pchange,rchange,zchange,options)
+    max(pchange/options.relative_tolerance,rchange/options.relative_tolerance,
+        zchange/options.height_tolerance_m)
+end
+
 """Build a finite column-wise hydrostatic initial state before 3-D relaxation."""
 function _bootstrap_hse_1d!(p,rho,ne,z,kappa,pnew,rhonew,nenew,znew,temperature,
         eos,opacity,tau,top_to_bottom,order,pboundary,options)
     zero_force=zeros(eltype(p),size(p))
     pchange=rchange=zchange=Inf
+    recent_metrics=Float64[]
     for iteration in 1:options.bootstrap_iterations
         thermodynamics!(rhonew,nenew,eos,temperature,p)
         opacity500!(kappa,opacity,temperature,p,rhonew,nenew)
@@ -226,12 +588,22 @@ function _bootstrap_hse_1d!(p,rho,ne,z,kappa,pnew,rhonew,nenew,znew,temperature,
         @. p=options.relaxation*pnew+(1-options.relaxation)*p
         @. rho=options.relaxation*rhonew+(1-options.relaxation)*rho
         copyto!(ne,nenew); copyto!(z,znew)
+        push!(recent_metrics,_bootstrap_change_metric(pchange,rchange,zchange,options))
+        length(recent_metrics)>20 && popfirst!(recent_metrics)
         if pchange<=options.relative_tolerance && rchange<=options.relative_tolerance &&
                 zchange<=options.height_tolerance_m
             return iteration,pchange,rchange,zchange
         end
     end
-    throw(ErrorException("1-D HSE bootstrap did not converge after $(options.bootstrap_iterations) iterations (dP=$pchange, drho=$rchange, dz=$zchange)"))
+    state_valid=_valid_hse_1d_state(p,rho,ne,z,kappa,top_to_bottom)
+    final_metric=last(recent_metrics)
+    nondivergent=isfinite(final_metric) &&
+        final_metric<=options.backtrack_growth_limit*minimum(recent_metrics)
+    if state_valid && nondivergent
+        @warn "1-D HSE reached its iteration limit; accepting the finite, positive, monotonic, non-divergent state" iterations=options.bootstrap_iterations dP=pchange drho=rchange dz_m=zchange
+        return options.bootstrap_iterations,pchange,rchange,zchange
+    end
+    throw(ErrorException("1-D HSE bootstrap was invalid or diverging after $(options.bootstrap_iterations) iterations (valid=$state_valid, nondivergent=$nondivergent, dP=$pchange, drho=$rchange, dz=$zchange)"))
 end
 
 function _force_residual(p,rho,z,fx,fy,fz,grid,g)
@@ -305,7 +677,9 @@ function reconstruct_force_balance!(atmosphere::Atmosphere3D{Float64},boundary::
     initial_3d_residual=_force_residual(p,rho,z,fx,fy,fz,atmosphere.grid,
         options.gravity_m_s2)
     continuation_needed=initial_3d_residual>options.force_tolerance
-    bootstrap_state=(copy(p),copy(rho),copy(ne),copy(z)); fallback_reason=nothing
+    best_state=(copy(p),copy(rho),copy(ne),copy(z)); fallback_reason=nothing
+    best_residual=initial_3d_residual; best_pchange=best_rchange=best_zchange=0.0
+    best_lorentzmax=lorentzmax
     current_residual=initial_3d_residual
     for iteration in 1:options.max_iterations
         iterations=iteration; thermodynamics!(rhonew,nenew,eos,atmosphere.temperature,p)
@@ -353,25 +727,34 @@ function reconstruct_force_balance!(atmosphere::Atmosphere3D{Float64},boundary::
             fallback_reason="all backtracking trials increased the force residual from $current_residual"
             break
         end
+        if fres<best_residual
+            best_residual=fres; best_pchange=pchange; best_rchange=rchange
+            best_zchange=zchange
+            best_lorentzmax=mode isa MHSMode ?
+                maximum(sqrt.(fxtrial.^2 .+ fytrial.^2 .+ fztrial.^2)) : 0.0
+            copyto!(best_state[1],p); copyto!(best_state[2],rho)
+            copyto!(best_state[3],ne); copyto!(best_state[4],z)
+        end
         if horizontal_weight==1 && pchange<=options.relative_tolerance &&
                 rchange<=options.relative_tolerance && fres<=options.force_tolerance &&
                 zchange<=options.height_tolerance_m
             converged=true; break
         end
     end
-    degraded=!converged && (fallback_reason!==nothing ||
-        fres>max(options.force_tolerance,initial_3d_residual))
-    if degraded && mode isa HE3DMode
-        copyto!(p,bootstrap_state[1]); copyto!(rho,bootstrap_state[2])
-        copyto!(ne,bootstrap_state[3]); copyto!(z,bootstrap_state[4])
-        pchange=rchange=zchange=0.0; fres=initial_3d_residual
-        @warn "3-D HE relaxation degraded; using the converged 1-D HSE bootstrap" reason=something(fallback_reason,"3-D residual increased") force=fres
-    end
-    if !converged && mode isa MHSMode
-        throw(ErrorException("force balance did not converge after $(options.max_iterations) iterations (dP=$pchange, drho=$rchange, force=$fres, dz=$zchange)"))
-    elseif !converged && !degraded
-        @warn "HE3D reached its iteration limit; accepting the 3-D relaxed atmosphere" iterations=options.max_iterations dP=pchange drho=rchange force=fres dz_m=zchange
+    absolute_improvement=max(0.0,initial_3d_residual-best_residual)
+    improvement=absolute_improvement/max(initial_3d_residual,eps(Float64))
+    accepted_3d=best_residual<initial_3d_residual*(1-sqrt(eps(Float64)))
+    copyto!(p,best_state[1]); copyto!(rho,best_state[2])
+    copyto!(ne,best_state[3]); copyto!(z,best_state[4])
+    pchange=best_pchange; rchange=best_rchange; zchange=best_zchange
+    fres=best_residual; lorentzmax=best_lorentzmax
+    if accepted_3d && !converged
+        @warn "accepting the best non-divergent 3-D force-balance improvement" iterations=iterations initial_force=initial_3d_residual best_force=best_residual relative_improvement=improvement reason=something(fallback_reason,"iteration limit reached")
+    elseif !accepted_3d
+        @warn "3-D force balance did not improve on the 1-D baseline; restoring 1-D HSE" iterations=iterations initial_force=initial_3d_residual reason=something(fallback_reason,"no improving 3-D iterate")
     end
     atmosphere.pgas=p; atmosphere.rho=rho; atmosphere.ne=ne; atmosphere.z=z
-    ForceBalanceDiagnostics(mode isa HE3DMode ? :HE3D : :MHS,iterations,converged,pchange,rchange,fres,zchange,0.0,0.0,lorentzmax)
+    ForceBalanceDiagnostics(mode isa HE3DMode ? :HE3D : :MHS,iterations,converged,
+        pchange,rchange,fres,zchange,0.0,0.0,lorentzmax,initial_3d_residual,
+        best_residual,absolute_improvement,improvement,accepted_3d)
 end
