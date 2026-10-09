@@ -6,9 +6,10 @@ using HDF5
 
 
 function atom_file(atom_name)
+    atom_dir = normpath(joinpath(@__DIR__,"..","multi3d","input","atoms"))
     files = Dict(
-        "H" => "/mn/stornext/u3/harshm/Documents/WorkRepo/multi3d/input/atoms/atom.h6_tiago2.yaml",
-        "CA" => "/mn/stornext/u3/harshm/Documents/WorkRepo/multi3d/input/atoms/atom.ca2.yaml",
+        "H" => joinpath(atom_dir,"atom.h6_tiago2.yaml"),
+        "CA" => joinpath(atom_dir,"atom.ca2.yaml"),
     )
     haskey(files, atom_name) || error("No atom file configured for $(atom_name)")
     return files[atom_name]

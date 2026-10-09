@@ -1,0 +1,12 @@
+training_FFNO3D_zscale_expand_lognlte/*
+!training_FFNO3D_zscale_expand_lognlte/.gitkeep
+reference/*
+!reference/.gitkeep
+tmp/
+julia-environment/
+ffno-julia-setup-*.out
+ffno-julia-setup-*.err
+olivia-runtime-*.out
+olivia-runtime-*.err
+olivia-runtime-evidence-*/
+olivia-runtime-evidence-*.tar.gz

@@ -216,3 +216,13 @@ __marimo__/
 .streamlit/secrets.toml
 
 .DS_Store
+testdata/
+tmp/
+IO/
+training_FFNO3D_zscale_expand_lognlte/
+
+# Checked-in run-directory templates contain placeholder files inside folders
+# whose production counterparts are ignored above.
+!examples/
+!examples/**
+examples/**/.DS_Store

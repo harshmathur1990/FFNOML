@@ -187,11 +187,12 @@ end
 
 function all_atom_configs(pred)
     snapshot_dir = dirname(pred.mesh_file)
+    atom_dir = normpath(joinpath(@__DIR__,"..","multi3d","input","atoms"))
 
     return [
         (
             name = "H",
-            atom_file = "/mn/stornext/u3/harshm/Documents/WorkRepo/multi3d/input/atoms/atom.h6_tiago2.yaml",
+            atom_file = joinpath(atom_dir,"atom.h6_tiago2.yaml"),
             pops_file = joinpath(snapshot_dir, "H", "out_pop"),
             nlevels = 6,
             line_index = 5,
@@ -200,7 +201,7 @@ function all_atom_configs(pred)
         ),
         (
             name = "CA",
-            atom_file = "/mn/stornext/u3/harshm/Documents/WorkRepo/multi3d/input/atoms/atom.ca2.yaml",
+            atom_file = joinpath(atom_dir,"atom.ca2.yaml"),
             pops_file = joinpath(snapshot_dir, "CA", "out_pop"),
             nlevels = 6,
             line_index = 5,
@@ -740,5 +741,7 @@ function run_all(; predname=nothing)
     end
 end
 
-cli_args = parse_cli_args(ARGS)
-run_all(predname=cli_args.predname)
+if abspath(PROGRAM_FILE) == @__FILE__
+    cli_args = parse_cli_args(ARGS)
+    run_all(predname=cli_args.predname)
+end

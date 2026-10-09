@@ -1,0 +1,7 @@
+IO/*
+!IO/.gitkeep
+training_FFNO3D_zscale_expand_lognlte/*
+!training_FFNO3D_zscale_expand_lognlte/.gitkeep
+slurm-*.out
+slurm-*.err
+output-*.txt

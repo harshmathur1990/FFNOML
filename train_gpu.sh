@@ -23,9 +23,23 @@ source /cluster/home/harshm/loadnvidia.sh
 #module load NRIS/GPU
 #module load PyTorch/2.10.0
 
-cd /cluster/work/projects/nn2834k/harshm/FFNOML
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+FFNOML_REPO_DIR=${FFNOML_REPO_DIR:-${script_dir}}
+FFNOML_RUN_DIR=${FFNOML_RUN_DIR:-${SLURM_SUBMIT_DIR}}
 
-echo "Work dir: $(pwd)"
+FFNOML_REPO_DIR=$(cd -- "${FFNOML_REPO_DIR}" && pwd)
+mkdir -p "${FFNOML_RUN_DIR}"
+FFNOML_RUN_DIR=$(cd -- "${FFNOML_RUN_DIR}" && pwd)
+export FFNOML_REPO_DIR FFNOML_RUN_DIR
+
+mkdir -p \
+  "${FFNOML_RUN_DIR}/IO" \
+  "${FFNOML_RUN_DIR}/training_FFNO3D_zscale_expand_lognlte"
+
+cd "${FFNOML_REPO_DIR}"
+
+echo "Repository dir: ${FFNOML_REPO_DIR}"
+echo "Run dir: ${FFNOML_RUN_DIR}"
 echo "Job ID: ${SLURM_JOB_ID}"
 echo "Node list: ${SLURM_JOB_NODELIST}"
 echo "Num nodes: ${SLURM_NNODES}"
@@ -72,6 +86,6 @@ srun --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 \
     --rdzv_backend=c10d \
     --rdzv_endpoint="${MASTER_ADDR}:${MASTER_PORT}" \
     pipeline.py --train \
-  2>&1 | tee "/cluster/work/projects/nn2834k/harshm/FFNOML/output-${SLURM_JOB_ID}.txt"
+  2>&1 | tee "${FFNOML_RUN_DIR}/output-${SLURM_JOB_ID}.txt"
 
 echo "End: $(date)"

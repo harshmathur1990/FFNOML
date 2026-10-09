@@ -1,0 +1,82 @@
+mode = "forward"
+
+[inputs]
+initial_atmosphere_file = "inputs/initial_atmosphere.h5"
+time_index = 1
+
+[outputs]
+synthesis_file = "outputs/synthesis.h5"
+atmosphere_file = "outputs/forward_atmosphere.h5"
+
+[atmosphere]
+pressure_top_pa = 0.1
+storage_order = "python"
+
+[atmosphere.datasets]
+logtau500 = "logtau_500"
+temperature = "temperature"
+# vturb = "vturb" # optional; defaults to zero if not configured
+vx = "vx"
+vy = "vy"
+vz = "vz"
+# Bx = "Bx"
+# By = "By"
+# Bz = "Bz"
+
+[grid]
+dx_m = 48000.0
+dy_m = 48000.0
+
+[[regions]]
+start_angstrom = 6561.92
+step_angstrom = 0.020
+count = 88
+normalization = 4.323060e-05
+psf_type = "none"
+
+[[regions.sources]]
+mode = "ffno"
+species = "H"
+line = "halpha"
+
+[[regions]]
+start_angstrom = 8540.23102
+step_angstrom = 0.04267
+count = 88
+normalization = 4.227725e-05
+psf_type = "none"
+
+[[regions.sources]]
+mode = "ffno"
+species = "CA"
+line = "ca_ii_8542"
+
+[[regions]]
+start_angstrom = 6301.24942
+step_angstrom = 0.01007
+count = 46
+normalization = 4.054384e-05
+psf_type = "none"
+
+[[regions.sources]]
+mode = "kurucz_lte"
+linelist_file = "inputs/kurucz_6302.list"
+
+[physics]
+redistribution = "non_prd"
+
+[observation]
+stokes = ["I"]
+
+[observation.gaussian_psf]
+spatial_fwhm_x_m = 96000.0
+spatial_fwhm_y_m = 96000.0
+
+[parallel]
+enabled = true
+decomposition = "cartesian_2d"
+gpu_launcher_rank = 0
+gpu_connect_timeout_seconds = 180.0
+gpu_status_timeout_seconds = 300.0
+gpu_diagnostic_interval_seconds = 30.0
+gpu_diagnostics_directory = ""

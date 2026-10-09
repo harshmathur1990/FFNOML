@@ -20,8 +20,12 @@ constexpr double HH = 6.62606957E-27;
 constexpr double CC = 2.99792458E10;
 constexpr double AMU = 1.660538921E-24;
 constexpr double EV = 1.602176565E-12;
+constexpr double ME = 9.10938188E-28;
+constexpr double PI = 3.14159265358979323846;
+const double SAHA_FAC = std::pow((2.0*PI*ME*BK)/(HH*HH),1.5);
 constexpr int NCONTR = 28;
 constexpr double PREC = 1.0e-5;
+constexpr int MAX_ION_STAGES = 8;
 
 const std::array<double, 99> ABUND_RAW = {{
     -0.04048,-1.07,-10.95,-10.89,-9.44,-3.48,-3.99,-3.11,-7.48,-3.95,
@@ -83,6 +87,10 @@ struct Element {
 struct GasResult {
     double pg;
     double fe;
+    double f1;
+    double f2;
+    double f3;
+    double phtot;
 };
 
 class WittEOS {
@@ -118,6 +126,40 @@ public:
         return pe / (BK * temp) * 1.0e6;
     }
 
+    void thermodynamics_from_pgas_si(double temp, double pgas_pa,
+                                     double& rho_kg_m3, double& ne_m3) const {
+        const double pgas_cgs = pgas_pa * 10.0;
+        const double pe = pe_from_pg(temp, pgas_cgs);
+        rho_kg_m3 = rho_from_pe(temp, pe) * 1.0e3;
+        ne_m3 = pe / (BK * temp) * 1.0e6;
+    }
+
+    void continuum_state_si(double temp, double pgas_pa, double& rho_kg_m3,
+                            double& xna_cm3, double& xne_cm3, double* n) const {
+        const double pgas = pgas_pa * 10.0;
+        const double pe = pe_from_pg(temp, pgas);
+        rho_kg_m3 = rho_from_pe(temp, pe) * 1.0e3;
+        xna_cm3 = (pgas-pe)/(BK*temp);
+        xne_cm3 = pe/(BK*temp);
+        background_partials(temp, pgas, pe, n);
+    }
+
+    double kurucz_lower_population_m3(double temp,double pgas_pa,int atomic_number,
+                                      int stage,double energy_j,double statistical_weight) const {
+        if(atomic_number<1 || atomic_number>99 || stage<0) throw std::runtime_error("invalid Kurucz species");
+        const double pgas=pgas_pa*10.0, pe=pe_from_pg(temp,pgas);
+        double xpa[8]={}; ion_partials(atomic_number-1,temp,pgas,pe,xpa,0);
+        if(stage>=8) throw std::runtime_error("unsupported Kurucz ion stage");
+        return xpa[stage]*statistical_weight*std::exp(-energy_j/(BK*1.0e-7*temp))*1.0e6;
+    }
+
+    double neutral_hydrogen_m3(double temp,double pgas_pa) const {
+        const double pgas=pgas_pa*10.0,pe=pe_from_pg(temp,pgas);
+        double xpa[8]={},u[8]={}; int count=0;
+        ion_partials(0,temp,pgas,pe,xpa,0); partition_f(0,temp,0,u,count);
+        return xpa[0]*u[0]*1.0e6;
+    }
+
 private:
     std::array<double, 99> ABUND{};
     std::vector<double> tpf;
@@ -137,6 +179,9 @@ private:
             Element e;
             e.npf = read_u32_be(in);
             e.nstage = read_u32_be(in);
+            if (e.nstage == 0 || e.nstage > MAX_ION_STAGES) {
+                throw std::runtime_error("Partition-function ion-stage count exceeds the fixed 8-stage workspace");
+            }
             e.pf.resize(size_t(npf) * e.nstage);
             for (double& v : e.pf) v = read_f64_be(in);
             e.eion.resize(e.nstage);
@@ -178,7 +223,12 @@ private:
     }
 
     void partition_f(int n, double t, int only, double* out, int& count) const {
+        if (n < 0 || n >= int(el.size())) throw std::runtime_error("invalid partition-function element index");
+        if (only < 0 || only > MAX_ION_STAGES) throw std::runtime_error(
+            "requested partition-function stage count exceeds the fixed 8-stage workspace");
         const Element& e = el[n];
+        if (e.nstage == 0 || e.nstage > MAX_ION_STAGES) throw std::runtime_error(
+            "invalid partition-function ion-stage count");
         count = int(e.nstage);
         if (only > 0) count = std::min(count, only);
         for (int ii = 0; ii < count; ++ii) {
@@ -191,6 +241,38 @@ private:
     double saha(double theta, double eion, double u1, double u2, double pe) const {
         return u2 * std::exp(2.302585093 * (9.0804625434325867 - theta * eion)) /
                (u1 * pe * std::pow(theta, 2.5));
+    }
+
+    void ion_partials(int atom, double temp, double pgas, double pe,
+                      double* xpa, int requested) const {
+        double u[8]; int count=0; partition_f(atom,temp,requested,u,count);
+        const double xna=(pgas-pe)/(BK*temp), xne=pe/(BK*temp);
+        const double ntot=xna*ABUND[atom];
+        xpa[0]=1.0;
+        for (int stage=1;stage<count;++stage)
+            xpa[stage]=2.0*SAHA_FAC*(u[stage]/u[stage-1])*std::pow(temp,1.5)*
+                std::exp(-el[atom].eion[stage-1]*EV/(temp*BK))/xne;
+        for (int stage=count-1;stage>0;--stage) xpa[0]=1.0+xpa[0]*xpa[stage];
+        xpa[0]=1.0/xpa[0];
+        for (int stage=1;stage<count;++stage) xpa[stage]*=xpa[stage-1];
+        for (int stage=0;stage<count;++stage) xpa[stage]*=ntot/u[stage];
+    }
+
+    void background_partials(double temp,double pgas,double pe,double* n) const {
+        double x[8] = {};
+        ion_partials(1,temp,pgas,pe,x,3); n[3]=x[0]; n[4]=x[1]; n[5]=x[2];
+        ion_partials(5,temp,pgas,pe,x,0); n[6]=x[0];
+        ion_partials(12,temp,pgas,pe,x,0); n[7]=x[0];
+        ion_partials(13,temp,pgas,pe,x,0); n[8]=x[0]; n[9]=x[1];
+        ion_partials(19,temp,pgas,pe,x,0); n[10]=x[0]; n[11]=x[1];
+        ion_partials(11,temp,pgas,pe,x,0); n[12]=x[0]; n[13]=x[1];
+        ion_partials(25,temp,pgas,pe,x,0); n[14]=x[0];
+        ion_partials(6,temp,pgas,pe,x,0); n[15]=x[0];
+        ion_partials(7,temp,pgas,pe,x,0); n[16]=x[0];
+        const GasResult h=gasc(temp,pe);
+        n[0]=h.f1*h.phtot/(temp*BK)*0.5;
+        n[1]=h.f2*h.phtot/(temp*BK);
+        n[2]=h.f3*h.phtot/(temp*BK);
     }
 
     double init_pe_from_pg(double t, double pg) const {
@@ -354,7 +436,7 @@ private:
         }
 
         const double pg = pe * (1.0 + (f1 + f2 + f3 + f4 + f5 + ab_others) / fe);
-        return {pg, fe};
+        return {pg,fe,f1,f2,f3,phtot};
     }
 
     double pg_from_pe(double t, double pe) const {
@@ -493,6 +575,42 @@ int witt_ne(
     }
 }
 
+template <typename Function>
+int parallel_cells(std::size_t n, int requested_threads, Function&& function) {
+    if (n == 0) return 0;
+    unsigned int nthreads = requested_threads > 0
+        ? static_cast<unsigned int>(requested_threads)
+        : std::thread::hardware_concurrency();
+    if (nthreads == 0) nthreads = 1;
+    nthreads = static_cast<unsigned int>(std::min<std::size_t>(nthreads, n));
+    if (nthreads == 1) {
+        try {
+            for (std::size_t index = 0; index < n; ++index) function(index);
+            return 0;
+        } catch (...) {
+            return 1;
+        }
+    }
+    std::atomic<bool> failed{false};
+    std::vector<std::thread> pool;
+    pool.reserve(nthreads);
+    const std::size_t block = (n + nthreads - 1) / nthreads;
+    for (unsigned int thread = 0; thread < nthreads; ++thread) {
+        const std::size_t begin = std::min<std::size_t>(thread * block, n);
+        const std::size_t end = std::min<std::size_t>(begin + block, n);
+        if (begin >= end) break;
+        pool.emplace_back([&, begin, end]() {
+            try {
+                for (std::size_t index = begin; index < end; ++index) function(index);
+            } catch (...) {
+                failed.store(true, std::memory_order_relaxed);
+            }
+        });
+    }
+    for (auto& thread : pool) thread.join();
+    return failed.load(std::memory_order_relaxed) ? 1 : 0;
+}
+
 }  // namespace
 
 extern "C" int witt_ne_from_rho(
@@ -521,4 +639,103 @@ extern "C" int witt_ne_from_pgas(
     return witt_ne(
         pf_path, temp, pgas_pa, ne_m3, n, threads, show_progress, true
     );
+}
+
+extern "C" int witt_thermodynamics_from_pgas(
+    const char* pf_path, const double* temp, const double* pgas_pa,
+    double* rho_kg_m3, double* ne_m3, std::size_t n
+) {
+    try {
+        WittEOS eos(pf_path);
+        return parallel_cells(n, 1, [&](std::size_t i) {
+            eos.thermodynamics_from_pgas_si(temp[i],pgas_pa[i],rho_kg_m3[i],ne_m3[i]);
+        });
+    } catch (...) {
+        return 1;
+    }
+}
+
+extern "C" int witt_thermodynamics_from_pgas_parallel(
+    const char* pf_path, const double* temp, const double* pgas_pa,
+    double* rho_kg_m3, double* ne_m3, std::size_t n, int threads
+) {
+    try {
+        WittEOS eos(pf_path);
+        return parallel_cells(n, threads, [&](std::size_t i) {
+            eos.thermodynamics_from_pgas_si(temp[i],pgas_pa[i],rho_kg_m3[i],ne_m3[i]);
+        });
+    } catch (...) {
+        return 1;
+    }
+}
+
+extern "C" int witt_continuum_state_from_pgas(
+    const char* pf_path, const double* temp, const double* pgas_pa,
+    double* rho_kg_m3, double* xna_cm3, double* xne_cm3,
+    double* partials, std::size_t n
+) {
+    try {
+        WittEOS eos(pf_path);
+        return parallel_cells(n, 1, [&](std::size_t i) {
+            eos.continuum_state_si(temp[i],pgas_pa[i],rho_kg_m3[i],xna_cm3[i],
+                                   xne_cm3[i],partials+17*i);
+        });
+    } catch (...) {
+        return 1;
+    }
+}
+
+extern "C" int witt_continuum_state_from_pgas_parallel(
+    const char* pf_path, const double* temp, const double* pgas_pa,
+    double* rho_kg_m3, double* xna_cm3, double* xne_cm3,
+    double* partials, std::size_t n, int threads
+) {
+    try {
+        WittEOS eos(pf_path);
+        return parallel_cells(n, threads, [&](std::size_t i) {
+            eos.continuum_state_si(temp[i],pgas_pa[i],rho_kg_m3[i],xna_cm3[i],
+                                   xne_cm3[i],partials+17*i);
+        });
+    } catch (...) {
+        return 1;
+    }
+}
+
+extern "C" int witt_kurucz_populations_from_pgas(
+    const char* pf_path,const double* temp,const double* pgas_pa,
+    int atomic_number,int stage,double energy_j,double statistical_weight,
+    double* lower_population_m3,double* neutral_hydrogen_m3,std::size_t n
+) {
+    try {
+        WittEOS eos(pf_path);
+        for(std::size_t i=0;i<n;++i) {
+            lower_population_m3[i]=eos.kurucz_lower_population_m3(temp[i],pgas_pa[i],atomic_number,stage,energy_j,statistical_weight);
+            neutral_hydrogen_m3[i]=eos.neutral_hydrogen_m3(temp[i],pgas_pa[i]);
+        }
+        return 0;
+    } catch(...) { return 1; }
+}
+
+extern "C" void* witt_create_backend(const char* pf_path) {
+    try { return new WittEOS(pf_path); } catch(...) { return nullptr; }
+}
+
+extern "C" void witt_destroy_backend(void* backend) {
+    delete static_cast<WittEOS*>(backend);
+}
+
+extern "C" int witt_kurucz_populations(
+    void* backend,const double* temp,const double* pgas_pa,
+    int atomic_number,int stage,double energy_j,double statistical_weight,
+    double* lower_population_m3,double* neutral_hydrogen_m3,std::size_t n
+) {
+    try {
+        if(!backend) return 1;
+        const WittEOS& eos=*static_cast<WittEOS*>(backend);
+        for(std::size_t i=0;i<n;++i) {
+            lower_population_m3[i]=eos.kurucz_lower_population_m3(temp[i],pgas_pa[i],atomic_number,stage,energy_j,statistical_weight);
+            neutral_hydrogen_m3[i]=eos.neutral_hydrogen_m3(temp[i],pgas_pa[i]);
+        }
+        return 0;
+    } catch(...) { return 1; }
 }

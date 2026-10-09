@@ -1,0 +1,140 @@
+# FFNOInversion.jl
+
+Spatially coupled Julia inversion layer implementing Phases 0-6 of the project planning PDF.
+
+For your first atmosphere-to-spectrum run, use the
+[short starter guide](../examples/inversion_run/START_HERE.md).
+
+## Run contract
+
+One inversion run has exactly two scientific inputs and two scientific outputs:
+
+1. observation input file - intensity, uncertainty, `(wavelength, Stokes)` weights, and spatial weights;
+2. initial-atmosphere input file - `logtau_500`, temperature, velocities, top pressure, and optional magnetic field;
+3. synthesis output file - final full-grid synthetic spectrum after the configured PSF, wavelengths, residual/chi-square diagnostics, and provenance;
+4. atmosphere output file - recovered atmosphere plus derived pressure, density, electron density, height, populations, convergence history, and provenance.
+
+The TOML file configures these four paths but is not itself a scientific data input.
+
+## Current capabilities
+
+- canonical 3D grids, atmospheres, optional magnetic fields, observations and node fields;
+- automatic HE3D selection when B is absent and MHS selection when B is present;
+- Stokes-aware spectral cubes with intensity-only/non-PRD Release 1 defaults;
+- stable population, redistribution, synthesis and observation interfaces;
+- a two-input/two-output run contract plus configuration for `logtau_500`, temperature, velocities, top pressure, `dx/dy`, and any number of simultaneously inverted spectral regions;
+- Gaussian spectral/spatial PSFs on the full grid and zero-capable wavelength/2D-spatial chi-square weights;
+- vertical and horizontal regularization of selected recovered atmospheric variables;
+- deterministic mock forward model, weighted residual packing, configuration dry-run and restart checkpoints.
+
+Phase 1 provides iterative HE3D/MHS reconstruction, an in-memory Wittmann EOS adapter, Lorentz-force diagnostics, and a native Julia production continuum-opacity backend. The constant-opacity backend remains only for manufactured tests.
+
+Phase 2 defines and validates the six-channel population request, level metadata, units, positivity and canonical array layouts. `RecordedPopulationModel` remains available for deterministic CPU tests. The inversion application has one production FFNO implementation: the persistent multi-GPU FSDP service introduced by Phase 6.
+
+Phase 3 adds production mixed intensity synthesis. Each region may combine FFNO Halpha or Ca II 8542 with RH K94 LTE lines before one formal solution. `build_synthesis_setup` caches Muspel atom/continuum/Voigt data, K94 lists, and the persistent Wittmann partition-function backend outside the pixel loops. Exactly one contributor owns continuum, so blended sources do not double count it. LTE-only regions do not invoke FFNO. Configured STiC-style air wavelengths are retained for observations and converted to vacuum for line physics. Muspel is pinned to Git commit `01ec68d`, whose `Atmosphere3D` accepts the corrugated three-dimensional height field produced by HE3D/MHS.
+
+The Phase 4 runtime foundation uses hybrid MPI plus Julia threading. MPI ranks own non-overlapping 2D spatial tiles; typed numeric payloads are scattered/gathered without Julia object serialization; coupled spatial kernels use corner-complete halo exchange; and `Forward.jl`-style column synthesis uses one mutable workspace per Julia thread. Global rank 0 alone controls the persistent or nested GPU launcher through a TCP status channel, so non-root ranks do not hold an MPI collective open during an overlapping Slurm/NCCL launch. MPI calls remain on the initializing Julia thread.
+
+Olivia deployment validation is provided by `scripts/run_olivia_runtime_tests.sbatch`.
+It runs small MPI/CUDA/NCCL probes, intentional CPU and GPU-rank stalls with
+bounded timeouts, Slurm-step cleanup, failure propagation, post-timeout recovery,
+and diagnostic collection without loading the scientific forward model. See
+`docs/reports/olivia-runtime-test-guide.md` for submission and return-artifact
+instructions.
+
+The production GPU control plane also supports an internal non-root status
+timeout and charge-style periodic per-rank diagnostics. Configure these through
+the `parallel` TOML keys or the `FFNO_GPU_*` environment overrides documented in
+ADR-009. The external Slurm watchdog remains necessary for a rank-0 process that
+cannot be interrupted safely.
+
+Phase 4 integrates that runtime into the sole application-level forward path: distributed node expansion, HE3D/optional-B MHS and EOS, rank-0 population inference with tile redistribution, threaded local synthesis, halo-aware spatial PSF, distributed observations and weights, global chi-squared/regularization reductions, and final atmosphere/spectrum collection. One-rank development runs and multi-rank production runs invoke the same `HybridForwardModel` and `forward!` implementation.
+
+Phase 5 adds the first closed-loop inversion. Bounded temperature and velocity node maps are packed into scaled coarse control maps, broadcast from rank 0, expanded directly onto MPI-owned tiles, and evaluated with separately reported normalized chi-square and 3D regularization terms. A deterministic projected pattern search provides the derivative-free reference solver; centered directional finite differences provide the gradient oracle for Phase 6. Checkpoints are atomic, capability/layout validated, and portable across compatible MPI/thread topologies. TOML/CSV diagnostic bundles retain final controls and every objective component.
+
+Phase 6 implements the production gradient path. Exact distributed PSF and formal-transfer transposes, FFNO-transition and Julia Kurucz LTE pullbacks, Muspel/Wittmann local fallbacks, the persistent multi-GPU FFNO VJP, and the force-balance/regularization composite feed synchronized bounded L-BFGS without a dense Jacobian. The GPU service combines `FULL_SHARD` FSDP parameters with H-slab-distributed activations/FFTs and eval-mode activation checkpointing. Only torchrun rank 0 reads each full checkpoint; every GPU retains only parameter shards between wrapped-block calls. H and Ca can reside together in one persistent service while contributing with Kurucz LTE lines to the same objective. `run_inversion!` positively requires this FSDP backend with at least two GPU ranks; no alternate production FFNO route exists. The centered finite-difference backend remains only as the validation oracle.
+
+`src/Execution.jl` and `scripts/invert.jl` provide the canonical HDF5 two-input/two-output route. Atmosphere files use `(time,z,y,x)` and observation files use `(time,Stokes,wavelength,y,x)`; internal conversion is explicit and performs no interpolation. A model-factory file supplies deployment-specific checkpoints, atom data, EOS and synthesis construction without becoming a third scientific input.
+
+Olivia job 2072078 passed the Phase 6 solver, rejection-recovery, 800 x 800 memory and CUDA/NCCL VJP probes. The cumulative regression adds two acceptance gates: a real H-checkpoint `FULL_SHARD` FSDP VJP versus finite differences, and the complete outer-MPI to persistent-FSDP predict/VJP/shutdown route. All five jobs from the regression chain must pass before the production GPU path is accepted.
+
+The scheduler chooses rank count and Julia chooses threads per rank. For example, a 256-core allocation can start with 16 ranks and 16 threads per rank. Set BLAS/OpenMP thread counts to one when Julia threads own column-level parallelism.
+
+## Grid and objective convention
+
+The atmosphere file supplies the complete `logtau_500` vector and the initial temperature and velocity cubes. Repeatable `[[regions]]` tables configure simultaneous spectral windows with their synthesis grids, continuum normalization, PSF type, and PSF file; `dx_m`/`dy_m` describe the spatial forward grid. The observation layer convolves the full spectral-spatial cube without resizing it. Chi-square uses a `(wavelength, Stokes)` weight matrix and a general 2D spatial-weight map. Zero entries exclude wavelengths, Stokes components, or pixels; an all-zero Stokes column disables inversion of that component.
+
+Regularization is evaluated on the full recovered atmosphere independently of spectral chi-square weights. Vertical regularization uses seven fixed slots `(Temp, Vlos, vturb, B, inc, azi, pgas_boundary)`, one global multiplier, seven relative weights, and per-slot types: 0 none, 1 first derivative, 2 deviation from depth mean, 3 deviation from zero, and 4 second derivative. Temperature types 2/3 normalize to 0. Horizontal strengths and derivative order remain separately configurable.
+
+## Verify
+
+```sh
+julia --project=. -e 'using Pkg; Pkg.test()'
+julia --project=. scripts/dry_run.jl configs/example_intensity_nonprd.toml
+julia --project=. benchmarks/mock_forward.jl
+
+# Local hybrid integration example: 4 MPI ranks x 2 Julia threads
+julia --project=. -e 'using MPI; run(`$(MPI.mpiexec()) -n 4 $(Base.julia_cmd()) --project=. --threads=2 test/mpi_hybrid_worker.jl`)'
+
+# Full Phase 4 one-rank versus four-rank topology parity
+julia --project=. scripts/validate_phase4_topology.jl
+
+# Phase 5 one-rank/four-rank solver parity and 1-rank -> 4-rank restart
+julia --project=. scripts/validate_phase5_mpi.jl
+
+# Phase 6 one-rank/four-rank gradient-solver parity and cross-topology restart
+julia --project=. scripts/validate_phase6_mpi.jl
+
+# Canonical two-input/two-output executable
+julia --project=. scripts/invert.jl configs/example_intensity_nonprd.toml MODEL_FACTORY.jl
+
+# Prepare a separate run directory, install Julia packages on a compute node,
+# and submit every Phase 1-6 plus timeout/recovery test on Olivia
+bash scripts/bootstrap_olivia_regression.sh --help
+```
+
+Production and regression jobs should be submitted from a separate run
+directory. Checked-in layouts and Olivia commands are provided under
+`../examples/inversion_run` and `../examples/runtime_test_run`. The source
+checkout remains the Julia/Python code location; scientific inputs, checkpoints,
+diagnostics, temporary files, Slurm logs, and outputs live under the run root.
+Use `scripts/submit_olivia_inversion.sh` from a prepared inversion run directory.
+
+## Forward synthesis and correction-based inversion
+
+Set top-level `mode = "forward"` or `[solver] max_iterations = 0` to synthesize
+from the supplied atmosphere. Both select the same forward-only branch, without
+an observation file, control layout, objective, regularization, or gradients.
+Node and optimizer settings are ignored in this mode. Wavelengths, instrumental
+profiles, EOS/force balance, and the persistent multi-GPU FSDP backend remain the
+same as inversion. See `examples/inversion_run/forward.toml`.
+
+Temperature, velocities, optional magnetic fields, and optional configured
+`[atmosphere.datasets] vturb = "vturb"` are preserved on the input grid.
+Microturbulence defaults to zero only when no dataset is configured. Pressure,
+density, electron density and height are reconstructed by force balance/EOS.
+The two output files contain spectra and the resulting atmosphere/populations.
+Forward products omit objective and solver-termination fields; both products
+record execution mode and TOML provenance.
+
+For inversion (`mode = "inversion"`, the default, with positive iterations),
+observations and controls are required. The full atmospheric mapping is
+`A = A_start + interpolate(p - p_initial)`. The optimizer still packs physical
+node coordinates `p` for unit scaling and node bounds; their differences are the
+corrections. Initially the difference is zero, so the first objective/gradient
+uses the unsmoothed input atmosphere. Baseline fields are immutable rank-owned
+copies, never replicated global atmospheric arrays. Every trial is reconstructed
+from that baseline, rather than accumulating trial updates.
+
+Full-grid physical bounds are checked before expensive synthesis. Infeasible
+trials are rejected (no clipping), and bounded finite-difference components use
+feasible one-sided steps where needed. The starting atmosphere must already
+satisfy the specified physical bounds. Checkpoints bind to the baseline checksum,
+node initialization and correction representation; old checkpoints must start a
+fresh run. `refine_control_maps(problem, layout, parameters, context; ...)`
+creates a new stage based on the accepted full atmosphere, preserving its fine
+structure. Use the returned problem/layout with fresh optimizer history.
+
+The lower-level `apply_control_maps!(distributed, ...)` remains an absolute-field
+interpolation utility for constructing fixtures. Application inversion uses
+`apply_control_maps!(problem, ...)` and the correction mapping exclusively.
