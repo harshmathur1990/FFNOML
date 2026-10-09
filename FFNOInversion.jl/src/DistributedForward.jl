@@ -98,22 +98,28 @@ function _distributed_lorentz!(fx,fy,fz,distributed::DistributedAtmosphere,z,con
     bz=exchange_halos(_field(B.Bz,tile,(size(B.Bz,1),length(g.x),length(g.y))),context,1)
     zh=exchange_halos(_field(z,tile,(size(z,1),length(g.x),length(g.y))),context,1)
     nx,ny=size(fx,2),size(fx,3)
-    Threads.@threads :static for column in 1:nx*ny
-        i=(column-1)%nx+1; j=(column-1)÷nx+1
-        gi=first(tile.xrange)+i-1; gj=first(tile.yrange)+j-1
-        for k in axes(fx,1)
-            dbxdx,dbxdy,dbxdz=_distributed_physical_derivatives(B.Bx,bx,z,zh,g,k,i,j,gi,gj)
-            dbydx,dbydy,dbydz=_distributed_physical_derivatives(B.By,by,z,zh,g,k,i,j,gi,gj)
-            dbzdx,dbzdy,dbzdz=_distributed_physical_derivatives(B.Bz,bz,z,zh,g,k,i,j,gi,gj)
-            jx=(dbzdy-dbydz)/MU0; jy=(dbxdz-dbzdx)/MU0; jz=(dbydx-dbxdy)/MU0
-            fx[k,i,j]=jy*B.Bz[k,i,j]-jz*B.By[k,i,j]
-            fy[k,i,j]=jz*B.Bx[k,i,j]-jx*B.Bz[k,i,j]
-            fz[k,i,j]=jx*B.By[k,i,j]-jy*B.Bx[k,i,j]
+    _distributed_local_stage!("3-D Lorentz derivatives",context) do
+        Threads.@threads :static for column in 1:nx*ny
+            i=(column-1)%nx+1; j=(column-1)÷nx+1
+            gi=first(tile.xrange)+i-1; gj=first(tile.yrange)+j-1
+            for k in axes(fx,1)
+                dbxdx,dbxdy,dbxdz=_distributed_physical_derivatives(B.Bx,bx,z,zh,g,k,i,j,gi,gj)
+                dbydx,dbydy,dbydz=_distributed_physical_derivatives(B.By,by,z,zh,g,k,i,j,gi,gj)
+                dbzdx,dbzdy,dbzdz=_distributed_physical_derivatives(B.Bz,bz,z,zh,g,k,i,j,gi,gj)
+                jx=(dbzdy-dbydz)/MU0; jy=(dbxdz-dbzdx)/MU0; jz=(dbydx-dbxdy)/MU0
+                fx[k,i,j]=jy*B.Bz[k,i,j]-jz*B.By[k,i,j]
+                fy[k,i,j]=jz*B.Bx[k,i,j]-jx*B.Bz[k,i,j]
+                fz[k,i,j]=jx*B.By[k,i,j]-jy*B.Bx[k,i,j]
+            end
         end
     end
 end
 
-function _distributed_pressure_relax!(p,fx,fy,fz,rho,z,distributed,pboundary,order,g,context,sweeps)
+function _distributed_pressure_relax!(p,fx,fy,fz,rho,z,distributed,pboundary,order,g,context,
+        sweeps,horizontal_weight=1.0;max_sweeps=sweeps,tolerance=0.0,sweeps_used=nothing,
+        converged_ref=nothing)
+    max_sweeps>=sweeps>0 || throw(ArgumentError(
+        "pressure sweep limits must satisfy max >= minimum > 0"))
     tile=distributed.tile; grid=distributed.global_grid; nz,nx,ny=size(p); boundary_k=order[1]
     targetz=fz.-rho.*g
     global_shape=(nz,length(grid.x),length(grid.y)); next=similar(p)
@@ -121,7 +127,8 @@ function _distributed_pressure_relax!(p,fx,fy,fz,rho,z,distributed,pboundary,ord
     fyh=exchange_halos(_field(fy,tile,global_shape),context,1)
     qzh=exchange_halos(_field(targetz,tile,global_shape),context,1)
     zh=exchange_halos(_field(z,tile,global_shape),context,1)
-    for _ in 1:sweeps
+    used=0; inner_converged=false
+    for sweep in 1:max_sweeps
         ph=exchange_halos(_field(p,tile,global_shape),context,1)
         copyto!(next,p); @views next[boundary_k,:,:].=pboundary
         Threads.@threads :static for column in 1:nx*ny
@@ -129,41 +136,53 @@ function _distributed_pressure_relax!(p,fx,fy,fz,rho,z,distributed,pboundary,ord
             gi=first(tile.xrange)+i-1; gj=first(tile.yrange)+j-1
             for k in 1:nz
                 k==boundary_k && continue
-                total=0.0; count=0
+                total=0.0; weight=0.0
                 if gi>1
                     dx=grid.x[gi]-grid.x[gi-1]; dz=z[k,i,j]-zh[k,i,j+1]
-                    total+=ph[k,i,j+1]+(fxh[k,i,j+1]+fx[k,i,j])*dx/2+
-                        (qzh[k,i,j+1]+targetz[k,i,j])*dz/2; count+=1
+                    estimate=ph[k,i,j+1]+(fxh[k,i,j+1]+fx[k,i,j])*dx/2+
+                        (qzh[k,i,j+1]+targetz[k,i,j])*dz/2
+                    total+=horizontal_weight*estimate; weight+=horizontal_weight
                 end
                 if gi<length(grid.x)
                     dx=grid.x[gi+1]-grid.x[gi]; dz=zh[k,i+2,j+1]-z[k,i,j]
-                    total+=ph[k,i+2,j+1]-(fxh[k,i+2,j+1]+fx[k,i,j])*dx/2-
-                        (qzh[k,i+2,j+1]+targetz[k,i,j])*dz/2; count+=1
+                    estimate=ph[k,i+2,j+1]-(fxh[k,i+2,j+1]+fx[k,i,j])*dx/2-
+                        (qzh[k,i+2,j+1]+targetz[k,i,j])*dz/2
+                    total+=horizontal_weight*estimate; weight+=horizontal_weight
                 end
                 if gj>1
                     dy=grid.y[gj]-grid.y[gj-1]; dz=z[k,i,j]-zh[k,i+1,j]
-                    total+=ph[k,i+1,j]+(fyh[k,i+1,j]+fy[k,i,j])*dy/2+
-                        (qzh[k,i+1,j]+targetz[k,i,j])*dz/2; count+=1
+                    estimate=ph[k,i+1,j]+(fyh[k,i+1,j]+fy[k,i,j])*dy/2+
+                        (qzh[k,i+1,j]+targetz[k,i,j])*dz/2
+                    total+=horizontal_weight*estimate; weight+=horizontal_weight
                 end
                 if gj<length(grid.y)
                     dy=grid.y[gj+1]-grid.y[gj]; dz=zh[k,i+1,j+2]-z[k,i,j]
-                    total+=ph[k,i+1,j+2]-(fyh[k,i+1,j+2]+fy[k,i,j])*dy/2-
-                        (qzh[k,i+1,j+2]+targetz[k,i,j])*dz/2; count+=1
+                    estimate=ph[k,i+1,j+2]-(fyh[k,i+1,j+2]+fy[k,i,j])*dy/2-
+                        (qzh[k,i+1,j+2]+targetz[k,i,j])*dz/2
+                    total+=horizontal_weight*estimate; weight+=horizontal_weight
                 end
                 if k>1
                     dz=z[k,i,j]-z[k-1,i,j]
-                    total+=p[k-1,i,j]+(targetz[k-1,i,j]+targetz[k,i,j])*dz/2; count+=1
+                    total+=p[k-1,i,j]+(targetz[k-1,i,j]+targetz[k,i,j])*dz/2; weight+=1
                 end
                 if k<nz
                     dz=z[k+1,i,j]-z[k,i,j]
-                    total+=p[k+1,i,j]-(targetz[k+1,i,j]+targetz[k,i,j])*dz/2; count+=1
+                    total+=p[k+1,i,j]-(targetz[k+1,i,j]+targetz[k,i,j])*dz/2; weight+=1
                 end
-                next[k,i,j]=max(total/count,eps(eltype(p)))
+                next[k,i,j]=max(total/weight,eps(eltype(p)))
             end
         end
-        p,next=next,p
+        local_change=maximum(abs.(next.-p)./max.(abs.(p),one(eltype(p))))
+        p,next=next,p; used=sweep
+        if sweep>=sweeps && tolerance>0 && (sweep%sweeps==0 || sweep==max_sweeps)
+            if allreduce_max(local_change,context)<=tolerance
+                inner_converged=true; break
+            end
+        end
     end
     @views p[boundary_k,:,:].=pboundary
+    sweeps_used===nothing || (sweeps_used[]=used)
+    converged_ref===nothing || (converged_ref[]=inner_converged)
     p
 end
 
@@ -217,10 +236,84 @@ function _force_balance_log(context::ParallelContext,event::AbstractString;value
     nothing
 end
 
+function _validate_distributed_force_state(stage,context,arrays...)
+    local_invalid=any(array->!all(isfinite,array),arrays)
+    invalid_ranks=allreduce_sum(local_invalid ? 1 : 0,context)
+    invalid_ranks==0 || throw(ErrorException(
+        "$stage produced non-finite values on $invalid_ranks MPI rank(s)"))
+    nothing
+end
+
+"""Run a rank-local stage and turn any exception into one collective failure."""
+function _distributed_local_stage!(f,stage,context)
+    local_error=nothing
+    try
+        f()
+    catch error
+        local_error=sprint(showerror,error)
+    end
+    failed_ranks=allreduce_sum(local_error===nothing ? 0 : 1,context)
+    failed_ranks==0 && return nothing
+    detail=local_error===nothing ? "another rank failed" : local_error
+    throw(ErrorException("$stage failed on $failed_ranks MPI rank(s); $detail"))
+end
+
+function _distributed_bootstrap_hse_1d!(p,rho,ne,z,kappa,pnew,rhonew,nenew,znew,
+        temperature,eos,opacity,tau,top_to_bottom,order,pboundary,options,context)
+    zero_force=zeros(eltype(p),size(p)); pchange=rchange=zchange=Inf
+    _force_balance_log(context,"bootstrap_start";mode="HSE1D",
+        max_iterations=options.bootstrap_iterations)
+    for iteration in 1:options.bootstrap_iterations
+        iteration_start=time_ns()
+        _distributed_local_stage!("1-D HSE EOS",context) do
+            thermodynamics!(rhonew,nenew,eos,temperature,p)
+        end
+        _distributed_local_stage!("1-D HSE opacity",context) do
+            opacity500!(kappa,opacity,temperature,p,rhonew,nenew)
+        end
+        _distributed_local_stage!("1-D HSE height",context) do
+            _height_from_tau!(znew,kappa,rhonew,tau,top_to_bottom)
+        end
+        _distributed_local_stage!("1-D HSE pressure",context) do
+            _pressure_from_force!(pnew,rhonew,znew,zero_force,pboundary,order,
+                options.gravity_m_s2)
+        end
+        _validate_distributed_force_state("1-D HSE bootstrap",context,
+            pnew,rhonew,nenew,znew)
+        pchange=allreduce_max(_relative_change(pnew,p),context)
+        rchange=allreduce_max(_relative_change(rhonew,rho),context)
+        zchange=allreduce_max(maximum(abs.(znew.-z)),context)
+        @. p=options.relaxation*pnew+(1-options.relaxation)*p
+        @. rho=options.relaxation*rhonew+(1-options.relaxation)*rho
+        copyto!(ne,nenew); copyto!(z,znew)
+        _force_balance_log(context,"bootstrap_iteration";iteration=iteration,dP=pchange,
+            drho=rchange,dz_m=zchange,
+            total_s=round((time_ns()-iteration_start)/1e9;digits=3))
+        if pchange<=options.relative_tolerance && rchange<=options.relative_tolerance &&
+                zchange<=options.height_tolerance_m
+            _force_balance_log(context,"bootstrap_converged";iteration=iteration)
+            return iteration
+        end
+    end
+    _force_balance_log(context,"bootstrap_failed";iterations=options.bootstrap_iterations,
+        dP=pchange,drho=rchange,dz_m=zchange)
+    throw(ErrorException("distributed 1-D HSE bootstrap did not converge (dP=$pchange, drho=$rchange, dz=$zchange)"))
+end
+
 function reconstruct_force_balance_distributed!(distributed::DistributedAtmosphere{Float64},boundary::HE3DBoundaryState,
         eos::AbstractEOS,opacity::AbstractOpacity500,context::ParallelContext;options=ForceBalanceOptions())
     options.max_iterations>0 || throw(ArgumentError("max_iterations must be positive"))
     options.pressure_sweeps>0 || throw(ArgumentError("pressure_sweeps must be positive"))
+    options.pressure_max_sweeps>=options.pressure_sweeps || throw(ArgumentError(
+        "pressure_max_sweeps must be at least pressure_sweeps"))
+    options.pressure_tolerance>0 || throw(ArgumentError("pressure_tolerance must be positive"))
+    options.bootstrap_iterations>0 || throw(ArgumentError("bootstrap_iterations must be positive"))
+    options.continuation_iterations>0 || throw(ArgumentError("continuation_iterations must be positive"))
+    options.max_backtracks>=0 || throw(ArgumentError("max_backtracks must be non-negative"))
+    options.backtrack_growth_limit>=1 || throw(ArgumentError(
+        "backtrack_growth_limit must be at least one"))
+    0<options.minimum_relaxation<=options.relaxation || throw(ArgumentError(
+        "minimum_relaxation must lie in (0, relaxation]"))
     options.lateral_boundary===:force_neumann || throw(ArgumentError("unsupported lateral boundary"))
     options.bottom_boundary===:force_neumann || throw(ArgumentError("unsupported bottom boundary"))
     0<options.relaxation<=1 || throw(ArgumentError("relaxation must lie in (0,1]"))
@@ -233,58 +326,138 @@ function reconstruct_force_balance_distributed!(distributed::DistributedAtmosphe
     rho=a.rho===nothing ? repeat(reshape(rhoboundary,1,nx,ny),nz,1,1) : copy(a.rho)
     ne=a.ne===nothing ? similar(rho) : copy(a.ne); z=a.z===nothing ? zeros(shape) : copy(a.z)
     kappa=similar(rho); pnew=similar(p); rhonew=similar(rho); nenew=similar(ne); znew=similar(z)
+    ptrial=similar(p); rhotrial=similar(rho); netrial=similar(ne); ztrial=similar(z)
     fx=zeros(shape); fy=zeros(shape); fz=zeros(shape); mode=select_force_balance(a)
-    pchange=rchange=fres=zchange=Inf; lorentzmax=0.0
+    fxtrial=zeros(shape); fytrial=zeros(shape); fztrial=zeros(shape)
+    pchange=rchange=fres=zchange=Inf; lorentzmax=0.0; iterations=0
     _force_balance_log(context,"start";mode=mode isa HE3DMode ? "HE3D" : "MHS",
         global_shape="$(length(distributed.global_grid.log_tau500))x$(length(distributed.global_grid.x))x$(length(distributed.global_grid.y))",
         local_shape="$(nz)x$(nx)x$(ny)",threads=Threads.nthreads(),
         max_iterations=options.max_iterations,pressure_sweeps=options.pressure_sweeps,
+        pressure_max_sweeps=options.pressure_max_sweeps,
+        pressure_tolerance=options.pressure_tolerance,
+        bootstrap_iterations=options.bootstrap_iterations,
+        continuation_iterations=options.continuation_iterations,
+        max_backtracks=options.max_backtracks,
         lateral_boundary=options.lateral_boundary,bottom_boundary=options.bottom_boundary)
+    _distributed_bootstrap_hse_1d!(p,rho,ne,z,kappa,pnew,rhonew,nenew,znew,
+        a.temperature,eos,opacity,tau,top_to_bottom,order,pboundary,options,context)
+    if mode isa MHSMode
+        _distributed_lorentz!(fx,fy,fz,distributed,z,context)
+        lorentzmax=allreduce_max(maximum(sqrt.(fx.^2 .+ fy.^2 .+ fz.^2)),context)
+    end
+    initial_3d_residual=_distributed_force_residual(p,rho,z,fx,fy,fz,distributed,
+        context,options.gravity_m_s2)
+    continuation_needed=initial_3d_residual>options.force_tolerance
+    _force_balance_log(context,"bootstrap_complete";initial_3d_force=initial_3d_residual,
+        continuation=continuation_needed)
+    bootstrap_state=(copy(p),copy(rho),copy(ne),copy(z)); fallback_reason=nothing
+    current_residual=initial_3d_residual
     for iteration in 1:options.max_iterations
-        iteration_start=time_ns(); stage_start=time_ns()
-        thermodynamics!(rhonew,nenew,eos,a.temperature,p)
-        eos_seconds=(time_ns()-stage_start)/1e9; stage_start=time_ns()
-        opacity500!(kappa,opacity,a.temperature,p,rhonew,nenew)
-        opacity_seconds=(time_ns()-stage_start)/1e9; stage_start=time_ns()
-        _height_from_tau!(znew,kappa,rhonew,tau,top_to_bottom)
-        height_seconds=(time_ns()-stage_start)/1e9; stage_start=time_ns()
-        if mode isa MHSMode
-            _distributed_lorentz!(fx,fy,fz,distributed,znew,context)
-            lorentzmax=allreduce_max(maximum(sqrt.(fx.^2 .+ fy.^2 .+ fz.^2)),context)
-        end
-        force_seconds=(time_ns()-stage_start)/1e9; stage_start=time_ns()
-        _pressure_from_force!(pnew,rhonew,znew,fz,pboundary,order,options.gravity_m_s2)
-        pnew=_distributed_pressure_relax!(pnew,fx,fy,fz,rhonew,znew,distributed,pboundary,order,
-            options.gravity_m_s2,context,options.pressure_sweeps)
-        pressure_seconds=(time_ns()-stage_start)/1e9; stage_start=time_ns()
-        pchange=allreduce_max(_relative_change(pnew,p),context); rchange=allreduce_max(_relative_change(rhonew,rho),context)
-        zchange=allreduce_max(maximum(abs.(znew.-z)),context)
-        fres=_distributed_force_residual(pnew,rhonew,znew,fx,fy,fz,distributed,context,
-            options.gravity_m_s2)
-        residual_seconds=(time_ns()-stage_start)/1e9
-        @. p=options.relaxation*pnew+(1-options.relaxation)*p
-        @. rho=options.relaxation*rhonew+(1-options.relaxation)*rho
-        copyto!(ne,nenew); copyto!(z,znew)
-        _force_balance_log(context,"iteration";iteration=iteration,dP=pchange,drho=rchange,
-            force=fres,dz_m=zchange,eos_s=round(eos_seconds;digits=3),
-            opacity_s=round(opacity_seconds;digits=3),height_s=round(height_seconds;digits=3),
-            force_s=round(force_seconds;digits=3),pressure_s=round(pressure_seconds;digits=3),
-            residual_s=round(residual_seconds;digits=3),total_s=round((time_ns()-iteration_start)/1e9;digits=3))
-        if pchange<=options.relative_tolerance && rchange<=options.relative_tolerance && fres<=options.force_tolerance && zchange<=options.height_tolerance_m
-            a.pgas=p; a.rho=rho; a.ne=ne; a.z=z
-            _force_balance_log(context,"converged";iteration=iteration)
-            return ForceBalanceDiagnostics(mode isa HE3DMode ? :HE3D : :MHS,iteration,true,pchange,rchange,fres,zchange,0.0,0.0,lorentzmax)
-        end
+            iterations=iteration
+            iteration_start=time_ns(); stage_start=time_ns()
+            _distributed_local_stage!("3-D EOS",context) do
+                thermodynamics!(rhonew,nenew,eos,a.temperature,p)
+            end
+            eos_seconds=(time_ns()-stage_start)/1e9; stage_start=time_ns()
+            _distributed_local_stage!("3-D opacity",context) do
+                opacity500!(kappa,opacity,a.temperature,p,rhonew,nenew)
+            end
+            opacity_seconds=(time_ns()-stage_start)/1e9; stage_start=time_ns()
+            _distributed_local_stage!("3-D height",context) do
+                _height_from_tau!(znew,kappa,rhonew,tau,top_to_bottom)
+            end
+            _validate_distributed_force_state("3-D height",context,znew,rhonew,nenew)
+            height_seconds=(time_ns()-stage_start)/1e9; stage_start=time_ns()
+            if mode isa MHSMode
+                _distributed_lorentz!(fx,fy,fz,distributed,znew,context)
+                lorentzmax=allreduce_max(maximum(sqrt.(fx.^2 .+ fy.^2 .+ fz.^2)),context)
+            end
+            force_seconds=(time_ns()-stage_start)/1e9; stage_start=time_ns()
+            _distributed_local_stage!("3-D vertical pressure seed",context) do
+                _pressure_from_force!(pnew,rhonew,znew,fz,pboundary,order,
+                    options.gravity_m_s2)
+            end
+            horizontal_weight=continuation_needed ?
+                min(1.0,iteration/options.continuation_iterations) : 1.0
+            inner_sweeps=Ref(0); inner_converged=Ref(false)
+            pnew=_distributed_pressure_relax!(pnew,fx,fy,fz,rhonew,znew,distributed,pboundary,order,
+                options.gravity_m_s2,context,options.pressure_sweeps,horizontal_weight;
+                max_sweeps=options.pressure_max_sweeps,tolerance=options.pressure_tolerance,
+                sweeps_used=inner_sweeps,converged_ref=inner_converged)
+            _validate_distributed_force_state("3-D force relaxation",context,
+                pnew,rhonew,nenew,znew,fx,fy,fz)
+            pressure_seconds=(time_ns()-stage_start)/1e9; stage_start=time_ns()
+            accepted=false; alpha=options.relaxation; accepted_backtracks=0
+            for backtrack in 0:options.max_backtracks
+                alpha<options.minimum_relaxation && break
+                _blend_state!(ptrial,pnew,p,alpha); _blend_state!(rhotrial,rhonew,rho,alpha)
+                _blend_state!(netrial,nenew,ne,alpha); _blend_state!(ztrial,znew,z,alpha)
+                _validate_distributed_force_state("3-D backtracking trial",context,
+                    ptrial,rhotrial,netrial,ztrial)
+                if mode isa MHSMode
+                    _distributed_lorentz!(fxtrial,fytrial,fztrial,distributed,ztrial,context)
+                else
+                    fill!(fxtrial,0); fill!(fytrial,0); fill!(fztrial,0)
+                end
+                trial_residual=_distributed_force_residual(ptrial,rhotrial,ztrial,
+                    fxtrial,fytrial,fztrial,distributed,context,options.gravity_m_s2)
+                threshold=max(options.force_tolerance,
+                    options.backtrack_growth_limit*current_residual)
+                if isfinite(trial_residual) && trial_residual<=threshold
+                    pchange=allreduce_max(_relative_change(ptrial,p),context)
+                    rchange=allreduce_max(_relative_change(rhotrial,rho),context)
+                    zchange=allreduce_max(maximum(abs.(ztrial.-z)),context)
+                    fres=trial_residual; accepted_backtracks=backtrack
+                    copyto!(p,ptrial); copyto!(rho,rhotrial); copyto!(ne,netrial); copyto!(z,ztrial)
+                    copyto!(fx,fxtrial); copyto!(fy,fytrial); copyto!(fz,fztrial)
+                    current_residual=fres; accepted=true; break
+                end
+                _force_balance_log(context,"backtrack";iteration=iteration,attempt=backtrack+1,
+                    relaxation=alpha,trial_force=trial_residual,previous_force=current_residual)
+                alpha/=2
+            end
+            if !accepted
+                fallback_reason="all backtracking trials increased the force residual from $current_residual"
+                _force_balance_log(context,"step_rejected";iteration=iteration,
+                    previous_force=current_residual)
+                break
+            end
+            residual_seconds=(time_ns()-stage_start)/1e9
+            _force_balance_log(context,"iteration";iteration=iteration,dP=pchange,drho=rchange,
+                force=fres,dz_m=zchange,horizontal_weight=horizontal_weight,
+                relaxation=alpha,backtracks=accepted_backtracks,inner_sweeps=inner_sweeps[],
+                inner_converged=inner_converged[],
+                eos_s=round(eos_seconds;digits=3),
+                opacity_s=round(opacity_seconds;digits=3),height_s=round(height_seconds;digits=3),
+                force_s=round(force_seconds;digits=3),pressure_s=round(pressure_seconds;digits=3),
+                residual_s=round(residual_seconds;digits=3),total_s=round((time_ns()-iteration_start)/1e9;digits=3))
+            if horizontal_weight==1 && pchange<=options.relative_tolerance &&
+                    rchange<=options.relative_tolerance && fres<=options.force_tolerance &&
+                    zchange<=options.height_tolerance_m
+                a.pgas=p; a.rho=rho; a.ne=ne; a.z=z
+                _force_balance_log(context,"converged";iteration=iteration)
+                return ForceBalanceDiagnostics(mode isa HE3DMode ? :HE3D : :MHS,iteration,true,pchange,rchange,fres,zchange,0.0,0.0,lorentzmax)
+            end
+    end
+    degraded=mode isa HE3DMode && (fallback_reason!==nothing ||
+        fres>max(options.force_tolerance,initial_3d_residual))
+    if degraded
+        copyto!(p,bootstrap_state[1]); copyto!(rho,bootstrap_state[2])
+        copyto!(ne,bootstrap_state[3]); copyto!(z,bootstrap_state[4])
+        pchange=rchange=zchange=0.0; fres=initial_3d_residual
+        _force_balance_log(context,"fallback_hse1d";reason=something(fallback_reason,
+            "3-D residual increased"),force=fres)
     end
     if mode isa MHSMode
-        _force_balance_log(context,"failed";iterations=options.max_iterations,dP=pchange,drho=rchange,
+        _force_balance_log(context,"failed";iterations=iterations,dP=pchange,drho=rchange,
             force=fres,dz_m=zchange)
-        throw(ErrorException("distributed force balance did not converge (dP=$pchange, drho=$rchange, force=$fres, dz=$zchange)"))
+        throw(ErrorException("distributed force balance did not converge after $iterations iterations (dP=$pchange, drho=$rchange, force=$fres, dz=$zchange)"))
     end
     a.pgas=p; a.rho=rho; a.ne=ne; a.z=z
-    _force_balance_log(context,"accepted_unconverged";iterations=options.max_iterations,dP=pchange,
-        drho=rchange,force=fres,dz_m=zchange)
-    ForceBalanceDiagnostics(:HE3D,options.max_iterations,false,pchange,rchange,fres,zchange,0.0,0.0,lorentzmax)
+    _force_balance_log(context,degraded ? "accepted_hse1d_fallback" : "accepted_unconverged";
+        iterations=iterations,dP=pchange,drho=rchange,force=fres,dz_m=zchange)
+    ForceBalanceDiagnostics(:HE3D,iterations,false,pchange,rchange,fres,zchange,0.0,0.0,lorentzmax)
 end
 
 abstract type AbstractDistributedPopulationModel end

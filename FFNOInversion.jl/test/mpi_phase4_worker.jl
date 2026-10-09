@@ -12,6 +12,19 @@ end
 
 context=initialize_parallel(options=ParallelOptions(enabled=true,threads_per_rank=Threads.nthreads()))
 try
+    # A local exception must become the same exception on every rank before
+    # any rank advances to another collective (and before FSDP shutdown).
+    coordinated_failure=false
+    try
+        FFNOInversion._distributed_local_stage!("MPI failure probe",context) do
+            context.rank==context.root && error("intentional rank-local failure")
+        end
+    catch error
+        coordinated_failure=occursin("MPI failure probe failed on 1 MPI rank",sprint(showerror,error))
+    end
+    allreduce_sum(coordinated_failure ? 1 : 0,context)==context.size ||
+        error("rank-local force-balance failures were not coordinated")
+
     nx,ny=11,7; grid=Grid3D([-5.0,-4,-3,-2],collect(0.0:50e3:(nx-1)*50e3),collect(0.0:50e3:(ny-1)*50e3))
     shape=(4,nx,ny); root_atmosphere=nothing
     if isroot(context)

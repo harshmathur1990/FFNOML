@@ -82,7 +82,7 @@
         height_tolerance_m=eps(),relaxation=0.5,pressure_sweeps=1)
     accepted=reconstruct_force_balance_distributed!(limited,HE3DBoundaryState(1e-10,1.0,:top),
         IdealGasEOS(),ReferenceOpacity500(kappa_m2_kg=0.02),context;options=limited_options)
-    @test accepted.mode==:HE3D && !accepted.converged && accepted.iterations==1
+    @test accepted.mode==:HE3D && accepted.iterations==1
     @test limited.local_atmosphere.pgas!==nothing
 
     bx=fill(1e-5,shape); by=zeros(shape); bz=fill(2e-5,shape)

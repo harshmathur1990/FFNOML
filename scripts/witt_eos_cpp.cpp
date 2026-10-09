@@ -25,6 +25,7 @@ constexpr double PI = 3.14159265358979323846;
 const double SAHA_FAC = std::pow((2.0*PI*ME*BK)/(HH*HH),1.5);
 constexpr int NCONTR = 28;
 constexpr double PREC = 1.0e-5;
+constexpr int MAX_ION_STAGES = 8;
 
 const std::array<double, 99> ABUND_RAW = {{
     -0.04048,-1.07,-10.95,-10.89,-9.44,-3.48,-3.99,-3.11,-7.48,-3.95,
@@ -178,6 +179,9 @@ private:
             Element e;
             e.npf = read_u32_be(in);
             e.nstage = read_u32_be(in);
+            if (e.nstage == 0 || e.nstage > MAX_ION_STAGES) {
+                throw std::runtime_error("Partition-function ion-stage count exceeds the fixed 8-stage workspace");
+            }
             e.pf.resize(size_t(npf) * e.nstage);
             for (double& v : e.pf) v = read_f64_be(in);
             e.eion.resize(e.nstage);
@@ -219,7 +223,12 @@ private:
     }
 
     void partition_f(int n, double t, int only, double* out, int& count) const {
+        if (n < 0 || n >= int(el.size())) throw std::runtime_error("invalid partition-function element index");
+        if (only < 0 || only > MAX_ION_STAGES) throw std::runtime_error(
+            "requested partition-function stage count exceeds the fixed 8-stage workspace");
         const Element& e = el[n];
+        if (e.nstage == 0 || e.nstage > MAX_ION_STAGES) throw std::runtime_error(
+            "invalid partition-function ion-stage count");
         count = int(e.nstage);
         if (only > 0) count = std::min(count, only);
         for (int ii = 0; ii < count; ++ii) {
