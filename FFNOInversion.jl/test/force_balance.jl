@@ -67,18 +67,7 @@ end
     @test a.temperature==T0
     @test all(a.pgas.>0) && all(a.rho.>0) && all(a.ne.>0)
     @test all(diff(a.z[:,1,1]).<0)
-    reference_k0,reference_k1,reference_weight=
-        FFNOInversion._zero_logtau_bracket(a.grid.log_tau500)
-    interpolated_z0=(1-reference_weight).*a.z[reference_k0,:,:].+
-        reference_weight.*a.z[reference_k1,:,:]
-    @test maximum(abs,interpolated_z0)<1e-8
-
-    increasing_bracket=FFNOInversion._zero_logtau_bracket([-1.0,0.25,1.0])
-    @test increasing_bracket[1:2]==(1,2)
-    @test increasing_bracket[3]≈0.8
-    decreasing_bracket=FFNOInversion._zero_logtau_bracket([1.0,0.25,-1.0])
-    @test decreasing_bracket[1:2]==(3,2)
-    @test decreasing_bracket[3]≈0.8
+    @test all(iszero,a.z[1,:,:])
 
     limited=phase1_atmosphere()
     accepted=reconstruct_force_balance!(limited,HE3DBoundaryState(1e-10,1.0,:top),eos,opacity;

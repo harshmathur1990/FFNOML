@@ -97,50 +97,15 @@ function _boundary_map(value,nx,ny,name)
     Float64.(value)
 end
 
-"""Return adjacent samples and the linear weight for `logtau500 = 0`.
-
-The returned weight is not clamped: grids that do not span zero use the two
-nearest endpoint samples for linear extrapolation.  Production atmospheres
-normally span zero, in which case this is ordinary interpolation.
-"""
-function _zero_logtau_bracket(logtau)
-    n=length(logtau)
-    n>=2 || throw(ArgumentError("at least two optical-depth samples are required to define z(logtau500=0)"))
-    increasing=logtau[end]>logtau[1]
-    decreasing=logtau[end]<logtau[1]
-    (increasing || decreasing) || throw(ArgumentError("logtau500 must be monotonic"))
-    if increasing
-        k1=clamp(searchsortedfirst(logtau,zero(eltype(logtau))),2,n)
-        k0=k1-1
-    else
-        reversed=reverse(logtau)
-        q1=clamp(searchsortedfirst(reversed,zero(eltype(logtau))),2,n)
-        q0=q1-1
-        k0=n-q0+1
-        k1=n-q1+1
-    end
-    denominator=logtau[k1]-logtau[k0]
-    iszero(denominator) && throw(ArgumentError("logtau500 samples must be distinct"))
-    weight=-logtau[k0]/denominator
-    k0,k1,weight
-end
-
 function _height_from_tau!(z,kappa,rho,tau,order)
     fill!(z,0)
     nx,ny=size(z,2),size(z,3)
-    logtau=log10.(tau)
-    reference_k0,reference_k1,reference_weight=_zero_logtau_bracket(logtau)
     Threads.@threads :static for column in 1:nx*ny
         i=(column-1)%nx+1; j=(column-1)÷nx+1
         for q in 2:length(order)
             k0,k1=order[q-1],order[q]; dtau=abs(tau[k1]-tau[k0])
             extinction=(kappa[k0,i,j]*rho[k0,i,j]+kappa[k1,i,j]*rho[k1,i,j])/2
             z[k1,i,j]=z[k0,i,j]-dtau/extinction
-        end
-        reference_height=(1-reference_weight)*z[reference_k0,i,j]+
-            reference_weight*z[reference_k1,i,j]
-        for k in axes(z,1)
-            z[k,i,j]-=reference_height
         end
     end
     z
