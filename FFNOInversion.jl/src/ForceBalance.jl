@@ -42,12 +42,28 @@ function ForceBalanceOptions(;gravity_m_s2=274.0,max_iterations=500,relative_tol
         continuation_iterations,max_backtracks,values[7],values[8],lateral_boundary,bottom_boundary)
 end
 
+"""Final returned-state diagnostics. Directional residuals use physical grid edges
+and the same global force scale as `force_residual` (not Cartesian derivatives).
+Integrability measures normalized closed-face circulation; zero is necessary,
+not sufficient, for equilibrium. EOS errors compare stored rho/ne with EOS(T,P).
+These measurements do not change convergence or acceptance decisions.
+"""
 struct ForceBalanceDiagnostics{T<:AbstractFloat}
     mode::Symbol; iterations::Int; converged::Bool
     pressure_change::T; density_change::T; force_residual::T; height_change_m::T
     temperature_remap_error::T; magnetic_remap_error::T; lorentz_max_n_m3::T
     initial_force_residual::T; best_force_residual::T
     absolute_force_improvement::T; relative_force_improvement::T; accepted_3d::Bool
+    force_residual_x::T; force_residual_y::T; force_residual_z::T
+    force_integrability_max::T; force_integrability_rms::T; force_integrability_faces::Int
+    eos_density_relative_error::T; eos_electron_relative_error::T
+    bootstrap_iterations::Int; bootstrap_converged::Bool
+    bootstrap_pressure_change::T; bootstrap_density_change::T; bootstrap_height_change_m::T
+    bootstrap_force_residual::T
+    bootstrap_force_residual_x::T; bootstrap_force_residual_y::T; bootstrap_force_residual_z::T
+    bootstrap_force_integrability_max::T; bootstrap_force_integrability_rms::T
+    bootstrap_force_integrability_faces::Int
+    bootstrap_eos_density_relative_error::T; bootstrap_eos_electron_relative_error::T
 end
 
 const MU0 = 4pi*1e-7
@@ -217,11 +233,13 @@ Returns the maximum and RMS normalized circulation. Zero means that the edge
 force is locally compatible with a scalar pressure. Coordinates in `grid`,
 including the configured physical `dx` and `dy`, enter every horizontal edge.
 """
-function _force_integrability(fx,fy,fz,rho,z,grid,g)
+function _force_integrability(fx,fy,fz,rho,z,grid,g;
+        origins_x=axes(rho,2),origins_y=axes(rho,3))
     qz=fz.-rho.*g; nz,nx,ny=size(rho)
     sums=zeros(Float64,nx*ny); counts=zeros(Int,nx*ny); maxima=zeros(Float64,nx*ny)
     Threads.@threads :static for column in 1:nx*ny
         i=(column-1)%nx+1; j=(column-1)÷nx+1
+        (i in origins_x && j in origins_y) || continue
         local_sum=0.0; local_count=0; local_max=0.0
         if i<nx && j<ny
             for k in 1:nz
@@ -260,7 +278,57 @@ function _force_integrability(fx,fy,fz,rho,z,grid,g)
     end
     total_count=sum(counts)
     (maximum=max(maximum(maxima),0.0),rms=sqrt(sum(sums)/max(total_count,1)),
-        faces=total_count)
+        faces=total_count,sum_squares=sum(sums))
+end
+
+"""Directional edge mismatch maxima for fixed state; optional owned edge origins
+allow halo-backed distributed evaluation without counting edges twice."""
+function _directional_force_residual(p,rho,z,fx,fy,fz,grid,g;
+        origins_x=axes(p,2),origins_y=axes(p,3),
+        scale=max(abs(g)*maximum(abs,rho),maximum(sqrt.(fx.^2 .+ fy.^2 .+ fz.^2)))+eps(eltype(p)))
+    qz=fz.-rho.*g; nz,nx,ny=size(p)
+    rx=ry=rz=zero(eltype(p))
+    for j in origins_y,i in origins_x,k in 1:nz
+        if i<nx
+            ds=hypot(grid.x[i+1]-grid.x[i],z[k,i+1,j]-z[k,i,j])
+            mismatch=p[k,i+1,j]-p[k,i,j]-_x_force_integral(fx,qz,z,grid,k,i,j)
+            rx=max(rx,abs(mismatch)/(ds*scale))
+        end
+        if j<ny
+            ds=hypot(grid.y[j+1]-grid.y[j],z[k,i,j+1]-z[k,i,j])
+            mismatch=p[k,i,j+1]-p[k,i,j]-_y_force_integral(fy,qz,z,grid,k,i,j)
+            ry=max(ry,abs(mismatch)/(ds*scale))
+        end
+        if k<nz
+            ds=abs(z[k+1,i,j]-z[k,i,j])
+            mismatch=p[k+1,i,j]-p[k,i,j]-_z_force_integral(qz,z,k,i,j)
+            rz=max(rz,abs(mismatch)/(ds*scale))
+        end
+    end
+    (x=rx,y=ry,z=rz)
+end
+
+function _eos_consistency(p,rho,ne,temperature,eos)
+    expected_rho=similar(rho); expected_ne=similar(ne)
+    thermodynamics!(expected_rho,expected_ne,eos,temperature,p)
+    (density=_relative_change(rho,expected_rho),electron=_relative_change(ne,expected_ne))
+end
+
+"""Snapshot the completed HSE bootstrap without changing any state. Convergence
+here is the existing bootstrap change test, not the full 3-D force test."""
+function _bootstrap_summary(changes,metrics,consistency,options)
+    iterations,pchange,rchange,zchange=changes
+    (bootstrap_iterations=iterations,
+     bootstrap_converged=pchange<=options.relative_tolerance &&
+        rchange<=options.relative_tolerance && zchange<=options.height_tolerance_m,
+     bootstrap_pressure_change=pchange,bootstrap_density_change=rchange,
+     bootstrap_height_change_m=zchange,
+     bootstrap_force_residual=max(metrics.x,metrics.y,metrics.z),
+     bootstrap_force_residual_x=metrics.x,bootstrap_force_residual_y=metrics.y,
+     bootstrap_force_residual_z=metrics.z,bootstrap_force_integrability_max=metrics.maximum,
+     bootstrap_force_integrability_rms=metrics.rms,bootstrap_force_integrability_faces=metrics.faces,
+     bootstrap_eos_density_relative_error=consistency.density,
+     bootstrap_eos_electron_relative_error=consistency.electron)
 end
 
 function _pressure_poisson_system!(rhs,diagonal,fx,fy,fz,rho,z,grid,pboundary,
@@ -605,7 +673,8 @@ end
 """Iteratively reconstruct `Pgas`, `rho`, `ne`, and corrugated `z` on fixed log-tau points."""
 function reconstruct_force_balance!(atmosphere::Atmosphere3D{Float64},boundary::HE3DBoundaryState,
                                     eos::AbstractEOS,opacity::AbstractOpacity500;
-                                    options::ForceBalanceOptions=ForceBalanceOptions())
+                                    options::ForceBalanceOptions=ForceBalanceOptions(),
+                                    bootstrap_callback=nothing)
     boundary.boundary in (:top,:bottom) || throw(ArgumentError("Phase 1 reconstruction supports top or bottom boundaries"))
     options.max_iterations>0 || throw(ArgumentError("max_iterations must be positive"))
     options.pressure_sweeps>0 || throw(ArgumentError("pressure_sweeps must be positive"))
@@ -633,8 +702,16 @@ function reconstruct_force_balance!(atmosphere::Atmosphere3D{Float64},boundary::
     fx=zeros(shape); fy=zeros(shape); fz=zeros(shape); mode=select_force_balance(atmosphere)
     fxtrial=zeros(shape); fytrial=zeros(shape); fztrial=zeros(shape)
     pchange=rchange=fres=zchange=Inf; lorentzmax=0.0; converged=false; iterations=0
-    _bootstrap_hse_1d!(p,rho,ne,z,kappa,pnew,rhonew,nenew,znew,
+    bootstrap_changes=_bootstrap_hse_1d!(p,rho,ne,z,kappa,pnew,rhonew,nenew,znew,
         atmosphere.temperature,eos,opacity,tau,top_to_bottom,order,pboundary,options)
+    bootstrap_direction=_directional_force_residual(p,rho,z,fx,fy,fz,atmosphere.grid,
+        options.gravity_m_s2)
+    bootstrap_compatibility=_force_integrability(fx,fy,fz,rho,z,atmosphere.grid,options.gravity_m_s2)
+    bootstrap_consistency=_eos_consistency(p,rho,ne,atmosphere.temperature,eos)
+    bootstrap=_bootstrap_summary(bootstrap_changes,merge(bootstrap_direction,bootstrap_compatibility),
+        bootstrap_consistency,options)
+    bootstrap_callback===nothing || bootstrap_callback((pgas=copy(p),rho=copy(rho),
+        ne=copy(ne),z=copy(z),diagnostics=bootstrap))
     if mode isa MHSMode
         lorentz_force!(fx,fy,fz,atmosphere.magnetic_field,atmosphere.grid,z)
         lorentzmax=maximum(sqrt.(fx.^2 .+ fy.^2 .+ fz.^2))
@@ -718,8 +795,15 @@ function reconstruct_force_balance!(atmosphere::Atmosphere3D{Float64},boundary::
     elseif !accepted_3d
         @warn "3-D force balance did not improve on the 1-D baseline; restoring 1-D HSE" iterations=iterations initial_force=initial_3d_residual reason=something(fallback_reason,"no improving 3-D iterate")
     end
+    # Recompute forces on the restored best state, never the last trial state.
+    mode isa MHSMode && lorentz_force!(fx,fy,fz,atmosphere.magnetic_field,atmosphere.grid,z)
+    directional=_directional_force_residual(p,rho,z,fx,fy,fz,atmosphere.grid,options.gravity_m_s2)
+    compatibility=_force_integrability(fx,fy,fz,rho,z,atmosphere.grid,options.gravity_m_s2)
+    consistency=_eos_consistency(p,rho,ne,atmosphere.temperature,eos)
     atmosphere.pgas=p; atmosphere.rho=rho; atmosphere.ne=ne; atmosphere.z=z
     ForceBalanceDiagnostics(mode isa HE3DMode ? :HE3D : :MHS,iterations,converged,
         pchange,rchange,fres,zchange,0.0,0.0,lorentzmax,initial_3d_residual,
-        best_residual,absolute_improvement,improvement,accepted_3d)
+        best_residual,absolute_improvement,improvement,accepted_3d,
+        directional.x,directional.y,directional.z,compatibility.maximum,compatibility.rms,
+        compatibility.faces,consistency.density,consistency.electron,values(bootstrap)...)
 end

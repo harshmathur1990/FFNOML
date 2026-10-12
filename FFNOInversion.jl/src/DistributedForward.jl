@@ -186,6 +186,39 @@ function _distributed_pressure_relax!(p,fx,fy,fz,rho,z,distributed,pboundary,ord
     p
 end
 
+"""Final-state edge/face diagnostics with halo exchange and globally reduced
+statistics. Each edge or face belongs to its lower-index horizontal origin."""
+function _distributed_force_metrics(p,rho,z,fx,fy,fz,distributed,context,g)
+    tile=distributed.tile; grid=distributed.global_grid
+    shape=(size(p,1),length(grid.x),length(grid.y))
+    gx=max(1,first(tile.xrange)-1):min(length(grid.x),last(tile.xrange)+1)
+    gy=max(1,first(tile.yrange)-1):min(length(grid.y),last(tile.yrange)+1)
+    hx=(first(gx)-first(tile.xrange)+2):(last(gx)-first(tile.xrange)+2)
+    hy=(first(gy)-first(tile.yrange)+2):(last(gy)-first(tile.yrange)+2)
+    padded=map((p,rho,z,fx,fy,fz)) do array
+        halo=exchange_halos(_field(array,tile,shape),context,1)
+        @view halo[:,hx,hy]
+    end
+    localgrid=Grid3D(grid.log_tau500,grid.x[gx],grid.y[gy])
+    ox=(first(tile.xrange)-first(gx)+1):(last(tile.xrange)-first(gx)+1)
+    oy=(first(tile.yrange)-first(gy)+1):(last(tile.yrange)-first(gy)+1)
+    scale=allreduce_max(max(abs(g)*maximum(abs,rho),
+        maximum(sqrt.(fx.^2 .+ fy.^2 .+ fz.^2))),context)+eps(eltype(p))
+    directional=compatibility=nothing
+    _distributed_local_stage!("final force diagnostics",context) do
+        ph,rh,zh,fxh,fyh,fzh=padded
+        directional=_directional_force_residual(ph,rh,zh,fxh,fyh,fzh,localgrid,g;
+            origins_x=ox,origins_y=oy,scale=scale)
+        compatibility=_force_integrability(fxh,fyh,fzh,rh,zh,localgrid,g;origins_x=ox,origins_y=oy)
+    end
+    faces=allreduce_sum(compatibility.faces,context)
+    sums=allreduce_sum(compatibility.sum_squares,context)
+    (x=allreduce_max(directional.x,context),y=allreduce_max(directional.y,context),
+     z=allreduce_max(directional.z,context),
+     maximum=allreduce_max(compatibility.maximum,context),
+     rms=sqrt(sums/max(faces,1)),faces=faces)
+end
+
 function _distributed_force_residual(p,rho,z,fx,fy,fz,distributed,context,g)
     tile=distributed.tile; grid=distributed.global_grid; shape=(size(p,1),length(grid.x),length(grid.y))
     ph=exchange_halos(_field(p,tile,shape),context,1)
@@ -295,7 +328,7 @@ function _distributed_bootstrap_hse_1d!(p,rho,ne,z,kappa,pnew,rhonew,nenew,znew,
         if pchange<=options.relative_tolerance && rchange<=options.relative_tolerance &&
                 zchange<=options.height_tolerance_m
             _force_balance_log(context,"bootstrap_converged";iteration=iteration)
-            return iteration
+            return iteration,pchange,rchange,zchange
         end
     end
     local_valid=_valid_hse_1d_state(p,rho,ne,z,kappa,top_to_bottom)
@@ -307,7 +340,7 @@ function _distributed_bootstrap_hse_1d!(p,rho,ne,z,kappa,pnew,rhonew,nenew,znew,
     if invalid_ranks==0 && divergent_ranks==0
         _force_balance_log(context,"bootstrap_accepted_unconverged";
             iterations=options.bootstrap_iterations,dP=pchange,drho=rchange,dz_m=zchange)
-        return options.bootstrap_iterations
+        return options.bootstrap_iterations,pchange,rchange,zchange
     end
     _force_balance_log(context,"bootstrap_failed";iterations=options.bootstrap_iterations,
         invalid_ranks=invalid_ranks,divergent_ranks=divergent_ranks,
@@ -318,7 +351,7 @@ function _distributed_bootstrap_hse_1d!(p,rho,ne,z,kappa,pnew,rhonew,nenew,znew,
 end
 
 function reconstruct_force_balance_distributed!(distributed::DistributedAtmosphere{Float64},boundary::HE3DBoundaryState,
-        eos::AbstractEOS,opacity::AbstractOpacity500,context::ParallelContext;options=ForceBalanceOptions())
+        eos::AbstractEOS,opacity::AbstractOpacity500,context::ParallelContext;options=ForceBalanceOptions(),bootstrap_callback=nothing)
     options.max_iterations>0 || throw(ArgumentError("max_iterations must be positive"))
     options.pressure_sweeps>0 || throw(ArgumentError("pressure_sweeps must be positive"))
     options.pressure_max_sweeps>=options.pressure_sweeps || throw(ArgumentError(
@@ -357,8 +390,24 @@ function reconstruct_force_balance_distributed!(distributed::DistributedAtmosphe
         continuation_iterations=options.continuation_iterations,
         max_backtracks=options.max_backtracks,
         lateral_boundary=options.lateral_boundary,bottom_boundary=options.bottom_boundary)
-    _distributed_bootstrap_hse_1d!(p,rho,ne,z,kappa,pnew,rhonew,nenew,znew,
+    bootstrap_changes=_distributed_bootstrap_hse_1d!(p,rho,ne,z,kappa,pnew,rhonew,nenew,znew,
         a.temperature,eos,opacity,tau,top_to_bottom,order,pboundary,options,context)
+    bootstrap_metrics=_distributed_force_metrics(p,rho,z,fx,fy,fz,distributed,context,
+        options.gravity_m_s2)
+    bootstrap_local_consistency=nothing
+    _distributed_local_stage!("bootstrap EOS diagnostics",context) do
+        bootstrap_local_consistency=_eos_consistency(p,rho,ne,a.temperature,eos)
+    end
+    bootstrap_consistency=(density=allreduce_max(bootstrap_local_consistency.density,context),
+        electron=allreduce_max(bootstrap_local_consistency.electron,context))
+    bootstrap=_bootstrap_summary(bootstrap_changes,bootstrap_metrics,bootstrap_consistency,options)
+    _force_balance_log(context,"bootstrap_diagnostics";bootstrap...)
+    if bootstrap_callback!==nothing
+        _distributed_local_stage!("bootstrap output callback",context) do
+            bootstrap_callback((pgas=copy(p),rho=copy(rho),ne=copy(ne),z=copy(z),
+                diagnostics=bootstrap))
+        end
+    end
     if mode isa MHSMode
         _distributed_lorentz!(fx,fy,fz,distributed,z,context)
         lorentzmax=allreduce_max(maximum(sqrt.(fx.^2 .+ fy.^2 .+ fz.^2)),context)
@@ -474,6 +523,18 @@ function reconstruct_force_balance_distributed!(distributed::DistributedAtmosphe
     copyto!(ne,best_state[3]); copyto!(z,best_state[4])
     pchange=best_pchange; rchange=best_rchange; zchange=best_zchange
     fres=best_residual; lorentzmax=best_lorentzmax
+    mode isa MHSMode && _distributed_lorentz!(fx,fy,fz,distributed,z,context)
+    metrics=_distributed_force_metrics(p,rho,z,fx,fy,fz,distributed,context,options.gravity_m_s2)
+    consistency=nothing
+    _distributed_local_stage!("final EOS diagnostics",context) do
+        consistency=_eos_consistency(p,rho,ne,a.temperature,eos)
+    end
+    eos_density_error=allreduce_max(consistency.density,context)
+    eos_electron_error=allreduce_max(consistency.electron,context)
+    _force_balance_log(context,"final_diagnostics";force_x=metrics.x,force_y=metrics.y,
+        force_z=metrics.z,integrability_max=metrics.maximum,integrability_rms=metrics.rms,
+        integrability_faces=metrics.faces,eos_density_error=eos_density_error,
+        eos_electron_error=eos_electron_error)
     a.pgas=p; a.rho=rho; a.ne=ne; a.z=z
     if accepted_3d
         _force_balance_log(context,converged ? "accepted_converged_3d" :
@@ -489,7 +550,9 @@ function reconstruct_force_balance_distributed!(distributed::DistributedAtmosphe
     end
     ForceBalanceDiagnostics(mode isa HE3DMode ? :HE3D : :MHS,iterations,converged,
         pchange,rchange,fres,zchange,0.0,0.0,lorentzmax,initial_3d_residual,
-        best_residual,absolute_improvement,improvement,accepted_3d)
+        best_residual,absolute_improvement,improvement,accepted_3d,
+        metrics.x,metrics.y,metrics.z,metrics.maximum,metrics.rms,metrics.faces,
+        eos_density_error,eos_electron_error,values(bootstrap)...)
 end
 
 abstract type AbstractDistributedPopulationModel end

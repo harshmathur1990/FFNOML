@@ -37,5 +37,15 @@ include("helpers.jl")
             options=mhs_options)
         @test dmh.converged && dmh.mode==:MHS && dmh.lorentz_max_n_m3>0
         @test maximum(abs.(mh.pgas.-he.pgas))>0
+        for (atmosphere,diagnostics) in ((he,dhe),(mh,dmh))
+            expected=FFNOInversion._eos_consistency(atmosphere.pgas,atmosphere.rho,
+                atmosphere.ne,atmosphere.temperature,eos)
+            @test diagnostics.eos_density_relative_error==expected.density
+            @test diagnostics.eos_electron_relative_error==expected.electron
+            @test max(diagnostics.force_residual_x,diagnostics.force_residual_y,
+                diagnostics.force_residual_z)≈diagnostics.force_residual atol=1e-12
+            @test isfinite(diagnostics.force_integrability_rms)
+        end
+
     end
 end

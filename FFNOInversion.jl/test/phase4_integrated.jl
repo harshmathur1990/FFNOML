@@ -25,6 +25,25 @@
 
     nodes=NodeField(reshape(collect(1.0:12.0),3,2,2),[-5.0,-3.0,-2.0])
     @test expand_nodes(nodes,grid,distributed.tile)==expand_nodes(nodes,grid)
+    for incompatible in (false,true)
+        diagnostic_fx=zeros(cshape)
+        if incompatible
+            for j in 1:3
+                @views diagnostic_fx[:,:,j].=cgrid.y[j]
+            end
+        end
+        metrics=FFNOInversion._distributed_force_metrics(cp,crho,cz,diagnostic_fx,
+            zeros(cshape),zeros(cshape),cdistributed,context,cg)
+        direction=FFNOInversion._directional_force_residual(cp,crho,cz,diagnostic_fx,
+            zeros(cshape),zeros(cshape),cgrid,cg)
+        compatibility=FFNOInversion._force_integrability(diagnostic_fx,zeros(cshape),
+            zeros(cshape),crho,cz,cgrid,cg)
+        @test (metrics.x,metrics.y,metrics.z)==(direction.x,direction.y,direction.z)
+        @test metrics.maximum==compatibility.maximum
+        @test metrics.rms==compatibility.rms
+        @test metrics.faces==compatibility.faces==36
+    end
+
     wave=collect(range(656.1e-9,656.5e-9,length=9))
     options=ForceBalanceOptions(max_iterations=100,relative_tolerance=1e-5,force_tolerance=0.6,
         height_tolerance_m=1.0,relaxation=0.5,pressure_sweeps=20)
@@ -82,6 +101,8 @@
         height_tolerance_m=eps(),relaxation=0.5,pressure_sweeps=1)
     accepted=reconstruct_force_balance_distributed!(limited,HE3DBoundaryState(1e-10,1.0,:top),
         IdealGasEOS(),ReferenceOpacity500(kappa_m2_kg=0.02),context;options=limited_options)
+    @test max(accepted.force_residual_x,accepted.force_residual_y,
+        accepted.force_residual_z)≈accepted.force_residual atol=1e-12
     @test accepted.mode==:HE3D && accepted.iterations==1
     @test accepted.best_force_residual<=accepted.initial_force_residual
     @test accepted.force_residual==accepted.best_force_residual

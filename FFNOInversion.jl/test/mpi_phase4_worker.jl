@@ -63,6 +63,41 @@ try
     manufactured_residual<1e-10 || error(
         "corrugated MPI force operator/residual mismatch: $manufactured_residual")
 
+    # Final diagnostics must count faces across both tile seams exactly once.
+    for incompatible in (false,true)
+        diagnostic_fx=zeros(local_shape)
+        if incompatible
+            for j in axes(diagnostic_fx,3)
+                @views diagnostic_fx[:,:,j].=grid.y[first(distributed.tile.yrange)+j-1]
+            end
+        end
+        measured=FFNOInversion._distributed_force_metrics(manufactured_p,
+            manufactured_rho,corrugated_z,diagnostic_fx,zero_force,zero_force,
+            distributed,context,gravity)
+        reference=if isroot(context)
+            global_z=[100(k-1)+4e-4*grid.x[i]-2.5e-4*grid.y[j]
+                for k in 1:shape[1],i in 1:nx,j in 1:ny]
+            global_rho=fill(2.0,shape); global_p=@. 1e9-global_rho*gravity*global_z
+            global_fx=incompatible ? repeat(reshape(grid.y,1,1,ny),shape[1],nx,1) : zeros(shape)
+            global_zero=zeros(shape)
+            direction=FFNOInversion._directional_force_residual(global_p,global_rho,
+                global_z,global_fx,global_zero,global_zero,grid,gravity)
+            compatibility=FFNOInversion._force_integrability(global_fx,global_zero,
+                global_zero,global_rho,global_z,grid,gravity)
+            (x=direction.x,y=direction.y,z=direction.z,maximum=compatibility.maximum,
+                rms=compatibility.rms,faces=compatibility.faces)
+        else
+            nothing
+        end
+        reference=mpi_broadcast(reference,context)
+        for name in propertynames(reference)
+            isapprox(getproperty(measured,name),getproperty(reference,name);rtol=1e-12,atol=1e-14) ||
+                error("MPI diagnostic $name differs from whole-domain evaluation")
+        end
+        measured.faces==shape[1]*(nx-1)*(ny-1)+(shape[1]-1)*((nx-1)*ny+nx*(ny-1)) ||
+            error("MPI diagnostics missed or double-counted faces")
+    end
+
     wave=collect(range(656.1e-9,656.5e-9,length=9))
     # The synthetic B field is intentionally not a manufactured MHS equilibrium;
     # loose outer tolerances keep this fixture focused on MPI topology parity.
