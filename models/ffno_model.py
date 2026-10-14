@@ -545,6 +545,11 @@ class FFNO3D(nn.Module):
         super().__init__()
 
         self.checkpoint_blocks = checkpoint_blocks
+        # DistributedFSDPBackend wraps each block with PyTorch's composable
+        # checkpoint wrapper before FSDP is applied. In that configuration the
+        # block call must not be checkpointed a second time around the FSDP
+        # module, while lift/head checkpointing remains enabled.
+        self.external_block_checkpointing = False
 
         self.lift = nn.Sequential(
             nn.Conv3d(in_channels, width, 1, bias=False),
@@ -576,12 +581,23 @@ class FFNO3D(nn.Module):
     def _run_block(
         self, blk, x, z_scale, dx, dy, collect_stats=False, branch_mask=None
     ):
-        if self.checkpoint_blocks and self.training and not collect_stats:
+        # Inversion VJPs run the model in eval mode (dropout disabled) but still
+        # require activation checkpointing at production cube sizes.  Gradient
+        # mode, rather than train/eval mode, is the correct switch: no-grad
+        # prediction avoids recomputation, while autograd VJPs retain only the
+        # block inputs and recompute each FSDP-wrapped block during backward.
+        if (
+            self.checkpoint_blocks
+            and not self.external_block_checkpointing
+            and torch.is_grad_enabled()
+            and not collect_stats
+        ):
             return checkpoint(
-                lambda t: blk(
-                    t, z_scale, dx, dy, collect_stats=False, branch_mask=None
+                lambda t, z: blk(
+                    t, z, dx, dy, collect_stats=False, branch_mask=None
                 ),
                 x,
+                z_scale,
                 use_reentrant=False,
             )
         return blk(
@@ -594,12 +610,12 @@ class FFNO3D(nn.Module):
         )
 
     def _run_lift(self, x, collect_stats=False):
-        if self.checkpoint_blocks and self.training and not collect_stats:
+        if self.checkpoint_blocks and torch.is_grad_enabled() and not collect_stats:
             return checkpoint(self.lift, x, use_reentrant=False)
         return self.lift(x)
 
     def _run_head(self, x, collect_stats=False):
-        if self.checkpoint_blocks and self.training and not collect_stats:
+        if self.checkpoint_blocks and torch.is_grad_enabled() and not collect_stats:
             return checkpoint(
                 lambda t: self.proj2(self.act(self.proj1(t))),
                 x,

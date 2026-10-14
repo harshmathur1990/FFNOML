@@ -1,0 +1,27 @@
+using Test
+using FFNOInversion
+
+include("olivia_environment_setup.jl")
+include("submission_preflight.jl")
+include("unit_types.jl")
+include("unit_nodes.jl")
+include("parallel_runtime.jl")
+include("integration_mock_forward.jl")
+include("observation_regularization.jl")
+include("extension_contracts.jl")
+include("io_config.jl")
+include("force_balance.jl")
+include("wittmann_production.jl")
+include("continuum_opacity.jl")
+include("population_backend.jl")
+include("phase3_synthesis.jl")
+include("muspel_phase3_integration.jl")
+include("phase4_integrated.jl")
+include("phase5_inversion.jl")
+include("phase6_gradients_solver.jl")
+include("phase6_production_gradient.jl")
+include("phase6_execution.jl")
+include("phase6_fsdp_protocol.jl")
+include("fsdp_only_architecture.jl")
+
+include("correction_mapping.jl")

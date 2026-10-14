@@ -1,0 +1,15 @@
+inputs/*
+!inputs/README.md
+!inputs/atoms/
+!inputs/atoms/.gitkeep
+!inputs/wittmann/
+!inputs/wittmann/.gitkeep
+outputs/*
+!outputs/.gitkeep
+diagnostics/*
+!diagnostics/.gitkeep
+training_FFNO3D_zscale_expand_lognlte/*
+!training_FFNO3D_zscale_expand_lognlte/.gitkeep
+tmp/
+slurm-*.out
+slurm-*.err
