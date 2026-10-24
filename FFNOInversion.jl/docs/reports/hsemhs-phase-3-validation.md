@@ -83,10 +83,11 @@ Read from `pipeline.py`, `FFNONet.py`, `models/ffno_model.py`, `ffno_fsdp_runtim
   sign/order and approximately the Bifrost zero point; the log-tau grids used so far (log τ −8 … 1.4) span roughly
   −0.1 to 2–3 Mm, again far less than the training span. (The removed legacy backend set z = 0 at the top and negative
   below, i.e. a different zero point and sign of the absolute-z feature as well.)
-* No resampling or offset is applied; `atm.z` stays the native axis (native z) or the HSEMHS height (log tau). Whether
-  the checkpoints generalize to the narrower vertical domains of the inversion grids (span and normalized-z features
-  outside the training distribution), or need retraining/padding, is a scientific question raised with the user; it
-  does not affect Phase 3 correctness of the equilibrium path.
+* No resampling, padding or offset is applied; `atm.z` stays the native axis (native z) or the HSEMHS height (log tau).
+  **Decision (user, 24 October 2026):** FFNO3D is grid agnostic by design — the reason it was chosen is to generalize
+  across vertical grids — so inversion columns with a different extent and spacing from the training columns are
+  passed as they are. Only the unit (Mm) and convention (top first, positive upward, photospheric zero) must match,
+  which they now do.
 
 ## Deviations from the phase document
 
@@ -106,4 +107,3 @@ Read from `pipeline.py`, `FFNONet.py`, `models/ffno_model.py`, `ffno_fsdp_runtim
 ## Remaining limits
 
 * `model = "mhs"` (Poisson modes) is Phase 4.
-* The population-model vertical-domain question above.
