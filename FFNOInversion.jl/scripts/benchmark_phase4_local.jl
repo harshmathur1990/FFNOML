@@ -17,10 +17,10 @@ mktempdir() do directory
     reference=results[1].checksum
     all(isapprox(result.checksum,reference;rtol=1e-12,atol=1e-14) for result in results) ||
         error("rank/thread layouts produced different spectra")
-    println("ranks,threads,cold_wall_s,instrumented_forward_s,force_s,populations_s,synthesis_s,observation_s,max_owned_bytes")
+    println("ranks,threads,cold_wall_s,instrumented_forward_s,equilibrium_s,populations_s,synthesis_s,observation_s,max_owned_bytes")
     for result in results
         timing=result.timings
-        println(join((result.ranks,result.threads,result.seconds,timing.total_seconds,timing.force_balance_seconds,
+        println(join((result.ranks,result.threads,result.seconds,timing.total_seconds,timing.equilibrium_seconds,
             timing.populations_seconds,timing.synthesis_seconds,timing.observation_seconds,result.memory),","))
     end
     println("PHASE4_LOCAL_LAYOUT_BENCHMARK_OK layouts=$(length(results)) checksum=$reference")
