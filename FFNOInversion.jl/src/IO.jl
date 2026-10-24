@@ -324,7 +324,7 @@ end
 
 function dry_run_summary(config::RunConfig)
     nlambda = length(config.synthesis.wavelength_m)
-    mode = isnothing(config.atmosphere.magnetic_datasets) ? "HE3D" : "MHS"
+    mode = "MHS"
     vertical_vars = Symbol[VERTICAL_PARAMETER_ORDER[i] for i in 1:7 if config.regularization.vertical.types[i] != 0]
     regvars = sort!(collect(union(vertical_vars,keys(config.regularization.horizontal))))
     nsources=sum(length(r.sources) for r in config.regions)

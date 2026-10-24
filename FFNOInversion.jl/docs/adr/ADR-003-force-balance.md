@@ -1,13 +1,42 @@
-# ADR-003: HE3D/MHS mode selection
+# ADR-003: Force balance with automatic magnetic coupling
 
-Status: Phase 1 accepted.
+Status: Updated 2026-10-12; supersedes the earlier HE3D/MHS mode selection.
 
-- If magnetic field data are absent, select HE3D and allocate no dummy magnetic arrays.
-- If magnetic field data are present, select MHS and include `J x B`, with `J = curl(B)/mu0`.
-- Geometrical height increases upward. The top boundary is `z=0`; deeper layers have negative `z`, and gravity has magnitude 274 m/s^2 downward. The implemented column equation is `dP/dz = -rho*g + (JxB)_z`.
-- Scalar or `(nx,ny)` pressure and density boundary values are accepted at the top or bottom. A full-boundary solve is rejected until its mathematical meaning is fixed.
-- Curl uses centered differences in the interior and one-sided differences at boundaries on the declared x/y coordinates and horizontally averaged z coordinate. This orthogonal Phase 1 stencil records the limitation; a metric-aware curl is required for strongly corrugated MHS volumes.
-- HE3D never allocates or evaluates magnetic data. MHS computes all components of `J=curl(B)/mu0` and `JxB`; the vertical component enters pressure integration and the full magnitude is diagnosed.
-- The pressure update is not a set of independent 1D columns. A vertical integration supplies the initial iterate, followed by a 3D least-squares gradient relaxation using x, y and z neighbors with the declared pressure boundary fixed. The fixed-point iteration alternates EOS density/electron density, 500 nm opacity, z reconstruction and this coupled pressure solve with under-relaxation. It requires pressure, density, normalized force, and height changes to pass independently.
-- Temperature and optional B are held exactly on the target log-tau grid, so their remap errors are zero by construction. Pressure positivity and finite EOS results are hard failure conditions.
-- `WittmannEOS` calls the repository's compiled Wittmann implementation for rho, ne, and the 17 partial populations needed by continuum physics. `WittmannOpacity500` evaluates the ported continuum routine in Julia at exactly 5000 Angstrom and converts volume extinction from cm^-1 to mass extinction in m^2 kg^-1. `ReferenceOpacity500` remains only for manufactured tests. The native routine is checked directly against the original `cop.cc` over temperature, pressure, and wavelength grids.
+- There is one reconstruction pipeline. Missing magnetic data represents B=0
+  by evaluating the same algebra on zero arrays. Explicit zero magnetic arrays have identical
+  behavior. There are no public `HE3DMode`, `MHSMode`, or mode-selector APIs.
+- There is no HSE bootstrap. Initialization computes EOS, opacity and geometry
+  once from initial pressure without updating pressure. One MHS iteration loop
+  then updates pressure and dependent fields.
+- Every B value uses the same Lorentz evaluation, coupled x/y/z pressure
+  relaxation, residual, backtracking and convergence equations. No B-value
+  branch selects an algorithm. Missing storage is normalized to zero arrays.
+- For B=0, magnetic force vanishes algebraically, leaving full hydrostatic
+  equilibrium including zero horizontal pressure gradients. This is not a
+  collection of unrestricted independent HSE columns.
+- The physical equation is grad(P) = J cross B - rho*g*e_z, with
+  J = curl(B)/mu0. Physical x/y forces are solely the Lorentz components.
+  Edge integrals across corrugated optical-depth surfaces include the vertical
+  force multiplied by the edge's height change; this is part of the coordinate
+  geometry, not an extra horizontal force.
+- Height increases upward. The top optical-depth sample is z=0 per column;
+  deeper layers have negative z. Gravity is 274 m/s^2 downward. Scalar or mapped
+  top/bottom pressure boundaries are supported; full boundaries are rejected.
+- Curl uses physical derivatives on the corrugated grid, obtained through the
+  optical-depth-to-height chain rule. Prescribed B remains fixed on log-tau
+  samples; reconstruction does not enforce div(B)=0 or solve for B.
+- Reconstruction solves a coupled log-pressure graph divergence equation using
+  PCG, clips the log candidate to explicit numerical bounds, and relaxes pressure
+  in logarithmic space. There is no vertical pressure seed. See the diagnostics
+  document for differences from FIRTEZ's FISHPACK discretization.
+  Pressure positivity and finite EOS results remain hard requirements.
+- A uniform nonzero B enters magnetic reconstruction but has zero curl and
+  Lorentz force; its presence does not guarantee convergence.
+- Diagnostic `mode` always records MHS. Iterations count the single solver loop.
+  Bootstrap options, routines, diagnostic fields and callbacks are removed;
+  `initial_callback` can checkpoint the state before the first pressure update.
+  All field values retain the same best-force selection, with fallback to the
+  initial state.
+- Production thermodynamics and opacity remain WittmannEOS and
+  WittmannOpacity500. The optional consistent-trial experiment remains disabled
+  by default; this policy change does not add any new trial enforcement.

@@ -1,9 +1,9 @@
-abstract type AbstractForceBalanceMode end
-struct HE3DMode <: AbstractForceBalanceMode end
-struct MHSMode <: AbstractForceBalanceMode end
-
-"""Select HE3D only when B is truly absent; never manufacture a zero B field."""
-select_force_balance(atmosphere::Atmosphere3D) = isnothing(atmosphere.magnetic_field) ? HE3DMode() : MHSMode()
+# Normalize absent storage to a zero field; the solver never branches on B values.
+function _magnetic_or_zero(atmosphere::Atmosphere3D)
+    B=atmosphere.magnetic_field
+    B===nothing ? MagneticField3D(zeros(size(atmosphere.temperature)),
+        zeros(size(atmosphere.temperature)),zeros(size(atmosphere.temperature))) : B
+end
 
 struct ForceBalanceOptions{T<:AbstractFloat}
     gravity_m_s2::T
@@ -15,31 +15,41 @@ struct ForceBalanceOptions{T<:AbstractFloat}
     pressure_sweeps::Int
     pressure_max_sweeps::Int
     pressure_tolerance::T
-    bootstrap_iterations::Int
     continuation_iterations::Int
     max_backtracks::Int
     backtrack_growth_limit::T
     minimum_relaxation::T
     lateral_boundary::Symbol
     bottom_boundary::Symbol
+    enforce_trial_consistency::Bool
+    log_pressure_iterations::Int
+    log_pressure_tolerance::T
+    log_pressure_max_pa::T
 end
 function ForceBalanceOptions(;gravity_m_s2=274.0,max_iterations=500,relative_tolerance=1e-6,
                              force_tolerance=1e-5,height_tolerance_m=1e-3,relaxation=0.7,
                              pressure_sweeps=10,pressure_max_sweeps=200,
-                             pressure_tolerance=1e-6,bootstrap_iterations=1000,
+                             pressure_tolerance=1e-6,
                              continuation_iterations=10,max_backtracks=8,
                              backtrack_growth_limit=1.25,minimum_relaxation=1/256,
                              lateral_boundary=:force_neumann,
-                             bottom_boundary=:force_neumann)
+                             bottom_boundary=:force_neumann,
+                             enforce_trial_consistency=false,log_pressure_iterations=1000,
+                             log_pressure_tolerance=1e-8,log_pressure_max_pa=1e6)
     values=promote(gravity_m_s2,relative_tolerance,force_tolerance,height_tolerance_m,
-        relaxation,pressure_tolerance,backtrack_growth_limit,minimum_relaxation)
+        relaxation,pressure_tolerance,backtrack_growth_limit,minimum_relaxation,
+        log_pressure_tolerance,log_pressure_max_pa)
+    log_pressure_iterations>0 || throw(ArgumentError("log_pressure_iterations must be positive"))
+    isfinite(log_pressure_tolerance) && log_pressure_tolerance>0 || throw(ArgumentError("log_pressure_tolerance must be positive and finite"))
+    isfinite(log_pressure_max_pa) && log_pressure_max_pa>0 || throw(ArgumentError("log_pressure_max_pa must be positive and finite"))
     lateral_boundary===:force_neumann || throw(ArgumentError(
         "lateral_boundary must be :force_neumann"))
     bottom_boundary===:force_neumann || throw(ArgumentError(
         "bottom_boundary must be :force_neumann"))
     ForceBalanceOptions(values[1],max_iterations,values[2],values[3],values[4],values[5],
-        pressure_sweeps,pressure_max_sweeps,values[6],bootstrap_iterations,
-        continuation_iterations,max_backtracks,values[7],values[8],lateral_boundary,bottom_boundary)
+        pressure_sweeps,pressure_max_sweeps,values[6],
+        continuation_iterations,max_backtracks,values[7],values[8],lateral_boundary,bottom_boundary,enforce_trial_consistency,
+        log_pressure_iterations,values[9],values[10])
 end
 
 """Final returned-state diagnostics. Directional residuals use physical grid edges
@@ -57,13 +67,8 @@ struct ForceBalanceDiagnostics{T<:AbstractFloat}
     force_residual_x::T; force_residual_y::T; force_residual_z::T
     force_integrability_max::T; force_integrability_rms::T; force_integrability_faces::Int
     eos_density_relative_error::T; eos_electron_relative_error::T
-    bootstrap_iterations::Int; bootstrap_converged::Bool
-    bootstrap_pressure_change::T; bootstrap_density_change::T; bootstrap_height_change_m::T
-    bootstrap_force_residual::T
-    bootstrap_force_residual_x::T; bootstrap_force_residual_y::T; bootstrap_force_residual_z::T
-    bootstrap_force_integrability_max::T; bootstrap_force_integrability_rms::T
-    bootstrap_force_integrability_faces::Int
-    bootstrap_eos_density_relative_error::T; bootstrap_eos_electron_relative_error::T
+    last_pressure_iterations::Int; last_pressure_residual::T
+    last_pressure_converged::Bool; last_pressure_clipped_cells::Int
 end
 
 const MU0 = 4pi*1e-7
@@ -314,23 +319,6 @@ function _eos_consistency(p,rho,ne,temperature,eos)
     (density=_relative_change(rho,expected_rho),electron=_relative_change(ne,expected_ne))
 end
 
-"""Snapshot the completed HSE bootstrap without changing any state. Convergence
-here is the existing bootstrap change test, not the full 3-D force test."""
-function _bootstrap_summary(changes,metrics,consistency,options)
-    iterations,pchange,rchange,zchange=changes
-    (bootstrap_iterations=iterations,
-     bootstrap_converged=pchange<=options.relative_tolerance &&
-        rchange<=options.relative_tolerance && zchange<=options.height_tolerance_m,
-     bootstrap_pressure_change=pchange,bootstrap_density_change=rchange,
-     bootstrap_height_change_m=zchange,
-     bootstrap_force_residual=max(metrics.x,metrics.y,metrics.z),
-     bootstrap_force_residual_x=metrics.x,bootstrap_force_residual_y=metrics.y,
-     bootstrap_force_residual_z=metrics.z,bootstrap_force_integrability_max=metrics.maximum,
-     bootstrap_force_integrability_rms=metrics.rms,bootstrap_force_integrability_faces=metrics.faces,
-     bootstrap_eos_density_relative_error=consistency.density,
-     bootstrap_eos_electron_relative_error=consistency.electron)
-end
-
 function _pressure_poisson_system!(rhs,diagonal,fx,fy,fz,rho,z,grid,pboundary,
         boundary_k,g,horizontal_weight)
     fill!(rhs,0); fill!(diagonal,0); qz=fz.-rho.*g
@@ -572,6 +560,15 @@ end
 
 _relative_change(a,b)=maximum(abs.(a.-b)./max.(abs.(b),eps(eltype(b))))
 
+# Rebuild the dependent fields at the actual trial pressure. Reuse scratch opacity;
+# pressure and temperature are inputs and are never changed here.
+function _enforce_trial_consistency!(rho,ne,z,kappa,temperature,p,eos,opacity,tau,order)
+    thermodynamics!(rho,ne,eos,temperature,p)
+    opacity500!(kappa,opacity,temperature,p,rho,ne)
+    _height_from_tau!(z,kappa,rho,tau,order)
+    nothing
+end
+
 function _blend_state!(out,candidate,current,alpha)
     @. out=alpha*candidate+(1-alpha)*current
     out
@@ -595,48 +592,6 @@ function _valid_hse_1d_state(p,rho,ne,z,kappa,top_to_bottom)
         all(@view(z[lower,:,:]) .< @view(z[upper,:,:])) || return false
     end
     true
-end
-
-@inline function _bootstrap_change_metric(pchange,rchange,zchange,options)
-    max(pchange/options.relative_tolerance,rchange/options.relative_tolerance,
-        zchange/options.height_tolerance_m)
-end
-
-"""Build a finite column-wise hydrostatic initial state before 3-D relaxation."""
-function _bootstrap_hse_1d!(p,rho,ne,z,kappa,pnew,rhonew,nenew,znew,temperature,
-        eos,opacity,tau,top_to_bottom,order,pboundary,options)
-    zero_force=zeros(eltype(p),size(p))
-    pchange=rchange=zchange=Inf
-    recent_metrics=Float64[]
-    for iteration in 1:options.bootstrap_iterations
-        thermodynamics!(rhonew,nenew,eos,temperature,p)
-        opacity500!(kappa,opacity,temperature,p,rhonew,nenew)
-        _height_from_tau!(znew,kappa,rhonew,tau,top_to_bottom)
-        _pressure_from_force!(pnew,rhonew,znew,zero_force,pboundary,order,
-            options.gravity_m_s2)
-        _validate_force_state("1-D HSE bootstrap",pnew,rhonew,nenew,znew)
-        pchange=_relative_change(pnew,p)
-        rchange=_relative_change(rhonew,rho)
-        zchange=maximum(abs.(znew.-z))
-        @. p=options.relaxation*pnew+(1-options.relaxation)*p
-        @. rho=options.relaxation*rhonew+(1-options.relaxation)*rho
-        copyto!(ne,nenew); copyto!(z,znew)
-        push!(recent_metrics,_bootstrap_change_metric(pchange,rchange,zchange,options))
-        length(recent_metrics)>20 && popfirst!(recent_metrics)
-        if pchange<=options.relative_tolerance && rchange<=options.relative_tolerance &&
-                zchange<=options.height_tolerance_m
-            return iteration,pchange,rchange,zchange
-        end
-    end
-    state_valid=_valid_hse_1d_state(p,rho,ne,z,kappa,top_to_bottom)
-    final_metric=last(recent_metrics)
-    nondivergent=isfinite(final_metric) &&
-        final_metric<=options.backtrack_growth_limit*minimum(recent_metrics)
-    if state_valid && nondivergent
-        @warn "1-D HSE reached its iteration limit; accepting the finite, positive, monotonic, non-divergent state" iterations=options.bootstrap_iterations dP=pchange drho=rchange dz_m=zchange
-        return options.bootstrap_iterations,pchange,rchange,zchange
-    end
-    throw(ErrorException("1-D HSE bootstrap was invalid or diverging after $(options.bootstrap_iterations) iterations (valid=$state_valid, nondivergent=$nondivergent, dP=$pchange, drho=$rchange, dz=$zchange)"))
 end
 
 function _force_residual(p,rho,z,fx,fy,fz,grid,g)
@@ -674,14 +629,13 @@ end
 function reconstruct_force_balance!(atmosphere::Atmosphere3D{Float64},boundary::HE3DBoundaryState,
                                     eos::AbstractEOS,opacity::AbstractOpacity500;
                                     options::ForceBalanceOptions=ForceBalanceOptions(),
-                                    bootstrap_callback=nothing)
+                                    initial_callback=nothing)
     boundary.boundary in (:top,:bottom) || throw(ArgumentError("Phase 1 reconstruction supports top or bottom boundaries"))
     options.max_iterations>0 || throw(ArgumentError("max_iterations must be positive"))
     options.pressure_sweeps>0 || throw(ArgumentError("pressure_sweeps must be positive"))
     options.pressure_max_sweeps>=options.pressure_sweeps || throw(ArgumentError(
         "pressure_max_sweeps must be at least pressure_sweeps"))
     options.pressure_tolerance>0 || throw(ArgumentError("pressure_tolerance must be positive"))
-    options.bootstrap_iterations>0 || throw(ArgumentError("bootstrap_iterations must be positive"))
     options.continuation_iterations>0 || throw(ArgumentError("continuation_iterations must be positive"))
     options.max_backtracks>=0 || throw(ArgumentError("max_backtracks must be non-negative"))
     options.backtrack_growth_limit>=1 || throw(ArgumentError("backtrack_growth_limit must be at least one"))
@@ -699,59 +653,54 @@ function reconstruct_force_balance!(atmosphere::Atmosphere3D{Float64},boundary::
     ne=atmosphere.ne===nothing ? similar(rho) : copy(atmosphere.ne); z=atmosphere.z===nothing ? zeros(Float64,shape) : copy(atmosphere.z)
     kappa=similar(rho); pnew=similar(p); rhonew=similar(rho); nenew=similar(ne); znew=similar(z)
     ptrial=similar(p); rhotrial=similar(rho); netrial=similar(ne); ztrial=similar(z)
-    fx=zeros(shape); fy=zeros(shape); fz=zeros(shape); mode=select_force_balance(atmosphere)
+    fx=zeros(shape); fy=zeros(shape); fz=zeros(shape); B=_magnetic_or_zero(atmosphere)
     fxtrial=zeros(shape); fytrial=zeros(shape); fztrial=zeros(shape)
     pchange=rchange=fres=zchange=Inf; lorentzmax=0.0; converged=false; iterations=0
-    bootstrap_changes=_bootstrap_hse_1d!(p,rho,ne,z,kappa,pnew,rhonew,nenew,znew,
-        atmosphere.temperature,eos,opacity,tau,top_to_bottom,order,pboundary,options)
-    bootstrap_direction=_directional_force_residual(p,rho,z,fx,fy,fz,atmosphere.grid,
-        options.gravity_m_s2)
-    bootstrap_compatibility=_force_integrability(fx,fy,fz,rho,z,atmosphere.grid,options.gravity_m_s2)
-    bootstrap_consistency=_eos_consistency(p,rho,ne,atmosphere.temperature,eos)
-    bootstrap=_bootstrap_summary(bootstrap_changes,merge(bootstrap_direction,bootstrap_compatibility),
-        bootstrap_consistency,options)
-    bootstrap_callback===nothing || bootstrap_callback((pgas=copy(p),rho=copy(rho),
-        ne=copy(ne),z=copy(z),diagnostics=bootstrap))
-    if mode isa MHSMode
-        lorentz_force!(fx,fy,fz,atmosphere.magnetic_field,atmosphere.grid,z)
-        lorentzmax=maximum(sqrt.(fx.^2 .+ fy.^2 .+ fz.^2))
-    end
+    # Initialize dependent fields once from the supplied/initial pressure. This
+    # is not an HSE solve: no hydrostatic pressure update occurs before the loop.
+    @views p[order[1],:,:].=pboundary
+    _enforce_trial_consistency!(rho,ne,z,kappa,atmosphere.temperature,p,eos,opacity,
+        tau,top_to_bottom)
+    lorentz_force!(fx,fy,fz,B,atmosphere.grid,z)
+    lorentzmax=maximum(sqrt.(fx.^2 .+ fy.^2 .+ fz.^2))
     initial_3d_residual=_force_residual(p,rho,z,fx,fy,fz,atmosphere.grid,
         options.gravity_m_s2)
+    initial_callback===nothing || initial_callback((pgas=copy(p),rho=copy(rho),
+        ne=copy(ne),z=copy(z),diagnostics=(force_residual=initial_3d_residual,)))
     continuation_needed=initial_3d_residual>options.force_tolerance
     best_state=(copy(p),copy(rho),copy(ne),copy(z)); fallback_reason=nothing
     best_residual=initial_3d_residual; best_pchange=best_rchange=best_zchange=0.0
     best_lorentzmax=lorentzmax
+    pressure_stats=(iterations=0,residual=Inf,converged=false,clipped=0)
     current_residual=initial_3d_residual
     for iteration in 1:options.max_iterations
         iterations=iteration; thermodynamics!(rhonew,nenew,eos,atmosphere.temperature,p)
         opacity500!(kappa,opacity,atmosphere.temperature,p,rhonew,nenew)
         _height_from_tau!(znew,kappa,rhonew,tau,top_to_bottom)
-        if mode isa MHSMode
-            lorentz_force!(fx,fy,fz,atmosphere.magnetic_field,atmosphere.grid,znew)
-            lorentzmax=maximum(sqrt.(fx.^2 .+ fy.^2 .+ fz.^2))
-        end
-        _pressure_from_force!(pnew,rhonew,znew,fz,pboundary,order,options.gravity_m_s2)
+        lorentz_force!(fx,fy,fz,B,atmosphere.grid,znew)
+        lorentzmax=maximum(sqrt.(fx.^2 .+ fy.^2 .+ fz.^2))
         horizontal_weight=continuation_needed ?
             min(1.0,iteration/options.continuation_iterations) : 1.0
-        inner_sweeps=Ref(0); inner_converged=Ref(false)
-        _relax_pressure_3d!(pnew,fx,fy,fz,rhonew,znew,atmosphere.grid,pboundary,order,
-            options.gravity_m_s2,options.pressure_sweeps,horizontal_weight;
-            max_sweeps=options.pressure_max_sweeps,tolerance=options.pressure_tolerance,
-            sweeps_used=inner_sweeps,converged_ref=inner_converged)
+        pressure_stats=_solve_log_pressure_serial!(pnew,p,fx,fy,fz,rhonew,znew,
+            atmosphere,pboundary,order,options.gravity_m_s2;horizontal_weight=horizontal_weight,
+            max_iterations=options.log_pressure_iterations,tolerance=options.log_pressure_tolerance,
+            max_pressure_pa=options.log_pressure_max_pa)
         _validate_force_state("3-D force relaxation",pnew,rhonew,nenew,znew,fx,fy,fz)
         accepted=false; alpha=options.relaxation
         for backtrack in 0:options.max_backtracks
             alpha<options.minimum_relaxation && break
-            _blend_state!(ptrial,pnew,p,alpha); _blend_state!(rhotrial,rhonew,rho,alpha)
-            _blend_state!(netrial,nenew,ne,alpha); _blend_state!(ztrial,znew,z,alpha)
-            _validate_force_state("3-D backtracking trial",ptrial,rhotrial,netrial,ztrial)
-            if mode isa MHSMode
-                lorentz_force!(fxtrial,fytrial,fztrial,atmosphere.magnetic_field,
-                    atmosphere.grid,ztrial)
+            _blend_log_pressure!(ptrial,pnew,p,alpha)
+            @views ptrial[order[1],:,:].=pboundary
+            if options.enforce_trial_consistency
+                _enforce_trial_consistency!(rhotrial,netrial,ztrial,kappa,
+                    atmosphere.temperature,ptrial,eos,opacity,tau,top_to_bottom)
             else
-                fill!(fxtrial,0); fill!(fytrial,0); fill!(fztrial,0)
+                _blend_state!(rhotrial,rhonew,rho,alpha)
+                _blend_state!(netrial,nenew,ne,alpha); _blend_state!(ztrial,znew,z,alpha)
             end
+            _validate_force_state("3-D backtracking trial",ptrial,rhotrial,netrial,ztrial)
+            lorentz_force!(fxtrial,fytrial,fztrial,B,
+                atmosphere.grid,ztrial)
             trial_residual=_force_residual(ptrial,rhotrial,ztrial,fxtrial,fytrial,
                 fztrial,atmosphere.grid,options.gravity_m_s2)
             threshold=max(options.force_tolerance,
@@ -772,8 +721,7 @@ function reconstruct_force_balance!(atmosphere::Atmosphere3D{Float64},boundary::
         if fres<best_residual
             best_residual=fres; best_pchange=pchange; best_rchange=rchange
             best_zchange=zchange
-            best_lorentzmax=mode isa MHSMode ?
-                maximum(sqrt.(fxtrial.^2 .+ fytrial.^2 .+ fztrial.^2)) : 0.0
+            best_lorentzmax=maximum(sqrt.(fxtrial.^2 .+ fytrial.^2 .+ fztrial.^2))
             copyto!(best_state[1],p); copyto!(best_state[2],rho)
             copyto!(best_state[3],ne); copyto!(best_state[4],z)
         end
@@ -785,7 +733,7 @@ function reconstruct_force_balance!(atmosphere::Atmosphere3D{Float64},boundary::
     end
     absolute_improvement=max(0.0,initial_3d_residual-best_residual)
     improvement=absolute_improvement/max(initial_3d_residual,eps(Float64))
-    accepted_3d=best_residual<initial_3d_residual*(1-sqrt(eps(Float64)))
+    accepted_3d= best_residual<initial_3d_residual*(1-sqrt(eps(Float64)))
     copyto!(p,best_state[1]); copyto!(rho,best_state[2])
     copyto!(ne,best_state[3]); copyto!(z,best_state[4])
     pchange=best_pchange; rchange=best_rchange; zchange=best_zchange
@@ -793,17 +741,18 @@ function reconstruct_force_balance!(atmosphere::Atmosphere3D{Float64},boundary::
     if accepted_3d && !converged
         @warn "accepting the best non-divergent 3-D force-balance improvement" iterations=iterations initial_force=initial_3d_residual best_force=best_residual relative_improvement=improvement reason=something(fallback_reason,"iteration limit reached")
     elseif !accepted_3d
-        @warn "3-D force balance did not improve on the 1-D baseline; restoring 1-D HSE" iterations=iterations initial_force=initial_3d_residual reason=something(fallback_reason,"no improving 3-D iterate")
+        @warn "3-D force balance did not improve on the 1-D baseline; restoring initial state" iterations=iterations initial_force=initial_3d_residual reason=something(fallback_reason,"no improving 3-D iterate")
     end
     # Recompute forces on the restored best state, never the last trial state.
-    mode isa MHSMode && lorentz_force!(fx,fy,fz,atmosphere.magnetic_field,atmosphere.grid,z)
+    lorentz_force!(fx,fy,fz,B,atmosphere.grid,z)
     directional=_directional_force_residual(p,rho,z,fx,fy,fz,atmosphere.grid,options.gravity_m_s2)
     compatibility=_force_integrability(fx,fy,fz,rho,z,atmosphere.grid,options.gravity_m_s2)
     consistency=_eos_consistency(p,rho,ne,atmosphere.temperature,eos)
     atmosphere.pgas=p; atmosphere.rho=rho; atmosphere.ne=ne; atmosphere.z=z
-    ForceBalanceDiagnostics(mode isa HE3DMode ? :HE3D : :MHS,iterations,converged,
+    ForceBalanceDiagnostics(:MHS,iterations,converged,
         pchange,rchange,fres,zchange,0.0,0.0,lorentzmax,initial_3d_residual,
         best_residual,absolute_improvement,improvement,accepted_3d,
         directional.x,directional.y,directional.z,compatibility.maximum,compatibility.rms,
-        compatibility.faces,consistency.density,consistency.electron,values(bootstrap)...)
+        compatibility.faces,consistency.density,consistency.electron,
+        pressure_stats.iterations,pressure_stats.residual,pressure_stats.converged,pressure_stats.clipped)
 end

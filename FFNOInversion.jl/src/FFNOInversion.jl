@@ -26,6 +26,7 @@ include("ForwardModel.jl")
 include("Objectives.jl")
 include("Regularization.jl")
 include("DistributedForward.jl")
+include("LogPressure.jl")
 include("FSDPService.jl")
 include("Solvers.jl")
 include("Gradients.jl")
@@ -43,7 +44,6 @@ export AbstractGPUCoordinator, RootGPUCoordinator, launch_gpu!
 export parallel_provenance, write_parallel_provenance
 export GPUControlDiagnostics, initialize_gpu_control_diagnostics, stop_diagnostics!
 export diagnostic_event!, diagnostic_checkpoint!, set_diagnostic_context!, record_diagnostic_failure!
-export HE3DMode, MHSMode, select_force_balance
 export AbstractEOS, WittmannEOS, IdealGasEOS, thermodynamics!
 export ContinuumState, continuum_state, continuum_extinction_cm, continuum_extinction_m
 export AbstractOpacity500, WittmannOpacity500, ReferenceOpacity500, opacity500!

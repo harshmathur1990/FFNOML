@@ -101,9 +101,8 @@
         height_tolerance_m=eps(),relaxation=0.5,pressure_sweeps=1)
     accepted=reconstruct_force_balance_distributed!(limited,HE3DBoundaryState(1e-10,1.0,:top),
         IdealGasEOS(),ReferenceOpacity500(kappa_m2_kg=0.02),context;options=limited_options)
-    @test max(accepted.force_residual_x,accepted.force_residual_y,
-        accepted.force_residual_z)≈accepted.force_residual atol=1e-12
-    @test accepted.mode==:HE3D && accepted.iterations==1
+    @test max(accepted.force_residual_x,accepted.force_residual_y,accepted.force_residual_z)≈accepted.force_residual atol=1e-12
+    @test accepted.mode==:MHS && accepted.iterations==1
     @test accepted.best_force_residual<=accepted.initial_force_residual
     @test accepted.force_residual==accepted.best_force_residual
     @test limited.local_atmosphere.pgas!==nothing

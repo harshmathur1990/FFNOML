@@ -40,6 +40,20 @@ try
     distributed=distribute_atmosphere(Float64,root_atmosphere,context)
     root_atmosphere=nothing
 
+    # Zero B must reduce to independent columns on every rank.
+    probe=deepcopy(distributed)
+    for component in (:Bx,:By,:Bz)
+        fill!(getfield(probe.local_atmosphere.magnetic_field,component),0.)
+    end
+    zero_diag=reconstruct_force_balance_distributed!(probe,HE3DBoundaryState(1e-10,1.,:top),
+        IdealGasEOS(),ReferenceOpacity500(),context;options=ForceBalanceOptions(max_iterations=1))
+    zero_diag.mode==:MHS && zero_diag.iterations==1 || error("zero-B MPI did not use the unified iteration")
+    # Only one rank owns a nonzero sample: all ranks must nevertheless enter MHS.
+    context.rank==context.root && (probe.local_atmosphere.magnetic_field.Bx[1,1,1]=1e-12)
+    magnetic_diag=reconstruct_force_balance_distributed!(probe,HE3DBoundaryState(1e-10,1.,:top),
+        IdealGasEOS(),ReferenceOpacity500(),context;options=ForceBalanceOptions(max_iterations=1))
+    magnetic_diag.mode==:MHS && magnetic_diag.iterations==1 || error("MPI magnetic branch is not collective")
+
     # Exercise corrugated physical edges across real MPI tile boundaries.  This
     # manufactured state exactly satisfies grad(P) = -rho*g*e_z even though a
     # constant-optical-depth surface is not a constant-height surface.

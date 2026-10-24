@@ -25,7 +25,6 @@ end
     @test ForceBalanceOptions().pressure_sweeps==10
     @test ForceBalanceOptions().pressure_max_sweeps==200
     @test ForceBalanceOptions().pressure_tolerance==1e-6
-    @test ForceBalanceOptions().bootstrap_iterations==1000
     @test ForceBalanceOptions().continuation_iterations==10
     @test ForceBalanceOptions().max_backtracks==8
     @test ForceBalanceOptions().lateral_boundary==:force_neumann
@@ -38,29 +37,10 @@ end
     kappa=similar(p); opacity500!(kappa,opacity,T,p,rho,ne)
     @test all(kappa.==0.02)
 
-    bootstrap_atmosphere=phase1_atmosphere(); bootstrap_shape=size(bootstrap_atmosphere.temperature)
-    bootstrap_p=fill(1.0,bootstrap_shape); bootstrap_rho=fill(1e-10,bootstrap_shape)
-    bootstrap_ne=similar(bootstrap_rho); bootstrap_z=zeros(bootstrap_shape)
-    bootstrap_kappa=similar(bootstrap_rho); bootstrap_pnew=similar(bootstrap_p)
-    bootstrap_rhonew=similar(bootstrap_rho); bootstrap_nenew=similar(bootstrap_ne)
-    bootstrap_znew=similar(bootstrap_z); bootstrap_tau=10.0.^bootstrap_atmosphere.grid.log_tau500
-    bootstrap_order=collect(axes(bootstrap_p,1)); bootstrap_boundary=fill(1.0,size(bootstrap_p,2),size(bootstrap_p,3))
-    bootstrap_options=ForceBalanceOptions(bootstrap_iterations=2,relative_tolerance=eps(),
-        height_tolerance_m=eps(),relaxation=0.5)
-    @test_logs (:warn,r"accepting the finite, positive, monotonic, non-divergent state") begin
-        bootstrap_result=FFNOInversion._bootstrap_hse_1d!(bootstrap_p,bootstrap_rho,
-            bootstrap_ne,bootstrap_z,bootstrap_kappa,bootstrap_pnew,bootstrap_rhonew,
-            bootstrap_nenew,bootstrap_znew,bootstrap_atmosphere.temperature,eos,opacity,
-            bootstrap_tau,bootstrap_order,bootstrap_order,bootstrap_boundary,bootstrap_options)
-        @test bootstrap_result[1]==2
-        @test FFNOInversion._valid_hse_1d_state(bootstrap_p,bootstrap_rho,bootstrap_ne,
-            bootstrap_z,bootstrap_kappa,bootstrap_order)
-    end
-
     a=phase1_atmosphere(); T0=copy(a.temperature)
     d=reconstruct_force_balance!(a,HE3DBoundaryState(1e-10,1.0,:top),eos,opacity;
         options=ForceBalanceOptions(max_iterations=200,relative_tolerance=1e-5,force_tolerance=0.6,height_tolerance_m=1.0,relaxation=0.5))
-    @test d.mode==:HE3D && d.converged && d.lorentz_max_n_m3==0
+    @test d.mode==:MHS && d.lorentz_max_n_m3==0
     @test d.best_force_residual<=d.initial_force_residual
     @test d.force_residual==d.best_force_residual
     @test d.absolute_force_improvement==d.initial_force_residual-d.best_force_residual
@@ -73,7 +53,7 @@ end
     accepted=reconstruct_force_balance!(limited,HE3DBoundaryState(1e-10,1.0,:top),eos,opacity;
         options=ForceBalanceOptions(max_iterations=1,relative_tolerance=eps(),force_tolerance=eps(),
             height_tolerance_m=eps(),relaxation=0.5,pressure_sweeps=1))
-    @test accepted.mode==:HE3D && accepted.iterations==1
+    @test accepted.mode==:MHS && accepted.iterations==1
     @test accepted.best_force_residual<=accepted.initial_force_residual
     @test accepted.force_residual==accepted.best_force_residual
     @test limited.pgas!==nothing
@@ -169,11 +149,11 @@ end
         options=ForceBalanceOptions(max_iterations=8,relative_tolerance=1e-4,
             force_tolerance=2.0,height_tolerance_m=1e4,relaxation=0.8,
             pressure_sweeps=5,pressure_max_sweeps=40,pressure_tolerance=1e-5))
-    @test production_diag.mode==:HE3D
+    @test production_diag.mode==:MHS
     @test all(isfinite,production.pgas) && all(>(0),production.pgas)
     @test all(isfinite,production.rho) && all(>(0),production.rho)
     @test all(isfinite,production.z)
-    @test maximum(production.pgas)>minimum(production.pgas)
+    @test production_diag.accepted_3d ? maximum(production.pgas)>minimum(production.pgas) : all(production.pgas.==0.5)
 end
 
 @testset "Final force diagnostics" begin
@@ -241,72 +221,75 @@ end
     @test diagnostics.force_integrability_faces==29
 end
 
-@testset "Bootstrap diagnostic checkpoint" begin
-    for magnetic in (false,true)
+@testset "EOS and geometry enforced at trial pressure" begin
+    @test !ForceBalanceOptions().enforce_trial_consistency
+    eos=IdealGasEOS(); opacity=NonlinearPressureOpacity(0.01)
+    for magnetic in (false,true), distributed_mode in (false,true), limit in (1,12)
         a=phase1_atmosphere(magnetic=magnetic)
-        options=ForceBalanceOptions(max_iterations=2,relative_tolerance=1e-5,
-            force_tolerance=0.6,height_tolerance_m=1.,relaxation=0.5)
-        d=reconstruct_force_balance!(a,HE3DBoundaryState(1e-10,1.,:top),IdealGasEOS(),
-            ReferenceOpacity500();options=options)
-        @test d.bootstrap_iterations>0 && d.bootstrap_converged
-        @test d.bootstrap_pressure_change<=options.relative_tolerance
-        @test d.bootstrap_density_change<=options.relative_tolerance
-        @test d.bootstrap_height_change_m<=options.height_tolerance_m
-        @test d.bootstrap_force_residual_z<1e-4
-        @test max(d.bootstrap_force_residual_x,d.bootstrap_force_residual_y,
-            d.bootstrap_force_residual_z)==d.bootstrap_force_residual
-        @test d.bootstrap_force_integrability_faces==29
-        @test d.bootstrap_eos_density_relative_error<1e-4
-        @test d.bootstrap_eos_electron_relative_error<1e-4
-        context=serial_context(); dist=distribute_atmosphere(Float64,
-            phase1_atmosphere(magnetic=magnetic),context)
-        dd=reconstruct_force_balance_distributed!(dist,HE3DBoundaryState(1e-10,1.,:top),
-            IdealGasEOS(),ReferenceOpacity500(),context;options=options)
-        for n in fieldnames(typeof(d))
-            startswith(String(n),"bootstrap_") || continue
-            @test getfield(d,n)==getfield(dd,n)
+        a.temperature[:,2,:].*=1.15
+        options=ForceBalanceOptions(max_iterations=limit,enforce_trial_consistency=true)
+        boundary=HE3DBoundaryState(1e-10,1.,:top)
+        if distributed_mode
+            context=serial_context(); dist=distribute_atmosphere(Float64,a,context)
+            d=reconstruct_force_balance_distributed!(dist,boundary,eos,opacity,context;
+                options=options)
+            a=dist.local_atmosphere
+        else
+            d=reconstruct_force_balance!(a,boundary,eos,opacity;options=options)
         end
+        rho=similar(a.rho); ne=similar(a.ne); kappa=similar(rho); z=similar(a.z)
+        thermodynamics!(rho,ne,eos,a.temperature,a.pgas)
+        opacity500!(kappa,opacity,a.temperature,a.pgas,rho,ne)
+        FFNOInversion._height_from_tau!(z,kappa,rho,10.0.^a.grid.log_tau500,
+            collect(axes(z,1)))
+        @test a.rho==rho
+        @test a.ne==ne
+        @test a.z==z
+        @test d.eos_density_relative_error==d.eos_electron_relative_error==0
+        @test all(a.pgas[1,:,:].==1.)
     end
-    # Accepting a finite iteration-limited bootstrap must not be labelled converged.
-    d=reconstruct_force_balance!(phase1_atmosphere(),HE3DBoundaryState(1e-10,1.,:top),
-        IdealGasEOS(),ReferenceOpacity500();options=ForceBalanceOptions(bootstrap_iterations=2,
-            max_iterations=1,relative_tolerance=eps(),height_tolerance_m=eps(),relaxation=0.5))
-    @test d.bootstrap_iterations==2 && !d.bootstrap_converged
 end
 
-@testset "Bootstrap output snapshot" begin
-    eos=IdealGasEOS(); opacity=ReferenceOpacity500()
-    options=ForceBalanceOptions(max_iterations=2)
+
+@testset "One MHS iteration without bootstrap" begin
+    eos=IdealGasEOS();opacity=ReferenceOpacity500()
+    @test !(:bootstrap_iterations in fieldnames(typeof(ForceBalanceOptions())))
+    @test !any(n->startswith(String(n),"bootstrap_"),fieldnames(ForceBalanceDiagnostics{Float64}))
     for distributed_mode in (false,true)
-        function run(callback)
-            a=phase1_atmosphere(); boundary=HE3DBoundaryState(1e-10,1.,:top)
+        outputs=[]
+        for explicit_zero in (false,true)
+            source=phase1_atmosphere()
+            shape=size(source.temperature)
+            B=explicit_zero ? MagneticField3D(zeros(shape),zeros(shape),zeros(shape)) : nothing
+            a=Atmosphere3D(source.grid,source.temperature,source.vx,source.vy,source.vz,source.vturb;
+                magnetic_field=B)
+            initial=Ref{Any}(nothing)
+            options=ForceBalanceOptions(max_iterations=300)
             if distributed_mode
-                context=serial_context(); dist=distribute_atmosphere(Float64,a,context)
-                d=reconstruct_force_balance_distributed!(dist,boundary,eos,opacity,context;
-                    options=options,bootstrap_callback=callback)
-                return dist.local_atmosphere,d
+                context=serial_context();dist=distribute_atmosphere(Float64,a,context)
+                d=reconstruct_force_balance_distributed!(dist,HE3DBoundaryState(1e-10,1.,:top),
+                    eos,opacity,context;options=options,initial_callback=s->(initial[]=s))
+                a=dist.local_atmosphere
+            else
+                d=reconstruct_force_balance!(a,HE3DBoundaryState(1e-10,1.,:top),eos,opacity;
+                    options=options,initial_callback=s->(initial[]=s))
             end
-            d=reconstruct_force_balance!(a,boundary,eos,opacity;options=options,
-                bootstrap_callback=callback)
-            a,d
+            @test all(initial[].pgas.==1.) # No preliminary pressure solve.
+            @test d.mode==:MHS && d.iterations>1
+            @test d.lorentz_max_n_m3==0
+            @test d.force_residual≈max(d.force_residual_x,d.force_residual_y,d.force_residual_z)
+            @test d.force_residual_x<1e-5
+            push!(outputs,(a,d))
         end
-        baseline,baseline_diag=run(nothing)
-        snapshot=Ref{Any}(nothing); calls=Ref(0)
-        a,d=run(state->begin
-            calls[]+=1; snapshot[]=deepcopy(state)
-            # Caller may edit its copies without affecting relaxation.
-            fill!(state.pgas,0); fill!(state.rho,0); fill!(state.ne,0); fill!(state.z,0)
-        end)
-        @test calls[]==1
-        @test snapshot[].diagnostics.bootstrap_converged
-        @test all(snapshot[].pgas.>0) && all(snapshot[].rho.>0) && all(snapshot[].ne.>0)
-        @test all(diff(snapshot[].z;dims=1).<0)
-        @test snapshot[].diagnostics.bootstrap_force_residual_z<1e-5
         for n in (:pgas,:rho,:ne,:z)
-            @test getfield(a,n)==getfield(baseline,n)
-        end
-        for n in fieldnames(typeof(d))
-            @test getfield(d,n)==getfield(baseline_diag,n)
+            @test getfield(outputs[1][1],n)==getfield(outputs[2][1],n)
         end
     end
+    # Even with a supplied B, initialization must not run HSE first.
+    a=phase1_atmosphere(magnetic=true);initial=Ref{Any}(nothing)
+    d=reconstruct_force_balance!(a,HE3DBoundaryState(1e-10,1.,:top),eos,opacity;
+        options=ForceBalanceOptions(max_iterations=1),initial_callback=s->(initial[]=s))
+    @test all(initial[].pgas.==1.)
+    @test d.mode==:MHS && d.iterations==1
+    @test d.lorentz_max_n_m3>0
 end

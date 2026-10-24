@@ -2,9 +2,9 @@ include("helpers.jl")
 
 @testset "canonical types and force-balance selection" begin
     a = test_atmosphere()
-    @test select_force_balance(a) isa HE3DMode
+    @test all(iszero,FFNOInversion._magnetic_or_zero(a).Bx)
     am = test_atmosphere(magnetic=true)
-    @test select_force_balance(am) isa MHSMode
+    @test FFNOInversion._magnetic_or_zero(am)===am.magnetic_field
     @test_throws ArgumentError Grid3D([0.0,1.0,0.5],[0.0],[0.0])
     @test_throws ArgumentError Atmosphere3D(a.grid,fill(-1.0,size(a.temperature)),a.vx,a.vy,a.vz,a.vturb)
     @test StokesSet((:I,:Q,:U,:V)).components == (:I,:Q,:U,:V)

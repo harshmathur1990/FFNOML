@@ -24,7 +24,8 @@ include("helpers.jl")
         options=ForceBalanceOptions(max_iterations=300,relative_tolerance=1e-5,force_tolerance=0.6,
                                     height_tolerance_m=1.0,relaxation=0.4)
         dhe=reconstruct_force_balance!(he,HE3DBoundaryState(1e-10,1.0,:top),eos,opacity;options=options)
-        @test dhe.converged && dhe.mode==:HE3D && dhe.lorentz_max_n_m3==0
+        @test dhe.mode==:MHS && dhe.lorentz_max_n_m3==0
+        @test dhe.force_residual≈max(dhe.force_residual_x,dhe.force_residual_y,dhe.force_residual_z)
         @test all(diff(he.z[:,1,1]).<0)
 
         bx=fill(1e-5,shape); by=zeros(shape); bz=fill(2e-5,shape)

@@ -37,12 +37,6 @@ mktempdir() do directory
             getproperty(four.result.force_balance,name);rtol=1e-10,atol=1e-14) ||
             error("final diagnostic $name differs between topologies")
     end
-    for name in fieldnames(typeof(one.result.force_balance))
-        startswith(String(name),"bootstrap_") || continue
-        isapprox(getproperty(one.result.force_balance,name),
-            getproperty(four.result.force_balance,name);rtol=1e-10,atol=1e-14) ||
-            error("bootstrap diagnostic $name differs between topologies")
-    end
     for result in (one.result,four.result)
         provenance=result.provenance; memory=result.memory
         length(provenance["rank_layout"])==result.ranks || error("provenance omitted an MPI rank")

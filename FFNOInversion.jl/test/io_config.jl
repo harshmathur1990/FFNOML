@@ -5,7 +5,7 @@ using TOML
     cfg = load_config(path)
     @test cfg.stokes.components == (:I,)
     summary = dry_run_summary(cfg)
-    @test occursin("force_balance=HE3D",summary)
+    @test occursin("force_balance=MHS",summary)
     @test occursin("full_grid_psf=true",summary)
     @test occursin("zero_weight_exclusion=true",summary)
     @test cfg.atmosphere.logtau500_dataset == "logtau_500"
