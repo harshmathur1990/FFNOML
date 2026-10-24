@@ -1,19 +1,73 @@
 const VALID_STOKES = (:I, :Q, :U, :V)
 
-"""Three-dimensional inversion grid. `log_tau500` must be strictly monotonic."""
-struct Grid3D{T<:AbstractFloat}
-    log_tau500::Vector{T}
-    x::Vector{T}
-    y::Vector{T}
-    function Grid3D(log_tau500::AbstractVector{T}, x::AbstractVector{T}, y::AbstractVector{T}) where {T<:AbstractFloat}
-        length(log_tau500) >= 2 || throw(ArgumentError("log_tau500 needs at least two points"))
-        length(x) >= 1 && length(y) >= 1 || throw(ArgumentError("x and y cannot be empty"))
-        all(isfinite, log_tau500) && all(isfinite, x) && all(isfinite, y) || throw(ArgumentError("grid values must be finite"))
-        d = diff(log_tau500)
-        (all(>(zero(T)), d) || all(<(zero(T)), d)) || throw(ArgumentError("log_tau500 must be strictly monotonic"))
-        new{T}(collect(log_tau500), collect(x), collect(y))
+const VERTICAL_KINDS = (:z_m, :log10tau500)
+
+"""Unit of a vertical coordinate kind, for messages and file attributes."""
+vertical_unit(kind::Symbol) = kind === :z_m ? "m" : kind === :log10tau500 ? "dex" :
+    throw(ArgumentError("unknown vertical coordinate kind :$kind; expected one of $(VERTICAL_KINDS)"))
+
+"""Native vertical coordinate of a grid, stored top first (index 1 is the top).
+
+`:z_m` is geometrical height in metres, positive upward, so its values strictly
+decrease; `:log10tau500` is log10 of the 500 nm optical depth, so its values
+strictly increase. Inputs in the other order are reversed, together with every
+field, by the readers that hold those fields; this type never reorders.
+"""
+struct VerticalAxis{T<:AbstractFloat}
+    kind::Symbol
+    values::Vector{T}
+    function VerticalAxis(kind::Symbol, values::AbstractVector{T}) where {T<:AbstractFloat}
+        unit = vertical_unit(kind)
+        length(values) >= 2 || throw(ArgumentError("vertical axis :$kind needs at least two levels"))
+        all(isfinite, values) || throw(ArgumentError("vertical axis :$kind [$unit] must be finite"))
+        d = diff(values)
+        if kind === :z_m
+            all(<(zero(T)), d) || throw(ArgumentError(
+                "height axis [m] must strictly decrease (top first); reverse the axis and every field together, or read through read_inversion_inputs, which normalizes"))
+        else
+            all(>(zero(T)), d) || throw(ArgumentError(
+                "log10tau500 axis [dex] must strictly increase (top first); reverse the axis and every field together, or read through read_inversion_inputs, which normalizes"))
+        end
+        new{T}(kind, collect(values))
     end
 end
+
+"""Three-dimensional inversion grid: a native vertical axis plus horizontal pixel
+coordinates. x and y must be finite and strictly increasing (one point allowed)."""
+struct Grid3D{T<:AbstractFloat}
+    vertical::VerticalAxis{T}
+    x::Vector{T}
+    y::Vector{T}
+    function Grid3D(vertical::VerticalAxis{T}, x::AbstractVector{T}, y::AbstractVector{T}) where {T<:AbstractFloat}
+        length(x) >= 1 && length(y) >= 1 || throw(ArgumentError("x and y cannot be empty"))
+        all(isfinite, x) && all(isfinite, y) || throw(ArgumentError("grid values must be finite"))
+        all(>(zero(T)), diff(x)) || throw(ArgumentError("x must be strictly increasing; decreasing horizontal axes are not normalized"))
+        all(>(zero(T)), diff(y)) || throw(ArgumentError("y must be strictly increasing; decreasing horizontal axes are not normalized"))
+        new{T}(vertical, collect(x), collect(y))
+    end
+end
+
+"""Legacy constructor: a log10tau500 axis, which must already be top first (increasing)."""
+Grid3D(log_tau500::AbstractVector{T}, x::AbstractVector{T}, y::AbstractVector{T}) where {T<:AbstractFloat} =
+    Grid3D(VerticalAxis(:log10tau500, log_tau500), x, y)
+
+"""Kind of the grid's native vertical coordinate (`:z_m` or `:log10tau500`)."""
+vertical_coordinate(grid::Grid3D) = grid.vertical.kind
+"""Values of the native vertical coordinate, top first, in its own unit."""
+native_depth(grid::Grid3D) = grid.vertical.values
+"""Number of vertical levels."""
+nlevels(grid::Grid3D) = length(grid.vertical.values)
+
+function _axis_of_kind(grid::Grid3D, kind::Symbol, name)
+    actual = vertical_coordinate(grid)
+    actual === kind || throw(ArgumentError(
+        "$name requested, but the grid's native vertical coordinate is :$actual [$(vertical_unit(actual))]"))
+    native_depth(grid)
+end
+"""The native log10tau500 axis [dex]; throws on a height grid."""
+log_tau500_axis(grid::Grid3D) = _axis_of_kind(grid, :log10tau500, "log10tau500 axis [dex]")
+"""The native height axis [m]; throws on an optical-depth grid."""
+z_axis(grid::Grid3D) = _axis_of_kind(grid, :z_m, "height axis [m]")
 
 struct MagneticField3D{T<:AbstractFloat,A<:AbstractArray{T,3}}
     Bx::A
@@ -26,7 +80,12 @@ struct MagneticField3D{T<:AbstractFloat,A<:AbstractArray{T,3}}
     end
 end
 
-"""Atmosphere arrays use `(nz,nx,ny)`. SI units: K, m/s, Pa, kg/m^3, m^-3, m, tesla."""
+"""Atmosphere arrays use `(nz,nx,ny)`, vertical index 1 at the top. SI units: K, m/s, Pa, kg/m^3, m^-3, m, tesla.
+
+`z` (m) and `logtau500` are full 3-D coordinate fields. The one matching the
+grid's native axis equals that axis broadcast over columns (see
+`check_coordinate_consistency`); the other is derived and may vary by column.
+"""
 mutable struct Atmosphere3D{T<:AbstractFloat,A<:AbstractArray{T,3},BM}
     grid::Grid3D{T}
     temperature::A
@@ -39,23 +98,39 @@ mutable struct Atmosphere3D{T<:AbstractFloat,A<:AbstractArray{T,3},BM}
     rho::Union{Nothing,A}
     ne::Union{Nothing,A}
     z::Union{Nothing,A}
+    logtau500::Union{Nothing,A}
 end
 
 function Atmosphere3D(grid::Grid3D{T}, temperature::A, vx::A, vy::A, vz::A, vturb::A;
-                      magnetic_field=nothing, pgas=nothing, rho=nothing, ne=nothing, z=nothing) where {T<:AbstractFloat,A<:AbstractArray{T,3}}
-    expected = (length(grid.log_tau500), length(grid.x), length(grid.y))
+                      magnetic_field=nothing, pgas=nothing, rho=nothing, ne=nothing, z=nothing,
+                      logtau500=nothing) where {T<:AbstractFloat,A<:AbstractArray{T,3}}
+    expected = (nlevels(grid), length(grid.x), length(grid.y))
     for (name, value) in ((:temperature,temperature),(:vx,vx),(:vy,vy),(:vz,vz),(:vturb,vturb))
         size(value) == expected || throw(DimensionMismatch("$name has size $(size(value)); expected $expected"))
         all(isfinite, value) || throw(ArgumentError("$name must be finite"))
     end
     minimum(temperature) > 0 || throw(ArgumentError("temperature must be positive"))
     magnetic_field === nothing || size(magnetic_field.Bx) == expected || throw(DimensionMismatch("magnetic field shape differs from grid"))
-    for (name, value) in ((:pgas,pgas),(:rho,rho),(:ne,ne),(:z,z))
+    for (name, value) in ((:pgas,pgas),(:rho,rho),(:ne,ne),(:z,z),(:logtau500,logtau500))
         value === nothing && continue
         size(value) == expected || throw(DimensionMismatch("$name shape differs from grid"))
         all(isfinite, value) || throw(ArgumentError("$name must be finite"))
     end
-    Atmosphere3D{T,A,typeof(magnetic_field)}(grid, temperature, vx, vy, vz, vturb, magnetic_field, pgas, rho, ne, z)
+    Atmosphere3D{T,A,typeof(magnetic_field)}(grid, temperature, vx, vy, vz, vturb, magnetic_field, pgas, rho, ne, z, logtau500)
+end
+
+"""Throw unless the 3-D coordinate field of the native kind (`z` for a height
+grid, `logtau500` for an optical-depth grid) is absent or equals the native axis
+broadcast over every column."""
+function check_coordinate_consistency(atmosphere::Atmosphere3D)
+    grid = atmosphere.grid; kind = vertical_coordinate(grid); axis = native_depth(grid)
+    field = kind === :z_m ? atmosphere.z : atmosphere.logtau500
+    field === nothing && return true
+    for k in axes(field,1)
+        all(==(axis[k]), @view field[k,:,:]) || throw(ArgumentError(
+            "native $(kind) field differs from the grid axis at level $k; the native coordinate cannot vary by column"))
+    end
+    true
 end
 
 struct HE3DBoundaryState{T<:AbstractFloat,A}

@@ -14,7 +14,8 @@ import Muspel
         zeros(T,shape),zeros(T,shape),ne,dropdims(sum(hp[:,:,:,1:5],dims=4),dims=4),
         Array(@view(hp[:,:,:,6])))
     @test muspel_atmos.z isa AbstractArray{T,3}
-    atom_path=normpath(joinpath(@__DIR__,"..","..","..","multi3d","input","atoms","atom.h6_tiago2.yaml"))
+    atom_dir=get(ENV,"FFNO_ATOM_DIR","/mn/stornext/u3/harshm/Documents/WorkRepo/multi3d/input/atoms")
+    atom_path=joinpath(atom_dir,"atom.h6_tiago2.yaml")
     cfg=(a_min=1f-4,a_max=1f1,a_n=300,v_min=0f0,v_max=5f2,v_n=500)
     model=build_muspel_line_model(atmos,hp,atom_path,5,2,3;voigt=cfg)
     wave=T.(model.line.λ).*T(1e-9)

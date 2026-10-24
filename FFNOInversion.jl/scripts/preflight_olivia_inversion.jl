@@ -36,9 +36,10 @@ function _validate_hdf5_inputs(config,run_dir)
     atmosphere_path=_required_file("initial atmosphere",_run_path(run_dir,config.atmosphere.file))
     atmosphere_shape=h5open(atmosphere_path,"r") do file
         storage_order=config.atmosphere.storage_order
-        logtau_shape=_selected_shape(_atmosphere_shape(
-            _dataset_shape(file,config.atmosphere.logtau500_dataset,"logtau500"),storage_order),
-            config.time_index,1,"logtau500")
+        vertical_name=string(config.atmosphere.vertical_dataset)
+        vertical_shape=_selected_shape(_atmosphere_shape(
+            _dataset_shape(file,config.atmosphere.vertical_dataset,vertical_name),storage_order),
+            config.time_index,1,vertical_name)
         fields=(
             temperature=config.atmosphere.temperature_dataset,
             vx=config.atmosphere.vx_dataset,
@@ -50,8 +51,12 @@ function _validate_hdf5_inputs(config,run_dir)
             config.time_index,3,string(name)) for (name,dataset) in pairs(fields))
         all(==(selected[:temperature]),values(selected)) || throw(DimensionMismatch(
             "atmosphere temperature/vx/vy/vz shapes differ: $selected"))
-        logtau_shape[1]==selected[:temperature][1] || throw(DimensionMismatch(
-            "logtau500 depth $(logtau_shape[1]) differs from atmosphere depth $(selected[:temperature][1])"))
+        vertical_shape[1]==selected[:temperature][1] || throw(DimensionMismatch(
+            "$vertical_name depth $(vertical_shape[1]) differs from atmosphere depth $(selected[:temperature][1])"))
+        for name in (config.atmosphere.x_dataset,config.atmosphere.y_dataset)
+            name===nothing && continue
+            _dataset_shape(file,name,name)
+        end
         if config.atmosphere.vturb_dataset!==nothing
             vturb_shape=_selected_shape(_atmosphere_shape(
                 _dataset_shape(file,config.atmosphere.vturb_dataset,"vturb"),storage_order),

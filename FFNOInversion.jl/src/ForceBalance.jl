@@ -82,8 +82,8 @@ const MU0 = 4pi*1e-7
 end
 
 @inline function _physical_derivatives(a,z,grid,k,i,j)
-    aτ=_derivative(a,k,i,j,grid.log_tau500,1)
-    zτ=_derivative(z,k,i,j,grid.log_tau500,1)
+    aτ=_derivative(a,k,i,j,log_tau500_axis(grid),1)
+    zτ=_derivative(z,k,i,j,log_tau500_axis(grid),1)
     abs(zτ)>eps(eltype(z)) || throw(ErrorException(
         "degenerate optical-depth mapping at depth=$k x=$i y=$j"))
     ax=_derivative(a,k,i,j,grid.x,2); ay=_derivative(a,k,i,j,grid.y,3)
@@ -644,7 +644,7 @@ function reconstruct_force_balance!(atmosphere::Atmosphere3D{Float64},boundary::
     options.lateral_boundary===:force_neumann || throw(ArgumentError("unsupported lateral boundary"))
     options.bottom_boundary===:force_neumann || throw(ArgumentError("unsupported bottom boundary"))
     0<options.relaxation<=1 || throw(ArgumentError("relaxation must lie in (0,1]"))
-    shape=size(atmosphere.temperature); nz,nx,ny=shape; tau=10.0.^atmosphere.grid.log_tau500
+    shape=size(atmosphere.temperature); nz,nx,ny=shape; tau=10.0.^log_tau500_axis(atmosphere.grid)
     top_to_bottom=tau[1]<tau[end] ? collect(1:nz) : collect(nz:-1:1)
     order=boundary.boundary==:top ? top_to_bottom : reverse(top_to_bottom)
     pboundary=_boundary_map(boundary.p0,nx,ny,:pressure); rho_boundary=_boundary_map(boundary.rho0,nx,ny,:density)

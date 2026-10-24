@@ -44,7 +44,7 @@ end
     spec=layout.specs[1]; output_length=length(fixture.distributed.local_atmosphere.temperature)
     linearization=MatrixFreeLinearization(length(spec.initial),output_length,
         (output,tangent)->begin
-            field=NodeField(reshape(collect(tangent),size(spec.initial)),spec.log_tau_nodes)
+            field=NodeField(reshape(collect(tangent),size(spec.initial)),spec.nodes,spec.kind)
             output.=vec(expand_nodes(field,fixture.distributed.global_grid,fixture.distributed.tile))
         end,
         (output,cotangent)->begin

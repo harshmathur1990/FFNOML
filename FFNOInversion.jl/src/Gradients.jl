@@ -59,7 +59,9 @@ function _node_expansion_vjp_local!(node_cotangent::AbstractArray{T,3},
         grid::Grid3D{T},tile::Tile2D) where T<:AbstractFloat
     size(node_cotangent)==size(spec.initial) || throw(DimensionMismatch(
         "node cotangent shape differs from control map"))
-    size(atmosphere_cotangent)==(length(grid.log_tau500),length(tile.xrange),length(tile.yrange)) ||
+    _check_node_kind(NodeField(spec.initial,spec.nodes,spec.kind),grid)
+    depth=native_depth(grid)
+    size(atmosphere_cotangent)==(length(depth),length(tile.xrange),length(tile.yrange)) ||
         throw(DimensionMismatch("atmosphere cotangent shape differs from rank-owned tile"))
     fill!(node_cotangent,zero(T))
     _,ncx,ncy=size(spec.initial)
@@ -67,8 +69,8 @@ function _node_expansion_vjp_local!(node_cotangent::AbstractArray{T,3},
     cy=ncy==1 ? T[zero(T)] : collect(range(zero(T),one(T),length=ncy))
     xn=length(grid.x)==1 ? T[zero(T)] : collect(range(zero(T),one(T),length=length(grid.x)))
     yn=length(grid.y)==1 ? T[zero(T)] : collect(range(zero(T),one(T),length=length(grid.y)))
-    for iz in eachindex(grid.log_tau500),(ii,ix) in enumerate(tile.xrange),(jj,iy) in enumerate(tile.yrange)
-        z0,z1,wz=_bracket(spec.log_tau_nodes,grid.log_tau500[iz])
+    for iz in eachindex(depth),(ii,ix) in enumerate(tile.xrange),(jj,iy) in enumerate(tile.yrange)
+        z0,z1,wz=_bracket(spec.nodes,depth[iz])
         x0,x1,wx=ncx==1 ? (1,1,zero(T)) : _bracket(cx,xn[ix])
         y0,y1,wy=ncy==1 ? (1,1,zero(T)) : _bracket(cy,yn[iy])
         value=atmosphere_cotangent[iz,ii,jj]
@@ -247,10 +249,10 @@ function _coordinate_step_limits(problem,layout,parameters,coordinate,context)
     spec=layout.specs[index]; indices=layout.ranges[index]
     delta=reshape(parameters[indices],size(spec.initial)).-spec.initial
     grid=problem.distributed.global_grid; tile=problem.distributed.tile
-    values=problem.control_reference[spec.variable].+expand_nodes(NodeField(delta,spec.log_tau_nodes),grid,tile)
+    values=problem.control_reference[spec.variable].+expand_nodes(NodeField(delta,spec.nodes,spec.kind),grid,tile)
     basis=zeros(eltype(parameters),size(spec.initial))
     basis[coordinate-first(indices)+1]=spec.scale
-    response=expand_nodes(NodeField(basis,spec.log_tau_nodes),grid,tile)
+    response=expand_nodes(NodeField(basis,spec.nodes,spec.kind),grid,tile)
     hp=Inf; hm=Inf
     for i in eachindex(values)
         w=response[i]

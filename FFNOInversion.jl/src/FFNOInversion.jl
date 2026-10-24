@@ -36,6 +36,8 @@ include("IO.jl")
 include("Execution.jl")
 
 export Grid3D, MagneticField3D, Atmosphere3D, HE3DBoundaryState
+export VerticalAxis, VERTICAL_KINDS, vertical_unit, vertical_coordinate, native_depth, nlevels
+export log_tau500_axis, z_axis, check_coordinate_consistency
 export ParallelOptions, ParallelContext, Tile2D, DistributedField
 export serial_context, initialize_parallel, finalize_parallel!, isroot, barrier, mpi_broadcast
 export allreduce_sum, allreduce_max, process_grid, tile_for_rank, local_tile, local_atmosphere

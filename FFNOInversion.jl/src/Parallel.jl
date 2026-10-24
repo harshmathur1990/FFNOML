@@ -5,7 +5,8 @@ threads are used inside rank-local kernels and never call MPI directly.
 """
 Base.@kwdef struct ParallelOptions
     enabled::Bool = false
-    decomposition::Symbol = :cartesian_2d
+    decomposition::Symbol = :cartesian_2d       # :cartesian_2d or :x_slabs (process grid (nranks,1), full y)
+    min_columns_per_rank::Int = 2               # x_slabs only: smallest owned x extent
     threads_per_rank::Int = Threads.nthreads()
     gpu_launcher_rank::Int = 0
     gpu_connect_timeout_seconds::Float64 = 30.0
@@ -42,7 +43,8 @@ function initialize_parallel(;options=ParallelOptions())
     options.threads_per_rank > 0 || throw(ArgumentError("threads_per_rank must be positive"))
     options.threads_per_rank == Threads.nthreads() || throw(ArgumentError(
         "configured threads_per_rank=$(options.threads_per_rank), but Julia started with $(Threads.nthreads()) threads"))
-    options.decomposition == :cartesian_2d || throw(ArgumentError("only cartesian_2d decomposition is supported"))
+    options.decomposition in (:cartesian_2d,:x_slabs) || throw(ArgumentError("decomposition must be cartesian_2d or x_slabs"))
+    options.min_columns_per_rank >= 1 || throw(ArgumentError("min_columns_per_rank must be positive"))
     options.gpu_connect_timeout_seconds >= 0 || throw(ArgumentError("gpu_connect_timeout_seconds must be non-negative"))
     options.gpu_status_timeout_seconds >= 0 || throw(ArgumentError("gpu_status_timeout_seconds must be non-negative"))
     options.gpu_diagnostic_interval_seconds >= 0 || throw(ArgumentError("gpu_diagnostic_interval_seconds must be non-negative"))
@@ -126,6 +128,19 @@ function _axis_partition(n::Int,index::Int,parts::Int)
     first:first+count-1
 end
 
+"""Choose the process grid. `:cartesian_2d` picks a near-square grid that fits
+the domain; `:x_slabs` uses `(nranks,1)`: every rank owns whole y rows of a
+contiguous x range, and at least `min_columns` x columns (checked identically
+on every rank, so an impossible layout fails on all ranks together)."""
+function process_grid(nranks::Int,nx::Int,ny::Int,decomposition::Symbol;min_columns::Int=2)
+    decomposition===:cartesian_2d && return process_grid(nranks,nx,ny)
+    decomposition===:x_slabs || throw(ArgumentError("unknown decomposition $decomposition"))
+    nranks > 0 || throw(ArgumentError("nranks must be positive"))
+    nx ÷ nranks >= min_columns || throw(ArgumentError(
+        "x_slabs: $nx x columns over $nranks ranks leave fewer than $min_columns columns on some rank"))
+    (nranks,1)
+end
+
 """Choose a near-square process grid that fits the spatial domain."""
 function process_grid(nranks::Int,nx::Int,ny::Int)
     nranks > 0 || throw(ArgumentError("nranks must be positive"))
@@ -146,7 +161,8 @@ function tile_for_rank(nx::Int,ny::Int,rank::Int,nranks::Int;grid=process_grid(n
     cx = rank % grid[1]; cy = rank ÷ grid[1]
     Tile2D(nx,ny,grid,(cx,cy),_axis_partition(nx,cx,grid[1]),_axis_partition(ny,cy,grid[2]))
 end
-local_tile(context::ParallelContext,nx::Int,ny::Int) = tile_for_rank(nx,ny,context.rank,context.size)
+local_tile(context::ParallelContext,nx::Int,ny::Int) = tile_for_rank(nx,ny,context.rank,context.size;
+    grid=process_grid(context.size,nx,ny,context.options.decomposition;min_columns=context.options.min_columns_per_rank))
 
 """Rank-owned array plus global shape and tile metadata; arrays exclude halos."""
 struct DistributedField{T,N,A<:AbstractArray{T,N}}
@@ -292,13 +308,13 @@ end
 """Copy one rank-local atmosphere. The returned object owns no global arrays."""
 function local_atmosphere(atmosphere::Atmosphere3D,tile::Tile2D)
     g = atmosphere.grid
-    grid = Grid3D(copy(g.log_tau500),copy(g.x[tile.xrange]),copy(g.y[tile.yrange]))
+    grid = Grid3D(g.vertical,copy(g.x[tile.xrange]),copy(g.y[tile.yrange]))
     cut(value) = value === nothing ? nothing : _tile_array(value,tile)
     B = atmosphere.magnetic_field
     local_B = B === nothing ? nothing : MagneticField3D(cut(B.Bx),cut(B.By),cut(B.Bz))
     Atmosphere3D(grid,cut(atmosphere.temperature),cut(atmosphere.vx),cut(atmosphere.vy),
         cut(atmosphere.vz),cut(atmosphere.vturb);magnetic_field=local_B,pgas=cut(atmosphere.pgas),
-        rho=cut(atmosphere.rho),ne=cut(atmosphere.ne),z=cut(atmosphere.z))
+        rho=cut(atmosphere.rho),ne=cut(atmosphere.ne),z=cut(atmosphere.z),logtau500=cut(atmosphere.logtau500))
 end
 
 abstract type AbstractGPUCoordinator end

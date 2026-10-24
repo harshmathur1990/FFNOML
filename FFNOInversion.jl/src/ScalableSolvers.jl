@@ -288,7 +288,7 @@ function write_lbfgs_diagnostics(directory::AbstractString,result::LBFGSInversio
     root=abspath(directory); mkpath(root)
     summary_path=joinpath(root,"summary.toml"); history_path=joinpath(root,"objective_history.csv")
     controls=[Dict{String,Any}("variable"=>string(spec.variable),"shape"=>collect(size(spec.initial)),
-        "log_tau_nodes"=>spec.log_tau_nodes,"lower"=>spec.lower,"upper"=>spec.upper,
+        "nodes"=>spec.nodes,"node_kind"=>string(spec.kind),"node_unit"=>vertical_unit(spec.kind),"lower"=>spec.lower,"upper"=>spec.upper,
         "scale"=>spec.scale,"final_values"=>collect(result.state.parameters[range]))
         for (spec,range) in zip(layout.specs,layout.ranges)]
     summary=Dict{String,Any}("schema_version"=>string(result.state.schema_version),

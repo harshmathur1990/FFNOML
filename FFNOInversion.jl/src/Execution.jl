@@ -51,6 +51,23 @@ function _from_atmosphere_storage(value,storage_order::Symbol)
 end
 
 _zyx_to_zxy(value)=permutedims(value,(1,3,2))
+
+"""x and y [m]: the explicit coordinate datasets (origin preserved, uniform and
+increasing, consistent with the configured spacing) or `(0:n-1)*dx`."""
+function _horizontal_axes(::Type{T},file,config,nx,ny) where T
+    if config.atmosphere.x_dataset===nothing
+        return T.(0:nx-1).*config.synthesis.dx_m,T.(0:ny-1).*config.synthesis.dy_m
+    end
+    axes=map(((config.atmosphere.x_dataset,nx,config.synthesis.dx_m),(config.atmosphere.y_dataset,ny,config.synthesis.dy_m))) do (name,n,d)
+        values=vec(_read_dataset(file,name))
+        length(values)==n || throw(DimensionMismatch("$name has $(length(values)) points; the atmosphere has $n"))
+        spacing=_uniform_axis_spacing(values,name)
+        spacing===nothing || abs(spacing-d)<=1e-9*abs(d) || throw(ArgumentError(
+            "$name spacing $spacing differs from the configured $d"))
+        T.(values)
+    end
+    axes[1],axes[2]
+end
 _syx_to_xys(value)=permutedims(value,(2,1))
 _slyx_to_lsxy(value)=permutedims(value,(2,1,4,3))
 
@@ -63,10 +80,11 @@ applied. Internal axes are `(z,x,y)` and `(wavelength,Stokes,x,y)`.
 """
 function read_inversion_inputs(config::RunConfig{T}) where T
     atmosphere_data=h5open(config.atmosphere.file,"r") do file
-        storage_order=config.atmosphere.storage_order
-        logtau_raw=_from_atmosphere_storage(
-            _read_dataset(file,config.atmosphere.logtau500_dataset),storage_order)
-        logtau=ndims(logtau_raw)==1 ? vec(logtau_raw) : vec(_time_slice(logtau_raw,config.time_index,1,"logtau500"))
+        storage_order=config.atmosphere.storage_order; kind=config.atmosphere.vertical_coordinate
+        vertical_raw=_from_atmosphere_storage(
+            _read_dataset(file,config.atmosphere.vertical_dataset),storage_order)
+        vertical=ndims(vertical_raw)==1 ? vec(vertical_raw) :
+            vec(_time_slice(vertical_raw,config.time_index,1,string(config.atmosphere.vertical_dataset)))
         temperature=_zyx_to_zxy(_time_slice(_from_atmosphere_storage(
             _read_dataset(file,config.atmosphere.temperature_dataset),storage_order),
             config.time_index,3,"temperature"))
@@ -78,8 +96,8 @@ function read_inversion_inputs(config::RunConfig{T}) where T
             _read_dataset(file,config.atmosphere.vz_dataset),storage_order),config.time_index,3,"vz"))
         size(temperature)==size(vx)==size(vy)==size(vz) || throw(DimensionMismatch(
             "initial-atmosphere parameter arrays differ"))
-        nz,nx,ny=size(temperature); length(logtau)==nz || throw(DimensionMismatch(
-            "logtau500 length differs from atmospheric depth"))
+        nz,nx,ny=size(temperature); length(vertical)==nz || throw(DimensionMismatch(
+            "vertical axis $(config.atmosphere.vertical_dataset) has $(length(vertical)) levels; the atmosphere has $nz"))
         pressure=if config.atmosphere.pressure_top isa String
             raw=_from_atmosphere_storage(_read_dataset(file,config.atmosphere.pressure_top),storage_order)
             selected=ndims(raw)==0 ? fill(T(raw[]),ny,nx) : _time_slice(raw,config.time_index,2,"pressure_top")
@@ -96,14 +114,21 @@ function read_inversion_inputs(config::RunConfig{T}) where T
                 config.time_index,3,"magnetic field"))),names)
             MagneticField3D(arrays...)
         end
-        x=T.(0:nx-1).*config.synthesis.dx_m; y=T.(0:ny-1).*config.synthesis.dy_m
-        grid=Grid3D(T.(logtau),x,y)
+        x,y=_horizontal_axes(T,file,config,nx,ny)
         vturb=config.atmosphere.vturb_dataset===nothing ? zeros(T,nz,nx,ny) :
             T.(_zyx_to_zxy(_time_slice(_from_atmosphere_storage(
                 _read_dataset(file,config.atmosphere.vturb_dataset),storage_order),
                 config.time_index,3,"vturb")))
-        atmosphere=Atmosphere3D(grid,T.(temperature),T.(vx),T.(vy),T.(vz),vturb;
-            magnetic_field=magnetic)
+        # canonical order is top first; reverse the axis and every 3-D field together
+        bottom_first=kind===:z_m ? vertical[1]<vertical[end] : vertical[1]>vertical[end]
+        flip(a)=bottom_first ? reverse(a;dims=1) : a
+        bottom_first && (vertical=reverse(vertical))
+        grid=Grid3D(VerticalAxis(kind,T.(vertical)),x,y)
+        magnetic=magnetic===nothing ? nothing : MagneticField3D(flip(magnetic.Bx),flip(magnetic.By),flip(magnetic.Bz))
+        # a native height axis is also the atmosphere's (column-independent) z field
+        zfield=kind===:z_m ? repeat(reshape(T.(vertical),:,1,1),1,nx,ny) : nothing
+        atmosphere=Atmosphere3D(grid,flip(T.(temperature)),flip(T.(vx)),flip(T.(vy)),flip(T.(vz)),flip(vturb);
+            magnetic_field=magnetic,z=zfield)
         (atmosphere=atmosphere,pressure=pressure)
     end
     config.mode===:forward && return InversionInputBundle(atmosphere_data.atmosphere,nothing,atmosphere_data.pressure)
@@ -158,8 +183,10 @@ function write_inversion_outputs(config::RunConfig,result::InversionRunResult)
     end
     atmosphere=result.atmosphere
     h5open(config.outputs.atmosphere_file,"w") do file
-        file["logtau_500"]=atmosphere.grid.log_tau500
-        for name in (:temperature,:vx,:vy,:vz,:vturb,:pgas,:rho,:ne,:z)
+        kind=vertical_coordinate(atmosphere.grid)
+        file[kind===:z_m ? "z_m" : "logtau_500"]=native_depth(atmosphere.grid)
+        file["x_m"]=atmosphere.grid.x; file["y_m"]=atmosphere.grid.y
+        for name in (:temperature,:vx,:vy,:vz,:vturb,:pgas,:rho,:ne,:z,:logtau500)
             value=getfield(atmosphere,name); value===nothing || (file[string(name)]=_with_time_zyx(value))
         end
         if atmosphere.magnetic_field!==nothing
@@ -176,6 +203,10 @@ function write_inversion_outputs(config::RunConfig,result::InversionRunResult)
             file["populations"]=permutedims(result.populations,(4,1,3,2))
         end
         attributes(file)["axis_order"]="time,z,y,x; populations=level,z,y,x"
+        attributes(file)["vertical_coordinate"]=string(kind)
+        attributes(file)["vertical_unit"]=vertical_unit(kind)
+        attributes(file)["vertical_order"]="top_first"
+        attributes(file)["native_axis_dataset"]=kind===:z_m ? "z_m" : "logtau_500"
         attributes(file)["execution_mode"]=string(config.mode)
         attributes(file)["provenance_toml"]=sprint(io->TOML.print(io,result.provenance;sorted=true))
         if result.solver!==nothing
@@ -212,7 +243,7 @@ function _require_production_population_backend(model,context)
 end
 
 function _gather_populations(populations,distributed,context)
-    grid=distributed.global_grid; tile=distributed.tile; nz=length(grid.log_tau500)
+    grid=distributed.global_grid; tile=distributed.tile; nz=nlevels(grid)
     nx=length(grid.x); ny=length(grid.y)
     gather_one(value,tag)=begin
         packed=permutedims(value,(1,4,2,3))
@@ -304,7 +335,8 @@ end
 # full-domain copy. The ID is independent of the MPI decomposition.
 function _atmosphere_reference_id(atmosphere)
     hash=SHA.SHA2_256_CTX()
-    for value in (atmosphere.grid.log_tau500,atmosphere.grid.x,atmosphere.grid.y,
+    SHA.update!(hash,codeunits(string(vertical_coordinate(atmosphere.grid))))
+    for value in (native_depth(atmosphere.grid),atmosphere.grid.x,atmosphere.grid.y,
             atmosphere.temperature,atmosphere.vx,atmosphere.vy,atmosphere.vz,atmosphere.vturb)
         SHA.update!(hash,codeunits(string(size(value))))
         SHA.update!(hash,reinterpret(UInt8,vec(value)))

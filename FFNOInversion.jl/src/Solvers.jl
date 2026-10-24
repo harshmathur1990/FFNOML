@@ -8,7 +8,8 @@ are physical values in the units of the associated atmospheric variable.
 struct ControlMapSpec{T<:AbstractFloat}
     variable::Symbol
     initial::Array{T,3}
-    log_tau_nodes::Vector{T}
+    nodes::Vector{T}
+    kind::Symbol
     lower::T
     upper::T
     scale::T
@@ -18,14 +19,14 @@ function ControlMapSpec(variable::Symbol,field::NodeField{T};lower::Real,upper::
                         scale::Real) where T<:AbstractFloat
     variable in PROTOTYPE_CONTROL_VARIABLES || throw(ArgumentError(
         "unsupported Phase 5 control variable $variable"))
-    length(field.log_tau_nodes)>=2 || throw(ArgumentError("control maps require at least two vertical nodes"))
+    length(field.nodes)>=2 || throw(ArgumentError("control maps require at least two vertical nodes"))
     lo,hi,s=T(lower),T(upper),T(scale)
     isfinite(lo) && isfinite(hi) && lo<hi || throw(ArgumentError("control-map bounds must be finite and increasing"))
     isfinite(s) && s>0 || throw(ArgumentError("control-map scale must be finite and positive"))
     all(v->lo<=v<=hi,field.values) || throw(ArgumentError("initial $variable controls violate bounds [$lo,$hi]"))
     variable===:temperature && lo<=0 && throw(ArgumentError("temperature lower bound must be positive"))
     variable===:vturb && lo<0 && throw(ArgumentError("vturb lower bound must be non-negative"))
-    ControlMapSpec{T}(variable,Array(field.values),copy(field.log_tau_nodes),lo,hi,s)
+    ControlMapSpec{T}(variable,Array(field.values),copy(field.nodes),field.kind,lo,hi,s)
 end
 
 """Deterministic packing layout for the small global control maps.
@@ -99,24 +100,28 @@ function parameter_nodefield(layout::ControlMapLayout{T},parameters::AbstractVec
     index=findfirst(spec->spec.variable===variable,layout.specs)
     index===nothing && throw(KeyError(variable))
     spec=layout.specs[index]; values=reshape(T.(parameters[layout.ranges[index]]),size(spec.initial))
-    NodeField(values,spec.log_tau_nodes)
+    NodeField(values,spec.nodes,spec.kind)
 end
 
 """Interpolate a solved set of controls onto a finer control-map layout."""
 function refine_control_maps(layout::ControlMapLayout{T},parameters::AbstractVector;
         shapes::AbstractDict{Symbol,<:Tuple}=Dict{Symbol,Tuple{Int,Int}}(),
-        log_tau_nodes::AbstractDict{Symbol,<:AbstractVector}=Dict{Symbol,Vector{T}}()) where T
+        nodes::AbstractDict{Symbol,<:AbstractVector}=Dict{Symbol,Vector{T}}()) where T
     _check_parameter_length(layout,parameters); refined=ControlMapSpec{T}[]
     for spec in layout.specs
         ncx,ncy=get(shapes,spec.variable,size(spec.initial)[2:3])
         ncx>0 && ncy>0 || throw(ArgumentError("refined control dimensions must be positive"))
-        nodes=T.(get(log_tau_nodes,spec.variable,spec.log_tau_nodes))
-        length(nodes)>=2 || throw(ArgumentError("refined controls require at least two vertical nodes"))
+        new_nodes=T.(get(nodes,spec.variable,spec.nodes))
+        length(new_nodes)>=2 || throw(ArgumentError("refined controls require at least two vertical nodes"))
         x=ncx==1 ? T[0] : collect(range(zero(T),one(T),length=ncx))
         y=ncy==1 ? T[0] : collect(range(zero(T),one(T),length=ncy))
-        target=Grid3D(nodes,x,y)
-        values=expand_nodes(parameter_nodefield(layout,parameters,spec.variable),target)
-        field=NodeField(values,nodes)
+        # interpolate in the controls' own coordinate; a target grid needs top-first order, so sort the
+        # new node positions for the expansion and return values in the requested node order
+        top_first=spec.kind===:z_m ? sortperm(new_nodes;rev=true) : sortperm(new_nodes)
+        target=Grid3D(VerticalAxis(spec.kind,new_nodes[top_first]),x,y)
+        sorted_values=expand_nodes(parameter_nodefield(layout,parameters,spec.variable),target)
+        values=similar(sorted_values); values[top_first,:,:].=sorted_values
+        field=NodeField(values,new_nodes,spec.kind)
         push!(refined,ControlMapSpec(spec.variable,field;lower=spec.lower,upper=spec.upper,scale=spec.scale))
     end
     new_layout=ControlMapLayout(refined)
@@ -227,7 +232,7 @@ function apply_control_maps!(problem::DistributedInversionProblem,layout::Contro
     _check_parameter_length(layout,parameters)
     for (spec,indices) in zip(layout.specs,layout.ranges)
         delta=reshape(parameters[indices],size(spec.initial)).-spec.initial
-        correction=expand_nodes(NodeField(delta,spec.log_tau_nodes),problem.distributed.global_grid,problem.distributed.tile)
+        correction=expand_nodes(NodeField(delta,spec.nodes,spec.kind),problem.distributed.global_grid,problem.distributed.tile)
         destination=_control_destination(problem.distributed.local_atmosphere,spec.variable)
         destination.=problem.control_reference[spec.variable].+correction
     end
@@ -351,7 +356,7 @@ function write_prototype_diagnostics(directory::AbstractString,result::Prototype
     history_path=joinpath(root,"objective_history.csv")
     controls=[Dict{String,Any}(
         "variable"=>string(spec.variable),"shape"=>collect(size(spec.initial)),
-        "log_tau_nodes"=>spec.log_tau_nodes,"lower"=>spec.lower,"upper"=>spec.upper,
+        "nodes"=>spec.nodes,"node_kind"=>string(spec.kind),"node_unit"=>vertical_unit(spec.kind),"lower"=>spec.lower,"upper"=>spec.upper,
         "scale"=>spec.scale,"final_values"=>collect(result.state.parameters[range]))
         for (spec,range) in zip(layout.specs,layout.ranges)]
     summary=Dict{String,Any}(
@@ -374,7 +379,7 @@ function write_prototype_diagnostics(directory::AbstractString,result::Prototype
 end
 
 function _layout_signature(layout::ControlMapLayout)
-    join((string(spec.variable,"|",size(spec.initial),"|",join(repr.(spec.log_tau_nodes),","),
+    join((string(spec.variable,"|",size(spec.initial),"|",spec.kind,"[",vertical_unit(spec.kind),"]:",join(repr.(spec.nodes),","),
         "|",repr(spec.lower),"|",repr(spec.upper),"|",repr(spec.scale),"|",join(repr.(vec(spec.initial)),",")) for spec in layout.specs),";")
 end
 

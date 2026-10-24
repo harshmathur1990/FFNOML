@@ -12,7 +12,8 @@ function distribute_atmosphere(::Type{T},root_atmosphere,context::ParallelContex
         root_atmosphere===nothing && throw(ArgumentError("root must supply the initial atmosphere"))
         (grid=root_atmosphere.grid,shape=size(root_atmosphere.temperature),
          magnetic=root_atmosphere.magnetic_field!==nothing,pgas=root_atmosphere.pgas!==nothing,
-         rho=root_atmosphere.rho!==nothing,ne=root_atmosphere.ne!==nothing,z=root_atmosphere.z!==nothing)
+         rho=root_atmosphere.rho!==nothing,ne=root_atmosphere.ne!==nothing,z=root_atmosphere.z!==nothing,
+         logtau500=root_atmosphere.logtau500!==nothing)
     else nothing end,context)
     shape=metadata.shape; tile=local_tile(context,shape[2],shape[3])
     getroot(name)=isroot(context) ? getfield(root_atmosphere,name) : nothing
@@ -24,6 +25,7 @@ function distribute_atmosphere(::Type{T},root_atmosphere,context::ParallelContex
     optional(name,flag,tag)=flag ? distribute_field(T,getroot(name),shape,context;tag=tag).values : nothing
     pgas=optional(:pgas,metadata.pgas,306); rho=optional(:rho,metadata.rho,307)
     ne=optional(:ne,metadata.ne,308); z=optional(:z,metadata.z,309)
+    logtau500=optional(:logtau500,metadata.logtau500,313)
     B=if metadata.magnetic
         rootB=isroot(context) ? root_atmosphere.magnetic_field : nothing
         bx=distribute_field(T,isroot(context) ? rootB.Bx : nothing,shape,context;tag=310).values
@@ -31,15 +33,16 @@ function distribute_atmosphere(::Type{T},root_atmosphere,context::ParallelContex
         bz=distribute_field(T,isroot(context) ? rootB.Bz : nothing,shape,context;tag=312).values
         MagneticField3D(bx,by,bz)
     else nothing end
-    local_grid=Grid3D(copy(metadata.grid.log_tau500),copy(metadata.grid.x[tile.xrange]),copy(metadata.grid.y[tile.yrange]))
-    local_atmos=Atmosphere3D(local_grid,temperature,vx,vy,vz,vturb;magnetic_field=B,pgas=pgas,rho=rho,ne=ne,z=z)
+    local_grid=Grid3D(metadata.grid.vertical,copy(metadata.grid.x[tile.xrange]),copy(metadata.grid.y[tile.yrange]))
+    local_atmos=Atmosphere3D(local_grid,temperature,vx,vy,vz,vturb;magnetic_field=B,pgas=pgas,rho=rho,ne=ne,z=z,
+        logtau500=logtau500)
     DistributedAtmosphere(local_atmos,metadata.grid,tile)
 end
 
 """Collect final output state on rank 0 only."""
 function gather_atmosphere(distributed::DistributedAtmosphere,context::ParallelContext)
     a=distributed.local_atmosphere; g=distributed.global_grid
-    shape=(length(g.log_tau500),length(g.x),length(g.y)); tile=distributed.tile
+    shape=(nlevels(g),length(g.x),length(g.y)); tile=distributed.tile
     gather(value,tag)=gather_field(_field(value,tile,shape),context;tag=tag)
     temperature=gather(a.temperature,321); vx=gather(a.vx,322); vy=gather(a.vy,323)
     vz=gather(a.vz,324); vturb=gather(a.vturb,325)
@@ -47,13 +50,15 @@ function gather_atmosphere(distributed::DistributedAtmosphere,context::ParallelC
     rho=a.rho===nothing ? nothing : gather(a.rho,327)
     ne=a.ne===nothing ? nothing : gather(a.ne,328)
     z=a.z===nothing ? nothing : gather(a.z,329)
+    logtau500=a.logtau500===nothing ? nothing : gather(a.logtau500,333)
     B=if a.magnetic_field===nothing
         nothing
     else
         bx=gather(a.magnetic_field.Bx,330); by=gather(a.magnetic_field.By,331); bz=gather(a.magnetic_field.Bz,332)
         isroot(context) ? MagneticField3D(bx,by,bz) : nothing
     end
-    isroot(context) ? Atmosphere3D(g,temperature,vx,vy,vz,vturb;magnetic_field=B,pgas=pgas,rho=rho,ne=ne,z=z) : nothing
+    isroot(context) ? Atmosphere3D(g,temperature,vx,vy,vz,vturb;magnetic_field=B,pgas=pgas,rho=rho,ne=ne,z=z,
+        logtau500=logtau500) : nothing
 end
 
 function _local_boundary(boundary::HE3DBoundaryState,tile::Tile2D)
@@ -80,8 +85,8 @@ end
 end
 
 @inline function _distributed_physical_derivatives(a,ah,z,zh,grid,k,i,j,gi,gj)
-    aτ=_derivative(a,k,i,j,grid.log_tau500,1)
-    zτ=_derivative(z,k,i,j,grid.log_tau500,1)
+    aτ=_derivative(a,k,i,j,log_tau500_axis(grid),1)
+    zτ=_derivative(z,k,i,j,log_tau500_axis(grid),1)
     abs(zτ)>eps(eltype(z)) || throw(ErrorException(
         "degenerate optical-depth mapping at depth=$k global_x=$gi global_y=$gj"))
     ax=_horizontal_derivative(ah,k,i,j,gi,grid.x,2,1)
@@ -199,7 +204,7 @@ function _distributed_force_metrics(p,rho,z,fx,fy,fz,distributed,context,g)
         halo=exchange_halos(_field(array,tile,shape),context,1)
         @view halo[:,hx,hy]
     end
-    localgrid=Grid3D(grid.log_tau500,grid.x[gx],grid.y[gy])
+    localgrid=Grid3D(grid.vertical,grid.x[gx],grid.y[gy])
     ox=(first(tile.xrange)-first(gx)+1):(last(tile.xrange)-first(gx)+1)
     oy=(first(tile.yrange)-first(gy)+1):(last(tile.yrange)-first(gy)+1)
     scale=allreduce_max(max(abs(g)*maximum(abs,rho),
@@ -308,7 +313,7 @@ function reconstruct_force_balance_distributed!(distributed::DistributedAtmosphe
     options.bottom_boundary===:force_neumann || throw(ArgumentError("unsupported bottom boundary"))
     0<options.relaxation<=1 || throw(ArgumentError("relaxation must lie in (0,1]"))
     a=distributed.local_atmosphere; local_boundary=_local_boundary(boundary,distributed.tile)
-    shape=size(a.temperature); nz,nx,ny=shape; tau=10.0.^a.grid.log_tau500
+    shape=size(a.temperature); nz,nx,ny=shape; tau=10.0.^log_tau500_axis(a.grid)
     top_to_bottom=tau[1]<tau[end] ? collect(1:nz) : collect(nz:-1:1)
     order=local_boundary.boundary==:top ? top_to_bottom : reverse(top_to_bottom)
     pboundary=_boundary_map(local_boundary.p0,nx,ny,:pressure); rhoboundary=_boundary_map(local_boundary.rho0,nx,ny,:density)
@@ -321,7 +326,7 @@ function reconstruct_force_balance_distributed!(distributed::DistributedAtmosphe
     fxtrial=zeros(shape); fytrial=zeros(shape); fztrial=zeros(shape)
     pchange=rchange=fres=zchange=Inf; lorentzmax=0.0; iterations=0; converged=false
     _force_balance_log(context,"start";mode="MHS",
-        global_shape="$(length(distributed.global_grid.log_tau500))x$(length(distributed.global_grid.x))x$(length(distributed.global_grid.y))",
+        global_shape="$(nlevels(distributed.global_grid))x$(length(distributed.global_grid.x))x$(length(distributed.global_grid.y))",
         local_shape="$(nz)x$(nx)x$(ny)",threads=Threads.nthreads(),
         max_iterations=options.max_iterations,pressure_sweeps=options.pressure_sweeps,
         pressure_max_sweeps=options.pressure_max_sweeps,
@@ -509,7 +514,7 @@ end
 
 function predict_distributed_populations!(out,backend::RootDistributedPopulationModel,distributed,context)
     global_atmosphere=gather_atmosphere(distributed,context)
-    shape=(length(distributed.global_grid.log_tau500),length(distributed.global_grid.x),length(distributed.global_grid.y))
+    shape=(nlevels(distributed.global_grid),length(distributed.global_grid.x),length(distributed.global_grid.y))
     coordinator=RootGPUCoordinator(() -> begin
         backend.root_model===nothing && error("rank 0 has no FFNO population model")
         populations=zeros(eltype(out),shape...,backend.levels)
@@ -701,7 +706,7 @@ function distributed_regularization_penalty(distributed::DistributedAtmosphere,s
     for (i,var) in enumerate(VERTICAL_PARAMETER_ORDER)
         typ=spec.vertical.types[i]; typ==0 && continue
         values=_atmospheric_variable(a,var); scale=get(spec.scales,var,one(eltype(values)))
-        localpen=var===:pgas_boundary && typ==1 ? _mean_square(values./scale.-1) : _vertical_penalty(values./scale,a.grid.log_tau500,typ)
+        localpen=var===:pgas_boundary && typ==1 ? _mean_square(values./scale.-1) : _vertical_penalty(values./scale,_vertical_spacing_axis(a.grid,spec),typ)
         weight=length(values); globalpen=allreduce_sum(localpen*weight,context)/allreduce_sum(weight,context)
         terms[var]=spec.vertical.regularize*spec.vertical.weights[i]*globalpen
     end

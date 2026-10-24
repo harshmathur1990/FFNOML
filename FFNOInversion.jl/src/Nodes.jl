@@ -1,13 +1,29 @@
+"""Control values on vertical nodes of one native coordinate kind.
+
+`nodes` may be given in either monotonic order and are in the unit of `kind`
+(`:z_m` metres or `:log10tau500` dex). Expanding onto a grid of another kind
+throws: node positions are never reinterpreted in another coordinate.
+"""
 struct NodeField{T<:AbstractFloat,A<:AbstractArray{T,3}}
     values::A                 # (nnode,ncx,ncy)
-    log_tau_nodes::Vector{T}
-    function NodeField(values::A, log_tau_nodes::AbstractVector{T}) where {T<:AbstractFloat,A<:AbstractArray{T,3}}
-        size(values,1) == length(log_tau_nodes) || throw(DimensionMismatch("node depth axis mismatch"))
+    nodes::Vector{T}
+    kind::Symbol
+    function NodeField(values::A, nodes::AbstractVector{T}, kind::Symbol=:log10tau500) where {T<:AbstractFloat,A<:AbstractArray{T,3}}
+        unit = vertical_unit(kind)
+        size(values,1) == length(nodes) || throw(DimensionMismatch("node depth axis mismatch"))
         all(isfinite, values) || throw(ArgumentError("node values must be finite"))
-        d = diff(log_tau_nodes)
-        (all(>(zero(T)), d) || all(<(zero(T)), d)) || throw(ArgumentError("node depths must be strictly monotonic"))
-        new{T,A}(values, collect(log_tau_nodes))
+        all(isfinite, nodes) || throw(ArgumentError("node positions [$unit] must be finite"))
+        d = diff(nodes)
+        (all(>(zero(T)), d) || all(<(zero(T)), d)) || throw(ArgumentError("node positions [$unit] must be strictly monotonic"))
+        new{T,A}(values, collect(nodes), kind)
     end
+end
+
+function _check_node_kind(field::NodeField, grid::Grid3D)
+    kind = vertical_coordinate(grid)
+    field.kind === kind || throw(ArgumentError(
+        "nodes are on :$(field.kind) [$(vertical_unit(field.kind))] but the grid's native coordinate is :$kind [$(vertical_unit(kind))]"))
+    nothing
 end
 
 function _bracket(grid, x)
@@ -25,14 +41,16 @@ end
 
 """Trilinearly expand `(node,control-x,control-y)` values to `(nz,nx,ny)`."""
 function expand_nodes(field::NodeField{T}, grid::Grid3D{T}) where T
+    _check_node_kind(field, grid)
     nnode, ncx, ncy = size(field.values)
-    out = Array{T}(undef, length(grid.log_tau500), length(grid.x), length(grid.y))
+    depth = native_depth(grid)
+    out = Array{T}(undef, length(depth), length(grid.x), length(grid.y))
     cx = ncx == 1 ? T[zero(T)] : collect(range(zero(T), one(T), length=ncx))
     cy = ncy == 1 ? T[zero(T)] : collect(range(zero(T), one(T), length=ncy))
     xn = length(grid.x) == 1 ? T[zero(T)] : collect(range(zero(T), one(T), length=length(grid.x)))
     yn = length(grid.y) == 1 ? T[zero(T)] : collect(range(zero(T), one(T), length=length(grid.y)))
-    for iz in eachindex(grid.log_tau500), ix in eachindex(xn), iy in eachindex(yn)
-        z0,z1,wz = _bracket(field.log_tau_nodes, grid.log_tau500[iz])
+    for iz in eachindex(depth), ix in eachindex(xn), iy in eachindex(yn)
+        z0,z1,wz = _bracket(field.nodes, depth[iz])
         x0,x1,wx = ncx == 1 ? (1,1,zero(T)) : _bracket(cx, xn[ix])
         y0,y1,wy = ncy == 1 ? (1,1,zero(T)) : _bracket(cy, yn[iy])
         v0 = (1-wx)*((1-wy)*field.values[z0,x0,y0] + wy*field.values[z0,x0,y1]) + wx*((1-wy)*field.values[z0,x1,y0] + wy*field.values[z0,x1,y1])
@@ -44,14 +62,15 @@ end
 
 """Expand node maps directly onto one MPI-owned tile using global normalized coordinates."""
 function expand_nodes(field::NodeField{T},grid::Grid3D{T},tile::Tile2D) where T
-    nnode,ncx,ncy=size(field.values); nz=length(grid.log_tau500)
+    _check_node_kind(field,grid)
+    nnode,ncx,ncy=size(field.values); depth=native_depth(grid); nz=length(depth)
     out=Array{T}(undef,nz,length(tile.xrange),length(tile.yrange))
     cx=ncx==1 ? T[zero(T)] : collect(range(zero(T),one(T),length=ncx))
     cy=ncy==1 ? T[zero(T)] : collect(range(zero(T),one(T),length=ncy))
     xn=length(grid.x)==1 ? T[zero(T)] : collect(range(zero(T),one(T),length=length(grid.x)))
     yn=length(grid.y)==1 ? T[zero(T)] : collect(range(zero(T),one(T),length=length(grid.y)))
     for iz in 1:nz,(ii,ix) in enumerate(tile.xrange),(jj,iy) in enumerate(tile.yrange)
-        z0,z1,wz=_bracket(field.log_tau_nodes,grid.log_tau500[iz])
+        z0,z1,wz=_bracket(field.nodes,depth[iz])
         x0,x1,wx=ncx==1 ? (1,1,zero(T)) : _bracket(cx,xn[ix])
         y0,y1,wy=ncy==1 ? (1,1,zero(T)) : _bracket(cy,yn[iy])
         v0=(1-wx)*((1-wy)*field.values[z0,x0,y0]+wy*field.values[z0,x0,y1])+wx*((1-wy)*field.values[z0,x1,y0]+wy*field.values[z0,x1,y1])

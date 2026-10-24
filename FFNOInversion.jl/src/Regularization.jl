@@ -5,12 +5,21 @@ const VERTICAL_PARAMETER_ORDER = (:temperature,:vlos,:vturb,:B,:inc,:azi,:pgas_b
 Types: 0 none, 1 first derivative, 2 deviation from depth mean,
 3 deviation from zero, 4 second derivative. `regularize` multiplies all seven
 relative `weights`. Temperature types 2/3 are normalized to 0.
+
+Derivatives (types 1 and 4) are taken with respect to the native vertical
+coordinate divided by a length scale, so the penalty does not depend on the
+coordinate's unit: `length_scale_dex` (default 1, the historical log-tau
+behaviour) on log10tau500 grids and `length_scale_m` on height grids, which has
+no default because metres and dex are not interchangeable.
 """
 struct VerticalRegularizationSpec{T<:AbstractFloat}
     types::NTuple{7,Int}
     regularize::T
     weights::NTuple{7,T}
-    function VerticalRegularizationSpec(types,regularize::T,weights) where T<:AbstractFloat
+    length_scale_m::Union{Nothing,T}
+    length_scale_dex::T
+    function VerticalRegularizationSpec(types,regularize::T,weights;length_scale_m=nothing,
+                                        length_scale_dex=one(T)) where T<:AbstractFloat
         length(types) == 7 && length(weights) == 7 || throw(ArgumentError("vertical regularization needs seven types and seven weights"))
         normalized = ntuple(i -> begin
             typ = Int(types[i])
@@ -19,7 +28,10 @@ struct VerticalRegularizationSpec{T<:AbstractFloat}
         end,7)
         w = ntuple(i -> T(weights[i]),7)
         regularize >= 0 && all(>=(zero(T)),w) || throw(ArgumentError("regularization strengths must be non-negative"))
-        new{T}(normalized,regularize,w)
+        lm=length_scale_m===nothing ? nothing : T(length_scale_m); ld=T(length_scale_dex)
+        (lm===nothing || (isfinite(lm) && lm>0)) || throw(ArgumentError("length_scale_m must be finite and positive"))
+        isfinite(ld) && ld>0 || throw(ArgumentError("length_scale_dex must be finite and positive"))
+        new{T}(normalized,regularize,w,lm,ld)
     end
 end
 
@@ -64,16 +76,28 @@ end
 
 _mean_square(a) = isempty(a) ? zero(eltype(a)) : sum(abs2,a)/length(a)
 
-function _vertical_penalty(a,logtau,typ)
+"""Native vertical coordinate divided by its regularization length scale, or
+`nothing` on a height grid without `length_scale_m`."""
+function _vertical_spacing_axis(grid::Grid3D,spec)
+    v = spec isa RegularizationSpec ? spec.vertical : spec
+    depth = native_depth(grid)
+    vertical_coordinate(grid) === :log10tau500 && return depth ./ v.length_scale_dex
+    v.length_scale_m === nothing && return nothing
+    depth ./ v.length_scale_m
+end
+
+function _vertical_penalty(a,axis,typ)
     typ == 0 && return 0.0
     typ == 2 && return _mean_square(a .- sum(a,dims=1)./size(a,1))
     typ == 3 && return _mean_square(a)
+    axis === nothing && throw(ArgumentError(
+        "vertical regularization types 1 and 4 on a height grid need regularization.vertical.length_scale_m"))
     size(a,1) >= 2 || return 0.0
-    spacing = reshape(diff(logtau),:,1,1)
+    spacing = reshape(diff(axis),:,1,1)
     slope = diff(a,dims=1) ./ spacing
     typ == 1 && return _mean_square(slope)
     size(a,1) >= 3 || return 0.0
-    centers = (logtau[1:end-1] .+ logtau[2:end]) ./ 2
+    centers = (axis[1:end-1] .+ axis[2:end]) ./ 2
     _mean_square(diff(slope,dims=1) ./ reshape(diff(centers),:,1,1))
 end
 
@@ -95,7 +119,7 @@ function regularization_penalty(atmosphere::Atmosphere3D,spec::RegularizationSpe
         penalty = if variable === :pgas_boundary && typ == 1
             _mean_square(a./scale .- 1) # STiC-style boundary enhancement relative to its reference scale
         else
-            _vertical_penalty(a./scale,atmosphere.grid.log_tau500,typ)
+            _vertical_penalty(a./scale,_vertical_spacing_axis(atmosphere.grid,spec),typ)
         end
         terms[variable] = spec.vertical.regularize*spec.vertical.weights[i]*penalty
     end

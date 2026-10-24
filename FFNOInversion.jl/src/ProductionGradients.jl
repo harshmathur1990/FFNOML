@@ -381,7 +381,7 @@ end
 function predict_distributed_populations_vjp!(bar::AtmosphereCotangent,
         backend::RootDistributedPopulationModel,distributed,population_bar,context)
     atmosphere=distributed.local_atmosphere; grid=distributed.global_grid; tile=distributed.tile
-    nz=length(grid.log_tau500); nx=length(grid.x); ny=length(grid.y)
+    nz=nlevels(grid); nx=length(grid.x); ny=length(grid.y)
     packed=permutedims(population_bar,(1,4,2,3))
     global_packed=gather_field(_field(packed,tile,(nz,size(packed,2),nx,ny)),context;tag=720)
     global_atmosphere=gather_atmosphere(distributed,context)

@@ -12,8 +12,7 @@ atmosphere_dir = abspath(get(ENV,"FFNO_REFERENCE_ATMOSPHERE_DIR",
     joinpath(root,"..","bifrost_data","en024048_hion","385")))
 atmos = read_atmos_multi3d(joinpath(atmosphere_dir,"mesh"),
                            joinpath(atmosphere_dir,"atm3d"))
-atom_dir = abspath(get(ENV,"FFNO_ATOM_DIR",
-    joinpath(root,"..","multi3d","input","atoms")))
+atom_dir = abspath(get(ENV,"FFNO_ATOM_DIR","/mn/stornext/u3/harshm/Documents/WorkRepo/multi3d/input/atoms"))
 run_root = abspath(get(ENV,"FFNOML_RUN_DIR",root))
 model_dir = abspath(get(ENV,"FFNO_REFERENCE_MODEL_DIR",
     joinpath(run_root,"training_FFNO3D_zscale_expand_lognlte")))

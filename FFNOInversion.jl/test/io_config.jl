@@ -8,7 +8,8 @@ using TOML
     @test occursin("force_balance=MHS",summary)
     @test occursin("full_grid_psf=true",summary)
     @test occursin("zero_weight_exclusion=true",summary)
-    @test cfg.atmosphere.logtau500_dataset == "logtau_500"
+    @test cfg.atmosphere.vertical_dataset == "logtau_500"
+    @test cfg.atmosphere.vertical_coordinate === :log10tau500
     @test cfg.atmosphere.storage_order == :julia
     @test cfg.atmosphere.temperature_dataset == "temperature"
     @test cfg.atmosphere.pressure_top == 0.1

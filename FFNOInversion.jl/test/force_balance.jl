@@ -240,7 +240,7 @@ end
         rho=similar(a.rho); ne=similar(a.ne); kappa=similar(rho); z=similar(a.z)
         thermodynamics!(rho,ne,eos,a.temperature,a.pgas)
         opacity500!(kappa,opacity,a.temperature,a.pgas,rho,ne)
-        FFNOInversion._height_from_tau!(z,kappa,rho,10.0.^a.grid.log_tau500,
+        FFNOInversion._height_from_tau!(z,kappa,rho,10.0.^log_tau500_axis(a.grid),
             collect(axes(z,1)))
         @test a.rho==rho
         @test a.ne==ne
