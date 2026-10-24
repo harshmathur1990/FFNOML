@@ -1,6 +1,7 @@
 # ADR-003: Force balance with automatic magnetic coupling
 
-Status: Updated 2026-10-12; supersedes the earlier HE3D/MHS mode selection.
+Status: **Superseded** (24 October 2026) by ADR-012: the force-balance backend did not work and was removed; HSEMHS is the equilibrium backend. Kept for history.
+Previously: updated 2026-10-12; superseded the earlier HE3D/MHS mode selection.
 
 - There is one reconstruction pipeline. Missing magnetic data represents B=0
   by evaluating the same algebra on zero arrays. Explicit zero magnetic arrays have identical

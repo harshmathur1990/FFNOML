@@ -13,7 +13,6 @@ struct AtmosphereInputConfig{T<:AbstractFloat}
     vx_dataset::String
     vy_dataset::String
     vz_dataset::String
-    pressure_top::Union{T,String}
     magnetic_datasets::Union{Nothing,NTuple{3,String}}
     vturb_dataset::Union{Nothing,String}
 end
@@ -98,6 +97,7 @@ struct RunConfig{T<:AbstractFloat}
     controls::Vector{ControlMapConfig{T}}
     solver::Union{PrototypeSolverOptions,LBFGSSolverOptions}
     time_index::Int
+    equilibrium::EquilibriumConfig
 end
 
 function _regions(cfg)
@@ -357,12 +357,16 @@ function load_config(path::AbstractString)
     magnetic = all(haskey(datasets,k) for k in ("Bx","By","Bz")) ?
         (String(datasets["Bx"]),String(datasets["By"]),String(datasets["Bz"])) : nothing
     any(haskey(datasets,k) for k in ("Bx","By","Bz")) && magnetic === nothing && throw(ArgumentError("provide all Bx, By and Bz datasets or none"))
-    pressure_top = haskey(atmos,"pressure_top_pa") ? Float64(atmos["pressure_top_pa"]) : String(_required(atmos,"pressure_top_dataset"))
-    pressure_top isa Float64 && pressure_top <= 0 && throw(ArgumentError("pressure_top_pa must be positive"))
-    atmosphere = AtmosphereInputConfig(String(_required(inputs,"initial_atmosphere_file")),storage_order,
+    for key in ("pressure_top_pa","pressure_top_dataset")
+        haskey(atmos,key) && throw(ArgumentError(
+            "atmosphere.$key is no longer accepted: the pressure boundary is set by HSEMHS; configure [equilibrium.column_z] anchor/P_ref_pa (native z) or nothing (native log tau)"))
+    end
+    haskey(cfg,"equilibrium") || throw(ArgumentError("missing required configuration section [equilibrium] (backend = \"HSEMHS\", model, eos_table_file, ...)"))
+    equilibrium = _equilibrium_config(cfg["equilibrium"],vertical_coordinate,dirname(abspath(path)))
+    atmosphere = AtmosphereInputConfig{Float64}(String(_required(inputs,"initial_atmosphere_file")),storage_order,
         vertical_coordinate,vertical_dataset,x_dataset,y_dataset,
         String(_required(datasets,"temperature")),String(_required(datasets,"vx")),String(_required(datasets,"vy")),
-        String(_required(datasets,"vz")),pressure_top,magnetic,
+        String(_required(datasets,"vz")),magnetic,
         haskey(datasets,"vturb") ? String(datasets["vturb"]) : nothing)
 
     observed=nothing; weights=nothing
@@ -421,19 +425,20 @@ function load_config(path::AbstractString)
         gpu_diagnostics_directory=gpu_diagnostics_directory)
     time_index=Int(get(inputs,"time_index",1)); time_index>0 || throw(ArgumentError(
         "inputs.time_index must be positive"))
+    parallel.enabled && parallel.decomposition!==:x_slabs && throw(ArgumentError(
+        "the HSEMHS equilibrium solves on x slabs: set parallel.decomposition = \"x_slabs\" (got $(parallel.decomposition))"))
     RunConfig(atmosphere,mode,observed,weights,outputs,SynthesisGridConfig(wavelength_m,dx_m,dy_m),regions,
-        observation_model,stokes,redistribution,regularization,parallel,controls,solver,time_index)
+        observation_model,stokes,redistribution,regularization,parallel,controls,solver,time_index,equilibrium)
 end
 
 function dry_run_summary(config::RunConfig)
     nlambda = length(config.synthesis.wavelength_m)
-    mode = "MHS"
     vertical_vars = Symbol[VERTICAL_PARAMETER_ORDER[i] for i in 1:7 if config.regularization.vertical.types[i] != 0]
     regvars = sort!(collect(union(vertical_vars,keys(config.regularization.horizontal))))
     nsources=sum(length(r.sources) for r in config.regions)
     controlvars=join(getfield.(config.controls,:variable),',')
     solver_name=config.solver isa LBFGSSolverOptions ? "bounded_lbfgs" : "prototype_pattern_search"
-    "mode=$(config.mode) observation_input=$(config.observed===nothing ? "none" : config.observed.file) atmosphere_input=$(config.atmosphere.file) atmosphere_storage_order=$(config.atmosphere.storage_order) synthesis_output=$(config.outputs.synthesis_file) atmosphere_output=$(config.outputs.atmosphere_file) time_index=$(config.time_index) vertical_coordinate=$(config.atmosphere.vertical_coordinate) vertical_dataset=$(config.atmosphere.vertical_dataset) nodes_unit=$(vertical_unit(config.atmosphere.vertical_coordinate)) dx_m=$(config.synthesis.dx_m) dy_m=$(config.synthesis.dy_m) spectral_regions=$(length(config.regions)) spectral_sources=$nsources synthesis_wavelengths=$nlambda full_grid_psf=true zero_weight_exclusion=true stokes=$(join(config.stokes.components,',')) redistribution=$(config.redistribution) force_balance=$mode controls=$controlvars solver=$solver_name max_iterations=$(config.solver.max_iterations) checkpoint=$(config.solver.checkpoint_path) regularized=$(join(regvars,',')) mpi=$(config.parallel.enabled) decomposition=$(config.parallel.decomposition) threads_per_rank=$(config.parallel.threads_per_rank) gpu_launcher_rank=$(config.parallel.gpu_launcher_rank) gpu_connect_timeout_seconds=$(config.parallel.gpu_connect_timeout_seconds) gpu_status_timeout_seconds=$(config.parallel.gpu_status_timeout_seconds) gpu_diagnostic_interval_seconds=$(config.parallel.gpu_diagnostic_interval_seconds)"
+    "mode=$(config.mode) observation_input=$(config.observed===nothing ? "none" : config.observed.file) atmosphere_input=$(config.atmosphere.file) atmosphere_storage_order=$(config.atmosphere.storage_order) synthesis_output=$(config.outputs.synthesis_file) atmosphere_output=$(config.outputs.atmosphere_file) time_index=$(config.time_index) vertical_coordinate=$(config.atmosphere.vertical_coordinate) vertical_dataset=$(config.atmosphere.vertical_dataset) nodes_unit=$(vertical_unit(config.atmosphere.vertical_coordinate)) dx_m=$(config.synthesis.dx_m) dy_m=$(config.synthesis.dy_m) spectral_regions=$(length(config.regions)) spectral_sources=$nsources synthesis_wavelengths=$nlambda full_grid_psf=true zero_weight_exclusion=true stokes=$(join(config.stokes.components,',')) redistribution=$(config.redistribution) equilibrium=HSEMHS:$(hsemhs_mode_name(config.equilibrium.mode)) eos_table=$(config.equilibrium.eos_table_file) controls=$controlvars solver=$solver_name max_iterations=$(config.solver.max_iterations) checkpoint=$(config.solver.checkpoint_path) regularized=$(join(regvars,',')) mpi=$(config.parallel.enabled) decomposition=$(config.parallel.decomposition) threads_per_rank=$(config.parallel.threads_per_rank) gpu_launcher_rank=$(config.parallel.gpu_launcher_rank) gpu_connect_timeout_seconds=$(config.parallel.gpu_connect_timeout_seconds) gpu_status_timeout_seconds=$(config.parallel.gpu_status_timeout_seconds) gpu_diagnostic_interval_seconds=$(config.parallel.gpu_diagnostic_interval_seconds)"
 end
 
 function checkpoint!(path::AbstractString,state;manifest::CapabilityManifest=CapabilityManifest())

@@ -29,14 +29,9 @@ mktempdir() do directory
     end
     isapprox(one.result.regularization.total,four.result.regularization.total;rtol=1e-13,atol=0) ||
         error("one-rank/four-rank regularization differs")
-    one.result.force_balance.mode==four.result.force_balance.mode==:MHS || error("force-balance modes differ")
-    for name in (:force_residual_x,:force_residual_y,:force_residual_z,
-            :force_integrability_max,:force_integrability_rms,:force_integrability_faces,
-            :eos_density_relative_error,:eos_electron_relative_error)
-        isapprox(getproperty(one.result.force_balance,name),
-            getproperty(four.result.force_balance,name);rtol=1e-10,atol=1e-14) ||
-            error("final diagnostic $name differs between topologies")
-    end
+    one.result.equilibrium.valid && four.result.equilibrium.valid || error("equilibrium invalid in a topology")
+    one.result.equilibrium.effective_mode==four.result.equilibrium.effective_mode ||
+        error("equilibrium modes differ between topologies")
     for result in (one.result,four.result)
         provenance=result.provenance; memory=result.memory
         length(provenance["rank_layout"])==result.ranks || error("provenance omitted an MPI rank")

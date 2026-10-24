@@ -5,14 +5,14 @@ using TOML
     cfg = load_config(path)
     @test cfg.stokes.components == (:I,)
     summary = dry_run_summary(cfg)
-    @test occursin("force_balance=MHS",summary)
+    @test occursin("equilibrium=HSEMHS:column-hse-ltau",summary)
     @test occursin("full_grid_psf=true",summary)
     @test occursin("zero_weight_exclusion=true",summary)
     @test cfg.atmosphere.vertical_dataset == "logtau_500"
     @test cfg.atmosphere.vertical_coordinate === :log10tau500
     @test cfg.atmosphere.storage_order == :julia
     @test cfg.atmosphere.temperature_dataset == "temperature"
-    @test cfg.atmosphere.pressure_top == 0.1
+    @test cfg.equilibrium.mode === :column_hse_ltau && cfg.equilibrium.column.align == "ptot"
     @test cfg.observed.file == "inputs/observations.h5"
     @test cfg.observed.intensity_dataset == "intensity"
     @test cfg.weights.wavelength_dataset == "wavelength_weights"
@@ -34,7 +34,7 @@ using TOML
     @test cfg.regularization.vertical.types == (4,1,3,0,0,0,1)
     @test cfg.regularization.vertical.regularize == 1.0
     @test cfg.regularization.vertical.weights[4] == 0.1
-    @test cfg.parallel.decomposition == :cartesian_2d
+    @test cfg.parallel.decomposition == :x_slabs
     @test cfg.parallel.gpu_launcher_rank == 0
     @test cfg.parallel.gpu_connect_timeout_seconds == 30.0
     @test cfg.parallel.gpu_status_timeout_seconds == 0.0

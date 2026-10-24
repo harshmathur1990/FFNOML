@@ -4,6 +4,8 @@ version = "0.1.0"
 authors = ["FFNOML contributors"]
 
 [deps]
+FFTW = "7a1cc6ca-52ef-59f5-83cd-3a7055c09341"
+HSEMHS = "3f8a2c4e-6b1d-4e7a-9c55-2d0f7e1a9b31"
 SHA = "ea8e919c-243c-51af-8825-aaa63cd721ce"
 AtomicData = "6b77412b-f4b7-4495-8b9c-778517285205"
 Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
@@ -21,9 +23,11 @@ TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
 FFNOInversionMuspelExt = "Muspel"
 
 [sources]
+HSEMHS = {url = "https://github.com/harshmathur1990/1DHSE3dMHS.git", rev = "f342f6b5e4058923ec0b171bcc8f3450644060a9", subdir = "HSEMHS"}
 Muspel = {url = "https://github.com/harshmathur1990/Muspel.jl.git", rev = "01ec68da389be75c9ce31494a910095d3590499a"}
 
 [compat]
+FFTW = "1.10"
 AtomicData = "0.1"
 HDF5 = "0.17.3"
 MPI = "0.20"

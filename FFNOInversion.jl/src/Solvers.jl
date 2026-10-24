@@ -154,7 +154,7 @@ function apply_control_maps!(distributed::DistributedAtmosphere,layout::ControlM
 end
 
 struct _ThermodynamicTrialReference{A}
-    pgas::A; rho::A; ne::A; z::A
+    pgas::A; rho::A; ne::A; z::A; logtau500::A
 end
 _trial_copy(value)=value===nothing ? nothing : copy(value)
 
@@ -185,7 +185,8 @@ function DistributedInversionProblem(model,workspace,distributed::DistributedAtm
     active=allreduce_sum(local_count,context)
     active>0 || throw(ArgumentError("at least one inversion weight must be positive"))
     a=distributed.local_atmosphere
-    reference=_ThermodynamicTrialReference(_trial_copy(a.pgas),_trial_copy(a.rho),_trial_copy(a.ne),_trial_copy(a.z))
+    reference=_ThermodynamicTrialReference(_trial_copy(a.pgas),_trial_copy(a.rho),_trial_copy(a.ne),_trial_copy(a.z),
+        _trial_copy(a.logtau500))
     T=eltype(a.temperature)
     controls=Dict{Symbol,Array{T,3}}()
     if control_layout!==nothing
@@ -201,13 +202,13 @@ function DistributedInversionProblem(model,workspace,distributed::DistributedAtm
     DistributedInversionProblem{typeof(model),typeof(workspace),typeof(distributed),typeof(observation),
         typeof(regularization),T,typeof(reference)}(model,workspace,distributed,observation,regularization,
         T(dx_m),T(dy_m),reference,active,controls,String(reference_id),signature,
-        Ref(control_layout!==nothing && hasproperty(model,:prepared_force_balance) &&
-            model.prepared_force_balance[]!==nothing))
+        Ref(control_layout!==nothing && hasproperty(model,:prepared_equilibrium) &&
+            model.prepared_equilibrium[]!==nothing))
 end
 
 function _restore_trial_reference!(problem::DistributedInversionProblem)
     atmosphere=problem.distributed.local_atmosphere; ref=problem.thermodynamic_reference
-    for name in (:pgas,:rho,:ne,:z)
+    for name in (:pgas,:rho,:ne,:z,:logtau500)
         source=getfield(ref,name)
         if source===nothing
             setfield!(atmosphere,name,nothing)
@@ -261,7 +262,7 @@ end
 
 struct ObjectiveEvaluation{T<:AbstractFloat,F,G}
     components::ObjectiveComponents{T}
-    force_balance::F
+    equilibrium::F
     timings::G
 end
 
@@ -284,6 +285,9 @@ function evaluate_objective!(problem::DistributedInversionProblem,layout::Contro
     problem.prepared_initial_available[]=false
     forward_result=forward!(problem.workspace,problem.model,problem.distributed,context;
         reuse_prepared=reuse_prepared)
+    # Phase 3: an invalid equilibrium is a collective error (the reject-trial policy arrives in Phase 4)
+    forward_result.valid || throw(ArgumentError("equilibrium reconstruction failed: $(forward_result.equilibrium.reason); "*
+        join(forward_result.equilibrium.messages,"; ")))
     data=distributed_chi2(forward_result.spectrum,problem.observation,context)/problem.active_residual_count
     reg=distributed_regularization_penalty(problem.distributed,problem.regularization,
         problem.dx_m,problem.dy_m,context)
@@ -292,7 +296,7 @@ function evaluate_objective!(problem::DistributedInversionProblem,layout::Contro
     components=ObjectiveComponents(T(data+reg.total),T(data),T(reg.total),terms)
     all(isfinite,(components.total,components.data,components.regularization)) ||
         throw(ErrorException("objective contains NaN or Inf"))
-    ObjectiveEvaluation(components,forward_result.force_balance,forward_result.timings)
+    ObjectiveEvaluation(components,forward_result.equilibrium,forward_result.timings)
 end
 
 Base.@kwdef struct PrototypeSolverOptions

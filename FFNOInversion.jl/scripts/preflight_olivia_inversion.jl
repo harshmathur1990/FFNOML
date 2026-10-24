@@ -72,18 +72,10 @@ function _validate_hdf5_inputs(config,run_dir)
                     "magnetic field '$name' shape differs from temperature"))
             end
         end
-        if config.atmosphere.pressure_top isa String
-            pressure_shape=_atmosphere_shape(
-                _dataset_shape(file,config.atmosphere.pressure_top,"pressure_top"),storage_order)
-            if !isempty(pressure_shape)
-                selected_pressure=_selected_shape(pressure_shape,config.time_index,2,"pressure_top")
-                selected_pressure==selected[:temperature][2:3] || throw(DimensionMismatch(
-                    "pressure_top shape $selected_pressure does not match atmosphere y/x shape $(selected[:temperature][2:3])"))
-            end
-        end
         selected[:temperature]
     end
 
+    _required_file("HSEMHS EOS table",config.equilibrium.eos_table_file)
     config.mode===:forward && return atmosphere_path,nothing,atmosphere_shape
 
     observation_path=_required_file("observations",_run_path(run_dir,config.observed.file))

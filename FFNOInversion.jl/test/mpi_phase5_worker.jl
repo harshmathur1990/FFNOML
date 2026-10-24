@@ -1,6 +1,7 @@
 using FFNOInversion
 using Serialization
 
+include(joinpath(@__DIR__,"test_equilibrium.jl"))
 struct MPIPhase5Synthesizer <: AbstractSynthesizer end
 function FFNOInversion.synthesize!(cube::SpectralCube{T},::MPIPhase5Synthesizer,::NonPRD,
         atmosphere::Atmosphere3D,populations,cache=nothing) where T
@@ -31,11 +32,8 @@ try
     else nothing end
     distributed=distribute_atmosphere(Float64,root_atmosphere,context); root_atmosphere=nothing
     wavelength=[500.0e-9,500.1e-9,500.2e-9,500.3e-9]
-    force=ForceBalanceOptions(max_iterations=4,relative_tolerance=5.0,force_tolerance=5.0,
-        height_tolerance_m=1e9,relaxation=0.5,pressure_sweeps=4)
     model=HybridForwardModel(LocalDistributedPopulationModel(MockPopulationModel(1e10),1),NonPRD(),
-        MPIPhase5Synthesizer(),IdentityObservation(),IdealGasEOS(),ReferenceOpacity500(kappa_m2_kg=0.02),
-        HE3DBoundaryState(1e-10,1.0,:top),force,CapabilityManifest())
+        MPIPhase5Synthesizer(),IdentityObservation(),TestHydrostaticEquilibrium(),CapabilityManifest())
     workspace=HybridForwardWorkspace(Float64,distributed,wavelength,StokesSet(:I),1)
     truth_layout=layout([5000,6000,5500,6500],[-1000,1000])
     apply_control_maps!(distributed,truth_layout,initial_parameters(truth_layout))

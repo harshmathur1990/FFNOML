@@ -39,6 +39,15 @@ serial_context(;options=ParallelOptions()) = ParallelContext(false,0,1,options.g
     nothing,false,Threads.threadid(),options)
 isroot(context::ParallelContext) = context.rank == context.root
 
+"""BLAS and FFTW run single-threaded inside each rank: Julia threads parallelize
+the column and slab loops (HSEMHS and synthesis), so library threads would
+oversubscribe the cores allocated to the rank."""
+function _set_library_threads!()
+    LinearAlgebra.BLAS.set_num_threads(1)
+    FFTW.set_num_threads(1)
+    nothing
+end
+
 function initialize_parallel(;options=ParallelOptions())
     options.threads_per_rank > 0 || throw(ArgumentError("threads_per_rank must be positive"))
     options.threads_per_rank == Threads.nthreads() || throw(ArgumentError(
@@ -48,9 +57,22 @@ function initialize_parallel(;options=ParallelOptions())
     options.gpu_connect_timeout_seconds >= 0 || throw(ArgumentError("gpu_connect_timeout_seconds must be non-negative"))
     options.gpu_status_timeout_seconds >= 0 || throw(ArgumentError("gpu_status_timeout_seconds must be non-negative"))
     options.gpu_diagnostic_interval_seconds >= 0 || throw(ArgumentError("gpu_diagnostic_interval_seconds must be non-negative"))
-    options.enabled || return serial_context(options=options)
+    _set_library_threads!()
+    # FFNO owns MPI. Embedded HSEMHS needs at least THREAD_FUNNELED (MPI calls on the main thread only); a serial run is
+    # a managed single-rank MPI run, so the equilibrium backend can use COMM_SELF.
     owns = !MPI.Initialized()
-    owns && MPI.Init()
+    if owns
+        provided = MPI.Init(threadlevel=:funneled)
+        provided >= MPI.THREAD_FUNNELED || throw(ArgumentError("MPI provides thread level $provided; THREAD_FUNNELED is required"))
+    else
+        MPI.Query_thread() >= MPI.THREAD_FUNNELED || throw(ArgumentError(
+            "MPI was initialized with thread level $(MPI.Query_thread()); THREAD_FUNNELED is required"))
+    end
+    if !options.enabled
+        MPI.Comm_size(MPI.COMM_WORLD) == 1 || throw(ArgumentError(
+            "parallel.enabled = false under a $(MPI.Comm_size(MPI.COMM_WORLD))-rank launch; set parallel.enabled = true (independent serial runs would collide on outputs and the GPU service)"))
+        return ParallelContext(false,0,1,options.gpu_launcher_rank,nothing,owns,Threads.threadid(),options)
+    end
     comm = MPI.COMM_WORLD
     size = MPI.Comm_size(comm)
     rank = MPI.Comm_rank(comm)
@@ -58,8 +80,10 @@ function initialize_parallel(;options=ParallelOptions())
     ParallelContext(true,rank,size,options.gpu_launcher_rank,comm,owns,Threads.threadid(),options)
 end
 
+"""Finalize MPI if this context initialized it (serial contexts too). Close
+equilibrium backends first: they own communicators."""
 function finalize_parallel!(context::ParallelContext)
-    context.enabled && context.owns_mpi && !MPI.Finalized() && MPI.Finalize()
+    context.owns_mpi && !MPI.Finalized() && MPI.Finalize()
     nothing
 end
 

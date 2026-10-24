@@ -1,5 +1,6 @@
 using FFNOInversion
 using Serialization
+include(joinpath(@__DIR__,"test_equilibrium.jl"))
 
 struct CoupledPopulationFixture <: AbstractPopulationModel
     scale::Float64
@@ -12,19 +13,6 @@ end
 
 context=initialize_parallel(options=ParallelOptions(enabled=true,threads_per_rank=Threads.nthreads()))
 try
-    # A local exception must become the same exception on every rank before
-    # any rank advances to another collective (and before FSDP shutdown).
-    coordinated_failure=false
-    try
-        FFNOInversion._distributed_local_stage!("MPI failure probe",context) do
-            context.rank==context.root && error("intentional rank-local failure")
-        end
-    catch error
-        coordinated_failure=occursin("MPI failure probe failed on 1 MPI rank",sprint(showerror,error))
-    end
-    allreduce_sum(coordinated_failure ? 1 : 0,context)==context.size ||
-        error("rank-local force-balance failures were not coordinated")
-
     nx,ny=11,7; grid=Grid3D([-5.0,-4,-3,-2],collect(0.0:50e3:(nx-1)*50e3),collect(0.0:50e3:(ny-1)*50e3))
     shape=(4,nx,ny); root_atmosphere=nothing
     if isroot(context)
@@ -40,95 +28,23 @@ try
     distributed=distribute_atmosphere(Float64,root_atmosphere,context)
     root_atmosphere=nothing
 
-    # Zero B must reduce to independent columns on every rank.
-    probe=deepcopy(distributed)
-    for component in (:Bx,:By,:Bz)
-        fill!(getfield(probe.local_atmosphere.magnetic_field,component),0.)
-    end
-    zero_diag=reconstruct_force_balance_distributed!(probe,HE3DBoundaryState(1e-10,1.,:top),
-        IdealGasEOS(),ReferenceOpacity500(),context;options=ForceBalanceOptions(max_iterations=1))
-    zero_diag.mode==:MHS && zero_diag.iterations==1 || error("zero-B MPI did not use the unified iteration")
-    # Only one rank owns a nonzero sample: all ranks must nevertheless enter MHS.
-    context.rank==context.root && (probe.local_atmosphere.magnetic_field.Bx[1,1,1]=1e-12)
-    magnetic_diag=reconstruct_force_balance_distributed!(probe,HE3DBoundaryState(1e-10,1.,:top),
-        IdealGasEOS(),ReferenceOpacity500(),context;options=ForceBalanceOptions(max_iterations=1))
-    magnetic_diag.mode==:MHS && magnetic_diag.iterations==1 || error("MPI magnetic branch is not collective")
-
-    # Exercise corrugated physical edges across real MPI tile boundaries.  This
-    # manufactured state exactly satisfies grad(P) = -rho*g*e_z even though a
-    # constant-optical-depth surface is not a constant-height surface.
-    local_shape=size(distributed.local_atmosphere.temperature)
-    corrugated_z=Array{Float64}(undef,local_shape)
-    for k in axes(corrugated_z,1),i in axes(corrugated_z,2),j in axes(corrugated_z,3)
-        gi=first(distributed.tile.xrange)+i-1
-        gj=first(distributed.tile.yrange)+j-1
-        corrugated_z[k,i,j]=100(k-1)+4e-4*grid.x[gi]-2.5e-4*grid.y[gj]
-    end
-    gravity=274.0; manufactured_rho=fill(2.0,local_shape)
-    manufactured_p=@. 1e9-manufactured_rho*gravity*corrugated_z
-    zero_force=zeros(local_shape)
-    manufactured_boundary=copy(@view manufactured_p[1,:,:])
-    FFNOInversion._distributed_pressure_relax!(manufactured_p,zero_force,zero_force,
-        zero_force,manufactured_rho,corrugated_z,distributed,manufactured_boundary,
-        collect(axes(manufactured_p,1)),gravity,context,3)
-    manufactured_residual=FFNOInversion._distributed_force_residual(manufactured_p,
-        manufactured_rho,corrugated_z,zero_force,zero_force,zero_force,distributed,
-        context,gravity)
-    manufactured_residual<1e-10 || error(
-        "corrugated MPI force operator/residual mismatch: $manufactured_residual")
-
-    # Final diagnostics must count faces across both tile seams exactly once.
-    for incompatible in (false,true)
-        diagnostic_fx=zeros(local_shape)
-        if incompatible
-            for j in axes(diagnostic_fx,3)
-                @views diagnostic_fx[:,:,j].=grid.y[first(distributed.tile.yrange)+j-1]
-            end
-        end
-        measured=FFNOInversion._distributed_force_metrics(manufactured_p,
-            manufactured_rho,corrugated_z,diagnostic_fx,zero_force,zero_force,
-            distributed,context,gravity)
-        reference=if isroot(context)
-            global_z=[100(k-1)+4e-4*grid.x[i]-2.5e-4*grid.y[j]
-                for k in 1:shape[1],i in 1:nx,j in 1:ny]
-            global_rho=fill(2.0,shape); global_p=@. 1e9-global_rho*gravity*global_z
-            global_fx=incompatible ? repeat(reshape(grid.y,1,1,ny),shape[1],nx,1) : zeros(shape)
-            global_zero=zeros(shape)
-            direction=FFNOInversion._directional_force_residual(global_p,global_rho,
-                global_z,global_fx,global_zero,global_zero,grid,gravity)
-            compatibility=FFNOInversion._force_integrability(global_fx,global_zero,
-                global_zero,global_rho,global_z,grid,gravity)
-            (x=direction.x,y=direction.y,z=direction.z,maximum=compatibility.maximum,
-                rms=compatibility.rms,faces=compatibility.faces)
-        else
-            nothing
-        end
-        reference=mpi_broadcast(reference,context)
-        for name in propertynames(reference)
-            isapprox(getproperty(measured,name),getproperty(reference,name);rtol=1e-12,atol=1e-14) ||
-                error("MPI diagnostic $name differs from whole-domain evaluation")
-        end
-        measured.faces==shape[1]*(nx-1)*(ny-1)+(shape[1]-1)*((nx-1)*ny+nx*(ny-1)) ||
-            error("MPI diagnostics missed or double-counted faces")
-    end
-
     wave=collect(range(656.1e-9,656.5e-9,length=9))
-    # The synthetic B field is intentionally not a manufactured MHS equilibrium;
-    # loose outer tolerances keep this fixture focused on MPI topology parity.
-    options=ForceBalanceOptions(max_iterations=120,relative_tolerance=5.0,force_tolerance=0.6,
-        height_tolerance_m=2e7,relaxation=0.5,pressure_sweeps=20)
     psf=GaussianPSFObservation(0.04e-9,50e3,50e3,50e3,50e3)
     # This fixture depends on the global temperature mean, so topology parity
     # proves that rank 0 received the complete FFNO feature volume before the
     # resulting population cube was scattered back to tile owners.
     root_model=isroot(context) ? CoupledPopulationFixture(1e10) : nothing
     model=HybridForwardModel(RootDistributedPopulationModel(root_model,1),NonPRD(),MockIntensitySynthesizer(),
-        psf,IdealGasEOS(),ReferenceOpacity500(kappa_m2_kg=0.02),HE3DBoundaryState(1e-10,1.0,:top),
-        options,CapabilityManifest())
+        psf,TestHydrostaticEquilibrium(),CapabilityManifest())
     workspace=HybridForwardWorkspace(Float64,distributed,wave,StokesSet(:I),1)
     forward_start=time(); result=forward!(workspace,model,distributed,context); forward_seconds=time()-forward_start
-    result.force_balance.mode==:MHS || error("MPI Phase 4 did not select MHS for supplied B")
-    result.force_balance.lorentz_max_n_m3>0 || error("distributed MHS Lorentz term is zero")
+    result.valid && result.equilibrium.valid || error("MPI Phase 4 equilibrium is invalid")
+    # an equilibrium failure seen on one rank only is the same verdict on every rank, and skips the rest of the forward
+    hot=deepcopy(distributed); context.rank==context.root && (hot.local_atmosphere.temperature[1,1,1]=1e5)
+    hot_model=HybridForwardModel(RootDistributedPopulationModel(root_model,1),NonPRD(),MockIntensitySynthesizer(),
+        psf,TestHydrostaticEquilibrium(invalid_above_K=5.0e4),CapabilityManifest())
+    hot_result=forward!(HybridForwardWorkspace(Float64,hot,wave,StokesSet(:I),1),hot_model,hot,context)
+    allreduce_sum(hot_result.valid ? 0 : 1,context)==context.size || error("equilibrium failure is not collective")
     local_pixels=length(distributed.tile.xrange)*length(distributed.tile.yrange)
     allreduce_sum(local_pixels,context)==nx*ny || error("rank tiles do not uniquely own the global domain")
     context.size>1 && local_pixels>=nx*ny && error("a rank retained the complete spatial model")
@@ -168,7 +84,7 @@ try
                 serialize(io,(spectrum=spectrum.data,populations=populations,temperature=atmosphere.temperature,
                     pgas=atmosphere.pgas,rho=atmosphere.rho,ne=atmosphere.ne,z=atmosphere.z,
                     Bx=atmosphere.magnetic_field.Bx,By=atmosphere.magnetic_field.By,Bz=atmosphere.magnetic_field.Bz,
-                    regularization=reg,force_balance=result.force_balance,ranks=context.size,
+                    regularization=reg,equilibrium=result.equilibrium,ranks=context.size,
                     threads=Threads.nthreads(),process_grid=distributed.tile.process_grid,
                     forward_seconds=forward_seconds,timings=result.timings,memory=memory,
                     provenance=provenance))

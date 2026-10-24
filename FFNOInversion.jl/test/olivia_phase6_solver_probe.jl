@@ -1,6 +1,7 @@
 using FFNOInversion
 using Sockets
 
+include(joinpath(@__DIR__,"test_equilibrium.jl"))
 mode=length(ARGS)==1 ? Symbol(ARGS[1]) : error(
     "usage: olivia_phase6_solver_probe.jl success|rejection")
 mode in (:success,:rejection) || error("unknown Phase 6 solver probe mode: $mode")
@@ -86,11 +87,8 @@ try
     end
     distributed=distribute_atmosphere(Float64,root_atmosphere,context); root_atmosphere=nothing
     wavelength=[500.0e-9,500.1e-9,500.2e-9,500.3e-9]
-    force=ForceBalanceOptions(max_iterations=4,relative_tolerance=5.0,force_tolerance=5.0,
-        height_tolerance_m=1e9,relaxation=0.5,pressure_sweeps=4)
     model=HybridForwardModel(LocalDistributedPopulationModel(MockPopulationModel(1e10),1),NonPRD(),
-        OliviaPhase6Synthesizer(),IdentityObservation(),IdealGasEOS(),ReferenceOpacity500(kappa_m2_kg=0.02),
-        HE3DBoundaryState(1e-10,1.0,:top),force,CapabilityManifest())
+        OliviaPhase6Synthesizer(),IdentityObservation(),TestHydrostaticEquilibrium(),CapabilityManifest())
     workspace=HybridForwardWorkspace(Float64,distributed,wavelength,StokesSet(:I),1)
     truth_layout=control_layout([5000,6000,5500,6500],[-1000,1000]); truth=initial_parameters(truth_layout)
     apply_control_maps!(distributed,truth_layout,truth)

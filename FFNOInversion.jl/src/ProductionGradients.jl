@@ -438,8 +438,9 @@ end
 function _reconstruct_trial!(problem,layout,parameters,context)
     _restore_trial_reference!(problem)
     apply_control_maps!(problem,layout,parameters)
-    reconstruct_force_balance_distributed!(problem.distributed,problem.model.boundary,
-        problem.model.eos,problem.model.opacity,context;options=problem.model.force_options)
+    outcome=reconstruct_equilibrium!(problem.model.equilibrium,problem.distributed,context)
+    outcome.valid || throw(ArgumentError("equilibrium reconstruction failed at a gradient trial point: $(outcome.reason)"))
+    outcome
 end
 
 function _force_regularization_vjp!(gradient,backend::HybridAdjointObjectiveGradient,

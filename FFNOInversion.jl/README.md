@@ -19,15 +19,15 @@ The TOML file configures these four paths but is not itself a scientific data in
 ## Current capabilities
 
 - canonical 3D grids, atmospheres, optional magnetic fields, observations and node fields;
-- automatic HE3D selection when B is absent and MHS selection when B is present;
+- equilibrium reconstruction by HSEMHS in process (`[equilibrium]`): column HSE on native z or log10 tau500 (MHS Poisson modes follow in Phase 4 of the HSEMHS integration); B absent means B = 0;
 - Stokes-aware spectral cubes with intensity-only/non-PRD Release 1 defaults;
 - stable population, redistribution, synthesis and observation interfaces;
-- a two-input/two-output run contract plus configuration for `logtau_500`, temperature, velocities, top pressure, `dx/dy`, and any number of simultaneously inverted spectral regions;
+- a two-input/two-output run contract plus configuration for a native vertical axis (`z_m` or `logtau500`), temperature, velocities, `dx/dy`, and any number of simultaneously inverted spectral regions;
 - Gaussian spectral/spatial PSFs on the full grid and zero-capable wavelength/2D-spatial chi-square weights;
 - vertical and horizontal regularization of selected recovered atmospheric variables;
 - deterministic mock forward model, weighted residual packing, configuration dry-run and restart checkpoints.
 
-Phase 1 provides iterative HE3D/MHS reconstruction, an in-memory Wittmann EOS adapter, Lorentz-force diagnostics, and a native Julia production continuum-opacity backend. The constant-opacity backend remains only for manufactured tests.
+Phase 1 provided an in-memory Wittmann EOS adapter (still used by synthesis) and a native Julia production continuum-opacity backend. Its HE3D/MHS force-balance reconstruction was replaced by the HSEMHS equilibrium (`src/Equilibrium.jl`, ADR-012).
 
 Phase 2 defines and validates the six-channel population request, level metadata, units, positivity and canonical array layouts. `RecordedPopulationModel` remains available for deterministic CPU tests. The inversion application has one production FFNO implementation: the persistent multi-GPU FSDP service introduced by Phase 6.
 
@@ -106,13 +106,13 @@ Set top-level `mode = "forward"` or `[solver] max_iterations = 0` to synthesize
 from the supplied atmosphere. Both select the same forward-only branch, without
 an observation file, control layout, objective, regularization, or gradients.
 Node and optimizer settings are ignored in this mode. Wavelengths, instrumental
-profiles, EOS/force balance, and the persistent multi-GPU FSDP backend remain the
+profiles, the HSEMHS equilibrium, and the persistent multi-GPU FSDP backend remain the
 same as inversion. See `examples/inversion_run/forward.toml`.
 
 Temperature, velocities, optional magnetic fields, and optional configured
 `[atmosphere.datasets] vturb = "vturb"` are preserved on the input grid.
 Microturbulence defaults to zero only when no dataset is configured. Pressure,
-density, electron density and height are reconstructed by force balance/EOS.
+density, electron density and the derived coordinate are reconstructed by the HSEMHS equilibrium.
 The two output files contain spectra and the resulting atmosphere/populations.
 Forward products omit objective and solver-termination fields; both products
 record execution mode and TOML provenance.

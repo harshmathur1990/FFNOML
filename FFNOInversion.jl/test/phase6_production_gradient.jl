@@ -1,5 +1,6 @@
 using LinearAlgebra
 
+include(joinpath(@__DIR__,"test_equilibrium.jl"))
 struct Phase6TwoLevelPopulation{T<:AbstractFloat} <: AbstractPopulationModel
     scale::T
 end
@@ -38,15 +39,12 @@ function phase6_mixed_fixture(temperature_values,vz_values;observation=nothing)
         OpacityContributor(continuum),OpacityContributor(transition,workspace.populations[:H]),
         OpacityContributor(ca_transition,workspace.populations[:CA]),
         OpacityContributor(KuruczLTEModel([kurucz_line]))])
-    force=ForceBalanceOptions(max_iterations=5,relative_tolerance=5.0,force_tolerance=5.0,
-        height_tolerance_m=1e9,relaxation=0.5,pressure_sweeps=4)
     psf=GaussianPSFObservation(0.015e-9,20e3,20e3,40e3,40e3)
     population_model=CompositeDistributedPopulationModel(Dict(
         :H=>LocalDistributedPopulationModel(Phase6TwoLevelPopulation(1e12),2),
         :CA=>LocalDistributedPopulationModel(Phase6TwoLevelPopulation(5e11),2)))
     model=HybridForwardModel(population_model,
-        NonPRD(),synthesizer,psf,IdealGasEOS(),ReferenceOpacity500(kappa_m2_kg=0.02),
-        HE3DBoundaryState(1e-10,1.0,:top),force,CapabilityManifest())
+        NonPRD(),synthesizer,psf,TestHydrostaticEquilibrium(),CapabilityManifest())
     temp=NodeField(reshape(Float64.(temperature_values),2,1,1),[-5.0,-1.0])
     vz=NodeField(reshape(Float64.(vz_values),2,1,1),[-5.0,-1.0])
     layout=ControlMapLayout(

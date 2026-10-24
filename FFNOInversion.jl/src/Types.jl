@@ -133,17 +133,6 @@ function check_coordinate_consistency(atmosphere::Atmosphere3D)
     true
 end
 
-struct HE3DBoundaryState{T<:AbstractFloat,A}
-    rho0::A
-    p0::A
-    boundary::Symbol
-    function HE3DBoundaryState(rho0::A, p0::A, boundary::Symbol=:top) where {T<:AbstractFloat,A<:Union{T,AbstractArray{T}}}
-        boundary in (:top, :bottom, :full) || throw(ArgumentError("boundary must be :top, :bottom or :full"))
-        all(>(zero(T)), rho0) && all(>(zero(T)), p0) || throw(ArgumentError("rho0 and p0 must be positive"))
-        new{T,A}(rho0, p0, boundary)
-    end
-end
-
 struct StokesSet
     components::Tuple{Vararg{Symbol}}
     function StokesSet(components::Tuple{Vararg{Symbol}})

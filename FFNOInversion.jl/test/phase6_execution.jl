@@ -1,3 +1,4 @@
+include("test_equilibrium.jl")
 using HDF5
 using Sockets
 using TOML
@@ -97,14 +98,11 @@ end
         end
         wavelength=collect(range(656.24e-9,656.32e-9,length=4))
         context=serial_context(); distributed=distribute_atmosphere(Float64,atmosphere,context)
-        force=ForceBalanceOptions(max_iterations=4,relative_tolerance=5.0,force_tolerance=5.0,
-            height_tolerance_m=1e9,relaxation=0.5,pressure_sweeps=4)
         truth_backend,truth_server=fake_fsdp_population_backend(value=1.0f10,
             temperature_scaled=true)
         model=HybridForwardModel(truth_backend,
-            NonPRD(),MockIntensitySynthesizer(),IdentityObservation(),IdealGasEOS(),
-            ReferenceOpacity500(kappa_m2_kg=0.02),HE3DBoundaryState(fill(1e-10,nx,ny),fill(1.0,nx,ny),:top),
-            force,CapabilityManifest())
+            NonPRD(),MockIntensitySynthesizer(),IdentityObservation(),TestHydrostaticEquilibrium(),
+            CapabilityManifest())
         workspace=HybridForwardWorkspace(Float64,distributed,wavelength,StokesSet(:I),1)
         truth=forward!(workspace,model,distributed,context).spectrum
         close_distributed_population_model!(truth_backend,context); wait(truth_server)
@@ -123,8 +121,11 @@ time_index = 1
 [outputs]
 synthesis_file = \"$synthesis_path\"
 atmosphere_file = \"$output_atmosphere_path\"
+[equilibrium]
+backend = "HSEMHS"
+model = "column_hse"
+eos_table_file = "eos_table.h5"
 [atmosphere]
-pressure_top_pa = 1.0
 storage_order = "python"
 [atmosphere.datasets]
 logtau500 = \"logtau_500\"
@@ -181,12 +182,12 @@ threads_per_rank = $(Threads.nthreads())
         @test all(inputs.atmosphere.vturb.==800)
         @test inputs.observation===nothing
         server_ref=Ref{Any}()
-        factory=InversionModelFactory(1,(cfg,dist,ws,pressure,ctx)->begin
+        equilibrium=TestHydrostaticEquilibrium()
+        factory=InversionModelFactory(1,(cfg,dist,ws,ctx)->begin
             backend,server=fake_fsdp_population_backend(value=1.0f10,
                 temperature_scaled=true); server_ref[]=server
             HybridForwardModel(backend,NonPRD(),MockIntensitySynthesizer(),IdentityObservation(),
-                IdealGasEOS(),ReferenceOpacity500(kappa_m2_kg=0.02),
-                HE3DBoundaryState(fill(1e-10,size(pressure)),pressure,:top),force,CapabilityManifest())
+                equilibrium,CapabilityManifest())
         end)
         result=run_inversion_files!(config_path,factory;gradient_backend=ForbiddenForwardGradient())
         wait(server_ref[])
@@ -195,6 +196,7 @@ threads_per_rank = $(Threads.nthreads())
         @test result.atmosphere.temperature==temperature
         @test result.synthesis.data≈truth.data
         @test result.atmosphere.pgas!==nothing && result.atmosphere.ne!==nothing
+        @test equilibrium.closed                                    # the run closes the equilibrium backend
         h5open(synthesis_path) do file
             @test size(read(file["intensity"]))==(1,1,4,ny,nx)
         end

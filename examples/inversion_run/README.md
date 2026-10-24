@@ -58,10 +58,9 @@ The Olivia batch script derives the Julia thread count and the runtime
 `threads_per_rank` in a copied run configuration; it is only needed for
 non-SLURM launches where it defaults to Julia's active thread count.
 
-`model_factory.jl` uses these relative paths through `FFNOML_RUN_DIR`. Edit the
-`FFNO_TOP_DENSITY_KG_M3` value in `olivia_runtime_environment.sh` for the
-appropriate boundary-density initialization; the template value is only a
-starting point and must be checked for the chosen atmosphere.
+`model_factory.jl` uses these relative paths through `FFNOML_RUN_DIR`. The
+equilibrium (pressure, density, electron density, heights) comes from HSEMHS as
+configured in `[equilibrium]`; point `eos_table_file` at the HSEMHS EOS table.
 The supplied configurations set `[atmosphere].storage_order = "python"` so
 NumPy/h5py array dimensions are converted before validation and reading.
 
@@ -77,6 +76,6 @@ This needs the atmosphere and model/physics assets listed above, but no
 `inputs/observations.h5`. It returns `outputs/synthesis.h5` and
 `outputs/forward_atmosphere.h5`. Alternatively set `max_iterations = 0` in an
 inversion configuration; nodes and observations will be ignored. This is still
-force-balance/EOS reconstruction followed by FFNO populations and synthesis,
+HSEMHS equilibrium reconstruction followed by FFNO populations and synthesis,
 with no optimization or gradient work. The example factory currently loads both
 H and Ca assets even when only one species contributes to the configured lines.

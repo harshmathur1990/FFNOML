@@ -54,10 +54,11 @@ end
     @test !occursin("setup_olivia_environment.sbatch",guide)
     @test !occursin("c++ -O3",guide)
     @test !occursin("/permanent/lib/libwitt_ffno.so",readme)
-    @test occursin("top_density_map = fill(top_density, size(local_pressure_top))",model_factory)
-    @test occursin("HE3DBoundaryState(top_density_map, local_pressure_top, :top)",model_factory)
-    @test first(findfirst("top_density_map = fill",model_factory)) <
-        first(findfirst("launch_fsdp_population_models",model_factory))
+    # the example factory prepares the HSEMHS equilibrium (checked against the synthesis EOS) before the GPU service
+    @test occursin("equilibrium = prepare_equilibrium(config, distributed, context; synthesis_eos=eos)",model_factory)
+    @test !occursin("pressure_top",model_factory) && !occursin("HE3DBoundaryState",model_factory)
+    @test first(findfirst("prepare_equilibrium(config",model_factory)) <
+        first(findfirst("launch_fsdp_population_models(",model_factory))
 end
 
 @testset "Disposable Olivia environment" begin

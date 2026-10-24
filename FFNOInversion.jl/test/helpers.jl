@@ -1,3 +1,4 @@
+include("test_equilibrium.jl")
 function test_atmosphere(; magnetic=false, T=Float64)
     grid = Grid3D(T.([-5,-3,-1,1]), T.([0,1]), T.([0,1,2]))
     shape = (4,2,3)

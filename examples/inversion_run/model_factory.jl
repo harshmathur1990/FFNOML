@@ -35,7 +35,7 @@ const LEVEL_NAMES = Dict(
     for (species, count) in LEVELS
 )
 
-function build_production_model(config, distributed, workspace, local_pressure_top, context)
+function build_production_model(config, distributed, workspace, context)
     metadata(species) = PopulationMetadata(
         FFNO_INPUT_CHANNELS,
         LEVEL_NAMES[species],
@@ -44,35 +44,30 @@ function build_production_model(config, distributed, workspace, local_pressure_t
     specs = [FSDPModelSpec(species, CHECKPOINTS[species], metadata(species))
              for species in (:H, :CA)]
 
+    # Synthesis uses the Wittmann library; the equilibrium (pressure, density, electron density, heights) comes from
+    # HSEMHS, configured in [equilibrium] (HSEMHS sets the pressure boundary). prepare_equilibrium checks that the
+    # HSEMHS EOS table was built with the same partition functions and abundances as this library.
     eos = WittmannEOS(EOS_LIBRARY, PARTITION_FUNCTIONS)
-    opacity = WittmannOpacity500(eos)
-    top_density = parse(Float64, get(ENV, "FFNO_TOP_DENSITY_KG_M3", "1e-10"))
-    isfinite(top_density) && top_density > 0 ||
-        throw(ArgumentError("FFNO_TOP_DENSITY_KG_M3 must be finite and positive"))
-    local_pressure_top isa AbstractMatrix ||
-        throw(ArgumentError("local_pressure_top must be a local two-dimensional boundary map"))
-    expected_shape = (size(distributed.local_atmosphere.temperature, 2),
-                      size(distributed.local_atmosphere.temperature, 3))
-    size(local_pressure_top) == expected_shape || throw(DimensionMismatch(
-        "local pressure-top shape $(size(local_pressure_top)) differs from local horizontal shape $expected_shape"
-    ))
-    top_density_map = fill(top_density, size(local_pressure_top))
-    boundary = HE3DBoundaryState(top_density_map, local_pressure_top, :top)
-    force_options = ForceBalanceOptions()
+    equilibrium = prepare_equilibrium(config, distributed, context; synthesis_eos=eos)
 
     diagnostics = get(ENV, "FFNO_GPU_DIAGNOSTICS_DIR", joinpath(RUN_DIR, "diagnostics"))
-    populations = launch_fsdp_population_models(
-        specs,
-        context;
-        timeout_seconds=max(180.0, config.parallel.gpu_connect_timeout_seconds),
-        diagnostics_directory=diagnostics,
-    )
+    populations = try
+        launch_fsdp_population_models(
+            specs,
+            context;
+            timeout_seconds=max(180.0, config.parallel.gpu_connect_timeout_seconds),
+            diagnostics_directory=diagnostics,
+        )
+    catch
+        close_equilibrium!(equilibrium)
+        rethrow()
+    end
 
     try
         # Muspel caches are built from a thermodynamically complete initial state.
-        force_diagnostics = reconstruct_force_balance_distributed!(
-            distributed, boundary, eos, opacity, context; options=force_options
-        )
+        outcome = reconstruct_equilibrium!(equilibrium, distributed, context)
+        outcome.valid || throw(ArgumentError(
+            "the initial atmosphere has no valid equilibrium: $(outcome.reason); $(join(outcome.messages, "; "))"))
         predict_distributed_populations!(workspace.populations, populations, distributed, context)
         synthesizer = build_synthesis_setup(
             config,
@@ -86,15 +81,13 @@ function build_production_model(config, distributed, workspace, local_pressure_t
             NonPRD(),
             synthesizer,
             config.observation_model,
-            eos,
-            opacity,
-            boundary,
-            force_options,
+            equilibrium,
             CapabilityManifest(),
-            prepared_force_balance=force_diagnostics,
+            prepared_equilibrium=outcome,
         )
     catch
         close_distributed_population_model!(populations, context)
+        close_equilibrium!(equilibrium)
         rethrow()
     end
 end

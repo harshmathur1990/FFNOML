@@ -30,10 +30,15 @@ initial_atmosphere_file = "$file"
 [outputs]
 synthesis_file = "$(joinpath(dir,"syn.h5"))"
 atmosphere_file = "$(joinpath(dir,"atm.h5"))"
+[equilibrium]
+backend = "HSEMHS"
+model = "column_hse"
+eos_table_file = "eos_table.h5"
+[equilibrium.column_z]
+P_ref_pa = 1.0e5
 [atmosphere]
 vertical_coordinate = "z"
 storage_order = "$order"
-pressure_top_pa = 0.1
 $extra_atmos
 [atmosphere.datasets]
 z_m = "z_m"

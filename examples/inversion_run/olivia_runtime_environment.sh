@@ -15,4 +15,3 @@ export OLIVIA_LOCAL_MUSPEL_DIR=/cluster/projects/nn2834k/harshm/julia-sources/Mu
 export JULIA_DEPOT_PATH="${OLIVIA_JULIA_DEPOT}"
 
 # Initialization guess at the top boundary; subsequent density comes from EOS.
-export FFNO_TOP_DENSITY_KG_M3=1e-10

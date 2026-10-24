@@ -1,3 +1,4 @@
+include("test_equilibrium.jl")
 struct Phase5RecoverySynthesizer <: AbstractSynthesizer end
 
 function FFNOInversion.synthesize!(cube::SpectralCube{T},::Phase5RecoverySynthesizer,
@@ -20,14 +21,9 @@ function phase5_fixture()
     context=serial_context(options=ParallelOptions(threads_per_rank=Threads.nthreads()))
     distributed=distribute_atmosphere(Float64,atmosphere,context)
     wave=[500.0e-9,500.1e-9,500.2e-9,500.3e-9]
-    # The fixture isolates optimizer orchestration; strict force-balance
-    # convergence is covered independently by the Phase 1/4 suites.
-    force=ForceBalanceOptions(max_iterations=4,relative_tolerance=5.0,force_tolerance=5.0,
-        height_tolerance_m=1e9,relaxation=0.5,pressure_sweeps=4)
+    # The fixture isolates optimizer orchestration; the equilibrium is the deterministic test double.
     model=HybridForwardModel(LocalDistributedPopulationModel(MockPopulationModel(1e10),1),NonPRD(),
-        Phase5RecoverySynthesizer(),IdentityObservation(),IdealGasEOS(),
-        ReferenceOpacity500(kappa_m2_kg=0.02),HE3DBoundaryState(1e-10,1.0,:top),force,
-        CapabilityManifest())
+        Phase5RecoverySynthesizer(),IdentityObservation(),TestHydrostaticEquilibrium(),CapabilityManifest())
     workspace=HybridForwardWorkspace(Float64,distributed,wave,StokesSet(:I),1)
     zero_reg=RegularizationSpec(vertical=VerticalRegularizationSpec(ntuple(_->0,7),0.0,ntuple(_->1.0,7)),
         horizontal=Dict{Symbol,Float64}(),scales=Dict{Symbol,Float64}(),horizontal_order=1)
@@ -71,7 +67,7 @@ end
     parameters=initial_parameters(layout)
     apply_control_maps!(fixture.distributed,layout,parameters)
     prepared=forward!(fixture.workspace,fixture.model,fixture.distributed,fixture.context)
-    fixture.model.prepared_force_balance[]=prepared.force_balance
+    fixture.model.prepared_equilibrium[]=prepared.equilibrium
     observed=ObservationCube(SpectralCube(copy(prepared.spectrum.data),fixture.wave,StokesSet(:I)),
         ones(size(prepared.spectrum.data)),ones(size(prepared.spectrum.data)))
     local_observation=distribute_observation(Float64,observed,size(observed.spectrum.data),
@@ -81,13 +77,13 @@ end
         control_layout=layout,reference_id="prepared-fixture")
 
     first=evaluate_objective!(problem,layout,parameters,fixture.context)
-    @test first.timings.force_balance_seconds==0
+    @test first.timings.equilibrium_seconds==0
     @test first.timings.populations_seconds==0
-    @test fixture.model.prepared_force_balance[]===nothing
+    @test fixture.model.prepared_equilibrium[]===nothing
     @test !problem.prepared_initial_available[]
 
     second=evaluate_objective!(problem,layout,parameters,fixture.context)
-    @test second.timings.force_balance_seconds>0
+    @test second.timings.equilibrium_seconds>0
     @test second.timings.populations_seconds>0
 end
 

@@ -9,7 +9,6 @@ synthesis_file = "outputs/synthesis.h5"
 atmosphere_file = "outputs/inverted_atmosphere.h5"
 
 [atmosphere]
-pressure_top_pa = 0.1
 
 [atmosphere.datasets]
 logtau500 = "logtau_500"
@@ -17,10 +16,22 @@ temperature = "temperature"
 vx = "vx"
 vy = "vy"
 vz = "vz"
-# If available, provide all three. Their presence selects MHS instead of HE3D.
+# If available, provide all three (needed for equilibrium.model = "mhs" and the ptot alignment).
 # Bx = "Bx"
 # By = "By"
 # Bz = "Bz"
+
+
+[equilibrium]
+backend = "HSEMHS"
+model = "column_hse"         # column-hse-ltau for this native log-tau input; "mhs" arrives with Phase 4
+gravity_m_s2 = 274.0
+eos_table_file = "inputs/eos_table_fullz.h5"   # HSEMHS EOS table (copy or link HSEMHS/cache/eos_table_fullz.h5)
+on_nonconvergence = "reject_trial"
+
+[equilibrium.column_ltau]
+cap_per_dex = 50.0
+align = "ptot"
 
 [grid]
 dx_m = 48000.0
@@ -153,7 +164,7 @@ checkpoint_path = "outputs/inversion.checkpoint"
 
 [parallel]
 enabled = false
-decomposition = "cartesian_2d"
+decomposition = "x_slabs"
 threads_per_rank = 1
 gpu_launcher_rank = 0
 gpu_connect_timeout_seconds = 30.0

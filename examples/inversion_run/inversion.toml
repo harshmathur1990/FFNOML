@@ -8,7 +8,6 @@ synthesis_file = "outputs/synthesis.h5"
 atmosphere_file = "outputs/inverted_atmosphere.h5"
 
 [atmosphere]
-pressure_top_pa = 0.1
 storage_order = "python"
 
 [atmosphere.datasets]
@@ -21,6 +20,18 @@ vz = "vz"
 # Bx = "Bx"
 # By = "By"
 # Bz = "Bz"
+
+
+[equilibrium]
+backend = "HSEMHS"
+model = "column_hse"         # column-hse-ltau for this native log-tau input; "mhs" arrives with Phase 4
+gravity_m_s2 = 274.0
+eos_table_file = "inputs/eos_table_fullz.h5"   # HSEMHS EOS table (copy or link HSEMHS/cache/eos_table_fullz.h5)
+on_nonconvergence = "reject_trial"
+
+[equilibrium.column_ltau]
+cap_per_dex = 50.0
+align = "ptot"
 
 [grid]
 dx_m = 48000.0
@@ -141,7 +152,7 @@ checkpoint_path = "outputs/inversion.checkpoint"
 
 [parallel]
 enabled = true
-decomposition = "cartesian_2d"
+decomposition = "x_slabs"
 gpu_launcher_rank = 0
 gpu_connect_timeout_seconds = 180.0
 gpu_status_timeout_seconds = 300.0

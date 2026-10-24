@@ -9,6 +9,8 @@ using SHA
 using Sockets
 using TOML
 import MPI
+import HSEMHS
+import FFTW
 
 include("Types.jl")
 include("Parallel.jl")
@@ -16,8 +18,6 @@ include("Diagnostics.jl")
 include("Nodes.jl")
 include("EOS.jl")
 include("ContinuumOpacity.jl")
-include("Opacity500.jl")
-include("ForceBalance.jl")
 include("PopulationModels.jl")
 include("LinePhysics.jl")
 include("Synthesis.jl")
@@ -26,7 +26,7 @@ include("ForwardModel.jl")
 include("Objectives.jl")
 include("Regularization.jl")
 include("DistributedForward.jl")
-include("LogPressure.jl")
+include("Equilibrium.jl")
 include("FSDPService.jl")
 include("Solvers.jl")
 include("Gradients.jl")
@@ -35,7 +35,7 @@ include("ScalableSolvers.jl")
 include("IO.jl")
 include("Execution.jl")
 
-export Grid3D, MagneticField3D, Atmosphere3D, HE3DBoundaryState
+export Grid3D, MagneticField3D, Atmosphere3D
 export VerticalAxis, VERTICAL_KINDS, vertical_unit, vertical_coordinate, native_depth, nlevels
 export log_tau500_axis, z_axis, check_coordinate_consistency
 export ParallelOptions, ParallelContext, Tile2D, DistributedField
@@ -48,8 +48,8 @@ export GPUControlDiagnostics, initialize_gpu_control_diagnostics, stop_diagnosti
 export diagnostic_event!, diagnostic_checkpoint!, set_diagnostic_context!, record_diagnostic_failure!
 export AbstractEOS, WittmannEOS, IdealGasEOS, thermodynamics!
 export ContinuumState, continuum_state, continuum_extinction_cm, continuum_extinction_m
-export AbstractOpacity500, WittmannOpacity500, ReferenceOpacity500, opacity500!
-export ForceBalanceOptions, ForceBalanceDiagnostics, lorentz_force!, reconstruct_force_balance!
+export AbstractEquilibriumBackend, EquilibriumConfig, EquilibriumOutcome, HSEMHSBackend
+export prepare_equilibrium, reconstruct_equilibrium!, close_equilibrium!
 export StokesSet, SpectralCube, ObservationCube, CapabilityManifest
 export NodeField, expand_nodes
 export AbstractPopulationModel, predict_populations!, population_vjp!, MockPopulationModel
@@ -66,7 +66,7 @@ export AbstractObservationModel, apply_observation!, IdentityObservation
 export GaussianPSFObservation, build_inversion_weights
 export ForwardWorkspace, MockForwardModel, forward!
 export DistributedAtmosphere, distribute_atmosphere, gather_atmosphere
-export reconstruct_force_balance_distributed!, AbstractDistributedPopulationModel
+export AbstractDistributedPopulationModel
 export LocalDistributedPopulationModel, RootDistributedPopulationModel, CompositeDistributedPopulationModel, predict_distributed_populations!
 export HybridForwardWorkspace, HybridForwardModel, HybridForwardTimings, gather_spectrum, distributed_chi2, distributed_regularization_penalty
 export distributed_memory_report

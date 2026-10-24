@@ -1,15 +1,17 @@
 """Canonical two-file scientific input after selecting one time plane."""
-struct InversionInputBundle{A,O,P}
+struct InversionInputBundle{A,O}
     atmosphere::A
     observation::O
-    pressure_top::P
 end
 
 """Application factory kept separate from the two scientific input files.
 
 `population_levels` is an integer or species-to-level dictionary. `build_model`
 is called on every rank as
-`build_model(config, distributed, workspace, local_pressure_top, context)`.
+`build_model(config, distributed, workspace, context)` and returns a
+`HybridForwardModel` whose `equilibrium` is a prepared backend
+(`prepare_equilibrium(config, distributed, context)`); the pressure boundary is
+part of the HSEMHS configuration, not an input field.
 Production FFNO models are constructed collectively with
 `launch_fsdp_population_models`; the persistent multi-GPU FSDP service is
 launched only by MPI rank 0.
@@ -98,13 +100,6 @@ function read_inversion_inputs(config::RunConfig{T}) where T
             "initial-atmosphere parameter arrays differ"))
         nz,nx,ny=size(temperature); length(vertical)==nz || throw(DimensionMismatch(
             "vertical axis $(config.atmosphere.vertical_dataset) has $(length(vertical)) levels; the atmosphere has $nz"))
-        pressure=if config.atmosphere.pressure_top isa String
-            raw=_from_atmosphere_storage(_read_dataset(file,config.atmosphere.pressure_top),storage_order)
-            selected=ndims(raw)==0 ? fill(T(raw[]),ny,nx) : _time_slice(raw,config.time_index,2,"pressure_top")
-            T.(_syx_to_xys(selected))
-        else
-            fill(T(config.atmosphere.pressure_top),nx,ny)
-        end
         magnetic=if config.atmosphere.magnetic_datasets===nothing
             nothing
         else
@@ -129,9 +124,9 @@ function read_inversion_inputs(config::RunConfig{T}) where T
         zfield=kind===:z_m ? repeat(reshape(T.(vertical),:,1,1),1,nx,ny) : nothing
         atmosphere=Atmosphere3D(grid,flip(T.(temperature)),flip(T.(vx)),flip(T.(vy)),flip(T.(vz)),flip(vturb);
             magnetic_field=magnetic,z=zfield)
-        (atmosphere=atmosphere,pressure=pressure)
+        (atmosphere=atmosphere,)
     end
-    config.mode===:forward && return InversionInputBundle(atmosphere_data.atmosphere,nothing,atmosphere_data.pressure)
+    config.mode===:forward && return InversionInputBundle(atmosphere_data.atmosphere,nothing)
     observation=h5open(config.observed.file,"r") do file
         intensity=T.(_slyx_to_lsxy(_time_slice(_read_dataset(file,config.observed.intensity_dataset),
             config.time_index,4,"observed intensity")))
@@ -153,7 +148,7 @@ function read_inversion_inputs(config::RunConfig{T}) where T
     end
     size(observation.spectrum.data)[3:4]==size(atmosphere_data.atmosphere.temperature)[2:3] ||
         throw(DimensionMismatch("observation and initial atmosphere spatial grids differ"))
-    InversionInputBundle(atmosphere_data.atmosphere,observation,atmosphere_data.pressure)
+    InversionInputBundle(atmosphere_data.atmosphere,observation)
 end
 
 function _with_time_zyx(value)
@@ -273,19 +268,21 @@ function run_inversion!(config::RunConfig,root_inputs,
             reference_id=_atmosphere_reference_id(root_inputs.atmosphere))
     else nothing end,context)
     distributed=distribute_atmosphere(Float64,isroot(context) ? root_inputs.atmosphere : nothing,context)
-    pressure_field=distribute_field(Float64,isroot(context) ? root_inputs.pressure_top : nothing,
-        (metadata.atmosphere_shape[2],metadata.atmosphere_shape[3]),context;tag=760).values
     levels=_factory_levels(factory,config)
     workspace=HybridForwardWorkspace(Float64,distributed,config.synthesis.wavelength_m,config.stokes,levels)
-    model=factory.build_model(config,distributed,workspace,pressure_field,context)
+    model=factory.build_model(config,distributed,workspace,context)
     model isa HybridForwardModel || throw(ArgumentError("model factory must return HybridForwardModel"))
     try
         _require_production_population_backend(model.populations,context)
         if config.mode===:forward
-            forward!(workspace,model,distributed,context;reuse_prepared=true)
+            result=forward!(workspace,model,distributed,context;reuse_prepared=true)
+            result.valid || throw(ArgumentError("equilibrium reconstruction failed: $(result.equilibrium.reason); "*
+                join(result.equilibrium.messages,"; ")))
+            provenance=parallel_provenance(context,distributed.tile;capabilities=["intensity","non_prd","forward","fsdp_distributed_h_slab"])
+            _equilibrium_provenance!(provenance,model,result.equilibrium)
             return InversionRunResult(nothing,gather_spectrum(workspace.output,distributed,context),
                 gather_atmosphere(distributed,context),_gather_populations(workspace.populations,distributed,context),
-                nothing,parallel_provenance(context,distributed.tile;capabilities=["intensity","non_prd","forward","fsdp_distributed_h_slab"]))
+                nothing,provenance)
         end
         local_observation=distribute_observation(Float64,isroot(context) ? root_inputs.observation : nothing,
             metadata.observation_shape,config.synthesis.wavelength_m,config.stokes,context)
@@ -306,10 +303,28 @@ function run_inversion!(config::RunConfig,root_inputs,
         populations=_gather_populations(workspace.populations,distributed,context)
         provenance=parallel_provenance(context,distributed.tile;capabilities=["intensity","non_prd",
             "matrix_free_vjp","lbfgs","fsdp_distributed_h_slab"])
+        _equilibrium_provenance!(provenance,model,objective.equilibrium)
         InversionRunResult(solver,synthesis,atmosphere,populations,objective,provenance)
     finally
-        close_distributed_population_model!(model.populations,context)
+        try
+            close_distributed_population_model!(model.populations,context)
+        finally
+            close_equilibrium!(model.equilibrium)
+        end
     end
+end
+
+"""Record the equilibrium backend, mode, EOS provenance and final status."""
+function _equilibrium_provenance!(provenance,model,outcome)
+    backend=model.equilibrium
+    entry=Dict{String,Any}("backend"=>string(nameof(typeof(backend))))
+    hasproperty(backend,:provenance) && merge!(entry,backend.provenance)
+    if outcome isa EquilibriumOutcome
+        entry["requested_model"]=string(outcome.requested_model); entry["effective_mode"]=string(outcome.effective_mode)
+        entry["final_reason"]=string(outcome.reason); entry["final_valid"]=outcome.valid; entry["final_steps"]=outcome.steps
+    end
+    provenance["equilibrium"]=entry
+    provenance
 end
 
 function run_inversion_files!(config_path::AbstractString,factory::InversionModelFactory;

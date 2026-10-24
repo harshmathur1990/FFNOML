@@ -34,6 +34,9 @@ from train_utils import (
 
 
 INPUT_CHANNELS = ("temperature", "vx", "vy", "vz", "log10_ne", "log10_rho")
+# The Julia client sends geometrical height in metres; the checkpoints were trained on z in Mm
+# (FFNONet._normalize_z_scale divides by 1e6 when building the training and solving sets).
+Z_METRES_PER_MODEL_UNIT = 1.0e6
 
 
 class DistributedFSDPBackend:
@@ -217,9 +220,10 @@ class DistributedFSDPBackend:
         dy_tensor = torch.as_tensor(
             float(dy), dtype=torch.float32, device=self.device
         )
+        # z stays the autograd leaf in metres, so VJP z gradients are per metre
         pred_normalized = self.model(
             (x - self.mean_x) / self.std_x,
-            z,
+            z / Z_METRES_PER_MODEL_UNIT,
             dx_tensor,
             dy_tensor,
         )

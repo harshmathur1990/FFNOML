@@ -15,8 +15,11 @@ include(joinpath(@__DIR__,"..","scripts","preflight_olivia_inversion.jl"))
         [outputs]
         synthesis_file = "outputs/synthesis.h5"
         atmosphere_file = "outputs/atmosphere.h5"
+        [equilibrium]
+        backend = "HSEMHS"
+        model = "column_hse"
+        eos_table_file = "eos_table.h5"
         [atmosphere]
-        pressure_top_pa = 0.1
         storage_order = "python"
         [atmosphere.datasets]
         logtau500 = "logtau_500"
@@ -55,6 +58,7 @@ include(joinpath(@__DIR__,"..","scripts","preflight_olivia_inversion.jl"))
           generated_assets=FFNO_INVERSION_GENERATED_ASSETS)
         """)
         write(line_list_path,"test line list\n")
+        write(joinpath(run_dir,"eos_table.h5"),"placeholder HSEMHS table (preflight checks existence only)\n")
 
         @test_throws ArgumentError run_submission_preflight(
             config_path,factory_path,run_dir,batch_path;io=devnull)

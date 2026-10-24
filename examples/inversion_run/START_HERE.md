@@ -3,7 +3,7 @@
 Use this guide on **Olivia**, with the updated FFNOML checkout. The entry point
 is `FFNOInversion.jl/scripts/invert.jl` for both forward synthesis and inversion.
 `forward.toml` selects forward mode: the supplied full atmosphere goes through
-force balance/EOS, FFNO3D populations, and spectral synthesis. No observations,
+the HSEMHS equilibrium, FFNO3D populations, and spectral synthesis. No observations,
 node interpolation, derivatives, or fitting are needed.
 
 ## 1. Make a separate run folder
@@ -88,13 +88,14 @@ for files written with HDF5.jl.
 | `Bx`, `By`, `Bz` (optional; supply all three) | same as temperature | tesla |
 
 `time_index = 1` selects the first snapshot. Enable the `vturb` mapping to read
-microturbulence; otherwise it is zero. Omit magnetic mappings for HE3D; enabling
-all three selects MHS. Pressure, density, electron density and height are derived
-through force balance/EOS, rather than read as full input fields.
+microturbulence; otherwise it is zero. Magnetic mappings are optional (absent means
+B = 0). Pressure, density, electron density and the derived coordinate (height for
+this log-tau input) are reconstructed by the HSEMHS equilibrium configured in
+`[equilibrium]`, rather than read as input fields.
 
 Before submission, set:
 
-- `pressure_top_pa` in `[atmosphere]`, to an appropriate **top pressure for your atmosphere**; 0.1 Pa is an example. The current factory also accepts `FFNO_TOP_DENSITY_KG_M3` (default 1e-10 kg/m³) as an initialization guess, used at the top only on the first force-balance iteration; subsequent density comes from the EOS.
+- `[equilibrium] eos_table_file` to the HSEMHS EOS table (e.g. a link to `HSEMHS/cache/eos_table_fullz.h5`). The pressure boundary is HSEMHS's: for native log-tau input the τ-hydrostatic top closure sets it (`[equilibrium.column_ltau]`), for native-z input `[equilibrium.column_z] anchor` and `P_ref_pa` do. There is no top-pressure or top-density setting in FFNO.
 - `storage_order = "python"` when the atmosphere file was written by NumPy/h5py or C; the supplied template uses this setting.
 - `[grid] dx_m` and `dy_m` to the actual horizontal spacing in metres.
 - `[[regions]]` wavelengths (Å), counts, normalization and line lists. The example synthesizes Ca II 8542 through FFNO and an LTE Fe 6302 region; only the latter needs a Kurucz line list.
