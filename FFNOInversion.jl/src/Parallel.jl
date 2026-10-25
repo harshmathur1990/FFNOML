@@ -35,6 +35,21 @@ struct ParallelContext{C}
     options::ParallelOptions
 end
 
+"""Report a failure on this rank at once and, on a multi-rank run, abort every rank.
+
+An exception on one rank otherwise leaves the others waiting forever in their next collective, and the failing
+rank waits too in the collective cleanup (`close_model_resources!`) before its error is ever printed. Call this in a
+`catch` before any collective cleanup; on a serial run it only prints, and the caller rethrows.
+"""
+function abort_on_rank_failure(exception,backtrace,context)
+    message=sprint(showerror,exception,backtrace)
+    println(stderr,"FFNO_RANK_FAILURE rank=$(context.rank) of $(context.size)\n",message); flush(stderr)
+    if context.enabled && context.size>1 && MPI.Initialized() && !MPI.Finalized()
+        MPI.Abort(context.comm,1)
+    end
+    nothing
+end
+
 serial_context(;options=ParallelOptions()) = ParallelContext(false,0,1,options.gpu_launcher_rank,
     nothing,false,Threads.threadid(),options)
 isroot(context::ParallelContext) = context.rank == context.root

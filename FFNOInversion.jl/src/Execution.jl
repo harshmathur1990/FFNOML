@@ -308,6 +308,9 @@ function run_inversion!(config::RunConfig,root_inputs,
             "matrix_free_vjp","lbfgs","fsdp_distributed_h_slab"])
         _equilibrium_provenance!(provenance,model,objective.equilibrium)
         InversionRunResult(solver,synthesis,atmosphere,populations,objective,provenance)
+    catch exception
+        abort_on_rank_failure(exception,catch_backtrace(),context)
+        rethrow()
     finally
         close_model_resources!(model.populations,model.equilibrium,context)
     end
@@ -333,7 +336,8 @@ function close_model_resources!(populations,equilibrium,context)
     failures
 end
 
-"""Record the equilibrium backend, mode, EOS provenance and final status."""
+"""Record the equilibrium backend, mode, EOS provenance and final status (root only: other ranks have no provenance)."""
+_equilibrium_provenance!(::Nothing,model,outcome)=nothing
 function _equilibrium_provenance!(provenance,model,outcome)
     backend=model.equilibrium
     entry=Dict{String,Any}("backend"=>string(nameof(typeof(backend))))

@@ -58,7 +58,8 @@ function build_production_model(config, distributed, workspace, context)
             timeout_seconds=max(180.0, config.parallel.gpu_connect_timeout_seconds),
             diagnostics_directory=diagnostics,
         )
-    catch
+    catch exception
+        abort_on_rank_failure(exception, catch_backtrace(), context)
         close_equilibrium!(equilibrium)
         rethrow()
     end
@@ -85,9 +86,11 @@ function build_production_model(config, distributed, workspace, context)
             CapabilityManifest(),
             prepared_equilibrium=outcome,
         )
-    catch
-        # Both are always closed; a cleanup failure (e.g. a GPU service that already died)
-        # is logged and the original error is the one rethrown.
+    catch exception
+        # Print this rank's error now and, with several MPI ranks, abort them all: the cleanup below is
+        # collective and would otherwise wait forever for ranks that did not fail.
+        abort_on_rank_failure(exception, catch_backtrace(), context)
+        # Serial runs continue here: both are always closed and the original error is rethrown.
         close_model_resources!(populations, equilibrium, context)
         rethrow()
     end

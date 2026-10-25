@@ -190,7 +190,7 @@ function _prepare_hsemhs(eq,distributed,context,synthesis_eos)
     table,provenance=local_state
     column=eq.column
     ws=HSEMHS.prepare_embedded(comm,eq.mode;axis=native_depth(grid),x=grid.x,y=grid.y,eos=table,g=eq.gravity_m_s2,
-        column=column,poisson=eq.poisson)
+        column=column,poisson=eq.poisson,progress=isroot(context))
     ok=HSEMHS.agree(comm,"equilibrium slab ownership") do
         HSEMHS.owned_columns(ws)==distributed.tile.xrange && distributed.tile.yrange==1:length(grid.y) ||
             throw(ArgumentError("HSEMHS owns x $(HSEMHS.owned_columns(ws)) but this rank's tile is x $(distributed.tile.xrange), y $(distributed.tile.yrange)"))
@@ -215,6 +215,8 @@ function reconstruct_equilibrium!(backend::HSEMHSBackend,distributed::Distribute
     a=distributed.local_atmosphere
     lnT=_zxy_to_zyx(log.(a.temperature))
     B=a.magnetic_field
+    started=time()
+    _forward_stage(context,"equilibrium begin mode=$(hsemhs_mode_name(backend.config.mode))")
     res=try
         if B===nothing
             # no magnetic data means B = 0 (the τ-grid alignment then uses the gas pressure alone)
@@ -227,6 +229,7 @@ function reconstruct_equilibrium!(backend::HSEMHSBackend,distributed::Distribute
         e isa HSEMHS.InvalidInput ? throw(ArgumentError(e.msg)) : rethrow()
     end
     st=res.status
+    _forward_stage(context,"equilibrium done seconds=$(round(time()-started;digits=1)) valid=$(st.valid) reason=$(st.reason)")
     if st.valid
         _set_field!(a,:pgas,_zxy_to_zyx(res.Pgas)); _set_field!(a,:rho,_zxy_to_zyx(res.rho))
         _set_field!(a,:ne,_zxy_to_zyx(res.ne)); _set_field!(a,:z,_zxy_to_zyx(res.z))

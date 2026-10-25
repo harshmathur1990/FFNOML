@@ -216,10 +216,8 @@ function forward!(workspace::HybridForwardWorkspace,model::HybridForwardModel,
     model.prepared_equilibrium[]=nothing
     outcome,equilibrium_seconds,populations_seconds=if prepared===nothing
         stage_start=time_ns()
-        _forward_stage(context,"equilibrium begin")
         equilibrium=reconstruct_equilibrium!(model.equilibrium,distributed,context)
         equilibrium_elapsed=(time_ns()-stage_start)/1e9
-        _forward_stage(context,"equilibrium done seconds=$(round(equilibrium_elapsed;digits=1)) valid=$(equilibrium.valid)")
         if !equilibrium.valid
             timings=HybridForwardTimings(equilibrium_elapsed,0.0,0.0,0.0,(time_ns()-total_start)/1e9)
             return (spectrum=workspace.output,equilibrium=equilibrium,timings=timings,valid=false)
