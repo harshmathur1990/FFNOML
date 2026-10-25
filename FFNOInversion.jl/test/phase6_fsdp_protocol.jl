@@ -56,3 +56,70 @@ using Sockets
     close_fsdp_service!(service) # closing an already closed service is harmless
     wait(server)
 end
+
+mutable struct DeadServiceTestEquilibrium <: FFNOInversion.AbstractEquilibriumBackend
+    closed::Bool
+end
+FFNOInversion.close_equilibrium!(b::DeadServiceTestEquilibrium)=(b.closed=true; nothing)
+
+@testset "Phase 6 FSDP service that dies mid-request" begin
+    # The GPU service accepts a PREDICT, then dies (as job 2622023's workers did with
+    # SIGSEGV). The prediction error must survive cleanup, and cleanup must still close the
+    # socket, stop the launcher process, close the log and close the equilibrium.
+    listener=listen(ip"127.0.0.1",0); port=Int(getsockname(listener)[2])
+    server=@async begin
+        peer=accept(listener)
+        fields=split(readline(peer)); nz,nx,ny=parse.(Int,fields[3:5])
+        FFNOInversion._read_float32_array(peer,(6,nz,nx,ny))
+        FFNOInversion._read_float32_array(peer,(nz,nx,ny))
+        close(peer); close(listener)
+    end
+    socket=connect(ip"127.0.0.1",port)
+    log_path,log_stream=mktemp()
+    process=run(`sleep 600`;wait=false)
+    metadata=PopulationMetadata(FFNO_INPUT_CHANNELS,("H level 1",),"test-hash")
+    service=FSDPServiceClient(socket,process,log_stream,"127.0.0.1",port,"token",2,
+        Dict(:H=>metadata),ReentrantLock(),false)
+    model=FSDPFFNOModel(service,:H,metadata,0)
+    populations=CompositeDistributedPopulationModel(Dict(:H=>RootDistributedPopulationModel(model,1)))
+    equilibrium=DeadServiceTestEquilibrium(false)
+    grid=Grid3D([-4.0,-2.0],[0.0,5.0e4],[0.0,5.0e4])
+    shape=(2,2,2); zero3=zeros(shape)
+    atmosphere=Atmosphere3D(grid,fill(5500.0,shape),copy(zero3),copy(zero3),copy(zero3),copy(zero3);
+        rho=fill(1e-7,shape),ne=fill(1e17,shape),z=reshape(repeat([-2e5,0.0],4),shape))
+    out=zeros(Float64,shape...,1)
+
+    primary=try
+        try
+            predict_populations!(out,model,atmosphere)
+        catch
+            withenv("FFNO_FSDP_SHUTDOWN_TIMEOUT"=>"1") do
+                close_model_resources!(populations,equilibrium,serial_context())
+            end
+            rethrow()
+        end
+        nothing
+    catch exception
+        exception
+    end
+    wait(server)
+    @test primary isa ErrorException
+    @test occursin("truncated FSDP service response",primary.msg)
+    @test service.closed && !isopen(socket)
+    @test !process_running(process)
+    @test !isopen(log_stream)
+    @test equilibrium.closed
+    @test isempty(close_fsdp_service!(service))           # idempotent
+    rm(log_path;force=true)
+end
+
+@testset "Population model request order" begin
+    models=Dict(:H=>1,:CA=>2)
+    @test FFNOInversion._population_model_order(models)==[:CA,:H]
+    withenv("FFNO_POPULATION_MODEL_ORDER"=>"H, CA") do
+        @test FFNOInversion._population_model_order(models)==[:H,:CA]
+    end
+    withenv("FFNO_POPULATION_MODEL_ORDER"=>"H") do
+        @test_throws ArgumentError FFNOInversion._population_model_order(models)
+    end
+end

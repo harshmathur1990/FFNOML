@@ -52,7 +52,16 @@ exec srun --overlap --exact --kill-on-bad-exit=1 --mpi=none --network=no_vni --c
             exit 2
         fi
         echo "FSDP service torchrun worker: host=${current_host} node_rank=${node_rank} CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
+        # FFNO_FSDP_DIAGNOSTICS>0 also gives every rank its own stdout/stderr
+        # files (tee keeps the merged service log), next to the manifest.
+        rank_logs=()
+        if [[ "${FFNO_FSDP_DIAGNOSTICS:-0}" != "0" ]]; then
+            rank_log_dir="$(dirname "${FFNO_FSDP_SERVICE_MANIFEST}")/torchrun-${SLURM_JOB_ID}/node${node_rank}"
+            mkdir -p "${rank_log_dir}"
+            rank_logs=(--log-dir "${rank_log_dir}" --redirects 3 --tee 3)
+        fi
         exec "${OLIVIA_PYTHON}" -m torch.distributed.run \
+        ${rank_logs[@]+"${rank_logs[@]}"} \
         --nnodes="${SLURM_NNODES}" \
         --nproc_per_node="${FFNO_FSDP_NPROC_PER_NODE}" \
         --node_rank="${node_rank}" \

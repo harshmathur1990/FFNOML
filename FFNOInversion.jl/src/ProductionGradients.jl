@@ -404,7 +404,7 @@ function predict_distributed_populations_vjp!(bar::AtmosphereCotangent,
         backend::CompositeDistributedPopulationModel,distributed,population_bar::AbstractDict,context)
     Set(keys(population_bar))==Set(keys(backend.models)) || throw(ArgumentError(
         "population cotangent species differ from composite model"))
-    for species in sort!(collect(keys(backend.models));by=string)
+    for species in _population_model_order(backend.models)
         predict_distributed_populations_vjp!(bar,backend.models[species],distributed,
             population_bar[species],context)
     end

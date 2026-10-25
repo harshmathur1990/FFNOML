@@ -72,7 +72,7 @@ export HybridForwardWorkspace, HybridForwardModel, HybridForwardTimings, gather_
 export distributed_memory_report
 export FSDPModelSpec, FSDPServiceClient, FSDPFFNOModel
 export launch_fsdp_service, close_fsdp_service!, launch_fsdp_population_models
-export close_distributed_population_model!
+export close_distributed_population_model!, close_model_resources!
 export distribute_observation
 export ResidualLayout, residual!, VerticalRegularizationSpec, RegularizationSpec, regularization_penalty
 export ControlMapSpec, ControlMapLayout, initial_parameters, parameter_nodefield

@@ -86,8 +86,9 @@ function build_production_model(config, distributed, workspace, context)
             prepared_equilibrium=outcome,
         )
     catch
-        close_distributed_population_model!(populations, context)
-        close_equilibrium!(equilibrium)
+        # Both are always closed; a cleanup failure (e.g. a GPU service that already died)
+        # is logged and the original error is the one rethrown.
+        close_model_resources!(populations, equilibrium, context)
         rethrow()
     end
 end

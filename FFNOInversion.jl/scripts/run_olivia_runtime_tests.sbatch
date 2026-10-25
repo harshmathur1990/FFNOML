@@ -374,7 +374,7 @@ for required_file in Project.toml src/FFNOInversion.jl \
         exit 2
     fi
 done
-for required_parent_file in ffno_fsdp_runtime.py ffno_fsdp_service.py \
+for required_parent_file in ffno_fsdp_runtime.py ffno_fsdp_service.py ffno_fsdp_diagnostics.py \
         distributed_inference.py ffno_model_factory.py; do
     if [[ ! -f "${OLIVIA_REPO_DIR}/../${required_parent_file}" ]]; then
         echo "Missing required FFNOML file: ${OLIVIA_REPO_DIR}/../${required_parent_file}" \

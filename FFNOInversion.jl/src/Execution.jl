@@ -306,12 +306,28 @@ function run_inversion!(config::RunConfig,root_inputs,
         _equilibrium_provenance!(provenance,model,objective.equilibrium)
         InversionRunResult(solver,synthesis,atmosphere,populations,objective,provenance)
     finally
+        close_model_resources!(model.populations,model.equilibrium,context)
+    end
+end
+
+"""Close the population model and the equilibrium backend, always attempting both.
+
+Collective. A failure in either is logged and returned instead of thrown, so calling
+this while handling an exception (`catch; close_model_resources!(...); rethrow(); end`)
+keeps that exception as the one reported.
+"""
+function close_model_resources!(populations,equilibrium,context)
+    failures=Any[]
+    for (label,close!) in (("population model",() -> close_distributed_population_model!(populations,context)),
+                           ("equilibrium backend",() -> close_equilibrium!(equilibrium)))
         try
-            close_distributed_population_model!(model.populations,context)
-        finally
-            close_equilibrium!(model.equilibrium)
+            close!()
+        catch exception
+            push!(failures,exception)
+            @error "closing the $label failed" exception=(exception,catch_backtrace())
         end
     end
+    failures
 end
 
 """Record the equilibrium backend, mode, EOS provenance and final status."""

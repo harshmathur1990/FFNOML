@@ -56,7 +56,8 @@ end
 
 function _service_response(stream,operation,shape)
     fields=split(readline(stream))
-    length(fields)>=2 || error("truncated FSDP service response")
+    length(fields)>=2 || error("truncated FSDP service response: the GPU service closed the " *
+        "connection during $operation (see the ffno-fsdp-service log and per-rank logs)")
     fields[1]=="OK" || error("FSDP service returned: $(join(fields,' '))")
     fields[2]==operation || error("FSDP service response operation differs from request")
     returned=Tuple(parse.(Int,fields[3:end]))
@@ -200,24 +201,51 @@ function launch_fsdp_service(specs::AbstractVector{FSDPModelSpec};
         ReentrantLock(),false)
 end
 
-function close_fsdp_service!(service::FSDPServiceClient;timeout_seconds::Real=60)
-    service.closed && return nothing
+"""Stop the service and release its socket, process and log; safe to call twice.
+
+Every cleanup step runs even when the service has already died (for example after a
+GPU-worker crash broke the connection mid-request). Shutdown problems are logged and
+returned rather than thrown, so cleanup in an error path never replaces the error that
+is being handled.
+"""
+function close_fsdp_service!(service::FSDPServiceClient;
+        timeout_seconds::Real=parse(Float64,get(ENV,"FFNO_FSDP_SHUTDOWN_TIMEOUT","60")))
+    problems=String[]
+    service.closed && return problems
     service.closed=true
     try
-        println(service.socket,"SHUTDOWN"); flush(service.socket)
-        strip(readline(service.socket))=="BYE" || error("FSDP service did not acknowledge shutdown")
+        try
+            println(service.socket,"SHUTDOWN"); flush(service.socket)
+            reply=strip(readline(service.socket))
+            reply=="BYE" || push!(problems,isempty(reply) ?
+                "FSDP service closed the connection without acknowledging shutdown" :
+                "FSDP service answered shutdown with: $reply")
+        catch exception
+            push!(problems,"FSDP service shutdown request failed: "*sprint(showerror,exception))
+        finally
+            isopen(service.socket)&&close(service.socket)
+        end
+        deadline=time()+timeout_seconds
+        while service.process!==nothing && process_running(service.process) && time()<deadline
+            sleep(0.1)
+        end
+        if service.process!==nothing && process_running(service.process)
+            kill(service.process)
+            push!(problems,"FSDP service did not stop within $timeout_seconds s and was killed")
+            deadline=time()+10
+            while process_running(service.process) && time()<deadline
+                sleep(0.1)
+            end
+            process_running(service.process) && kill(service.process,Base.SIGKILL)
+            wait(service.process)
+        end
     finally
-        isopen(service.socket)&&close(service.socket)
+        service.log_stream===nothing || close(service.log_stream)
     end
-    deadline=time()+timeout_seconds
-    while service.process!==nothing && process_running(service.process) && time()<deadline
-        sleep(0.1)
+    for problem in problems
+        @warn problem
     end
-    if service.process!==nothing && process_running(service.process)
-        kill(service.process); error("FSDP service did not stop within $timeout_seconds s")
-    end
-    service.log_stream===nothing || close(service.log_stream)
-    nothing
+    problems
 end
 
 """Collectively start the rank-0-controlled FSDP service and return population backends."""

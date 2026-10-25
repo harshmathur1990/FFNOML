@@ -50,6 +50,8 @@ class DistributedFSDPBackend:
         level_names,
         factory_kwargs=None,
         require_multi_gpu=True,
+        diagnostics=None,
+        name="model",
     ):
         if not (dist.is_available() and dist.is_initialized()):
             raise RuntimeError(
@@ -151,6 +153,12 @@ class DistributedFSDPBackend:
             sync_module_states=True,
         )
         self.model.eval()
+        self.diagnostics = diagnostics
+        self.hook_handles = (
+            diagnostics.install_model_hooks(name, self.model, self.device)
+            if diagnostics is not None
+            else []
+        )
         self.local_parameter_count = sum(
             parameter.numel() for parameter in self.model.parameters()
         )

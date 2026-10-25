@@ -97,11 +97,24 @@ function predict_distributed_populations!(out,backend::RootDistributedPopulation
     out.=permutedims(field.values,(1,3,4,2)); out
 end
 
+"""Species request order: alphabetical unless `FFNO_POPULATION_MODEL_ORDER` (comma-separated, naming every
+species once, e.g. `H,CA`) overrides it for diagnostics. Each request is collective, so the variable must be
+identical on all ranks."""
+function _population_model_order(models)
+    names=sort!(collect(keys(models));by=string)
+    raw=strip(get(ENV,"FFNO_POPULATION_MODEL_ORDER",""))
+    isempty(raw) && return names
+    requested=[Symbol(strip(name)) for name in split(raw,',')]
+    sort(requested;by=string)==names || throw(ArgumentError(
+        "FFNO_POPULATION_MODEL_ORDER=$raw must name each population model once: $(join(names,','))"))
+    requested
+end
+
 function predict_distributed_populations!(out::AbstractDict,backend::CompositeDistributedPopulationModel,
         distributed,context)
     Set(keys(out))==Set(keys(backend.models)) || throw(ArgumentError(
         "population workspace species differ from composite model"))
-    for species in sort!(collect(keys(backend.models));by=string)
+    for species in _population_model_order(backend.models)
         predict_distributed_populations!(out[species],backend.models[species],distributed,context)
     end
     out

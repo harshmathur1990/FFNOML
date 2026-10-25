@@ -15,6 +15,7 @@ import torch
 import torch.distributed as dist
 
 from distributed_inference import partition_range
+from ffno_fsdp_diagnostics import RankDiagnostics
 from ffno_fsdp_runtime import DistributedFSDPBackend
 
 
@@ -121,7 +122,7 @@ def gather_h(local_value, global_shape, h_axis, device):
     return global_value
 
 
-def build_backends(configuration):
+def build_backends(configuration, diagnostics):
     backends = {}
     for model in sorted(configuration["models"], key=lambda item: item["name"]):
         name = str(model["name"])
@@ -132,15 +133,21 @@ def build_backends(configuration):
             level_names=model["level_names"],
             factory_kwargs=model.get("factory_kwargs", {}),
             require_multi_gpu=True,
+            diagnostics=diagnostics,
+            name=name,
         )
     return backends
 
 
-def serve(configuration, backends, command_group):
+def _service_device(local_rank):
+    return torch.device("cuda", local_rank)
+
+
+def serve(configuration, backends, command_group, diagnostics):
     rank = dist.get_rank()
     world = dist.get_world_size()
     local_rank = int(os.environ.get("LOCAL_RANK", rank))
-    device = torch.device("cuda", local_rank)
+    device = _service_device(local_rank)
     service = configuration["service"]
     stream = None
     listener = None
@@ -180,6 +187,7 @@ def serve(configuration, backends, command_group):
             command = None
         command = broadcast_command(command, command_group)
         operation = command[0]
+        diagnostics.record("command", count=command_count + 1, fields=" ".join(command))
         if operation in ("SHUTDOWN", "DISCONNECT"):
             if rank == 0 and operation == "SHUTDOWN":
                 stream.sendall(b"BYE\n")
@@ -199,6 +207,7 @@ def serve(configuration, backends, command_group):
             raise ValueError("request level count differs from FSDP model")
         dx = float(dx_raw)
         dy = float(dy_raw)
+        diagnostics.record_memory("request_begin", device, reset_peak=True)
         if rank == 0:
             features_global = read_array(stream, (6, nz, nx, ny))
             z_global = read_array(stream, (nz, nx, ny))
@@ -211,20 +220,33 @@ def serve(configuration, backends, command_group):
             features_global = None
             z_global = None
             population_bar_global = None
+        if rank == 0:
+            diagnostics.record("inputs_received", operation=operation, model=name)
+            diagnostics.record_array("features_global", features_global)
+            diagnostics.record_array("z_global", z_global)
 
+        diagnostics.record("scatter_begin")
         features_tensor = scatter_h(
             features_global, (6, nz, nx, ny), 2, device
         )
         z_tensor = scatter_h(z_global, (nz, nx, ny), 1, device)
         features_local = features_tensor.cpu().numpy()
         z_local = z_tensor.cpu().numpy()
+        diagnostics.record("scatter_end")
+        diagnostics.record_array("features_local", features_local)
+        diagnostics.record_array("z_local", z_local)
         if operation == "PREDICT":
+            diagnostics.record("predict_begin", model=name)
             populations_local = backend.predict_local(
                 features_local, z_local, dx, dy
             )
+            diagnostics.record("predict_end", model=name)
+            diagnostics.record_array("populations_local", populations_local)
+            diagnostics.record("gather_begin")
             populations_global = gather_h(
                 populations_local, (nz, nx, ny, levels), 1, device
             )
+            diagnostics.record("gather_end")
             if rank == 0:
                 stream.sendall(f"OK PREDICT {nz} {nx} {ny} {levels}\n".encode())
                 write_array(stream, populations_global)
@@ -232,6 +254,7 @@ def serve(configuration, backends, command_group):
             population_bar_tensor = scatter_h(
                 population_bar_global, (nz, nx, ny, levels), 1, device
             )
+            diagnostics.record("vjp_begin", model=name)
             result = backend.vjp_local(
                 features_local,
                 z_local,
@@ -239,17 +262,24 @@ def serve(configuration, backends, command_group):
                 dy,
                 population_bar_tensor.cpu().numpy(),
             )
+            diagnostics.record("vjp_end", model=name)
+            diagnostics.record("gather_begin")
             features_bar_global = gather_h(
                 result["features"], (6, nz, nx, ny), 2, device
             )
             z_bar_global = gather_h(
                 result["z_scale"], (nz, nx, ny), 1, device
             )
+            diagnostics.record("gather_end")
             if rank == 0:
                 stream.sendall(f"OK VJP {nz} {nx} {ny} {levels}\n".encode())
                 write_array(stream, features_bar_global)
                 write_array(stream, z_bar_global)
         command_count += 1
+        diagnostics.record_memory("request_end", device)
+        diagnostics.record("command_done", count=command_count)
+        if command_count == 1:
+            diagnostics.record_libraries("after_first_command")
         if rank == 0:
             print(
                 f"FFNO_FSDP_SERVICE_COMMAND_OK count={command_count} "
@@ -273,6 +303,9 @@ def main():
     manifest = Path(arguments.manifest).resolve()
     with manifest.open("rb") as stream:
         configuration = tomllib.load(stream)
+    # Diagnostics may move each rank into its own working directory.
+    for model in configuration["models"]:
+        model["checkpoint_path"] = str(Path(model["checkpoint_path"]).resolve())
 
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     torch.cuda.set_device(local_rank)
@@ -282,21 +315,32 @@ def main():
         )
     except TypeError:
         dist.init_process_group("nccl")
-    faulthandler.enable(all_threads=True)
-    interval = int(os.environ.get("FFNO_FSDP_TRACEBACK_INTERVAL", "60"))
+    diagnostics = RankDiagnostics(dist.get_rank(), local_rank, manifest)
+    diagnostics.enable_core_dumps()
+    diagnostics.record_versions(torch.device("cuda", local_rank))
+    traceback_file = diagnostics.stream if diagnostics.enabled else sys.stderr
+    faulthandler.enable(file=traceback_file, all_threads=True)
+    # Periodic dumps are opt-in. The watchdog thread walks other threads'
+    # frames without the GIL; in job 2622023 (Python 3.12.3, frames from torch's
+    # dynamo eval-frame shim under activation checkpointing) every rank crashed
+    # with SIGSEGV inside libpython during the first 60 s dump.
+    interval = int(os.environ.get("FFNO_FSDP_TRACEBACK_INTERVAL", "0"))
     if interval > 0:
-        faulthandler.dump_traceback_later(interval, repeat=True)
+        faulthandler.dump_traceback_later(interval, repeat=True, file=traceback_file)
     command_group = None
     try:
         command_group = dist.new_group(backend="gloo")
-        backends = build_backends(configuration)
-        serve(configuration, backends, command_group)
+        backends = build_backends(configuration, diagnostics)
+        diagnostics.record_libraries("after_model_setup")
+        serve(configuration, backends, command_group, diagnostics)
     except BaseException:
+        failure = traceback.format_exc()
         print(
-            f"FFNO_FSDP_SERVICE_FAILURE rank={dist.get_rank()}\n{traceback.format_exc()}",
+            f"FFNO_FSDP_SERVICE_FAILURE rank={dist.get_rank()}\n{failure}",
             file=sys.stderr,
             flush=True,
         )
+        diagnostics.record("failure", traceback=repr(failure))
         raise
     finally:
         if interval > 0:
@@ -305,6 +349,8 @@ def main():
             dist.destroy_process_group(command_group)
         if dist.is_initialized():
             dist.destroy_process_group()
+        faulthandler.enable(file=sys.stderr, all_threads=True)
+        diagnostics.close()
 
 
 if __name__ == "__main__":

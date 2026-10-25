@@ -155,3 +155,23 @@ The first synthesis preserves the full starting atmosphere; nodes parameterize
 subsequent corrections. Setting `solver.max_iterations = 0` also selects forward
 mode and ignores observations/nodes. See [the full example configuration](inversion.toml)
 for fitting options.
+
+## If the GPU service crashes
+
+Set these when submitting (the job inherits them); all are off by default:
+
+| Variable | Effect |
+| --- | --- |
+| `FFNO_FSDP_DIAGNOSTICS=1` | each GPU rank writes `diagnostics/slurm-JOB_ID/fsdp-ranks-JOB_ID/rank-NNNN.log`: versions, loaded libraries, input shapes/strides/dtypes and finiteness, GPU memory per request, and progress through scatter, each model block and gather (the GPU is synchronized at each block, so this is slow). Per-rank stdout/stderr go to `torchrun-JOB_ID/`. `2` logs every submodule. |
+| `FFNO_FSDP_CORE_DUMPS=1` | raises the core-file limit and runs each rank in its own `core-rank-NNNN/` directory. |
+| `FFNO_POPULATION_MODEL_ORDER=H,CA` | requests the population models in this order instead of alphabetically. |
+| `FFNO_FSDP_TRACEBACK_INTERVAL=60` | periodic Python stack dumps from every rank. Leave unset: in job 2622023 the dump itself crashed every rank. |
+| `CUDA_LAUNCH_BLOCKING=1`, `TORCH_SHOW_CPP_STACKTRACES=1` | standard CUDA/PyTorch settings for attributing a native failure (slow). |
+
+For example:
+
+```bash
+FFNO_FSDP_DIAGNOSTICS=1 FFNO_FSDP_CORE_DUMPS=1 \
+FFNOML_RUN_DIR="$run" FFNO_INVERSION_CONFIG="$run/forward.toml" \
+  bash "$repo/FFNOInversion.jl/scripts/submit_olivia_inversion.sh"
+```
