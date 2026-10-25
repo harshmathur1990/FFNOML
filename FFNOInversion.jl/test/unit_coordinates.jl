@@ -186,12 +186,28 @@ end
             write(p2,replace(t2,"[solver]"=>"[parallel]\ndecomposition = \"x_slabs\"\n[solver]"))
             @test load_config(p2).parallel.decomposition===:x_slabs
         end
-        # legacy example configurations still parse unchanged as log-tau inputs
+        # the native-z example configurations parse (their x_m/y_m spacing is read from the atmosphere file)
+        mktempdir() do dir
+            file=joinpath(dir,"atm_z.h5"); write_native_z_file(file)
+            for example in ("forward_z.toml","inversion_z.toml")
+                path=joinpath(@__DIR__,"..","..","examples","inversion_run",example)
+                isfile(path) || continue
+                text=replace(read(path,String),"inputs/initial_atmosphere_z.h5"=>file)
+                copy=joinpath(dir,example); write(copy,text)
+                c=load_config(copy)
+                @test c.atmosphere.vertical_coordinate===:z_m && c.equilibrium.mode===:column_hse_z
+                @test c.equilibrium.column.anchor===:bottom && c.equilibrium.column.P_ref==1.035e5
+                example=="inversion_z.toml" && @test all(cc->cc.kind===:z_m,c.controls) &&
+                    c.regularization.vertical.length_scale_m==1.0e5
+            end
+        end
+        # the log-tau example configurations parse as native log tau
         for example in ("forward.toml","inversion.toml")
             path=joinpath(@__DIR__,"..","..","examples","inversion_run",example)
             isfile(path) || continue
             c=load_config(path)
             @test c.atmosphere.vertical_coordinate===:log10tau500 && c.atmosphere.vertical_dataset=="logtau_500"
+            @test c.equilibrium.mode===:column_hse_ltau && c.parallel.decomposition===:x_slabs
             all(cc->cc.kind===:log10tau500,c.controls) && @test true
         end
     end

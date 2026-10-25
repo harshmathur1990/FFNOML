@@ -9,6 +9,8 @@ synthesis_file = "outputs/synthesis.h5"
 atmosphere_file = "outputs/forward_atmosphere.h5"
 
 [atmosphere]
+# native vertical coordinate of the input: "log10tau500" (this file) or "z" (see forward_z.toml)
+vertical_coordinate = "log10tau500"
 storage_order = "python"
 
 [atmosphere.datasets]
@@ -24,16 +26,23 @@ vz = "vz"
 
 
 [equilibrium]
-backend = "HSEMHS"
-model = "column_hse"         # column-hse-ltau for this native log-tau input; "mhs" arrives with Phase 4
+# HSEMHS reconstructs Pgas, rho, ne and the derived coordinate (height here) in process. The mode follows from
+# atmosphere.vertical_coordinate and model:
+#   log10tau500 + column_hse -> column-hse-ltau   (this file)
+#   log10tau500 + mhs        -> mhs-poisson-ltau  (available from HSEMHS integration Phase 4; needs Bx, By, Bz)
+#   z           + column_hse -> column-hse-z      (see forward_z.toml / inversion_z.toml)
+#   z           + mhs        -> mhs-poisson-z     (Phase 4)
+backend = "HSEMHS"           # the only equilibrium backend
+model = "column_hse"
+# model = "mhs"              # Phase 4
 gravity_m_s2 = 274.0
 eos_table_file = "inputs/eos_table_fullz.h5"   # HSEMHS EOS table (copy or link HSEMHS/cache/eos_table_fullz.h5)
-on_nonconvergence = "reject_trial"
+on_nonconvergence = "reject_trial"             # or "abort"
 
+# Native log tau: no pressure anchor; HSEMHS's tau-hydrostatic top closure sets the pressure.
 [equilibrium.column_ltau]
-cap_per_dex = 50.0
-align = "ptot"
-
+cap_per_dex = 50.0           # largest rise of ln P per dex in tau
+align = "ptot"               # "ptot": P + B^2/2mu0 equal at one height (B = 0 if no field is given); "none"
 [grid]
 dx_m = 48000.0
 dy_m = 48000.0
