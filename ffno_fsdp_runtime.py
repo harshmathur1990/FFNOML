@@ -34,9 +34,25 @@ from train_utils import (
 
 
 INPUT_CHANNELS = ("temperature", "vx", "vy", "vz", "log10_ne", "log10_rho")
-# The Julia client sends geometrical height in metres; the checkpoints were trained on z in Mm
-# (FFNONet._normalize_z_scale divides by 1e6 when building the training and solving sets).
+# The Julia client sends SI: T [K], velocities [m/s] and z [m]. The checkpoints were trained on
+# log10 T, velocities in km/s (MULTI3D atmospheres; FFNONet._prepare_input_features) and z in Mm
+# (FFNONet._normalize_z_scale). _model_inputs converts inside the differentiated forward pass, so
+# VJP cotangents stay with respect to the SI quantities Julia sent.
 Z_METRES_PER_MODEL_UNIT = 1.0e6
+VELOCITY_M_S_PER_MODEL_UNIT = 1.0e3
+
+
+def _model_inputs(x, z):
+    """(T, vx, vy, vz, log10 ne, log10 rho) and z in SI -> the checkpoints' training features."""
+    features = torch.cat(
+        (
+            torch.log10(x[:, 0:1]),
+            x[:, 1:4] / VELOCITY_M_S_PER_MODEL_UNIT,
+            x[:, 4:6],
+        ),
+        dim=1,
+    )
+    return features, z / Z_METRES_PER_MODEL_UNIT
 
 
 class DistributedFSDPBackend:
@@ -215,6 +231,8 @@ class DistributedFSDPBackend:
             )
         if not np.isfinite(features).all() or not np.isfinite(z_scale).all():
             raise ValueError("FSDP FFNO request contains NaN or Inf")
+        if not (features[0] > 0).all():
+            raise ValueError("FSDP FFNO request temperature must be positive")
         x = torch.as_tensor(features, device=self.device)[None]
         z = torch.as_tensor(z_scale, device=self.device)[None]
         x.requires_grad_(requires_grad)
@@ -228,10 +246,11 @@ class DistributedFSDPBackend:
         dy_tensor = torch.as_tensor(
             float(dy), dtype=torch.float32, device=self.device
         )
-        # z stays the autograd leaf in metres, so VJP z gradients are per metre
+        # x and z stay the autograd leaves in SI, so VJP gradients are per K, per m/s and per metre
+        features, z_model = _model_inputs(x, z)
         pred_normalized = self.model(
-            (x - self.mean_x) / self.std_x,
-            z / Z_METRES_PER_MODEL_UNIT,
+            (features - self.mean_x) / self.std_x,
+            z_model,
             dx_tensor,
             dy_tensor,
         )

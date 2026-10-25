@@ -73,6 +73,13 @@ Read from `pipeline.py`, `FFNONet.py`, `models/ffno_model.py`, `ffno_fsdp_runtim
   1e6) and dx, dy in **m**. The FSDP runtime used by the inversion passed z in **metres** straight to the model — a
   factor 1e6 in the first z feature channel (absolute z) for every inversion call. Fixed in `ffno_fsdp_runtime.py`
   (z / 1e6 inside the graph; gradients still per metre).
+* **Units — two more defects, fixed 25 October 2026.** The same audit had missed the other input channels. The
+  checkpoints were trained on **log10 T** and velocities in **km/s** (MULTI3D atmospheres; checkpoint `mean_X[0]` =
+  4.55, velocity std ≈ 6). Julia sends linear T [K] and velocities in m/s. `ffno_fsdp_runtime._model_inputs` now
+  converts both inside the graph, so gradients stay per K and per m/s. Every population predicted by the service
+  before this fix used wrong inputs. `scripts/compare_service_with_ffnonet.py` (with
+  `scripts/run_olivia_service_vs_ffnonet.sbatch`) checks the service against a direct `FFNONet.py` prediction on
+  the same HSE atmosphere.
 * **Convention.** The model's z features are: absolute z (Mm), z normalized to the column's own [min, max], |dz| over
   its column mean, and the column span. Training z: Bifrost/MULTI3D mesh, 467 levels, +14.37 Mm (top) to −1.02 Mm,
   top first, positive upward, non-uniform (Δz 18.6–97 km), z = 0 near the Bifrost photosphere.
