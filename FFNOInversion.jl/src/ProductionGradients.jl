@@ -323,19 +323,37 @@ end
 function synthesis_vjp!(atmosphere_bar::AtmosphereCotangent,model::MixedIntensitySynthesizer,
         redistribution,atmosphere,populations,intrinsic,intrinsic_bar,cache=nothing)
     redistribution isa NonPRD || throw(ArgumentError("mixed synthesis VJP supports non-PRD only"))
+    population_bar=_population_bar(populations)
+    _mixed_synthesis_vjp!(atmosphere_bar,population_bar,model,atmosphere,populations,
+        intrinsic.wavelength_m,intrinsic_bar)
+    population_bar
+end
+
+"""VJP of the region synthesis: each region's slice of `intrinsic_bar`, on that region's vacuum grid."""
+function synthesis_vjp!(atmosphere_bar::AtmosphereCotangent,setups::AbstractVector{<:RegionSynthesisSetup},
+        redistribution,atmosphere,populations,intrinsic,intrinsic_bar,cache=nothing)
+    redistribution isa NonPRD || throw(ArgumentError("mixed synthesis VJP supports non-PRD only"))
+    population_bar=_population_bar(populations)
+    for (setup,range) in zip(setups,_region_ranges(intrinsic.wavelength_m,setups))
+        _mixed_synthesis_vjp!(atmosphere_bar,population_bar,setup.synthesizer,atmosphere,populations,
+            setup.wavelength_vacuum_m,@view(intrinsic_bar[range,:,:,:]))
+    end
+    population_bar
+end
+
+function _mixed_synthesis_vjp!(atmosphere_bar,population_bar,model::MixedIntensitySynthesizer,atmosphere,
+        populations,wavelength,intrinsic_bar)
     model.solver isa ScalarFormalSolver || throw(ArgumentError(
         "production synthesis VJP requires ScalarFormalSolver"))
-    population_bar=_population_bar(populations)
     lookup(source)=_population_lookup(populations,population_bar,source)
-    nz,nx,ny=size(atmosphere.temperature); nlambda=length(intrinsic.wavelength_m)
+    nz,nx,ny=size(atmosphere.temperature); nlambda=length(wavelength); T=eltype(intrinsic_bar)
     for x in 1:nx,y in 1:ny
-        chi=zeros(eltype(intrinsic.data),nz,nlambda); eta=zeros(eltype(intrinsic.data),nz,nlambda)
+        chi=zeros(T,nz,nlambda); eta=zeros(T,nz,nlambda)
         for contributor in model.contributors
             source=contributor.populations===nothing ? populations : contributor.populations
-            add_opacity_emissivity!(chi,eta,contributor.model,intrinsic.wavelength_m,
-                atmosphere,x,y,source)
+            add_opacity_emissivity!(chi,eta,contributor.model,wavelength,atmosphere,x,y,source)
         end
-        chi_bar=zeros(eltype(chi),size(chi)); eta_bar=similar(chi_bar); z_bar=zeros(eltype(chi),nz)
+        chi_bar=zeros(T,size(chi)); eta_bar=similar(chi_bar); z_bar=zeros(T,nz)
         _formal_solve_vjp!(chi_bar,eta_bar,z_bar,model.solver,chi,eta,
             @view(atmosphere.z[:,x,y]),@view(intrinsic_bar[:,1,x,y]))
         @views atmosphere_bar.z[:,x,y].+=z_bar
@@ -343,7 +361,7 @@ function synthesis_vjp!(atmosphere_bar::AtmosphereCotangent,model::MixedIntensit
             source=contributor.populations===nothing ? populations : contributor.populations
             source_bar=contributor.populations===nothing && populations isa AbstractDict ? nothing : lookup(source)
             add_opacity_emissivity_vjp!(atmosphere_bar,source_bar,lookup,chi_bar,eta_bar,
-                contributor.model,intrinsic.wavelength_m,atmosphere,x,y,source)
+                contributor.model,wavelength,atmosphere,x,y,source)
         end
     end
     population_bar

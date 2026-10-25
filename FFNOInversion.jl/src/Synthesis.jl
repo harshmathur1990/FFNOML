@@ -83,27 +83,72 @@ end
 
 function synthesize!(cube::SpectralCube{T},model::MixedIntensitySynthesizer,redistribution::AbstractRedistributionModel,
                      atmosphere::Atmosphere3D,populations=nothing,cache=nothing) where T
+    threaded=_mixed_synthesis_cache(cube,redistribution,atmosphere,cache)
+    _synthesize_mixed!(cube.data,cube.wavelength_m,model,atmosphere,populations,threaded)
+    cube
+end
+
+"""Synthesize every configured region into its slice of `cube`.
+
+The cube's wavelength axis is the regions' air-wavelength grids concatenated in configuration order (`IO.jl`).
+Each region is computed on its vacuum grid, because the Muspel line centres (from level energies) and the
+Kurucz line lists are vacuum wavelengths.
+"""
+function synthesize!(cube::SpectralCube{T},setups::AbstractVector{<:RegionSynthesisSetup},
+                     redistribution::AbstractRedistributionModel,atmosphere::Atmosphere3D,
+                     populations=nothing,cache=nothing) where T
+    threaded=_mixed_synthesis_cache(cube,redistribution,atmosphere,cache)
+    for (setup,range) in zip(setups,_region_ranges(cube.wavelength_m,setups))
+        _synthesize_mixed!(@view(cube.data[range,:,:,:]),setup.wavelength_vacuum_m,setup.synthesizer,
+                           atmosphere,populations,threaded)
+    end
+    cube
+end
+
+"""Index range of each region in the concatenated cube wavelength axis; checks the grids match."""
+function _region_ranges(wavelength_m,setups)
+    ranges=UnitRange{Int}[]; start=1
+    for (i,setup) in enumerate(setups)
+        stop=start+length(setup.wavelength_air_m)-1
+        stop<=length(wavelength_m) && isapprox(wavelength_m[start:stop],setup.wavelength_air_m;rtol=1e-12) ||
+            throw(DimensionMismatch("spectral region $i does not match the synthesis wavelength grid"))
+        push!(ranges,start:stop); start=stop+1
+    end
+    start==length(wavelength_m)+1 || throw(DimensionMismatch(
+        "synthesis wavelength grid has $(length(wavelength_m)) points; the regions cover $(start-1)"))
+    ranges
+end
+
+function _mixed_synthesis_cache(cube::SpectralCube{T},redistribution,atmosphere,cache) where T
     redistribution isa NonPRD || throw(ArgumentError("mixed intensity synthesis currently supports non-PRD only"))
     cube.stokes.components==(:I,) || throw(ArgumentError("mixed synthesizer supports only Stokes I"))
-    atmosphere.z===nothing && throw(ArgumentError("formal synthesis requires geometrical z from force balance"))
+    atmosphere.z===nothing && throw(ArgumentError("formal synthesis requires geometrical z"))
     nz,nx,ny=size(atmosphere.temperature); nλ=length(cube.wavelength_m)
     size(cube.data)[3:4]==(nx,ny) || throw(DimensionMismatch("spectral spatial shape mismatch"))
     threaded=cache===nothing ? ThreadedSynthesisCache(T,nz,nλ) : cache
     threaded isa ThreadedSynthesisCache || throw(ArgumentError("mixed synthesis requires ThreadedSynthesisCache"))
     length(threaded.workspaces)>=Threads.maxthreadid() || throw(DimensionMismatch("not enough thread-local synthesis caches"))
     all(ws->size(ws.extinction)==(nz,nλ),threaded.workspaces) || throw(DimensionMismatch("synthesis cache shape mismatch"))
+    threaded
+end
+
+"""Opacity, emissivity and formal solution for every column; `data` is (λ, Stokes, x, y) on `wavelength`."""
+function _synthesize_mixed!(data,wavelength,model::MixedIntensitySynthesizer,atmosphere,populations,threaded)
+    nx,ny=size(data,3),size(data,4); nλ=length(wavelength)
+    size(data,1)==nλ || throw(DimensionMismatch("spectral slice and wavelength grid differ"))
     Threads.@threads :static for column in 1:nx*ny
         x=(column-1)%nx+1; y=(column-1)÷nx+1
         work=threaded.workspaces[Threads.threadid()]
-        fill!(work.extinction,zero(T)); fill!(work.emissivity,zero(T))
+        extinction=@view(work.extinction[:,1:nλ]); emissivity=@view(work.emissivity[:,1:nλ])
+        fill!(extinction,zero(eltype(extinction))); fill!(emissivity,zero(eltype(emissivity)))
         for contributor in model.contributors
             contributor_populations=contributor.populations===nothing ? populations : contributor.populations
-            add_opacity_emissivity!(work.extinction,work.emissivity,contributor.model,cube.wavelength_m,
+            add_opacity_emissivity!(extinction,emissivity,contributor.model,wavelength,
                                     atmosphere,x,y,contributor_populations)
         end
-        formal_solve!(@view(cube.data[:,1,x,y]),model.solver,work.extinction,work.emissivity,@view(atmosphere.z[:,x,y]))
+        formal_solve!(@view(data[:,1,x,y]),model.solver,extinction,emissivity,@view(atmosphere.z[:,x,y]))
     end
-    cube
+    data
 end
 
 struct MockIntensitySynthesizer{T<:AbstractFloat} <: AbstractSynthesizer
