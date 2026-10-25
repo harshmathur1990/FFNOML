@@ -13,6 +13,7 @@ mutable struct AtmosphereCotangent{T<:AbstractFloat,A<:AbstractArray{T,3},B}
     rho::A
     ne::A
     z::A
+    chi500::A
     magnetic_field::B
 end
 
@@ -20,11 +21,11 @@ function AtmosphereCotangent(atmosphere::Atmosphere3D{T}) where T
     shape=size(atmosphere.temperature); field()=zeros(T,shape)
     magnetic=atmosphere.magnetic_field===nothing ? nothing :
         MagneticField3D(field(),field(),field())
-    AtmosphereCotangent(field(),field(),field(),field(),field(),field(),field(),field(),field(),magnetic)
+    AtmosphereCotangent(field(),field(),field(),field(),field(),field(),field(),field(),field(),field(),magnetic)
 end
 
 function _accumulate!(destination::AtmosphereCotangent,source::AtmosphereCotangent)
-    for name in (:temperature,:vx,:vy,:vz,:vturb,:pgas,:rho,:ne,:z)
+    for name in (:temperature,:vx,:vy,:vz,:vturb,:pgas,:rho,:ne,:z,:chi500)
         getfield(destination,name).+=getfield(source,name)
     end
     if destination.magnetic_field!==nothing
@@ -354,9 +355,19 @@ function _mixed_synthesis_vjp!(atmosphere_bar,population_bar,model::MixedIntensi
             add_opacity_emissivity!(chi,eta,contributor.model,wavelength,atmosphere,x,y,source)
         end
         chi_bar=zeros(T,size(chi)); eta_bar=similar(chi_bar); z_bar=zeros(T,nz)
-        _formal_solve_vjp!(chi_bar,eta_bar,z_bar,model.solver,chi,eta,
-            @view(atmosphere.z[:,x,y]),@view(intrinsic_bar[:,1,x,y]))
-        @views atmosphere_bar.z[:,x,y].+=z_bar
+        if _tau_integration(atmosphere)
+            # formal_column!: χ' = wχ, η' = wη with w = τ500/χ500, integrated in s = -ln τ500 (native, fixed)
+            weight=_log_tau_weight(atmosphere,x,y)
+            _formal_solve_vjp!(chi_bar,eta_bar,z_bar,model.solver,chi.*weight,eta.*weight,
+                _log_tau_coordinate(atmosphere,x,y),@view(intrinsic_bar[:,1,x,y]))
+            weight_bar=vec(sum(chi_bar.*chi.+eta_bar.*eta;dims=2))
+            @views atmosphere_bar.chi500[:,x,y].-=weight_bar.*weight./atmosphere.chi500[:,x,y]
+            chi_bar.*=weight; eta_bar.*=weight
+        else
+            _formal_solve_vjp!(chi_bar,eta_bar,z_bar,model.solver,chi,eta,
+                @view(atmosphere.z[:,x,y]),@view(intrinsic_bar[:,1,x,y]))
+            @views atmosphere_bar.z[:,x,y].+=z_bar
+        end
         for contributor in model.contributors
             source=contributor.populations===nothing ? populations : contributor.populations
             source_bar=contributor.populations===nothing && populations isa AbstractDict ? nothing : lookup(source)
@@ -446,7 +457,7 @@ HybridAdjointObjectiveGradient(;force_balance_step::Real=1e-4)=
 
 function _derived_pairing(bar::AtmosphereCotangent,atmosphere,context)
     local_value=zero(eltype(atmosphere.temperature))
-    for name in (:pgas,:rho,:ne,:z)
+    for name in (:pgas,:rho,:ne,:z,:chi500)
         value=getfield(atmosphere,name); value===nothing && continue
         local_value+=sum(value.*getfield(bar,name))
     end

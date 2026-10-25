@@ -13,7 +13,7 @@ function distribute_atmosphere(::Type{T},root_atmosphere,context::ParallelContex
         (grid=root_atmosphere.grid,shape=size(root_atmosphere.temperature),
          magnetic=root_atmosphere.magnetic_field!==nothing,pgas=root_atmosphere.pgas!==nothing,
          rho=root_atmosphere.rho!==nothing,ne=root_atmosphere.ne!==nothing,z=root_atmosphere.z!==nothing,
-         logtau500=root_atmosphere.logtau500!==nothing)
+         logtau500=root_atmosphere.logtau500!==nothing,chi500=root_atmosphere.chi500!==nothing)
     else nothing end,context)
     shape=metadata.shape; tile=local_tile(context,shape[2],shape[3])
     getroot(name)=isroot(context) ? getfield(root_atmosphere,name) : nothing
@@ -25,7 +25,7 @@ function distribute_atmosphere(::Type{T},root_atmosphere,context::ParallelContex
     optional(name,flag,tag)=flag ? distribute_field(T,getroot(name),shape,context;tag=tag).values : nothing
     pgas=optional(:pgas,metadata.pgas,306); rho=optional(:rho,metadata.rho,307)
     ne=optional(:ne,metadata.ne,308); z=optional(:z,metadata.z,309)
-    logtau500=optional(:logtau500,metadata.logtau500,313)
+    logtau500=optional(:logtau500,metadata.logtau500,313); chi500=optional(:chi500,metadata.chi500,314)
     B=if metadata.magnetic
         rootB=isroot(context) ? root_atmosphere.magnetic_field : nothing
         bx=distribute_field(T,isroot(context) ? rootB.Bx : nothing,shape,context;tag=310).values
@@ -35,7 +35,7 @@ function distribute_atmosphere(::Type{T},root_atmosphere,context::ParallelContex
     else nothing end
     local_grid=Grid3D(metadata.grid.vertical,copy(metadata.grid.x[tile.xrange]),copy(metadata.grid.y[tile.yrange]))
     local_atmos=Atmosphere3D(local_grid,temperature,vx,vy,vz,vturb;magnetic_field=B,pgas=pgas,rho=rho,ne=ne,z=z,
-        logtau500=logtau500)
+        logtau500=logtau500,chi500=chi500)
     DistributedAtmosphere(local_atmos,metadata.grid,tile)
 end
 
@@ -51,6 +51,7 @@ function gather_atmosphere(distributed::DistributedAtmosphere,context::ParallelC
     ne=a.ne===nothing ? nothing : gather(a.ne,328)
     z=a.z===nothing ? nothing : gather(a.z,329)
     logtau500=a.logtau500===nothing ? nothing : gather(a.logtau500,333)
+    chi500=a.chi500===nothing ? nothing : gather(a.chi500,334)
     B=if a.magnetic_field===nothing
         nothing
     else
@@ -58,7 +59,7 @@ function gather_atmosphere(distributed::DistributedAtmosphere,context::ParallelC
         isroot(context) ? MagneticField3D(bx,by,bz) : nothing
     end
     isroot(context) ? Atmosphere3D(g,temperature,vx,vy,vz,vturb;magnetic_field=B,pgas=pgas,rho=rho,ne=ne,z=z,
-        logtau500=logtau500) : nothing
+        logtau500=logtau500,chi500=chi500) : nothing
 end
 
 abstract type AbstractDistributedPopulationModel end
@@ -233,7 +234,7 @@ function forward!(workspace::HybridForwardWorkspace,model::HybridForwardModel,
         (prepared,0.0,0.0)
     end
     stage_start=time_ns()
-    _forward_stage(context,"synthesis begin")
+    _forward_stage(context,"synthesis begin integration=$(_tau_integration(distributed.local_atmosphere) ? "log10tau500" : "z")")
     Base.ScopedValues.with(SYNTHESIS_PROGRESS=>isroot(context)) do
         synthesize!(workspace.intrinsic,model.synthesizer,model.redistribution,distributed.local_atmosphere,
             workspace.populations,workspace.synthesis_cache)

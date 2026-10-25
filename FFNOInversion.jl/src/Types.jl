@@ -85,6 +85,8 @@ end
 `z` (m) and `logtau500` are full 3-D coordinate fields. The one matching the
 grid's native axis equals that axis broadcast over columns (see
 `check_coordinate_consistency`); the other is derived and may vary by column.
+`chi500` (m^-1) is the equilibrium's extinction per length at 5000 A that defines `logtau500`; with a native
+log-tau grid, synthesis integrates the optical depth on that grid with it (`formal_column`).
 """
 mutable struct Atmosphere3D{T<:AbstractFloat,A<:AbstractArray{T,3},BM}
     grid::Grid3D{T}
@@ -99,11 +101,12 @@ mutable struct Atmosphere3D{T<:AbstractFloat,A<:AbstractArray{T,3},BM}
     ne::Union{Nothing,A}
     z::Union{Nothing,A}
     logtau500::Union{Nothing,A}
+    chi500::Union{Nothing,A}
 end
 
 function Atmosphere3D(grid::Grid3D{T}, temperature::A, vx::A, vy::A, vz::A, vturb::A;
                       magnetic_field=nothing, pgas=nothing, rho=nothing, ne=nothing, z=nothing,
-                      logtau500=nothing) where {T<:AbstractFloat,A<:AbstractArray{T,3}}
+                      logtau500=nothing, chi500=nothing) where {T<:AbstractFloat,A<:AbstractArray{T,3}}
     expected = (nlevels(grid), length(grid.x), length(grid.y))
     for (name, value) in ((:temperature,temperature),(:vx,vx),(:vy,vy),(:vz,vz),(:vturb,vturb))
         size(value) == expected || throw(DimensionMismatch("$name has size $(size(value)); expected $expected"))
@@ -111,12 +114,12 @@ function Atmosphere3D(grid::Grid3D{T}, temperature::A, vx::A, vy::A, vz::A, vtur
     end
     minimum(temperature) > 0 || throw(ArgumentError("temperature must be positive"))
     magnetic_field === nothing || size(magnetic_field.Bx) == expected || throw(DimensionMismatch("magnetic field shape differs from grid"))
-    for (name, value) in ((:pgas,pgas),(:rho,rho),(:ne,ne),(:z,z),(:logtau500,logtau500))
+    for (name, value) in ((:pgas,pgas),(:rho,rho),(:ne,ne),(:z,z),(:logtau500,logtau500),(:chi500,chi500))
         value === nothing && continue
         size(value) == expected || throw(DimensionMismatch("$name shape differs from grid"))
         all(isfinite, value) || throw(ArgumentError("$name must be finite"))
     end
-    Atmosphere3D{T,A,typeof(magnetic_field)}(grid, temperature, vx, vy, vz, vturb, magnetic_field, pgas, rho, ne, z, logtau500)
+    Atmosphere3D{T,A,typeof(magnetic_field)}(grid, temperature, vx, vy, vz, vturb, magnetic_field, pgas, rho, ne, z, logtau500, chi500)
 end
 
 """Throw unless the 3-D coordinate field of the native kind (`z` for a height

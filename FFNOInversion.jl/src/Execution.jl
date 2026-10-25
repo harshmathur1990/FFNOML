@@ -181,7 +181,7 @@ function write_inversion_outputs(config::RunConfig,result::InversionRunResult)
         kind=vertical_coordinate(atmosphere.grid)
         file[kind===:z_m ? "z_m" : "logtau_500"]=native_depth(atmosphere.grid)
         file["x_m"]=atmosphere.grid.x; file["y_m"]=atmosphere.grid.y
-        for name in (:temperature,:vx,:vy,:vz,:vturb,:pgas,:rho,:ne,:z,:logtau500)
+        for name in (:temperature,:vx,:vy,:vz,:vturb,:pgas,:rho,:ne,:z,:logtau500,:chi500)
             value=getfield(atmosphere,name); value===nothing || (file[string(name)]=_with_time_zyx(value))
         end
         if atmosphere.magnetic_field!==nothing

@@ -9,7 +9,7 @@ populations, synthesis, observation).
     outcome = reconstruct_equilibrium!(backend, distributed, context)  # collective, every evaluation
     close_equilibrium!(backend)                                        # collective
 
-`reconstruct_equilibrium!` fills `pgas`, `rho`, `ne`, `z` and `logtau500` of the
+`reconstruct_equilibrium!` fills `pgas`, `rho`, `ne`, `z`, `logtau500` and `chi500` of the
 rank-local atmosphere from its temperature (and B) without changing T, B,
 velocities or microturbulence, and returns an `EquilibriumOutcome` that is
 identical on every rank. It does not throw for physics failures (EOS envelope,
@@ -233,7 +233,7 @@ function reconstruct_equilibrium!(backend::HSEMHSBackend,distributed::Distribute
     if st.valid
         _set_field!(a,:pgas,_zxy_to_zyx(res.Pgas)); _set_field!(a,:rho,_zxy_to_zyx(res.rho))
         _set_field!(a,:ne,_zxy_to_zyx(res.ne)); _set_field!(a,:z,_zxy_to_zyx(res.z))
-        _set_field!(a,:logtau500,_zxy_to_zyx(res.logtau500))
+        _set_field!(a,:logtau500,_zxy_to_zyx(res.logtau500)); _set_field!(a,:chi500,_zxy_to_zyx(res.chi500))
         check_coordinate_consistency(a)
     end
     EquilibriumOutcome(st.valid,st.reason,backend.config.model,backend.config.mode,st.steps,st.seconds,copy(st.messages),

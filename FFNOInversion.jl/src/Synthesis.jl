@@ -84,6 +84,28 @@ function formal_solve!(out,::ScalarFormalSolver,χ,η,z)
     out
 end
 
+"""True when synthesis integrates the optical depth on the native log10 tau500 grid.
+
+That needs a log-tau vertical axis and the equilibrium's `chi500`. With column-HSE heights, a 0.1 dex step can
+span the whole transition region (9 600 km in one column of the 504x504 run): the trapezoid `(χ[k]+χ[k+1])/2·Δz`
+then charges the cool point's opacity over the hot gas's height and makes the step optically thick, so the
+emergent intensity takes the coronal source function. The grid's own Δτ500 has no such error.
+"""
+_tau_integration(atmosphere)=vertical_coordinate(atmosphere.grid)===:log10tau500 && atmosphere.chi500!==nothing
+
+"""Formal solution of one column. On a native log-tau grid the integration variable is s = -ln τ500
+(decreasing with depth index, like z): `chi` and `eta` are scaled in place by τ500/χ500, so each step's
+optical depth is the trapezoid of (χ/χ500)·τ500 in ln τ500. Otherwise the geometric height `z` is used."""
+function formal_column!(out,solver,chi,eta,atmosphere,x,y)
+    _tau_integration(atmosphere) || return formal_solve!(out,solver,chi,eta,@view(atmosphere.z[:,x,y]))
+    coordinate=_log_tau_coordinate(atmosphere,x,y)
+    weight=_log_tau_weight(atmosphere,x,y)
+    chi.*=weight; eta.*=weight
+    formal_solve!(out,solver,chi,eta,coordinate)
+end
+_log_tau_coordinate(atmosphere,x,y)=-log(eltype(atmosphere.chi500)(10)) .* @view(atmosphere.logtau500[:,x,y])
+_log_tau_weight(atmosphere,x,y)=exp10.(@view(atmosphere.logtau500[:,x,y])) ./ @view(atmosphere.chi500[:,x,y])
+
 function synthesize!(cube::SpectralCube{T},model::MixedIntensitySynthesizer,redistribution::AbstractRedistributionModel,
                      atmosphere::Atmosphere3D,populations=nothing,cache=nothing) where T
     threaded=_mixed_synthesis_cache(cube,redistribution,atmosphere,cache)
@@ -125,7 +147,8 @@ end
 function _mixed_synthesis_cache(cube::SpectralCube{T},redistribution,atmosphere,cache) where T
     redistribution isa NonPRD || throw(ArgumentError("mixed intensity synthesis currently supports non-PRD only"))
     cube.stokes.components==(:I,) || throw(ArgumentError("mixed synthesizer supports only Stokes I"))
-    atmosphere.z===nothing && throw(ArgumentError("formal synthesis requires geometrical z"))
+    _tau_integration(atmosphere) || atmosphere.z!==nothing ||
+        throw(ArgumentError("formal synthesis requires geometrical z or (on a log-tau grid) chi500"))
     nz,nx,ny=size(atmosphere.temperature); nλ=length(cube.wavelength_m)
     size(cube.data)[3:4]==(nx,ny) || throw(DimensionMismatch("spectral spatial shape mismatch"))
     threaded=cache===nothing ? ThreadedSynthesisCache(T,nz,nλ) : cache
@@ -153,7 +176,7 @@ function _synthesize_mixed!(data,wavelength,model::MixedIntensitySynthesizer,atm
             add_opacity_emissivity!(extinction,emissivity,contributor.model,wavelength,
                                     atmosphere,x,y,contributor_populations)
         end
-        formal_solve!(@view(data[:,1,x,y]),model.solver,extinction,emissivity,@view(atmosphere.z[:,x,y]))
+        formal_column!(@view(data[:,1,x,y]),model.solver,extinction,emissivity,atmosphere,x,y)
         next!(progress)
     end
     finish!(progress)

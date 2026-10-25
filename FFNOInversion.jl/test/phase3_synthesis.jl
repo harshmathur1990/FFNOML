@@ -105,3 +105,68 @@ end
     @test all(pop_bar[k]≈expected_pops[k] for k in keys(populations))
     @test any(!iszero,pop_bar[:CA]) && any(!iszero,pop_bar[:H])
 end
+
+@testset "Log-tau formal integration (native log10 tau500 grid with chi500)" begin
+    T=Float64; nx,ny=2,1
+    column(v,nz)=repeat(reshape(T.(v),nz,1,1),1,nx,ny)
+    function atmosphere(logtau,chi500,z;tau=true)
+        nz=length(logtau); shape=(nz,nx,ny)
+        Atmosphere3D(Grid3D(T.(logtau),T[0,1],T[0]),fill(6000.0,shape),zeros(shape),zeros(shape),zeros(shape),
+            zeros(shape);z=column(z,nz),logtau500=column(logtau,nz),chi500=tau ? column(chi500,nz) : nothing)
+    end
+    solve(atmos,chi,eta)=begin
+        cube=SpectralCube(zeros(T,1,1,nx,ny),[500e-9],StokesSet(:I))
+        synthesize!(cube,MixedIntensitySynthesizer([OpacityContributor(TabulatedOpacityModel(chi,eta))]),NonPRD(),atmos)
+        cube.data[1,1,1,1]
+    end
+
+    # χ = χ500 and S = a + bτ500: the emergent intensity is a + b (Eddington-Barbier is exact for linear S).
+    logtau=collect(range(-6,2,length=81)); chi500=1e-5 .* exp10.(0.3 .* logtau)
+    tau=exp10.(logtau); source=1 .+ 3 .* tau
+    z=-cumsum(vcat(0,diff(tau)./((chi500[1:end-1].+chi500[2:end])./2)))
+    atmos=atmosphere(logtau,chi500,z)
+    @test FFNOInversion._tau_integration(atmos)
+    @test solve(atmos,reshape(chi500,:,1),reshape(chi500.*source,:,1))≈4 rtol=1e-2
+
+    # Transition region in one grid step: hot (S large, χ500 tiny) above cool gas, 9600 km apart in HSE height.
+    # The z trapezoid charges the cool opacity over that height and returns the coronal source function; the
+    # log-tau integration uses the step's true Δτ500 (~1e-6) and returns the photospheric value.
+    logtau=collect(range(-6.0,1.0,length=71)); tau=exp10.(logtau)
+    hot=logtau.<=-5.85
+    chi500=ifelse.(hot,1e-13,1e-4 .* tau.^0.3); source=ifelse.(hot,1e3,1 .+ tau)   # dense cool gas below
+    step=diff(tau)./((chi500[1:end-1].+chi500[2:end])./2)
+    step[findlast(hot)]=9.6e6                       # the HSE height of the transition step
+    z=-cumsum(vcat(0,step))
+    chi=reshape(chi500,:,1); eta=reshape(chi500.*source,:,1)
+    with_tau=solve(atmosphere(logtau,chi500,z),chi,eta)
+    with_z=solve(atmosphere(logtau,chi500,z;tau=false),chi,eta)
+    @test with_tau<2.5
+    @test with_z>100
+
+    # VJP: χ500 and population cotangents against central differences.
+    logtau=collect(range(-5,1,length=13)); nz=length(logtau); tau=exp10.(logtau)
+    chi500=1e-6 .* tau.^0.8; z=-cumsum(vcat(0,diff(tau)./((chi500[1:end-1].+chi500[2:end])./2)))
+    atmos=atmosphere(logtau,chi500,z); atmos.chi500[:,2,1].*=1.3
+    wave=collect(range(656.20e-9,656.36e-9,length=4)); nλ=length(wave)
+    pops=fill(1e12,nz,nx,ny,3); pops[:,:,:,3].=1e9
+    halpha=FFNOTransition(:H,656.28e-9,2,3,0.64,1.6735575e-27,1e8)
+    continuum=TabulatedOpacityModel(repeat(reshape(chi500,:,1),1,nλ),repeat(reshape(2 .* chi500 .* (1 .+ tau),:,1),1,nλ))
+    synth=MixedIntensitySynthesizer([OpacityContributor(continuum),OpacityContributor(halpha,pops)])
+    bar=reshape(cos.(1:nλ*nx*ny),nλ,1,nx,ny)
+    objective()=begin
+        cube=SpectralCube(zeros(T,nλ,1,nx,ny),wave,StokesSet(:I)); synthesize!(cube,synth,NonPRD(),atmos)
+        sum(bar.*cube.data)
+    end
+    cube=SpectralCube(zeros(T,nλ,1,nx,ny),wave,StokesSet(:I)); synthesize!(cube,synth,NonPRD(),atmos)
+    atmosphere_bar=FFNOInversion.AtmosphereCotangent(atmos)
+    population_bar=FFNOInversion.synthesis_vjp!(atmosphere_bar,synth,NonPRD(),atmos,pops,cube,bar)
+    @test all(iszero,atmosphere_bar.z)
+    for (k,x) in ((3,1),(7,2),(11,1))
+        h=1e-5*atmos.chi500[k,x,1]; c=atmos.chi500[k,x,1]
+        atmos.chi500[k,x,1]=c+h; fp=objective(); atmos.chi500[k,x,1]=c-h; fm=objective(); atmos.chi500[k,x,1]=c
+        @test atmosphere_bar.chi500[k,x,1]≈(fp-fm)/(2h) rtol=1e-4
+        h=1e-5*pops[k,x,1,2]; c=pops[k,x,1,2]
+        pops[k,x,1,2]=c+h; fp=objective(); pops[k,x,1,2]=c-h; fm=objective(); pops[k,x,1,2]=c
+        @test population_bar[k,x,1,2]≈(fp-fm)/(2h) rtol=1e-4
+    end
+end

@@ -153,8 +153,8 @@ function apply_control_maps!(distributed::DistributedAtmosphere,layout::ControlM
     distributed
 end
 
-struct _ThermodynamicTrialReference{A}
-    pgas::A; rho::A; ne::A; z::A; logtau500::A
+struct _ThermodynamicTrialReference{A,C}
+    pgas::A; rho::A; ne::A; z::A; logtau500::A; chi500::C   # chi500 is absent without an HSEMHS equilibrium
 end
 _trial_copy(value)=value===nothing ? nothing : copy(value)
 
@@ -186,7 +186,7 @@ function DistributedInversionProblem(model,workspace,distributed::DistributedAtm
     active>0 || throw(ArgumentError("at least one inversion weight must be positive"))
     a=distributed.local_atmosphere
     reference=_ThermodynamicTrialReference(_trial_copy(a.pgas),_trial_copy(a.rho),_trial_copy(a.ne),_trial_copy(a.z),
-        _trial_copy(a.logtau500))
+        _trial_copy(a.logtau500),_trial_copy(a.chi500))
     T=eltype(a.temperature)
     controls=Dict{Symbol,Array{T,3}}()
     if control_layout!==nothing
@@ -208,7 +208,7 @@ end
 
 function _restore_trial_reference!(problem::DistributedInversionProblem)
     atmosphere=problem.distributed.local_atmosphere; ref=problem.thermodynamic_reference
-    for name in (:pgas,:rho,:ne,:z,:logtau500)
+    for name in (:pgas,:rho,:ne,:z,:logtau500,:chi500)
         source=getfield(ref,name)
         if source===nothing
             setfield!(atmosphere,name,nothing)
