@@ -93,7 +93,20 @@ Combining the core with the service log points at the service's own periodic tra
 - **No "Fatal Python error".** faulthandler's fatal-signal handler was enabled on every rank, yet none printed this message. That is consistent with the fault happening inside faulthandler's own dump.
 - **What changed from earlier runs.** Job 2473982 made 960 periodic dumps without crashing. None of its stacks contained `<shim>` frames. In 2622023 the dumped stacks contain `<shim>` / `<interpreter trampoline>` frames from torch's dynamo eval-frame hook (`torch/_dynamo/eval_frame.py`, entered through the activation-checkpoint wrapper). The watchdog walks other threads' frames without the GIL. On Python 3.12.3 that is unsafe while those frames change, and it is especially fragile with shim frames.
 
-This remains a hypothesis until it is reproduced. A symbolized backtrace of `libpython3.12.so.1.0+0x11eea8` would confirm it. On Olivia, `addr2line -f -e <libpython> 0x11eea8`, or `gdb` against the core, should resolve to a frame-dumping function in `Modules/faulthandler.c` or `Python/traceback.c`.
+**Confirmed (symbolized on Olivia, 25 October 2026)** with `addr2line -i -f -p` against the job's exact `libpython3.12.so.1.0`:
+
+```text
+0x11eea8  PyType_HasFeature (object.h:966)
+          inlined by dump_frame (traceback.c:1248)
+          inlined by dump_traceback (traceback.c:1322)
+0x11f128  PyThreadState_Next (pystate.c:1968), inlined by _Py_DumpTracebackThreads (traceback.c:1439)
+0x29f4f4  faulthandler_thread (faulthandler.c:582)
+0x25ad4c  pythread_wrapper (thread_pthread.h:239)
+```
+
+The faulting thread is faulthandler's watchdog. `dump_frame` read the type (offset 8, so the fault address is `x0 + 8`) of an object taken from another thread's live frame and got a garbage pointer. The periodic dump caused the crash; CUDA, NCCL, the checkpoints and the model are not implicated. Earlier wording kept for the record:
+
+This remained a hypothesis until it was symbolized. A symbolized backtrace of `libpython3.12.so.1.0+0x11eea8` would confirm it. On Olivia, `addr2line -f -e <libpython> 0x11eea8`, or `gdb` against the core, should resolve to a frame-dumping function in `Modules/faulthandler.c` or `Python/traceback.c`.
 
 Changes made (`ffno_fsdp_service.py`, `ffno_fsdp_diagnostics.py`, `FSDPService.jl`, `Execution.jl`):
 
