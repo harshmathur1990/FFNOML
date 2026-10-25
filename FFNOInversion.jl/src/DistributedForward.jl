@@ -197,6 +197,12 @@ function _distributed_observation!(output,intrinsic,model::GaussianPSFObservatio
     copyto!(output.data,ydata); output
 end
 
+"""Root-rank progress line for a forward stage (stdout, flushed so a running job shows where it is)."""
+function _forward_stage(context,message)
+    isroot(context) || return nothing
+    println(stdout,"FORWARD stage=$message"); flush(stdout); nothing
+end
+
 """One collective forward evaluation: equilibrium, populations, synthesis,
 observation. If the equilibrium is invalid (identical verdict on every rank) the
 populations, synthesis and observation are skipped, the workspace keeps its
@@ -210,26 +216,36 @@ function forward!(workspace::HybridForwardWorkspace,model::HybridForwardModel,
     model.prepared_equilibrium[]=nothing
     outcome,equilibrium_seconds,populations_seconds=if prepared===nothing
         stage_start=time_ns()
+        _forward_stage(context,"equilibrium begin")
         equilibrium=reconstruct_equilibrium!(model.equilibrium,distributed,context)
         equilibrium_elapsed=(time_ns()-stage_start)/1e9
+        _forward_stage(context,"equilibrium done seconds=$(round(equilibrium_elapsed;digits=1)) valid=$(equilibrium.valid)")
         if !equilibrium.valid
             timings=HybridForwardTimings(equilibrium_elapsed,0.0,0.0,0.0,(time_ns()-total_start)/1e9)
             return (spectrum=workspace.output,equilibrium=equilibrium,timings=timings,valid=false)
         end
         stage_start=time_ns()
+        _forward_stage(context,"populations begin")
         predict_distributed_populations!(workspace.populations,model.populations,distributed,context)
-        (equilibrium,equilibrium_elapsed,(time_ns()-stage_start)/1e9)
+        populations_elapsed=(time_ns()-stage_start)/1e9
+        _forward_stage(context,"populations done seconds=$(round(populations_elapsed;digits=1))")
+        (equilibrium,equilibrium_elapsed,populations_elapsed)
     else
         isroot(context) && (println(stdout,"FORWARD event=reuse_prepared_equilibrium_and_populations"); flush(stdout))
         (prepared,0.0,0.0)
     end
     stage_start=time_ns()
-    synthesize!(workspace.intrinsic,model.synthesizer,model.redistribution,distributed.local_atmosphere,
-        workspace.populations,workspace.synthesis_cache)
+    _forward_stage(context,"synthesis begin")
+    Base.ScopedValues.with(SYNTHESIS_PROGRESS=>isroot(context)) do
+        synthesize!(workspace.intrinsic,model.synthesizer,model.redistribution,distributed.local_atmosphere,
+            workspace.populations,workspace.synthesis_cache)
+    end
     synthesis_seconds=(time_ns()-stage_start)/1e9
+    _forward_stage(context,"synthesis done seconds=$(round(synthesis_seconds;digits=1))")
     stage_start=time_ns()
     _distributed_observation!(workspace.output,workspace.intrinsic,model.observation,distributed,context)
     observation_seconds=(time_ns()-stage_start)/1e9
+    _forward_stage(context,"observation done seconds=$(round(observation_seconds;digits=1))")
     timings=HybridForwardTimings(equilibrium_seconds,populations_seconds,synthesis_seconds,
         observation_seconds,(time_ns()-total_start)/1e9)
     (spectrum=workspace.output,equilibrium=outcome,timings=timings,valid=true)

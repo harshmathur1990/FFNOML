@@ -3,6 +3,7 @@ module FFNOInversion
 using Dates
 using HDF5
 using LinearAlgebra
+using ProgressMeter: Progress, next!, finish!
 using Libdl
 using Serialization
 using SHA

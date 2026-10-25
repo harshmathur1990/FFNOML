@@ -280,9 +280,12 @@ function run_inversion!(config::RunConfig,root_inputs,
                 join(result.equilibrium.messages,"; ")))
             provenance=parallel_provenance(context,distributed.tile;capabilities=["intensity","non_prd","forward","fsdp_distributed_h_slab"])
             _equilibrium_provenance!(provenance,model,result.equilibrium)
-            return InversionRunResult(nothing,gather_spectrum(workspace.output,distributed,context),
+            _forward_stage(context,"gather begin")
+            gathered=InversionRunResult(nothing,gather_spectrum(workspace.output,distributed,context),
                 gather_atmosphere(distributed,context),_gather_populations(workspace.populations,distributed,context),
                 nothing,provenance)
+            _forward_stage(context,"gather done")
+            return gathered
         end
         local_observation=distribute_observation(Float64,isroot(context) ? root_inputs.observation : nothing,
             metadata.observation_shape,config.synthesis.wavelength_m,config.stokes,context)

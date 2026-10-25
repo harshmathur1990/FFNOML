@@ -1,6 +1,9 @@
 abstract type AbstractSynthesizer end
 function synthesize! end
 
+"""When true (forward! sets it on the root rank), synthesis prints progress lines to stdout."""
+const SYNTHESIS_PROGRESS=Base.ScopedValues.ScopedValue(false)
+
 struct ScalarFormalSolver <: AbstractFormalSolver end
 struct OpacityContributor{M<:AbstractLineOpacityModel,P}
     model::M; populations::P
@@ -98,9 +101,9 @@ function synthesize!(cube::SpectralCube{T},setups::AbstractVector{<:RegionSynthe
                      redistribution::AbstractRedistributionModel,atmosphere::Atmosphere3D,
                      populations=nothing,cache=nothing) where T
     threaded=_mixed_synthesis_cache(cube,redistribution,atmosphere,cache)
-    for (setup,range) in zip(setups,_region_ranges(cube.wavelength_m,setups))
+    for (i,(setup,range)) in enumerate(zip(setups,_region_ranges(cube.wavelength_m,setups)))
         _synthesize_mixed!(@view(cube.data[range,:,:,:]),setup.wavelength_vacuum_m,setup.synthesizer,
-                           atmosphere,populations,threaded)
+                           atmosphere,populations,threaded;label="region=$i/$(length(setups)) wavelengths=$(length(range))")
     end
     cube
 end
@@ -133,10 +136,14 @@ function _mixed_synthesis_cache(cube::SpectralCube{T},redistribution,atmosphere,
 end
 
 """Opacity, emissivity and formal solution for every column; `data` is (λ, Stokes, x, y) on `wavelength`."""
-function _synthesize_mixed!(data,wavelength,model::MixedIntensitySynthesizer,atmosphere,populations,threaded)
-    nx,ny=size(data,3),size(data,4); nλ=length(wavelength)
+function _synthesize_mixed!(data,wavelength,model::MixedIntensitySynthesizer,atmosphere,populations,threaded;
+                            label="wavelengths=$(length(wavelength))")
+    nx,ny=size(data,3),size(data,4); nλ=length(wavelength); ncolumns=nx*ny
     size(data,1)==nλ || throw(DimensionMismatch("spectral slice and wavelength grid differ"))
-    Threads.@threads :static for column in 1:nx*ny
+    # Rank-0 progress bar (as in Forward.jl); updates at most every 10 s to keep Slurm logs small.
+    progress=Progress(ncolumns;desc="Synthesis $label (rank-0 slab) ",dt=10,output=stdout,
+                      enabled=SYNTHESIS_PROGRESS[])
+    Threads.@threads :static for column in 1:ncolumns
         x=(column-1)%nx+1; y=(column-1)÷nx+1
         work=threaded.workspaces[Threads.threadid()]
         extinction=@view(work.extinction[:,1:nλ]); emissivity=@view(work.emissivity[:,1:nλ])
@@ -147,7 +154,9 @@ function _synthesize_mixed!(data,wavelength,model::MixedIntensitySynthesizer,atm
                                     atmosphere,x,y,contributor_populations)
         end
         formal_solve!(@view(data[:,1,x,y]),model.solver,extinction,emissivity,@view(atmosphere.z[:,x,y]))
+        next!(progress)
     end
+    finish!(progress)
     data
 end
 
