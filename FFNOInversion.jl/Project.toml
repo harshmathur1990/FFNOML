@@ -23,7 +23,7 @@ TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
 FFNOInversionMuspelExt = "Muspel"
 
 [sources]
-HSEMHS = {url = "https://github.com/harshmathur1990/1DHSE3dMHS.git", rev = "a5cdc9edac882127f46664fc5793c58ee55d7131", subdir = "HSEMHS"}
+HSEMHS = {url = "https://github.com/harshmathur1990/1DHSE3dMHS.git", rev = "c8bf91ee51bd69f84d7248ef6415ba9d24f1940e", subdir = "HSEMHS"}
 Muspel = {url = "https://github.com/harshmathur1990/Muspel.jl.git", rev = "01ec68da389be75c9ce31494a910095d3590499a"}
 
 [compat]

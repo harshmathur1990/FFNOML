@@ -56,7 +56,7 @@ end
 const _EQ_KEYS = ("backend","model","gravity_m_s2","eos_table_file","on_nonconvergence","column_z","column_ltau")
 const _COLUMN_Z_KEYS = Dict("anchor"=>:anchor,"P_ref_pa"=>:P_ref,"z_ref_m"=>:z_ref,"n_sub"=>:n_sub,"adapt"=>:adapt,
     "rk_tol"=>:rk_tol,"n_sub_max"=>:n_sub_max,"tau_top"=>:tau_top,"H_max_m"=>:H_max,"mu"=>:mu)
-const _COLUMN_LTAU_KEYS = Dict("cap_per_dex"=>:cap_per_dex,"align"=>:align)
+const _COLUMN_LTAU_KEYS = Dict("align"=>:align)
 
 function _option_value(field,value)
     field in (:anchor,:tau_top) && return Symbol(lowercase(String(value)))

@@ -12,7 +12,8 @@ Status: accepted, 24 October 2026 (HSEMHS integration Phase 3). Supersedes ADR-0
 - **HSEMHS is the authority on the pressure boundary.** FFNO accepts no top pressure (`pressure_top_*` are rejected).
   Native z: `[equilibrium.column_z]` carries HSEMHS's `anchor`, `P_ref_pa` (required), `z_ref_m` and column options
   with HSEMHS names and semantics. Native log tau: no anchor; the τ-hydrostatic top closure sets the pressure;
-  `[equilibrium.column_ltau]` carries `cap_per_dex`, `align`. HSEMHS's PoissonZ anchor damps rather than fixes the
+  `[equilibrium.column_ltau]` carries `align`. (HSEMHS no longer caps the rise of ln P in the τ-grid column HSE;
+  heights strictly decrease and a column leaving the EOS table is reported invalid.) HSEMHS's PoissonZ anchor damps rather than fixes the
   anchor-cell mean ln P; that is intended (user decision).
 - **Coordinates.** Native z: `atmosphere.z` is the axis broadcast, `logtau500` is HSEMHS's column-dependent result.
   Native log tau: `logtau500` is the axis broadcast, `z` is HSEMHS's reconstructed height (aligned on P + B²/2μ₀ and

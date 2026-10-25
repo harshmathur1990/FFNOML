@@ -211,8 +211,8 @@ version = "2.1.2+0"
 
 [[deps.HSEMHS]]
 deps = ["Dates", "DelimitedFiles", "FFTW", "HDF5", "Libdl", "LinearAlgebra", "MPI", "MPIPreferences", "OffsetArrays", "Printf", "Random", "SHA", "Statistics", "TOML"]
-git-tree-sha1 = "359b5c4249c26fae26b4a8eebe47e1a492967d0a"
-repo-rev = "a5cdc9edac882127f46664fc5793c58ee55d7131"
+git-tree-sha1 = "ab605ae55898497823d2fd1e99f34500e711a6b2"
+repo-rev = "c8bf91ee51bd69f84d7248ef6415ba9d24f1940e"
 repo-subdir = "HSEMHS"
 repo-url = "https://github.com/harshmathur1990/1DHSE3dMHS.git"
 uuid = "3f8a2c4e-6b1d-4e7a-9c55-2d0f7e1a9b31"

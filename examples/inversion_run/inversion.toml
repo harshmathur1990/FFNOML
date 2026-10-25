@@ -40,7 +40,6 @@ on_nonconvergence = "reject_trial"             # or "abort"
 
 # Native log tau: no pressure anchor; HSEMHS's tau-hydrostatic top closure sets the pressure.
 [equilibrium.column_ltau]
-cap_per_dex = 50.0           # largest rise of ln P per dex in tau
 align = "ptot"               # "ptot": P + B^2/2mu0 equal at one height (B = 0 if no field is given); "none"
 [grid]
 dx_m = 48000.0
