@@ -156,34 +156,64 @@ function _formal_solve_vjp!(chi_bar,eta_bar,z_bar,::ScalarFormalSolver,chi,eta,z
     nz,nlambda=size(chi); length(output_bar)==nlambda || throw(DimensionMismatch(
         "formal-solver cotangent wavelength count differs"))
     fill!(chi_bar,zero(eltype(chi_bar))); fill!(eta_bar,zero(eltype(eta_bar)))
+    T=eltype(chi); n=_MAX_SUBSTEPS+1
+    c=zeros(T,n); e=zeros(T,n); s=zeros(T,n); I=zeros(T,n); c_bar=zeros(T,n); s_bar=zeros(T,n)
     for l in 1:nlambda
-        source=(@view eta[:,l])./(@view chi[:,l])
-        intensity_before=zeros(eltype(chi),nz)
-        intensity=source[nz]; intensity_before[nz]=intensity
+        # forward: the intensity entering each step (sub-steps follow formal_solve!)
+        intensity_before=zeros(T,nz)
+        intensity=eta[nz,l]/chi[nz,l]
         for k in nz-1:-1:1
-            dz=z[k+1]-z[k]; average_chi=(chi[k,l]+chi[k+1,l])/2
-            dt=abs(dz)*average_chi
-            w1,w2,w3,_,_,_=_formal_weights_derivative(dt)
             intensity_before[k]=intensity
-            intensity=w1*intensity+w2*source[k+1]+w3*source[k]
+            m=_substeps(chi[k+1,l],chi[k,l],eta[k+1,l],eta[k,l]); h=abs(z[k+1]-z[k])/m
+            for q in 0:m
+                c[q+1]=_substep_value(chi[k+1,l],chi[k,l],q,m); e[q+1]=_substep_value(eta[k+1,l],eta[k,l],q,m)
+                s[q+1]=e[q+1]/c[q+1]
+            end
+            for q in 1:m
+                w1,w2,w3,_,_,_=_formal_weights_derivative(h*(c[q]+c[q+1])/2)
+                intensity=w1*intensity+w2*s[q]+w3*s[q+1]
+            end
         end
-        source_bar=zeros(eltype(chi),nz); intensity_bar=output_bar[l]
+        # reverse, step by step from the top; each step's sub-points are recomputed from its two grid points
+        intensity_bar=output_bar[l]
         for k in 1:nz-1
-            dz=z[k+1]-z[k]; average_chi=(chi[k,l]+chi[k+1,l])/2
-            dt=abs(dz)*average_chi
-            w1,w2,w3,dw1,dw2,dw3=_formal_weights_derivative(dt)
-            dt_bar=intensity_bar*(dw1*intensity_before[k]+dw2*source[k+1]+dw3*source[k])
-            source_bar[k+1]+=intensity_bar*w2; source_bar[k]+=intensity_bar*w3
-            intensity_bar*=w1
-            chi_bar[k,l]+=dt_bar*abs(dz)/2; chi_bar[k+1,l]+=dt_bar*abs(dz)/2
-            dz_bar=dt_bar*sign(dz)*average_chi
-            z_bar[k+1]+=dz_bar; z_bar[k]-=dz_bar
+            dz=z[k+1]-z[k]
+            m=_substeps(chi[k+1,l],chi[k,l],eta[k+1,l],eta[k,l]); h=abs(dz)/m
+            I[1]=intensity_before[k]
+            for q in 0:m
+                c[q+1]=_substep_value(chi[k+1,l],chi[k,l],q,m); e[q+1]=_substep_value(eta[k+1,l],eta[k,l],q,m)
+                s[q+1]=e[q+1]/c[q+1]; c_bar[q+1]=zero(T); s_bar[q+1]=zero(T)
+            end
+            for q in 1:m
+                w1,w2,w3,_,_,_=_formal_weights_derivative(h*(c[q]+c[q+1])/2)
+                I[q+1]=w1*I[q]+w2*s[q]+w3*s[q+1]
+            end
+            for q in m:-1:1
+                average_chi=(c[q]+c[q+1])/2
+                w1,w2,w3,dw1,dw2,dw3=_formal_weights_derivative(h*average_chi)
+                dt_bar=intensity_bar*(dw1*I[q]+dw2*s[q]+dw3*s[q+1])
+                s_bar[q]+=intensity_bar*w2; s_bar[q+1]+=intensity_bar*w3
+                intensity_bar*=w1
+                c_bar[q]+=dt_bar*h/2; c_bar[q+1]+=dt_bar*h/2
+                dz_bar=dt_bar*sign(dz)*average_chi/m
+                z_bar[k+1]+=dz_bar; z_bar[k]-=dz_bar
+            end
+            # sub-point values -> grid values: s = e/c, c and e log-linear in q/m between points k+1 and k
+            for q in 0:m
+                cb=c_bar[q+1]-s_bar[q+1]*s[q+1]/c[q+1]; eb=s_bar[q+1]/c[q+1]
+                if q==0
+                    chi_bar[k+1,l]+=cb; eta_bar[k+1,l]+=eb
+                elseif q==m
+                    chi_bar[k,l]+=cb; eta_bar[k,l]+=eb
+                else
+                    t=q/m
+                    chi_bar[k+1,l]+=cb*c[q+1]*(1-t)/chi[k+1,l]; chi_bar[k,l]+=cb*c[q+1]*t/chi[k,l]
+                    eta_bar[k+1,l]+=eb*e[q+1]*(1-t)/eta[k+1,l]; eta_bar[k,l]+=eb*e[q+1]*t/eta[k,l]
+                end
+            end
         end
-        source_bar[nz]+=intensity_bar
-        for k in 1:nz
-            eta_bar[k,l]+=source_bar[k]/chi[k,l]
-            chi_bar[k,l]-=source_bar[k]*eta[k,l]/chi[k,l]^2
-        end
+        eta_bar[nz,l]+=intensity_bar/chi[nz,l]
+        chi_bar[nz,l]-=intensity_bar*eta[nz,l]/chi[nz,l]^2
     end
     chi_bar,eta_bar,z_bar
 end

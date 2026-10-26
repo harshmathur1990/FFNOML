@@ -106,6 +106,35 @@ end
     @test any(!iszero,pop_bar[:CA]) && any(!iszero,pop_bar[:H])
 end
 
+@testset "Formal solver sub-steps a jump in opacity and emissivity" begin
+    T=Float64
+    solve(c,e,z)=begin out=zeros(T,size(c,2)); formal_solve!(out,ScalarFormalSolver(),c,e,z); out end
+    # every step refined n times, χ and η log-linear: the reference for the sub-stepped coarse column
+    refine(v,n)=vcat([exp.((1 .- (0:n-1)./n).*log(v[k]) .+ (0:n-1)./n.*log(v[k+1])) for k in 1:length(v)-1]...,[v[end]])
+    function old_solve(c,e,z)       # the scheme without sub-steps
+        nz=length(z); source=e[nz]/c[nz]; intensity=source
+        for k in nz-1:-1:1
+            w1,w2,w3=FFNOInversion._formal_weights(abs(z[k+1]-z[k])*(c[k]+c[k+1])/2)
+            next_source=e[k]/c[k]; intensity=w1*intensity+w2*source+w3*next_source; source=next_source
+        end
+        intensity
+    end
+
+    # hot, transparent top (S = 1e4) over cool, opaque gas (S = 1): one optically thick step carries the jump
+    z=collect(range(10,0,length=21)); hot=z.>5.2
+    chi=ifelse.(hot,1e-9,1e3 .* exp.(-z)); source=ifelse.(hot,1e4,1.0); eta=chi.*source
+    coarse=solve(reshape(chi,:,1),reshape(eta,:,1),z)[1]
+    zfine=vcat([collect(range(z[k],z[k+1],length=201))[1:200] for k in 1:length(z)-1]...,[z[end]])
+    fine=solve(reshape(refine(chi,200),:,1),reshape(refine(eta,200),:,1),zfine)[1]
+    @test old_solve(chi,eta,z)>100
+    @test coarse<2
+    @test coarse≈fine rtol=0.05
+
+    # smooth columns (no jump above e per step) are unchanged
+    chi=1e2 .* exp.(-0.9 .* z); eta=chi.*(1 .+ 0.1 .* (10 .- z))
+    @test solve(reshape(chi,:,1),reshape(eta,:,1),z)[1]==old_solve(chi,eta,z)
+end
+
 @testset "Log-tau formal integration (native log10 tau500 grid with chi500)" begin
     T=Float64; nx,ny=2,1
     column(v,nz)=repeat(reshape(T.(v),nz,1,1),1,nx,ny)
@@ -129,8 +158,9 @@ end
     @test solve(atmos,reshape(chi500,:,1),reshape(chi500.*source,:,1))≈4 rtol=1e-2
 
     # Transition region in one grid step: hot (S large, χ500 tiny) above cool gas, 9600 km apart in HSE height.
-    # The z trapezoid charges the cool opacity over that height and returns the coronal source function; the
-    # log-tau integration uses the step's true Δτ500 (~1e-6) and returns the photospheric value.
+    # The log-tau integration uses the step's true Δτ500 (~1e-6) and returns the photospheric value. Without
+    # sub-steps the z trapezoid charged the cool opacity over that height and returned the coronal source
+    # function (> 100); sub-stepping the jump in χ and η now keeps the z column photospheric too.
     logtau=collect(range(-6.0,1.0,length=71)); tau=exp10.(logtau)
     hot=logtau.<=-5.85
     chi500=ifelse.(hot,1e-13,1e-4 .* tau.^0.3); source=ifelse.(hot,1e3,1 .+ tau)   # dense cool gas below
@@ -141,7 +171,7 @@ end
     with_tau=solve(atmosphere(logtau,chi500,z),chi,eta)
     with_z=solve(atmosphere(logtau,chi500,z;tau=false),chi,eta)
     @test with_tau<2.5
-    @test with_z>100
+    @test with_z<2.5
 
     # VJP: χ500 and population cotangents against central differences.
     logtau=collect(range(-5,1,length=13)); nz=length(logtau); tau=exp10.(logtau)

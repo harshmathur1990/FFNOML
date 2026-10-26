@@ -101,6 +101,18 @@ end
         solve(chi.-epsilon.*chi_tangent,eta.-epsilon.*eta_tangent,z.-epsilon.*z_tangent))./(2epsilon)
     @test isapprox(dot(jvp,output_tangent),sum(chi_tangent.*chi_bar)+sum(eta_tangent.*eta_bar)+dot(z_tangent,z_bar);
         rtol=2e-6,atol=2e-7)
+
+    # the same through sub-stepped steps (χ and η jump by e^3 to e^14 between points)
+    chi=T[1e-6 2e-6; 3e-3 1e-3; 0.4 0.5; 2.0 3.0]; eta=chi.*T[1e3 2e3; 50 20; 1.5 1.2; 1.0 1.1]; z=T[3,2,1,0]
+    @test FFNOInversion._substeps(chi[2,1],chi[1,1],eta[2,1],eta[1,1])>1
+    output_tangent=randn(T,2); chi_tangent=randn(T,4,2).*chi; eta_tangent=randn(T,4,2).*eta; z_tangent=randn(T,4)
+    chi_bar=zeros(T,4,2); eta_bar=zeros(T,4,2); z_bar=zeros(T,4)
+    FFNOInversion._formal_solve_vjp!(chi_bar,eta_bar,z_bar,ScalarFormalSolver(),chi,eta,z,output_tangent)
+    solve2(c,e,zz)=begin out=zeros(T,2); formal_solve!(out,ScalarFormalSolver(),c,e,zz); out end
+    jvp=(solve2(chi.+epsilon.*chi_tangent,eta.+epsilon.*eta_tangent,z.+epsilon.*z_tangent)-
+        solve2(chi.-epsilon.*chi_tangent,eta.-epsilon.*eta_tangent,z.-epsilon.*z_tangent))./(2epsilon)
+    @test isapprox(dot(jvp,output_tangent),sum(chi_tangent.*chi_bar)+sum(eta_tangent.*eta_bar)+dot(z_tangent,z_bar);
+        rtol=2e-6,atol=2e-7)
 end
 
 @testset "Phase 6 complete mixed NLTE plus Kurucz objective pullback" begin

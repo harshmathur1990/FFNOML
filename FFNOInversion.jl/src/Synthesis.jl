@@ -63,21 +63,49 @@ SynthesisCache(::Type{T},nz,nλ) where T<:AbstractFloat=SynthesisCache(zeros(T,n
 ThreadedSynthesisCache(::Type{T},nz,nλ;threads=Threads.maxthreadid()) where T<:AbstractFloat =
     ThreadedSynthesisCache([SynthesisCache(T,nz,nλ) for _ in 1:threads])
 
+const _MAX_LOG_JUMP=1.0      # largest change of ln χ or ln η within one (sub-)step
+const _MAX_SUBSTEPS=256
+
+"""Sub-steps for the step between depth points `a` and `b`: one unless ln χ or ln η changes by more than
+`_MAX_LOG_JUMP`. Across a transition region on a 0.1 dex log τ grid, χ can rise 10⁸ and S fall 10⁵ in one step;
+a source function linear in τ over that optically thick step gives the hot end's S a weight 1/Δτ and the
+emergent intensity is set by the corona. Sub-stepping with χ and η log-linear in the integration variable puts
+the opacity where the gas is cool."""
+@inline function _substeps(χa,χb,ηa,ηb)
+    (χa>0 && χb>0 && ηa>0 && ηb>0) || return 1
+    jump=max(abs(log(χb/χa)),abs(log(ηb/ηa)))
+    jump>_MAX_LOG_JUMP || return 1
+    min(ceil(Int,jump/_MAX_LOG_JUMP),_MAX_SUBSTEPS)
+end
+"""Value at sub-point `q` of `m` between `a` (q = 0) and `b` (q = m), log-linear in between."""
+@inline _substep_value(a,b,q,m)=q==0 ? a : q==m ? b : (t=oftype(a,q/m); exp((1-t)*log(a)+t*log(b)))
+
+@inline function _formal_weights(dt)
+    if dt>40
+        w1=zero(dt); w2=one(dt)/dt; w3=one(dt)-w2
+    elseif dt>0.01
+        w1=exp(-dt); u0=(one(dt)-w1)/dt; w2=u0-w1; w3=one(dt)-u0
+    else
+        w1=one(dt)-dt+dt^2/2; w2=(one(dt)/2-dt/3)*dt; w3=(one(dt)/2-dt/6)*dt
+    end
+    w1,w2,w3
+end
+
+"""Short-characteristic formal solution, source function linear in τ per (sub-)step, from the bottom point
+`nz` (I = S) to the top point 1. Steps where χ or η jump are sub-stepped (see `_substeps`)."""
 function formal_solve!(out,::ScalarFormalSolver,χ,η,z)
     nz,nλ=size(χ); length(z)==nz || throw(DimensionMismatch("z column length mismatch"))
     @inbounds for l in 1:nλ
         source=η[nz,l]/χ[nz,l]; intensity=source
         for k in nz-1:-1:1
-            next_source=η[k,l]/χ[k,l]
-            dt=abs(z[k+1]-z[k])*(χ[k,l]+χ[k+1,l])/2
-            if dt>40
-                w1=zero(dt); w2=one(dt)/dt; w3=one(dt)-w2
-            elseif dt>0.01
-                w1=exp(-dt); u0=(one(dt)-w1)/dt; w2=u0-w1; w3=one(dt)-u0
-            else
-                w1=one(dt)-dt+dt^2/2; w2=(one(dt)/2-dt/3)*dt; w3=(one(dt)/2-dt/6)*dt
+            m=_substeps(χ[k+1,l],χ[k,l],η[k+1,l],η[k,l])
+            h=abs(z[k+1]-z[k])/m; chi_prev=χ[k+1,l]
+            for q in 1:m
+                c=_substep_value(χ[k+1,l],χ[k,l],q,m); e=_substep_value(η[k+1,l],η[k,l],q,m)
+                next_source=e/c
+                w1,w2,w3=_formal_weights(h*(chi_prev+c)/2)
+                intensity=w1*intensity+w2*source+w3*next_source; source=next_source; chi_prev=c
             end
-            intensity=w1*intensity+w2*source+w3*next_source; source=next_source
         end
         out[l]=intensity
     end
