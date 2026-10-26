@@ -15,6 +15,21 @@ function _muspel_atmosphere(atmosphere,hydrogen_populations)
         p(atmosphere.temperature),p(atmosphere.vx),p(atmosphere.vy),p(atmosphere.vz),p(atmosphere.ne),p(hi),p(hp))
 end
 
+"""Muspel's Voigt table, with the exact value Re/Im erfcx(a - iv) outside its (a, v) range.
+
+`Muspel.create_voigt_itp` extrapolates linearly (`Line()`), which goes negative for damping above the table
+(a > 10): van der Waals broadening in an HSE-collapsed column (n_H ~ 1e25 m^-3) then made the Ca 8542 line
+opacity about -1e3 m^-1 and the formal solution grow without bound.
+"""
+struct BoundedVoigt{I,T}
+    table::I
+    a_min::T
+    a_max::T
+    v_max::T
+end
+@inline (f::BoundedVoigt)(a,v)=(f.a_min<=a<=f.a_max && abs(v)<=f.v_max) ? f.table(a,abs(v)) :
+    Muspel.erfcx(complex(Float64(a),-Float64(abs(v))))
+
 function FFNOInversion.build_muspel_line_model(atmosphere,hydrogen_populations,atom_file::AbstractString,line_index::Integer,
                                                 lower_level::Integer,upper_level::Integer;
                                                 voigt=(a_min=1f-4,a_max=1f1,a_n=20000,v_min=0f0,v_max=5f2,v_n=2500),
@@ -24,8 +39,9 @@ function FFNOInversion.build_muspel_line_model(atmosphere,hydrogen_populations,a
     names=("Al.yaml","C.yaml","Ca.yaml","Fe.yaml","H_6.yaml","He.yaml","KI.yaml","Mg.yaml","N.yaml","Na.yaml","NiI.yaml","O.yaml","S.yaml","Si.yaml")
     files=[joinpath(Muspel.AtomicData.get_atom_dir(),name) for name in names]
     continuum=Muspel.get_σ_itp(matmos,line.λ0,files)
-    vitp=Muspel.create_voigt_itp(LinRange(Float32(voigt.a_min),Float32(voigt.a_max),voigt.a_n),
-                                  LinRange(Float32(voigt.v_min),Float32(voigt.v_max),voigt.v_n))
+    table=Muspel.create_voigt_itp(LinRange(Float32(voigt.a_min),Float32(voigt.a_max),voigt.a_n),
+                                   LinRange(Float32(voigt.v_min),Float32(voigt.v_max),voigt.v_n))
+    vitp=BoundedVoigt(table,Float32(voigt.a_min),Float32(voigt.a_max),Float32(voigt.v_max))
     MuspelLineOpacityModel(line,continuum,vitp,hydrogen_populations,Int(lower_level),Int(upper_level),include_continuum)
 end
 

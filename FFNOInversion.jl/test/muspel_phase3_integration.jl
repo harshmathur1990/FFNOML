@@ -26,6 +26,16 @@ import Muspel
     ma=Muspel.Atmosphere3D(1,1,nz,T[0],T[0],vec(z),temp,zeros(T,shape),zeros(T,shape),zeros(T,shape),ne,hi,Array(@view(hp[:,:,:,6])))
     col=ma[:,1,1]; buf=Muspel.RTBuffer(nz,length(wave),T)
     Muspel.calc_line_prep!(model.line,buf,col,model.continuum)
-    Muspel.calc_line_1D!(model.line,buf,model.line.λ,col,vec(hp[:,:,:,3]),vec(hp[:,:,:,2]),model.voigt)
+    Muspel.calc_line_1D!(model.line,buf,model.line.λ,col,vec(hp[:,:,:,3]),vec(hp[:,:,:,2]),model.voigt.table)
     @test isapprox(cube.data[:,1,1,1],buf.intensity;rtol=5e-4,atol=2e-6)
+
+    # Outside the table the Voigt function is exact (Faddeeva) instead of the linear extrapolation, which went
+    # negative for damping a > a_max and gave negative line opacity in HSE-collapsed columns.
+    exact(a,v)=real(Muspel.erfcx(complex(Float64(a),-Float64(v))))
+    @test real(model.voigt(2f0,3f0))≈exact(2,3) rtol=1e-3
+    for (a,v) in ((25f0,0f0),(25f0,40f0),(300f0,2f0),(1f0,800f0),(1f-6,0.5f0))
+        @test real(model.voigt(a,v))≈exact(a,v) rtol=1e-12
+        @test real(model.voigt(a,v))>0
+    end
+    @test real(model.voigt.table(40f0,1f0))<0   # the extrapolation this replaces (exact: +0.0141)
 end
