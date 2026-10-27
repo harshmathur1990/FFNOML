@@ -81,6 +81,20 @@ psf_type = "none"
 mode = "kurucz_lte"
 linelist_file = "inputs/kurucz_6302.list"
 
+# FFNO was trained on simulation height grids, not on log tau: for a native log-tau atmosphere its populations are
+# predicted on this height mesh (each column interpolated onto it using the HSEMHS heights, extended below its
+# bottom in hydrostatic equilibrium with d ln T/d ln P = nabla) and interpolated back. On by default for log tau;
+# the values below are the defaults. Not used for a native z grid.
+[population.mesh]
+# enabled = true
+bottom_m = -1.0e6            # mesh bottom [m] (training grids: -1 to -2.5 Mm)
+top_m = 1.4e7                # mesh top [m]
+spacing_m = 2.0e4            # spacing up to uniform_top_m [m] (training grids: 12-30 km)
+uniform_top_m = 4.5e6
+stretch = 1.01               # spacing growth per point above uniform_top_m
+max_spacing_m = 1.0e5
+nabla = 0.13                 # d ln T / d ln P of the deep extension (near-adiabatic convection zone)
+
 [physics]
 redistribution = "non_prd"
 

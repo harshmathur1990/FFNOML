@@ -52,9 +52,11 @@ function build_production_model(config, distributed, workspace, context)
 
     diagnostics = get(ENV, "FFNO_GPU_DIAGNOSTICS_DIR", joinpath(RUN_DIR, "diagnostics"))
     populations = try
+        # Native log tau: FFNO predicts on a height mesh like its training grids ([population.mesh]).
         launch_fsdp_population_models(
             specs,
             context;
+            population_mesh=population_mesh_options(config),
             timeout_seconds=max(180.0, config.parallel.gpu_connect_timeout_seconds),
             diagnostics_directory=diagnostics,
         )

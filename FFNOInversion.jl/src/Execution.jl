@@ -217,7 +217,7 @@ _factory_levels(factory::InversionModelFactory,config)=factory.population_levels
 
 _is_fsdp_population_backend(model)=false
 _is_fsdp_population_backend(model::RootDistributedPopulationModel)=
-    model.root_model isa FSDPFFNOModel
+    _unwrap_population_model(model.root_model) isa FSDPFFNOModel
 _is_fsdp_population_backend(model::CompositeDistributedPopulationModel)=
     !isempty(model.models) && all(_is_fsdp_population_backend,values(model.models))
 

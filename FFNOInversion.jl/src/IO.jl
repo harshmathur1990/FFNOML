@@ -98,6 +98,7 @@ struct RunConfig{T<:AbstractFloat}
     solver::Union{PrototypeSolverOptions,LBFGSSolverOptions}
     time_index::Int
     equilibrium::EquilibriumConfig
+    population_mesh::Union{Nothing,PopulationMeshConfig{T}}
 end
 
 function _regions(cfg)
@@ -428,7 +429,22 @@ function load_config(path::AbstractString)
     parallel.enabled && parallel.decomposition!==:x_slabs && throw(ArgumentError(
         "the HSEMHS equilibrium solves on x slabs: set parallel.decomposition = \"x_slabs\" (got $(parallel.decomposition))"))
     RunConfig(atmosphere,mode,observed,weights,outputs,SynthesisGridConfig(wavelength_m,dx_m,dy_m),regions,
-        observation_model,stokes,redistribution,regularization,parallel,controls,solver,time_index,equilibrium)
+        observation_model,stokes,redistribution,regularization,parallel,controls,solver,time_index,equilibrium,
+        _population_mesh(get(cfg,"population",Dict{String,Any}()),vertical_coordinate))
+end
+
+const _POPULATION_MESH_KEYS=("enabled","bottom_m","top_m","spacing_m","uniform_top_m","stretch","max_spacing_m","nabla")
+
+"""`[population.mesh]`: the height mesh FFNO runs on for a native log-tau atmosphere (on by default there;
+`enabled = false` feeds FFNO the log-tau grid). Not used for a native height grid."""
+function _population_mesh(raw,vertical_coordinate)
+    unknown=setdiff(collect(keys(raw)),["mesh"])
+    isempty(unknown) || throw(ArgumentError("unknown key(s) in [population]: $(join(sort(unknown),", "))"))
+    mesh=get(raw,"mesh",Dict{String,Any}())
+    unknown=setdiff(collect(keys(mesh)),collect(_POPULATION_MESH_KEYS))
+    isempty(unknown) || throw(ArgumentError("unknown key(s) in [population.mesh]: $(join(sort(unknown),", "))"))
+    vertical_coordinate===:log10tau500 && Bool(get(mesh,"enabled",true)) || return nothing
+    PopulationMeshConfig(;(Symbol(k)=>Float64(v) for (k,v) in mesh if k!="enabled")...)
 end
 
 function dry_run_summary(config::RunConfig)

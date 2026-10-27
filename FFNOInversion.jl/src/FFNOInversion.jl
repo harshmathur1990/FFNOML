@@ -20,6 +20,7 @@ include("Nodes.jl")
 include("EOS.jl")
 include("ContinuumOpacity.jl")
 include("PopulationModels.jl")
+include("PopulationMesh.jl")
 include("LinePhysics.jl")
 include("Synthesis.jl")
 include("Observations.jl")
@@ -55,6 +56,7 @@ export StokesSet, SpectralCube, ObservationCube, CapabilityManifest
 export NodeField, expand_nodes
 export AbstractPopulationModel, predict_populations!, population_vjp!, MockPopulationModel
 export FFNO_INPUT_CHANNELS, PopulationMetadata, population_features, RecordedPopulationModel
+export PopulationMeshConfig, MeshPopulationModel, population_mesh, population_mesh_options, wrap_population_mesh
 export save_population_record, load_population_record
 export AbstractRedistributionModel, NonPRD, MockPRD
 export AbstractLineOpacityModel, AbstractFormalSolver, FFNOTransition, MuspelLineOpacityModel, MuspelFormalSolver, build_muspel_line_model

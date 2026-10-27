@@ -248,13 +248,17 @@ function close_fsdp_service!(service::FSDPServiceClient;
     problems
 end
 
-"""Collectively start the rank-0-controlled FSDP service and return population backends."""
-function launch_fsdp_population_models(specs::AbstractVector{FSDPModelSpec},context::ParallelContext;kwargs...)
+"""Collectively start the rank-0-controlled FSDP service and return population backends. With
+`population_mesh` (from `population_mesh_options(config)`) each model predicts on the height mesh."""
+function launch_fsdp_population_models(specs::AbstractVector{FSDPModelSpec},context::ParallelContext;
+        population_mesh=nothing,kwargs...)
     client=launch_gpu!(RootGPUCoordinator(() -> launch_fsdp_service(specs;kwargs...);
         launcher_rank=context.root),context)
+    eos=isroot(context) && population_mesh!==nothing ? HSEMHS.load_table(population_mesh.eos_table_file) : nothing
     models=Dict{Symbol,Any}()
     for spec in specs
-        root_model=isroot(context) ? FSDPFFNOModel(client,spec.name,spec.metadata,0) : nothing
+        root_model=isroot(context) ? wrap_population_mesh(FSDPFFNOModel(client,spec.name,spec.metadata,0),
+            population_mesh,eos) : nothing
         models[spec.name]=RootDistributedPopulationModel(root_model,length(spec.metadata.level_names))
     end
     CompositeDistributedPopulationModel(models)
@@ -273,15 +277,15 @@ function _close_fsdp_services_collectively!(services,context)
 end
 
 function close_distributed_population_model!(model::RootDistributedPopulationModel,context)
-    services=isroot(context) && model.root_model isa FSDPFFNOModel ?
-        FSDPServiceClient[model.root_model.service] : FSDPServiceClient[]
+    root_model=_unwrap_population_model(model.root_model)
+    services=isroot(context) && root_model isa FSDPFFNOModel ? FSDPServiceClient[root_model.service] : FSDPServiceClient[]
     _close_fsdp_services_collectively!(services,context)
 end
 function close_distributed_population_model!(model::CompositeDistributedPopulationModel,context)
     services=IdSet{FSDPServiceClient}()
     if isroot(context)
         for backend in values(model.models)
-            root_model=backend isa RootDistributedPopulationModel ? backend.root_model : nothing
+            root_model=backend isa RootDistributedPopulationModel ? _unwrap_population_model(backend.root_model) : nothing
             root_model isa FSDPFFNOModel && push!(services,root_model.service)
         end
     end
