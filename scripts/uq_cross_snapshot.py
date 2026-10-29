@@ -16,13 +16,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 
 from config import TRAIN_SPLIT, VAL_SPLIT  # noqa: E402
-
-REGIMES = {
-    "photosphere": lambda T, z: z < 0.3,
-    "chromosphere": lambda T, z: (T < 4.5) & (z >= 0.3),
-    "TR": lambda T, z: (T >= 4.5) & (T <= 5.5),
-    "corona": lambda T, z: T > 5.5,
-}
+from uq_error_atlas import REGIMES  # noqa: E402
 
 
 def role(case):

@@ -12,13 +12,14 @@ Two routes:
                 ranks with DistributedGroupNorm, as FFNONet.ffno_predict_populations_distributed_full.
                 Each MC sample is a full-domain forward, so mc_std_log is the plain sample std.
                 With --tile N, boxes larger than N x N are covered by N x N sub-boxes at stride N/2,
-                each run through the same distributed operator and Hann-blended; mc_std_log is then
-                sqrt(sum_t w_t var_t / sum_t w_t). Use this when the whole box does not fit the GPUs.
+                each run through the same distributed operator and Hann-blended. Tiles draw independent
+                dropout masks, so the std of the stitched realization sum_t w_t y_t / W is
+                mc_std_log = sqrt(sum_t w_t^2 var_t) / W. Use this when the whole box does not fit the GPUs.
   --route tiled Hann-stitched patch x patch tiles (FFNONet._predict_tiled). GroupNorm statistics
                 are then per tile, so this is a different operator (~40% larger error for
-                en024048_hion_385/H with 40x40 tiles); kept for comparison. Here mc_std_log is
-                sqrt(sum_t w_t var_t / sum_t w_t) and tile_std_log is the Hann-weighted spread of
-                overlapping deterministic tiles.
+                en024048_hion_385/H with 40x40 tiles); kept for comparison. mc_std_log is the std of
+                the stitched realization, as above. tile_std_log is a tile-disagreement diagnostic (the
+                Hann-weighted spread of overlapping deterministic tiles), not a predictive variance.
 
 MC dropout keeps the model in eval mode and switches only the FFNOBlock3dBalanced spec_drop /
 vert_drop modules to train mode. The production checkpoints were trained with p=0.08 on both
@@ -74,6 +75,8 @@ def parse_args():
     p.add_argument("--patch", type=int, default=40, help="tiled route")
     p.add_argument("--stride", type=int, default=20, help="tiled route")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--z-range", type=float, nargs=2, metavar=("ZMIN", "ZMAX"),
+                   help="crop the columns to ZMIN <= z <= ZMAX (Mm) before prediction (context experiments)")
     p.add_argument("--device", default="cuda")
     return p.parse_args()
 
@@ -95,7 +98,15 @@ def git_revision():
 
 def load_inputs(args, h_slab=slice(None)):
     """Return raw (unnormalized) X [1,Cin,D,nx,ny], z_scale [1,D,nx,ny] in Mm, dx, dy in m,
-    restricted to rows h_slab of nx."""
+    restricted to rows h_slab of nx and, with --z-range, to the selected heights."""
+    X, z, dx, dy, src = _load_inputs(args, h_slab)
+    if args.z_range:
+        keep = (z[0, :, 0, 0] >= args.z_range[0]) & (z[0, :, 0, 0] <= args.z_range[1])
+        X, z = X[:, :, keep], z[:, keep]
+    return X, z, dx, dy, src
+
+
+def _load_inputs(args, h_slab):
     if args.atmos:
         from pipeline import load_pred_data
         from FFNONet import _make_inputs_ch_first, _normalize_z_scale, _expand_z_to_match_rho
@@ -182,7 +193,7 @@ def predict_tiled(model, mods, X, z, dx, dy, patch, stride, n_samples, batch, me
             mean = s1 / n_samples
             var = (s2 - n_samples * mean * mean).clamp_min(0) / max(n_samples - 1, 1)
             acc["mc"][sl] += (mean * w2).cpu()
-            acc["var"][sl] += (var * w2).cpu()
+            acc["var"][sl] += (var * w2 * w2).cpu()
             set_mc(mods, False)
 
         W[:, :, i0:i0 + patch, j0:j0 + patch] += w2c
@@ -198,7 +209,7 @@ def predict_tiled(model, mods, X, z, dx, dy, patch, stride, n_samples, batch, me
     }
     if n_samples > 0:
         out["mc_mean_log"] = acc["mc"] / W
-        out["mc_std_log"] = (acc["var"] / W).sqrt()
+        out["mc_std_log"] = acc["var"].sqrt() / W
     return out
 
 
@@ -307,12 +318,12 @@ def main():
                 for k_, v in tile.items():
                     if k_ not in acc:
                         acc[k_] = np.zeros(v.shape[:2] + (nx, ny), np.float32)
-                    acc[k_][sl] += v * w2
+                    acc[k_][sl] += v * (w2 * w2 if k_ == "mc_var" else w2)
                 W[..., i0:i0 + tx, j0:j0 + ty] += w2[0, 0]
             if multi:
                 log0(f"tile {k + 1}/{len(xs) * len(ys)} at ({i0},{j0}) {time.time() - t0:.0f}s")
         if rank == 0:
-            res = {k_: torch.from_numpy(v / W) for k_, v in acc.items()}
+            res = {k_: torch.from_numpy(v / (W * W if k_ == "mc_var" else W)) for k_, v in acc.items()}
             if "mc_var" in res:
                 res["mc_std_log"] = res.pop("mc_var").sqrt()
     else:
@@ -341,6 +352,7 @@ def main():
             route=args.route, ranks=world, patch=args.patch if not full else (args.tile or 0),
             stride=args.stride if not full else (args.tile // 2 if args.tile else 0), n_samples=args.samples,
             seed=args.seed, dropout_rates=str(rates), n_dropout_modules=len(mods),
+            z_range=str(args.z_range) if args.z_range else "full",
             model_config=repr(cfg), device=torch.cuda.get_device_name() if device.startswith("cuda") else "cpu",
             seconds=elapsed,
         ))

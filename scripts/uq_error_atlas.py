@@ -6,10 +6,14 @@ Prediction and truth are both [nx, ny, nz, nlev] in the out_pop orientation (no 
 
 Writes to --out-dir:
     <case>_<atom>_summary.csv    per-level bias, MAE, quantiles of |e|, exceedance fractions,
-                                 plus uncertainty-vs-error scores when --uq is given
+                                 plus scores of each spread against |e|: the --uq spreads and the
+                                 label-free conservation_log = |log10(sum_i n_pred,i / n_tot)|
     <case>_<atom>_height.csv     the same statistics in height bins
-    <case>_<atom>_atlas.h5       median |e| and counts on (logT, logne) and (z, logT) grids,
+    <case>_<atom>_atlas.h5       median |e| (medae_*) and counts on (logT, logne) and (z, logT) grids,
                                  and a random voxel sample of descriptors, errors and uncertainties
+
+Regimes (REGIMES, mutually exclusive and exhaustive): photosphere z < 0.3 Mm; above that,
+chromosphere logT < 4.5, TR 4.5 <= logT <= 5.5, corona logT > 5.5.
 
 Usage:
     python scripts/uq_error_atlas.py --case en024048_hion_385 --atom H \
@@ -33,6 +37,12 @@ THRESHOLDS = (0.05, 0.1, 0.2, 0.3)
 LOGT_EDGES = np.arange(3.0, 7.01, 0.1)
 LOGNE_EDGES = np.arange(14.0, 22.01, 0.2)
 Z_EDGES_MM = np.arange(-1.0, 14.51, 0.25)
+REGIMES = {
+    "photosphere": lambda T, z: z < 0.3,
+    "chromosphere": lambda T, z: (z >= 0.3) & (T < 4.5),
+    "TR": lambda T, z: (z >= 0.3) & (T >= 4.5) & (T <= 5.5),
+    "corona": lambda T, z: (z >= 0.3) & (T > 5.5),
+}
 
 
 def parse_args():
@@ -48,6 +58,8 @@ def parse_args():
     p.add_argument("--out-dir", required=True)
     p.add_argument("--sample", type=int, default=2_000_000, help="voxels in the random sample table")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--z-range", type=float, nargs=2, metavar=("ZMIN", "ZMAX"),
+                   help="restrict truth and features to these heights (Mm), for --z-range predictions")
     return p.parse_args()
 
 
@@ -57,7 +69,9 @@ def load_truth(directory):
     m3d.readall()
     log_truth = np.log10(np.maximum(np.asarray(m3d.atom.n, dtype=np.float32) * 1e6, 1e-30))
     z_mm = np.asarray(m3d.geometry.z, dtype=np.float64) * 1e-8  # cm -> Mm
-    return log_truth, z_mm
+    # total element density; input-derived (rho x abundance / mean mass, verified by uq_verify_alignment.py)
+    log_ntot = np.log10(np.asarray(m3d.atom.ntot, dtype=np.float64) * 1e6).astype(np.float32)
+    return log_truth, z_mm, log_ntot
 
 
 def load_prediction(args):
@@ -74,8 +88,8 @@ def load_prediction(args):
     return np.log10(np.maximum(pops, 1e-30)), {}, path
 
 
-def load_features(args, shape):
-    """Return dict of [nx, ny, nz] float32 descriptors, or {} if the solving set is missing."""
+def load_features(args, shape, zsel=slice(None)):
+    """Return dict of [nx, ny, nz] float32 descriptors (heights zsel), or {} if the solving set is missing."""
     path = args.inputs or os.path.join(MODEL_DIR, f"3D_sim_predict_{args.case}.hdf5")
     if os.path.exists(path):
         with h5py.File(path, "r") as f:
@@ -90,9 +104,51 @@ def load_features(args, shape):
     else:
         print(f"no solving set at {path} and no --atmos; regime maps skipped")
         return {}
+    feats = {k: np.ascontiguousarray(v[:, :, zsel]) for k, v in feats.items()}
     if feats["logT"].shape != shape[:3]:
         raise ValueError(f"solving set {feats['logT'].shape} does not match populations {shape[:3]}")
     return feats
+
+
+def dx_mm(args):
+    """Horizontal grid spacing in Mm from the mesh, or None."""
+    if not args.mesh:
+        return None
+    from pipeline import compute_dx_dy
+    dx, _ = compute_dx_dy(args.mesh)
+    return float(np.abs(np.ravel(dx)[0])) * 1e-6
+
+
+def context_descriptors(feats, z_mm, dx, idx, contrast_mm=1.0):
+    """Vertical/horizontal gradients, a horizontal log T contrast and log column mass at the sampled
+    voxels idx = (ix, iy, iz). Horizontal derivatives are periodic; without dx they are per pixel."""
+    from scipy.ndimage import uniform_filter
+    ix, iy, iz = idx
+    at = lambda a: a[ix, iy, iz]
+    h = dx if dx else 1.0
+
+    def dh(a, axis):
+        return (np.roll(a, -1, axis) - np.roll(a, 1, axis)) / (2 * h)
+
+    logT = feats["logT"]
+    out = dict(
+        dlogT_dz=at(np.gradient(logT, z_mm, axis=2)),
+        dlogrho_dz=at(np.gradient(feats["logrho"], z_mm, axis=2)),
+        dvz_dz=at(np.gradient(feats["vz"], z_mm, axis=2)),
+        gradh_logT=at(np.hypot(dh(logT, 0), dh(logT, 1))),
+        divh_v=at(dh(feats["vx"], 0) + dh(feats["vy"], 1)),
+    )
+    if dx:
+        n = max(int(round(contrast_mm / dx)), 1)
+        out[f"logT_contrast_{contrast_mm:g}Mm"] = at(logT - uniform_filter(logT, size=(n, n, 1), mode="wrap"))
+    # column mass from the top of the box, kg m^-2 (rho in kg m^-3, z in Mm)
+    order = np.argsort(z_mm)[::-1]
+    dz_m = np.abs(np.gradient(z_mm[order])) * 1e6
+    cm = np.cumsum(10.0 ** feats["logrho"][:, :, order] * dz_m, axis=2)
+    log_cm = np.empty_like(cm)
+    log_cm[:, :, order] = np.log10(cm)
+    out["log_cmass"] = at(log_cm)
+    return out
 
 
 def level_stats(e):
@@ -106,11 +162,15 @@ def level_stats(e):
 
 
 def spearman(a, b):
-    ra = np.argsort(np.argsort(a)).astype(np.float64)
-    rb = np.argsort(np.argsort(b)).astype(np.float64)
+    """Spearman correlation with average ranks for ties; NaN if either input is constant or empty."""
+    from scipy.stats import rankdata
+    if len(a) < 3:
+        return float("nan")
+    ra, rb = rankdata(a), rankdata(b)
     ra -= ra.mean()
     rb -= rb.mean()
-    return float((ra * rb).sum() / np.sqrt((ra * ra).sum() * (rb * rb).sum()))
+    den = np.sqrt((ra * ra).sum() * (rb * rb).sum())
+    return float((ra * rb).sum() / den) if den > 0 else float("nan")
 
 
 def uq_scores(err, u, rng, n_rank=2_000_000):
@@ -163,10 +223,18 @@ def main():
     rng = np.random.default_rng(args.seed)
     tag = f"{args.case}_{args.atom}"
 
-    log_truth, z_mm = load_truth(args.truth)
+    log_truth, z_mm, log_ntot = load_truth(args.truth)
+    zsel = slice(None)
+    if args.z_range:
+        zsel = (z_mm >= args.z_range[0]) & (z_mm <= args.z_range[1])
+        log_truth, z_mm, log_ntot = log_truth[:, :, zsel], z_mm[zsel], log_ntot[:, :, zsel]
     log_pred, spreads, src = load_prediction(args)
     if log_pred.shape != log_truth.shape:
         raise ValueError(f"prediction {log_pred.shape} vs truth {log_truth.shape}")
+    # label-free consistency score: |log10(sum_i n_pred,i) - log10(n_tot)|, the same for every level
+    mx = log_pred.max(-1, keepdims=True)
+    log_sum = (mx[..., 0] + np.log10((10.0 ** (log_pred - mx)).sum(-1))).astype(np.float32)
+    spreads["conservation_log"] = np.broadcast_to(np.abs(log_sum - log_ntot)[..., None], log_pred.shape)
     err = log_pred - log_truth
     nx, ny, nz, nlev = err.shape
     print(f"{tag}: {err.shape}, prediction {src}")
@@ -196,7 +264,7 @@ def main():
             hrows.append(row)
     write_csv(os.path.join(args.out_dir, f"{tag}_height.csv"), hrows)
 
-    feats = load_features(args, err.shape)
+    feats = load_features(args, err.shape, zsel)
     with h5py.File(os.path.join(args.out_dir, f"{tag}_atlas.h5"), "w") as f:
         f.attrs.update(dict(case=args.case, atom=args.atom, prediction=os.path.abspath(src),
                             truth=os.path.abspath(args.truth), error="log10(pred) - log10(truth) [dex]"))
@@ -208,8 +276,8 @@ def main():
             for lev in range(nlev):
                 a = np.abs(err[..., lev]).ravel()
                 g = f.create_group(f"level{lev + 1}")
-                g["mae_logT_logne"], g["count_logT_logne"] = binned_median(logT, logne, a, LOGT_EDGES, LOGNE_EDGES)
-                g["mae_z_logT"], g["count_z_logT"] = binned_median(zfull, logT, a, Z_EDGES_MM, LOGT_EDGES)
+                g["medae_logT_logne"], g["count_logT_logne"] = binned_median(logT, logne, a, LOGT_EDGES, LOGNE_EDGES)
+                g["medae_z_logT"], g["count_z_logT"] = binned_median(zfull, logT, a, Z_EDGES_MM, LOGT_EDGES)
                 for name, u in spreads.items():
                     g[f"{name}_logT_logne"], _ = binned_median(logT, logne, u[..., lev].ravel(),
                                                                LOGT_EDGES, LOGNE_EDGES)
@@ -220,10 +288,11 @@ def main():
             s["ix"], s["iy"], s["iz"], s["z_Mm"] = ix, iy, iz, z_mm[iz]
             for name, v in feats.items():
                 s[name] = v.ravel()[idx]
-            # vertical and horizontal log T gradients (per Mm and per pixel) as context descriptors
-            s["dlogT_dz"] = np.gradient(feats["logT"], z_mm, axis=2).ravel()[idx]
-            gx, gy = np.gradient(feats["logT"], axis=(0, 1))
-            s["gradh_logT_px"] = np.hypot(gx, gy).ravel()[idx]
+            # context descriptors at physical scales (z in Mm, horizontal spacing dx_mm, velocities km/s)
+            dx = dx_mm(args)
+            for name, v in context_descriptors(feats, z_mm, dx, (ix, iy, iz)).items():
+                s[name] = v
+            s.attrs["horizontal_derivatives"] = "per Mm" if dx else "per pixel"
             s["err"] = err.reshape(-1, nlev)[idx]
             for name, u in spreads.items():
                 s[name] = u.reshape(-1, nlev)[idx]
