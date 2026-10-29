@@ -132,6 +132,65 @@ Deliverable: a specific simulation/snapshot acquisition list. Use Olivia for the
 
 Deliverable: evidence that targeted data acquisition beats its cheaper baselines before launching a large new MULTI3D campaign.
 
+## Results so far — H, 24 labelled snapshots (2026-10-29, branch `uq-calibration`)
+
+Predictions were made on eagle7 (5 × T4) with `scripts/uq_predict.py --route full`, the same full-domain distributed operator as production. The 384³ boxes (ch024031_by200bz005 450/700/950, en024031_by100_helium_109) do not fit at full domain and used 256² Hann-blended tiles of that operator (`--tile 256`). Errors come from `scripts/uq_error_atlas.py`, and the table from `scripts/uq_cross_snapshot.py` (`uq/cross_snapshot_H.csv`). Regimes: photosphere z < 0.3 Mm; chromosphere logT < 4.5 and z ≥ 0.3 Mm; TR 4.5–5.5; corona > 5.5.
+
+**Inference route.** On en024048_hion_385 the full route reproduces production to a median of 0.002 dex. The tiling penalty, measured against the full route:
+
+| Route | Median \|Δ\| vs full | p99 | Chromosphere MAE, levels 2–5 |
+|---|---|---|---|
+| Full domain | — | — | 0.099–0.113 |
+| 192² tiles | 0.009 | 0.05 | 0.099–0.113, unchanged |
+| 40² tiles | 0.064 | 0.33 | 0.115–0.134 |
+
+The coronal and TR MAE of the 192² tiles is about 0.01 dex higher than the full route. Large tiles are therefore an acceptable fallback, but 40² tiles are a different operator and should not be used.
+
+**Chromosphere, H levels 2–5, mean MAE (dex) and bias:**
+
+| Group | Cases (MAE) |
+|---|---|
+| Train | qs 689 0.059, ch012006 836 0.078, nw 915 0.083, ch012012 910 0.091, en 465 0.098 |
+| Val | ch012006 849 0.106, qs 900 0.118, nw 940 0.123, ch012012 984 0.137, en 700 0.143 |
+| Held out, same simulation | qs 1297 0.055, qs 1100 0.058, ch012006 820 0.090, en 385/386 0.106/0.108, ch012012 834 0.106, ch012006 795 0.108, ch012012 759 0.143, nw 1050 0.244, nw 1120 0.341 |
+| Held out, new simulation | ch024031 450 0.135, 700 0.221, 950 0.313; helium 109 0.408 |
+
+Findings:
+
+- **Within a simulation, error grows with time from the training snapshot.** The clearest case is nw012023:
+
+  | nw012023 snapshot | Steps from training (915) | Chromosphere MAE (dex) |
+  |---|---|---|
+  | 940 | +25 | 0.12 |
+  | 1050 | +135 | 0.24 |
+  | 1120 | +205 | 0.34 |
+
+  ch012012_hion and en024048_hion show the same trend more weakly. qs006003_sap is flat.
+- **Large errors are coherent offsets, not noise.** Where chromospheric MAE exceeds 0.2 dex, |bias| is 0.14–0.32 dex. Examples: nw 1120 has bias −0.32 against MAE 0.34, and ch024031 950 has −0.26 against 0.31.
+  - Voxelwise spread estimates can only rank such failures by their spatial pattern. A snapshot-level novelty score is the more natural detector.
+- **Photospheric errors flag a simulation-level mismatch.** All three ch024031 snapshots carry the same photospheric bias in levels 2–5, −0.17 to −0.29 dex; every other simulation except helium is within ±0.06.
+  - Because the bias is the same at every snapshot, the cause is probably a difference in simulation setup (EOS, abundances, hydrogen treatment) rather than undersampling. Check this before acquiring more ch024031 labels.
+  - The helium run is off everywhere (photosphere −0.3 to −0.8 dex) and should be treated as out of scope until its physics is confirmed compatible.
+- **Coronal and TR errors are snapshot-wide offsets that change sign between snapshots.** Examples: nw 1120 −0.56, helium +0.80, ch024031 450 +0.27 dex at level 2. They come from non-local labels (see the earlier coronal notes) and matter little optically.
+- **MC dropout (p = 0.08, 20 samples; nw 915, en 385, nw 1050) is a weak signal.**
+  - Whole-volume Spearman ρ is −0.19 to 0.24, and in the chromosphere 0.26–0.39.
+  - RMS(error)/RMS(spread) is about 7, so the spread is badly underdispersed.
+  - It does not see the snapshot-level offsets above. Keep it only as a secondary within-snapshot ranking term.
+
+- **Training-support distance** (`scripts/uq_support_distance.py`, `uq/support_distance_H_all.csv`) is the mean distance from a voxel to its 10 nearest training voxels. The descriptors are the six inputs at the voxel and at −0.5/+0.5/+1.5 Mm, plus z, standardized on the training set.
+  - **Per voxel it is useless for H.** Chromospheric Spearman ρ against |e| for levels 2–5 lies between −0.35 and +0.26, and is mostly negative.
+  - **Per snapshot it is a moderate signal.** The rank correlation of median chromospheric distance with chromospheric MAE is ρ = 0.50 over all 24 cases (0.54 without helium). Measured as the change relative to the simulation's own training snapshot, it is ρ = 0.54 over 15 cases.
+  - In every simulation the training snapshot has the smallest distance. The ordering within nw012023 is right (915 1.30 → 940 1.65 → 1050/1120 about 1.78).
+  - **Absolute distances are not comparable across simulations.** qs006003_sap scores 0.25–0.51, while the training snapshot ch012006_836 scores 1.52. ch024031 950 (MAE 0.31) scores lower than ch012012_hion_834 (MAE 0.11). It cannot be used on its own to pick candidates.
+  - **What would improve it:** per-simulation normalization of the distance, or a descriptor that sees snapshot-wide state, such as the distribution of column structure rather than single voxels. Both are untested.
+
+**Implications for acquisition (step 7):**
+1. The cheapest gain is temporal coverage within the existing simulations: snapshots far from 915/910/465 in time. nw012023 1050/1120 are already labelled and are the obvious first retraining additions.
+2. Investigate ch024031's photospheric offset before labelling more of it.
+3. Neither MC dropout nor support distance is reliable enough to rank snapshots alone. Select initially on time distance plus diversity, and keep the retrospective test of step 8.
+
+CA has not yet been run through the 24-snapshot queue; only the 4 original cases have CA atlases (`uq/atlas_prod`).
+
 ## Resource placement
 
 | Work | Hyades suitability | Olivia trigger |
