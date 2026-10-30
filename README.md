@@ -1,20 +1,96 @@
 # FFNOML
 
-FFNOML is a training and inference pipeline for predicting NLTE populations from 3D MULTI3D/Bifrost atmospheres with Fourier Neural Operators.
+FFNOML predicts NLTE level populations in 3D solar atmospheres with Fourier Neural
+Operators, and uses those predictions to synthesize and invert chromospheric spectra.
 
-The codebase currently supports five main workflows through `pipeline.py`:
+The repository has two halves:
 
-- `--build`: build HDF5 training and validation datasets from MULTI3D outputs
-- `--train`: train a model checkpoint from the built HDF5 datasets
-- `--test`: run validation diagnostics and branch-ablation analysis on the validation set
-- `--predict`: build inference inputs for configured atmospheres and write predicted NLTE populations
-- `--fsdppredict`: run distributed full-volume prediction through `torchrun`
+1. **Python: learning NLTE populations.** `pipeline.py` builds training sets from
+   MULTI3D/Bifrost simulations, trains the FFNO3D network, validates it, and predicts
+   populations for new atmospheres (single GPU, tiled, or distributed over many GPUs).
+2. **Julia: forward synthesis and 3D inversion.**
+   [`FFNOInversion.jl`](FFNOInversion.jl/README.md) takes an atmosphere, reconstructs
+   its hydrostatic structure with HSEMHS, gets populations from the trained networks
+   through a persistent multi-GPU service, synthesizes spectra (H alpha, Ca II 8542 and
+   Kurucz LTE lines), and fits the whole 3D volume to observations with bounded L-BFGS.
 
-This README describes the code as it exists now. The current pipeline is `z_scale`-based, not column-mass-based.
+```text
+MULTI3D / Bifrost ──► pipeline.py --build ──► --train ──► checkpoint (.pt)
+                                                             │
+          atmosphere ──► --buildforpredict ──► --predict / --fsdppredict ──► populations (HDF5) ──► Forward.jl
+                                                             │
+log-tau or z atmosphere ──► FFNOInversion.jl ── HSEMHS ── FFNO service ── synthesis ──► spectra, atmosphere
+                                  ▲                                             │
+                            observations ◄──────── L-BFGS (inversion mode) ◄────┘
+```
+
+## Contents
+
+- [Repository layout](#repository-layout)
+- [Quick start](#quick-start)
+- [What the model learns](#what-the-model-learns)
+- [Data and configuration](#data-and-configuration)
+- [Installation](#installation)
+- [Pipeline modes](#pipeline-modes)
+- [Forward synthesis with Forward.jl](#forward-synthesis-with-forwardjl)
+- [Persistent FFNO service](#persistent-ffno-service)
+- [3D forward synthesis and inversion](#3d-forward-synthesis-and-inversion)
+- [Preparing inversion inputs](#preparing-inversion-inputs)
+- [Other scripts](#other-scripts)
+- [Tests](#tests)
+- [Documentation](#documentation)
+- [Caveats](#caveats)
+
+## Repository layout
+
+| Path | Role |
+| --- | --- |
+| `pipeline.py` | CLI entry point for dataset building, training, validation, prediction |
+| `config.py` | dataset splits, active atoms, model hyperparameters, paths, runtime flags |
+| `FFNONet.py` | dataset builders, HDF5 writers, training loop, validation diagnostics, inference |
+| `models/ffno_model.py` | the FFNO3D architecture |
+| `model_builder.py`, `ffno_model_factory.py` | model/loss/optimizer construction, FSDP wrapping, factory for the service |
+| `data_builder.py`, `data/dataset.py` | patch or cube datasets and dataloaders (lazy HDF5) |
+| `loss/` | composite NLTE loss, weighted MSE, gradient loss |
+| `train_utils.py`, `normalize_utils.py` | checkpoints, resume, model expansion, normalization |
+| `distributed_inference.py` | H-slab distributed FFTs and collectives for full-volume inference |
+| `ffno_fsdp_service.py`, `ffno_fsdp_runtime.py`, `ffno_fsdp_diagnostics.py` | persistent multi-GPU prediction/VJP service used by the inversion |
+| `Forward.jl` | standalone Julia synthesis from predicted (or MULTI3D) populations |
+| `FFNOInversion.jl/` | Julia forward-synthesis and inversion package ([README](FFNOInversion.jl/README.md)) |
+| `examples/` | run-directory templates for Python jobs, inversions and Olivia runtime tests |
+| `scripts/` | input builders, converters, EOS sources, comparisons, Slurm helpers |
+| `errorplots.py`, `make_paper_plots.py`, `compare_population_models.py` | analysis and figures |
+| `train_gpu.sh`, `predict_gpu.sh` | Olivia Slurm scripts for training and prediction |
+| `tests/` | Python unit tests |
+| `docs/` | architecture diagrams, paper draft, media |
+
+## Quick start
+
+Train and predict (Python):
+
+```bash
+python pipeline.py --build
+python pipeline.py --train
+python pipeline.py --test
+python pipeline.py --buildforpredict
+python pipeline.py --predict
+```
+
+Synthesize spectra from a 3D atmosphere on Olivia (Julia), after preparing a run
+directory as described in the
+[starter guide](examples/inversion_run/START_HERE.md):
+
+```bash
+FFNOML_RUN_DIR="$run" FFNO_INVERSION_CONFIG="$run/forward.toml" \
+  bash "$repo/FFNOInversion.jl/scripts/submit_olivia_inversion.sh"
+```
+
+Switch to `inversion.toml` and add `inputs/observations.h5` to invert.
 
 ## What The Model Learns
 
-The model maps atmospheric state variables to NLTE populations:
+The pipeline works on the native simulation height scale (`z_scale`), not on column
+mass. The model maps atmospheric state variables to NLTE populations:
 
 `[B, Cin, D, H, W] -> [B, Cout, D, H, W]`
 
@@ -34,18 +110,6 @@ Targets are:
 Prediction outputs are written back in linear space as:
 
 - `nlte_populations = n_NLTE [m^-3]`
-
-## Main Files
-
-- `pipeline.py`: CLI entrypoint for dataset building, training, validation testing, and prediction
-- `config.py`: dataset splits, active atoms, model hyperparameters, file paths, and runtime flags
-- `FFNONet.py`: dataset builders, HDF5 writers, training loop entrypoints, validation diagnostics, and inference
-- `model_builder.py`: model/loss/optimizer construction and optional FSDP wrapping
-- `data_builder.py`: selects patch or cube datasets and builds PyTorch dataloaders
-- `data/dataset.py`: lazy HDF5 dataset implementations
-- `train_utils.py`: checkpoint save/load, resume handling, validation helpers, and model expansion utilities
-- `Forward.jl`: downstream Julia-side forward synthesis utilities
-- `errorplots.py`: compares saved predictions against MULTI3D truth and plots error envelopes on `z_scale`
 
 ## Data And Configuration
 
@@ -152,6 +216,21 @@ Unit conversions currently applied by the pipeline:
 - `z` from mesh or geometry: `cm -> m`
 
 `dx` and `dy` are computed from the mesh and converted to meters.
+
+## Pipeline Modes
+
+`pipeline.py` takes exactly one mode flag:
+
+| Flag | Does |
+| --- | --- |
+| `--build` | build the HDF5 training and validation datasets from MULTI3D outputs |
+| `--train` | train a checkpoint (`--resume`, `--bestpath`, `--expand` modify it) |
+| `--val` | run one validation pass, print the loss terms, exit |
+| `--test` | validation diagnostics and branch ablations, written as JSON |
+| `--buildforpredict` | build the prediction solving sets (`--predname` for one atmosphere) |
+| `--predict` | predict NLTE populations, full cube or tiled |
+| `--fsdppredict` | the same through `torchrun`, distributed over GPUs by H slabs |
+| `--inspectfreqgate` | print and save the FFNO frequency-gate diagnostics (`--inspect-h`, `--inspect-w`, `--inspect-dx`, `--inspect-dy`, `--inspect-out`) |
 
 ## Dataset Build Mode
 
@@ -321,7 +400,7 @@ What it does for each configured atmosphere:
 
 1. Loads `atm3d` and `mesh`
 2. Computes `dx`, `dy`, and `z_scale`
-3. Builds a solving-set HDF5 if it does not already exist
+3. Requires the solving-set HDF5 from `--buildforpredict` (it stops with a message if the file is missing)
 4. Loads normalization stats and channel metadata from `MODEL_FILE`
 5. Runs full-cube or tiled inference
 6. Writes predicted NLTE populations in linear space
@@ -556,6 +635,7 @@ Typical usage is:
 python pipeline.py --build
 python pipeline.py --train
 python pipeline.py --test
+python pipeline.py --buildforpredict
 python pipeline.py --predict
 ```
 
@@ -594,7 +674,7 @@ It converts predicted and true NLTE populations to departure coefficients using
 the same MULTI3D LTE populations, then compares them on shared `z_scale`
 directly without interpolating to column mass.
 
-## Forward Synthesis
+## Forward Synthesis With Forward.jl
 
 `Forward.jl` is the Julia-side consumer for predicted NLTE populations and related atmospheric inputs. Use it for downstream synthesis after Python-side prediction has produced the HDF5 outputs.
 
@@ -622,6 +702,129 @@ When no Julia thread count is configured, the script restarts itself with
 `JULIA_NUM_THREADS=N` before starting Julia. The `Threads` line printed at
 startup is the number of CPU threads the synthesis can use.
 
+## Persistent FFNO Service
+
+The inversion does not call `pipeline.py`. It uses a persistent prediction service
+that keeps the trained models on the GPUs for the whole run:
+
+- `ffno_fsdp_service.py`: a socket service (protocol version 2) that answers
+  prediction and VJP requests for one or more species (H and Ca together in the
+  example) until it is told to shut down.
+- `ffno_fsdp_runtime.py`: FSDP `FULL_SHARD` parameters plus H-slab-distributed
+  activations and FFTs, with eval-mode activation checkpointing. FSDP alone would
+  replicate the full-volume activations. Only torchrun rank 0 reads each checkpoint.
+- `ffno_fsdp_diagnostics.py`: opt-in per-rank logs (`FFNO_FSDP_DIAGNOSTICS=1` or `2`)
+  and core dumps (`FFNO_FSDP_CORE_DUMPS=1`) for debugging native crashes.
+- `ffno_model_factory.py`: builds FFNO3D from `MODEL_CONFIG` for the service.
+
+Julia MPI rank 0 launches it with `FFNOInversion.jl/scripts/ffno_fsdp_service.sh`
+(one `srun --overlap` torchrun job across all nodes of the allocation). The service
+feeds log10 T and velocities in km/s, the same as training.
+`scripts/compare_service_with_ffnonet.py` (with
+`scripts/run_olivia_service_vs_ffnonet.sbatch`) checks that the service and a direct
+`FFNONet.py` prediction agree to float32 round-off on the same atmosphere.
+
+## 3D Forward Synthesis And Inversion
+
+[`FFNOInversion.jl`](FFNOInversion.jl/README.md) is the Julia package for
+atmosphere-to-spectrum synthesis and for fitting 3D atmospheres to observations.
+In brief:
+
+- **Inputs and outputs.** One atmosphere HDF5 (plus one observation HDF5 when
+  inverting) in, one synthesis HDF5 and one atmosphere HDF5 out. A TOML file
+  configures the run, and a model-factory Julia file names the checkpoints and atom
+  data.
+- **Vertical grids.** Native log10 tau500 (`forward.toml`, `inversion.toml`) or native
+  height z (`forward_z.toml`, `inversion_z.toml`).
+- **Equilibrium.** HSEMHS column hydrostatic equilibrium reconstructs gas pressure,
+  density, electron density, heights (or log tau) and the 500 nm opacity. It sets the
+  pressure boundary.
+- **Populations.** FFNO3D through the persistent service above. For log-tau
+  atmospheres each column is first mapped onto a training-like height mesh
+  (`[population.mesh]`), because the networks were trained on simulation height grids.
+- **Synthesis.** Any number of spectral regions, each combining FFNO lines (H alpha,
+  Ca II 8542 through Muspel) and Kurucz LTE lines in one formal solution. On log-tau
+  grids the optical depth is integrated on the native tau grid, with sub-stepping
+  across opacity jumps.
+- **Inversion.** Temperature, velocity, microturbulence and magnetic-field
+  corrections on coarse node maps, weighted chi-square plus vertical and horizontal
+  regularization, and bounded L-BFGS with matrix-free adjoint gradients.
+  Checkpoints restart on a different MPI/thread layout.
+- **Runtime.** Hybrid MPI ranks × Julia threads on CPU, with rank 0 controlling the
+  multi-GPU FFNO service. Production runs go on Olivia through
+  `FFNOInversion.jl/scripts/submit_olivia_inversion.sh`, which runs a login-node
+  preflight before `sbatch`.
+
+Start with [`examples/inversion_run/START_HERE.md`](examples/inversion_run/START_HERE.md).
+Run-directory templates are in [`examples/`](examples/README.md).
+
+## Preparing Inversion Inputs
+
+`scripts/build_input_ltau.py` builds a native log-tau input atmosphere from a Bifrost
+snapshot:
+
+```bash
+python scripts/build_input_ltau.py ATMOSPHERE.nc SUPPLEMENTARY.nc OUTPUT.nc
+```
+
+Each column's temperature, velocities and B (Bifrost height indices 0–466) are
+interpolated linearly in log tau500 onto the 95-point grid log tau500 = −8.0 … 1.4
+(step 0.1). The MULTI3D supplementary file stores `ltau500` with x and y swapped
+relative to the Bifrost netCDF, and the script corrects that. `--as-stored`
+reproduces the older, misregistered `input-mhs-ltau.nc` exactly. The output holds
+`log10tau500`, `temperature`, `velocity_{x,y,z}` and `B_{x,y,z}` in NumPy order.
+Map those names in the run's `[atmosphere.datasets]` with
+`storage_order = "python"`, and check the units the inversion reader expects
+(K, m/s, T).
+
+Native-z inputs need `z_m`, `x_m` and `y_m` axes in metres in addition to the fields.
+
+## Other Scripts
+
+| Script | Purpose |
+| --- | --- |
+| `scripts/convert_iris_sim_fits_to_ffno_hdf5.py` | MURaM FITS to prediction solving set (see above) |
+| `scripts/witt.py`, `scripts/witt_eos_cpp.cpp`, `scripts/pf_Kurucz.input` | Wittmann EOS (Python and C++) and partition functions. The C++ source is also compiled into the inversion's `libwitt_ffno` |
+| `scripts/atmosphere_resampler.cpp` | C++/Boost spatial resampler used by the MURaM converter |
+| `export_multi3d_depcoeff.py` | write MULTI3D departure coefficients in the FFNONet prediction layout |
+| `compute_muspel_lte.jl`, `validate_multi3d_dep_loading.jl` | Muspel LTE populations, check of MULTI3D departure-coefficient loading |
+| `compare_population_models.py` | per-level NRMSE of two prediction directories against MULTI3D |
+| `make_paper_plots.py`, `generate_ffno_schematic_matplotlib.py` | paper figures and the architecture schematic |
+| `scripts/generate_patch_training_animation.py` | animation of multiscale patch extraction (needs Pillow and ffmpeg) |
+| `run_script_regression.sh` | example invocation of the Olivia runtime-test bootstrap |
+
+## Tests
+
+Python:
+
+```bash
+python -m pytest tests
+```
+
+The tests cover the composite NLTE loss, spacing-grouped batches, checkpoint
+consistency, the FSDP service launcher, the Olivia case outcomes and the C++ Witt
+EOS.
+
+Julia (from `FFNOInversion.jl/`):
+
+```bash
+julia --project=. -e 'using Pkg; Pkg.test()'
+```
+
+The MPI parity checks and the Olivia regression chain are described in the
+[package README](FFNOInversion.jl/README.md#tests-and-validation).
+
+## Documentation
+
+- `docs/ffno_model_flowchart.md` and the `docs/ffno_*.svg` diagrams: FFNO3D
+  architecture (full forward pass, balanced block, spectral convolution, vertical
+  stack).
+- `docs/paper_draft_ffno_nlte.md`: paper draft.
+- `output/pdf/`: inversion development plan, implementation report and HSE bootstrap
+  review.
+- `FFNOInversion.jl/docs/`: architecture decisions, the HSEMHS integration plan and
+  validation reports.
+
 ## Caveats
 
 - The code does not overwrite existing dataset, solving-set, prediction, or checkpoint outputs by default
@@ -629,6 +832,8 @@ startup is the number of CPU threads the synthesis can use.
 - grouped patch datasets can have variable native depth across samples
 - some configured output names still contain historical strings such as `s5`; these are just file naming conventions
 - config values are the source of truth for splits, active atoms, paths, and model dimensions
+- `FFNOInversion.jl` overwrites its configured output files; use a new run directory per experiment
+- the inversion supports Stokes I, non-PRD synthesis and column HSE only; see the [package limitations](FFNOInversion.jl/README.md#known-limitations)
 
 ## Usage And Citation
 

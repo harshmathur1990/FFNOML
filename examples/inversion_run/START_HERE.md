@@ -98,7 +98,7 @@ Before submission, set:
 - `[equilibrium] eos_table_file` to the HSEMHS EOS table (e.g. a link to `HSEMHS/cache/eos_table_fullz.h5`). The pressure boundary is HSEMHS's: for native log-tau input the τ-hydrostatic top closure sets it (`[equilibrium.column_ltau]`), for native-z input `[equilibrium.column_z] anchor` and `P_ref_pa` do. There is no top-pressure or top-density setting in FFNO.
 - `storage_order = "python"` when the atmosphere file was written by NumPy/h5py or C; the supplied template uses this setting.
 - `[grid] dx_m` and `dy_m` to the actual horizontal spacing in metres.
-- `[[regions]]` wavelengths (Å), counts, normalization and line lists. The example synthesizes Ca II 8542 through FFNO and an LTE Fe 6302 region; only the latter needs a Kurucz line list.
+- `[[regions]]` wavelengths (Å), counts and line lists. The example synthesizes H alpha and Ca II 8542 through FFNO and an LTE Fe 6302 region; only the last needs a Kurucz line list. Each region's `normalization` must be positive but is not applied to the spectra yet, and its `psf_type`/`psf_file` are checked but no per-region PSF is applied.
 - `[observation.gaussian_psf]`: the example applies a **96 km spatial blur**. Set both spatial FWHM values to `0.0` for unblurred spectra. This section controls synthetic output even without observations.
 
 Keep `mode = "forward"`, `stokes = ["I"]`, and `redistribution = "non_prd"`
@@ -139,11 +139,11 @@ For the printed job ID, use `squeue -j JOB_ID` and, after completion,
 `slurm-JOB_ID.err`; GPU details are under `diagnostics/slurm-JOB_ID/`.
 A successful forward run writes:
 
-- `outputs/synthesis.h5`: `intensity` with axes `(time,Stokes,wavelength,y,x)`, `wavelength_m`, and provenance. Spectra include the configured normalization and PSF.
+- `outputs/synthesis.h5`: `intensity` with axes `(time,Stokes,wavelength,y,x)`, `wavelength_m`, and provenance. Spectra include the `[observation.gaussian_psf]` blur but are not divided by the region `normalization`.
 - `outputs/forward_atmosphere.h5`: atmospheric fields including `pgas`, `rho`, `ne`, `z`, and `populations/H` and `populations/CA` (population axes `(level,z,y,x)`). Both files record `execution_mode = "forward"`.
 
 For **inversion**, add `inputs/observations.h5`, edit `inversion.toml` to match the
-same atmosphere, wavelength grid, normalization and PSF, then set controls,
+same atmosphere, wavelength grid and Gaussian PSF, then set controls,
 bounds and a positive `solver.max_iterations`. Observations need `intensity`
 and positive `sigma` with `(time,Stokes,wavelength,y,x)`, `wavelength_weights`
 with `(wavelength,Stokes)`, and `spatial_weights` with `(y,x)`; the reader also
