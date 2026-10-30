@@ -54,33 +54,49 @@ def build_multi3d_entries(split_dict):
 
     return data
 
+
+OLIVIA_DIR = "/cluster/projects/nn2834k/harshm/"
+EAGLE7_DIR = "/mn/stornext/d9/data/harshm/"
+
+# DATA_DIR = OLIVIA_DIR
+DATA_DIR = EAGLE7_DIR
+
+# Keep permanent source data and disposable run files independent.  Batch
+# scripts set FFNOML_RUN_DIR to the directory from which the job is submitted.
+# Outside Slurm, the repository remains the default for backwards compatibility.
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+RUN_DIR = os.path.abspath(os.environ.get("FFNOML_RUN_DIR", PROJECT_DIR))
+
+# Backwards-compatible name used by plotting and Julia-side utilities.
+PRED_DIR = DATA_DIR
+
 SIMULATIONS = {
     "en024048_hion": {
-        "base_path": "/mn/stornext/d9/data/harshm/bifrost_data/en024048_hion",
+        "base_path": DATA_DIR + "bifrost_data/en024048_hion",
         "snaps": ["385", "386", "465", "700"],
     },
     "nw012023": {
-        "base_path": "/mn/stornext/d9/data/harshm/bifrost_data/nw012023",
+        "base_path": DATA_DIR + "bifrost_data/nw012023",
         "snaps": ["1050", "1120", "915", "940"],
     },
     "ch012012_hion": {
-        "base_path": "/mn/stornext/d9/data/harshm/bifrost_data/ch012012_hion",
+        "base_path": DATA_DIR + "bifrost_data/ch012012_hion",
         "snaps": ["759", "834", "910", "984"]
     },
     "ch012006": {
-        "base_path": "/mn/stornext/d9/data/harshm/bifrost_data/ch012006",
+        "base_path": DATA_DIR + "bifrost_data/ch012006",
         "snaps": ["795", "820", "836", "849"]
     },
     "qs006003_sap": {
-        "base_path": "/mn/stornext/d9/data/harshm/bifrost_data/qs006003_sap",
+        "base_path": DATA_DIR + "bifrost_data/qs006003_sap",
         "snaps": ["1100", "1297", "689", "900"]
     },
     "ch024031_by200bz005": {
-        "base_path": "/mn/stornext/d9/data/harshm/bifrost_data/ch024031_by200bz005",
+        "base_path": DATA_DIR + "bifrost_data/ch024031_by200bz005",
         "snaps": ["450"]
     },
     "en024031_by100_helium": {
-        "base_path": "/mn/stornext/d9/data/harshm/bifrost_data/en024031_by100_helium",
+        "base_path": DATA_DIR + "bifrost_data/en024031_by100_helium",
         "snaps": ["109"]
     }
 }
@@ -173,57 +189,50 @@ wave  = [ATOM_CONFIG[a]["wave"]  for a in ACTIVE_ATOMS]
 chi   = [ATOM_CONFIG[a]["chi"]   for a in ACTIVE_ATOMS]
 levels = [ATOM_CONFIG[a]["levels"]   for a in ACTIVE_ATOMS]
 
-
-PRED_OLIVIA_DIR = "/cluster/work/projects/nn2834k/harshm/"
-PRED_EAGLE7_DIR = "/mn/stornext/d9/data/harshm/"
-
-# PRED_DIR = PRED_OLIVIA_DIR
-PRED_DIR = PRED_EAGLE7_DIR
-
 MULTI3D_PRED_DATA = [
     {
-        "MULTI3D_ATMOS": PRED_DIR + "bifrost_data/en024048_hion/385/atm3d",
-        "MESH":  PRED_DIR + "bifrost_data/en024048_hion/385/mesh",
+        "MULTI3D_ATMOS": DATA_DIR + "bifrost_data/en024048_hion/385/atm3d",
+        "MESH":  DATA_DIR + "bifrost_data/en024048_hion/385/mesh",
         "NAME": "en024048_hion_385"
     },
     {
-        "MULTI3D_ATMOS": PRED_DIR + "bifrost_data/nw012023/1050/atm3d",
-        "MESH":  PRED_DIR + "bifrost_data/nw012023/1050/mesh",
+        "MULTI3D_ATMOS": DATA_DIR + "bifrost_data/nw012023/1050/atm3d",
+        "MESH":  DATA_DIR + "bifrost_data/nw012023/1050/mesh",
         "NAME": "nw012023_1050"
     },
     {
-        "MULTI3D_ATMOS": PRED_DIR + "bifrost_data/ch024031_by200bz005/450/atm3d",
-        "MESH":  PRED_DIR + "bifrost_data/ch024031_by200bz005/450/mesh",
+        "MULTI3D_ATMOS": DATA_DIR + "bifrost_data/ch024031_by200bz005/450/atm3d",
+        "MESH":  DATA_DIR + "bifrost_data/ch024031_by200bz005/450/mesh",
         "NAME": "ch024031_by200bz005_450"
     },
     {
-        "MULTI3D_ATMOS": PRED_DIR + "bifrost_data/en024031_by100_helium/109/atm3d",
-        "MESH":  PRED_DIR + "bifrost_data/en024031_by100_helium/109/mesh",
+        "MULTI3D_ATMOS": DATA_DIR + "bifrost_data/en024031_by100_helium/109/atm3d",
+        "MESH":  DATA_DIR + "bifrost_data/en024031_by100_helium/109/mesh",
         "NAME": "en024031_by100_helium_109"
     },
     {
-        "MULTI3D_ATMOS": PRED_DIR + "bifrost_data/en024048_hion_504/385/atm3d",
-        "MESH":  PRED_DIR + "bifrost_data/en024048_hion_504/385/mesh",
+        "MULTI3D_ATMOS": DATA_DIR + "bifrost_data/en024048_hion_504/385/atm3d",
+        "MESH":  DATA_DIR + "bifrost_data/en024048_hion_504/385/mesh",
         "NAME": "en024048_hion_504_385"
     },
     {
-        "MULTI3D_ATMOS": PRED_DIR + "bifrost_data/nw012023_512/1050/atm3d",
-        "MESH":  PRED_DIR + "bifrost_data/nw012023_512/1050/mesh",
+        "MULTI3D_ATMOS": DATA_DIR + "bifrost_data/nw012023_512/1050/atm3d",
+        "MESH":  DATA_DIR + "bifrost_data/nw012023_512/1050/mesh",
         "NAME": "nw012023_512_1050"
     },
     {
-        "MULTI3D_ATMOS": PRED_DIR + "bifrost_data/ch024031_by200bz005_768/450/atm3d",
-        "MESH":  PRED_DIR + "bifrost_data/ch024031_by200bz005_768/450/mesh",
+        "MULTI3D_ATMOS": DATA_DIR + "bifrost_data/ch024031_by200bz005_768/450/atm3d",
+        "MESH":  DATA_DIR + "bifrost_data/ch024031_by200bz005_768/450/mesh",
         "NAME": "ch024031_by200bz005_768_450"
     },
     {
-        "MULTI3D_ATMOS": PRED_DIR + "bifrost_data/en024031_by100_helium_768/109/atm3d",
-        "MESH":  PRED_DIR + "bifrost_data/en024031_by100_helium_768/109/mesh",
+        "MULTI3D_ATMOS": DATA_DIR + "bifrost_data/en024031_by100_helium_768/109/atm3d",
+        "MESH":  DATA_DIR + "bifrost_data/en024031_by100_helium_768/109/mesh",
         "NAME": "en024031_by100_helium_768_109"
     },
     {
-        "MULTI3D_ATMOS": PRED_DIR + "bifrost_data/ar098192/270000/atm3d",
-        "MESH":  PRED_DIR + "bifrost_data/ar098192/270000/mesh",
+        "MULTI3D_ATMOS": DATA_DIR + "bifrost_data/ar098192/270000/atm3d",
+        "MESH":  DATA_DIR + "bifrost_data/ar098192/270000/mesh",
         "NAME": "ar098192_270000"
     }
 ]
@@ -249,9 +258,12 @@ MODEL_CONFIG = dict(
 
 atoms_tag = _active_atoms_tag(ACTIVE_ATOMS)
 
-IODIR = "IO/"
+IODIR = os.path.join(RUN_DIR, "IO") + os.sep
 
-MODEL_DIR = f"training_{MODEL}_zscale_expand_lognlte/"
+MODEL_DIR = os.path.join(
+    RUN_DIR,
+    f"training_{MODEL}_zscale_expand_lognlte",
+) + os.sep
 MODEL_FILE = MODEL_DIR + f"3D_sim_train_{atoms_tag}.pt"
 
 for pred_atmos in MULTI3D_PRED_DATA:

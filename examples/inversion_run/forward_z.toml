@@ -1,0 +1,107 @@
+mode = "forward"
+
+[inputs]
+initial_atmosphere_file = "inputs/initial_atmosphere_z.h5"
+time_index = 1
+
+[outputs]
+synthesis_file = "outputs/synthesis_z.h5"
+atmosphere_file = "outputs/forward_atmosphere_z.h5"
+
+[atmosphere]
+# native vertical coordinate of the input: "z" (this file) or "log10tau500" (see forward.toml)
+vertical_coordinate = "z"
+storage_order = "python"
+
+[atmosphere.datasets]
+z_m = "z_m"                 # height axis [m], positive upward (either order; read top first)
+x_m = "x_m"                 # horizontal axes [m], uniform and increasing (origin kept)
+y_m = "y_m"
+temperature = "temperature"
+# vturb = "vturb" # optional; defaults to zero if not configured
+vx = "vx"
+vy = "vy"
+vz = "vz"
+# Bx = "Bx"
+# By = "By"
+# Bz = "Bz"
+
+
+[equilibrium]
+# HSEMHS reconstructs Pgas, rho, ne and the derived coordinate (log10 tau500 here) in process. The mode follows from
+# atmosphere.vertical_coordinate and model:
+#   z           + column_hse -> column-hse-z      (this file)
+#   z           + mhs        -> mhs-poisson-z     (available from HSEMHS integration Phase 4; needs Bx, By, Bz)
+#   log10tau500 + column_hse -> column-hse-ltau   (see forward.toml / inversion.toml)
+#   log10tau500 + mhs        -> mhs-poisson-ltau  (Phase 4)
+backend = "HSEMHS"           # the only equilibrium backend
+model = "column_hse"
+# model = "mhs"              # Phase 4
+gravity_m_s2 = 274.0
+eos_table_file = "inputs/eos_table_fullz.h5"   # HSEMHS EOS table (copy or link HSEMHS/cache/eos_table_fullz.h5)
+on_nonconvergence = "reject_trial"             # or "abort"
+
+# Native z: HSEMHS column_hse options (HSEMHS sets the pressure boundary; FFNO has no top-pressure setting).
+[equilibrium.column_z]
+anchor = "bottom"            # "bottom" | "top" | "height"
+P_ref_pa = 1.035e5           # anchor pressure [Pa], required (e.g. the median gas pressure on the bottom plane)
+# z_ref_m = 0.0              # anchor height [m] for anchor = "height"
+tau_top = "exp_tail"         # top closure of the tau500 integral: "exp_tail" | "half_cell" | "zero"
+[grid]
+# optional with explicit x_m/y_m (the spacing is read from them); if given, it must agree to 1e-9
+dx_m = 48000.0
+dy_m = 48000.0
+
+[[regions]]
+start_angstrom = 6561.92
+step_angstrom = 0.020
+count = 88
+normalization = 4.323060e-05
+psf_type = "none"
+
+[[regions.sources]]
+mode = "ffno"
+species = "H"
+line = "halpha"
+
+[[regions]]
+start_angstrom = 8540.23102
+step_angstrom = 0.04267
+count = 88
+normalization = 4.227725e-05
+psf_type = "none"
+
+[[regions.sources]]
+mode = "ffno"
+species = "CA"
+line = "ca_ii_8542"
+
+[[regions]]
+start_angstrom = 6301.24942
+step_angstrom = 0.01007
+count = 46
+normalization = 4.054384e-05
+psf_type = "none"
+
+[[regions.sources]]
+mode = "kurucz_lte"
+linelist_file = "inputs/kurucz_6302.list"
+
+[physics]
+redistribution = "non_prd"
+
+[observation]
+stokes = ["I"]
+
+[observation.gaussian_psf]
+spatial_fwhm_x_m = 96000.0
+spatial_fwhm_y_m = 96000.0
+
+[parallel]
+enabled = true
+decomposition = "x_slabs"
+gpu_launcher_rank = 0
+gpu_connect_timeout_seconds = 180.0
+gpu_status_timeout_seconds = 300.0
+gpu_diagnostic_interval_seconds = 30.0
+gpu_diagnostics_directory = ""

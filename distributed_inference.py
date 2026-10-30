@@ -1,5 +1,6 @@
 import torch
 import torch.distributed as dist
+import torch.distributed.nn.functional as dist_nn
 import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
@@ -78,10 +79,7 @@ def _all_to_all_tensor_list(input_list, output_shapes, concat_dim=None):
     if not is_dist():
         return input_list[0] if concat_dim is not None else [input_list[0]]
 
-    device = input_list[0].device
-    dtype = input_list[0].dtype
     world_size = get_world_size()
-    rank = get_rank()
 
     if len(input_list) != world_size or len(output_shapes) != world_size:
         raise ValueError(
@@ -89,30 +87,29 @@ def _all_to_all_tensor_list(input_list, output_shapes, concat_dim=None):
             f"{len(input_list)} tensors and {len(output_shapes)} shapes."
         )
 
-    output_list = [None for _ in range(world_size)]
-    output_list[rank] = input_list[rank]
-
-    for step in range(1, world_size):
-        dst = (rank + step) % world_size
-        src = (rank - step) % world_size
-
-        send = input_list[dst].contiguous()
-        recv, recv_dist = _empty_dist_tensor(
-            tuple(int(s) for s in output_shapes[src]),
-            device=device,
-            dtype=dtype,
-        )
-
-        ops = [
-            dist.P2POp(dist.irecv, recv_dist, src),
-            dist.P2POp(dist.isend, _as_dist_tensor(send), dst),
-        ]
-        for req in dist.batch_isend_irecv(ops):
-            req.wait()
-
-        output_list[src] = recv
-        input_list[dst] = None
-        del send
+    # The previous hand-written P2P ring was correct in no-grad prediction but
+    # severed autograd at every distributed FFT transpose.  The functional
+    # collective supplies the reverse all-to-all needed by the FFNO VJP.
+    reference = input_list[0]
+    is_complex = reference.is_complex()
+    input_dist = [
+        (_as_dist_tensor(value.contiguous()) if is_complex else value.contiguous())
+        for value in input_list
+    ]
+    output_dist = []
+    for shape in output_shapes:
+        real_shape = tuple(int(s) for s in shape) + ((2,) if is_complex else ())
+        output_dist.append(torch.empty(
+            real_shape,
+            device=reference.device,
+            dtype=reference.real.dtype if is_complex else reference.dtype,
+        ))
+    received = list(dist_nn.all_to_all(output_dist, input_dist))
+    output_list = (
+        [torch.view_as_complex(value) for value in received]
+        if is_complex
+        else received
+    )
 
     if concat_dim is not None:
         out = torch.cat(output_list, dim=concat_dim)
@@ -159,9 +156,9 @@ class DistributedGroupNorm(nn.Module):
             dtype=x.dtype,
         )
 
-        dist.all_reduce(local_sum, op=dist.ReduceOp.SUM)
-        dist.all_reduce(local_sq, op=dist.ReduceOp.SUM)
-        dist.all_reduce(local_count, op=dist.ReduceOp.SUM)
+        local_sum = dist_nn.all_reduce(local_sum, op=dist.ReduceOp.SUM)
+        local_sq = dist_nn.all_reduce(local_sq, op=dist.ReduceOp.SUM)
+        local_count = dist_nn.all_reduce(local_count, op=dist.ReduceOp.SUM)
 
         mean = local_sum / local_count
         var = local_sq / local_count - mean * mean
@@ -172,6 +169,67 @@ class DistributedGroupNorm(nn.Module):
             y = y * self.weight.view(1, -1, *([1] * (x.ndim - 2)))
             y = y + self.bias.view(1, -1, *([1] * (x.ndim - 2)))
         return y
+
+
+class _HaloExchangeH(torch.autograd.Function):
+    """Exchange one H-boundary cell and reverse the exchange in the VJP."""
+
+    @staticmethod
+    def forward(ctx, x):
+        rank = get_rank()
+        world_size = get_world_size()
+        left_rank = rank - 1
+        right_rank = rank + 1
+        left = torch.zeros_like(x[:, :, :, :1, :])
+        right = torch.zeros_like(x[:, :, :, :1, :])
+        ops = []
+        if left_rank >= 0:
+            left = torch.empty_like(left)
+            ops.append(dist.P2POp(dist.irecv, left, left_rank))
+            ops.append(dist.P2POp(
+                dist.isend, x[:, :, :, :1, :].contiguous(), left_rank
+            ))
+        if right_rank < world_size:
+            right = torch.empty_like(right)
+            ops.append(dist.P2POp(dist.irecv, right, right_rank))
+            ops.append(dist.P2POp(
+                dist.isend, x[:, :, :, -1:, :].contiguous(), right_rank
+            ))
+        for request in dist.batch_isend_irecv(ops):
+            request.wait()
+        ctx.rank = rank
+        ctx.world_size = world_size
+        return torch.cat([left, x, right], dim=3)
+
+    @staticmethod
+    def backward(ctx, grad_halo):
+        rank = ctx.rank
+        world_size = ctx.world_size
+        left_rank = rank - 1
+        right_rank = rank + 1
+        grad = grad_halo[:, :, :, 1:-1, :].contiguous()
+        from_left = None
+        from_right = None
+        ops = []
+        if left_rank >= 0:
+            from_left = torch.empty_like(grad[:, :, :, :1, :])
+            ops.append(dist.P2POp(dist.irecv, from_left, left_rank))
+            ops.append(dist.P2POp(
+                dist.isend, grad_halo[:, :, :, :1, :].contiguous(), left_rank
+            ))
+        if right_rank < world_size:
+            from_right = torch.empty_like(grad[:, :, :, -1:, :])
+            ops.append(dist.P2POp(dist.irecv, from_right, right_rank))
+            ops.append(dist.P2POp(
+                dist.isend, grad_halo[:, :, :, -1:, :].contiguous(), right_rank
+            ))
+        for request in dist.batch_isend_irecv(ops):
+            request.wait()
+        if from_left is not None:
+            grad[:, :, :, :1, :] += from_left
+        if from_right is not None:
+            grad[:, :, :, -1:, :] += from_right
+        return grad
 
 
 class DistributedHDepthwiseConv3d(nn.Module):
@@ -191,36 +249,9 @@ class DistributedHDepthwiseConv3d(nn.Module):
     def forward(self, x):
         if not is_dist():
             return self.conv(x)
-
-        rank = get_rank()
-        world_size = get_world_size()
-        left_rank = rank - 1
-        right_rank = rank + 1
-
-        left = torch.zeros_like(x[:, :, :, :1, :])
-        right = torch.zeros_like(x[:, :, :, :1, :])
-
-        ops = []
-        if left_rank >= 0:
-            recv_left = torch.empty_like(left)
-            ops.append(dist.P2POp(dist.irecv, recv_left, left_rank))
-            ops.append(dist.P2POp(dist.isend, x[:, :, :, :1, :].contiguous(), left_rank))
-        else:
-            recv_left = left
-
-        if right_rank < world_size:
-            recv_right = torch.empty_like(right)
-            ops.append(dist.P2POp(dist.irecv, recv_right, right_rank))
-            ops.append(dist.P2POp(dist.isend, x[:, :, :, -1:, :].contiguous(), right_rank))
-        else:
-            recv_right = right
-
         self._progress("halo exchange")
-        for req in dist.batch_isend_irecv(ops):
-            req.wait()
-
+        x_halo = _HaloExchangeH.apply(x)
         self._progress("local depthwise conv")
-        x_halo = torch.cat([recv_left, x, recv_right], dim=3)
         y = F.conv3d(
             x_halo,
             self.conv.weight,
