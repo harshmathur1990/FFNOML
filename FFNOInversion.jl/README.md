@@ -194,14 +194,12 @@ Unknown keys in `[equilibrium]` and its subsections are errors.
 `vturb`, `Bx`, `By`, `Bz`). There is no top-pressure or top-density option: configs
 that still contain `pressure_top_pa` or `pressure_top_dataset` are rejected.
 
-`frame` gives the right-handed frame of the input files. `"z_up"` (default) is the code's own frame: z, `vz` and
-`Bz` positive upward, as in the Bifrost/MULTI3D files the FFNO was trained on (rising hot granules have positive
-`vz`), and positive line-of-sight velocity (toward the observer) is a blue shift in every line model. `"z_down"`
-(z and `vz` positive downward, Bifrost's native convention) is that frame rotated by 180° about x: on input
-`vy`, `vz`, `By`, `Bz` change sign, all arrays (observations and weights included) are reversed along y, `y_m`
-becomes −y and native-z heights −z; the `[view]` azimuth φ becomes −φ; `vy`/`vz`/`By`/`Bz` control bounds and
-`z_nodes_m` are mirrored. Every output is written back in the input frame (attribute `frame`); `vlos` (n·v) is the
-same in both frames.
+`vz_positive` says what a positive `vz` means in the input files. `"up"` (default) is the code's own sign, as in the
+Bifrost/MULTI3D files the FFNO was trained on (rising hot granules have positive `vz`). `"down"` negates `vz` on input
+and on output (attribute `vz_positive`) and mirrors `vz` control bounds. Only that sign changes: z is positive upward
+and τ increases downward in every run, and `vx`, `vy`, B, the grid, the `[view]` azimuth, observations and `vlos`
+are untouched. Positive line-of-sight velocity (toward the observer) is a blue shift in every line model. Top-first or
+bottom-first storage of the arrays needs no setting and no sign change.
 
 ### `[equilibrium]`
 

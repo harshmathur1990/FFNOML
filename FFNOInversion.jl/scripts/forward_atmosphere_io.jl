@@ -4,18 +4,16 @@
 """Atmosphere (nz, nx, ny) and populations (nz, nx, ny, level) as written by write_inversion_outputs."""
 function read_forward_atmosphere(path)
     h5open(path,"r") do file
-        # a run with [atmosphere] frame = "z_down" writes its outputs rotated by 180° about x: rotate them back
-        down=haskey(HDF5.attributes(file),"frame") && read(HDF5.attributes(file)["frame"])=="z_down"
-        flip(name,a)=!down ? a : (name in ("vy","vz","z") ? -1 : 1) .* reverse(a;dims=3)
-        field(name)=haskey(file,name) ? flip(name,permutedims(read(file[name])[1,:,:,:],(1,3,2))) : nothing
+        # a run with [atmosphere] vz_positive = "down" writes vz in that sign: back to the code's
+        down=haskey(HDF5.attributes(file),"vz_positive") && read(HDF5.attributes(file)["vz_positive"])=="down"
+        field(name)=haskey(file,name) ? (name=="vz" && down ? -1 : 1) .* permutedims(read(file[name])[1,:,:,:],(1,3,2)) : nothing
         view=something(FFNOInversion.read_view_attributes(HDF5.attributes(file)),FFNOInversion.ViewGeometry())
-        down && (view=FFNOInversion.ViewGeometry(view.mu,-view.azimuth_deg,view.geometry))
-        y=read(file["y_m"]); down && (y=reverse(-y))
+        y=read(file["y_m"])
         grid=FFNOInversion.Grid3D(FFNOInversion.VerticalAxis(:log10tau500,read(file["logtau_500"])),read(file["x_m"]),y,view)
         atmosphere=FFNOInversion.Atmosphere3D(grid,field("temperature"),field("vx"),field("vy"),field("vz"),field("vturb");
             pgas=field("pgas"),rho=field("rho"),ne=field("ne"),z=field("z"),logtau500=field("logtau500"),
             chi500=field("chi500"))
-        populations=Dict(Symbol(name)=>flip(name,permutedims(read(file["populations"][name]),(2,4,3,1)))
+        populations=Dict(Symbol(name)=>permutedims(read(file["populations"][name]),(2,4,3,1))
             for name in keys(file["populations"]))
         atmosphere,populations
     end
