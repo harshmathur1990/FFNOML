@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Persistent socket service for multi-GPU FSDP FFNO prediction and VJPs."""
+"""Persistent socket service for multi-GPU FSDP FFNO prediction, VJPs and JVPs."""
 
 import argparse
 import faulthandler
@@ -192,7 +192,7 @@ def serve(configuration, backends, command_group, diagnostics):
             if rank == 0 and operation == "SHUTDOWN":
                 stream.sendall(b"BYE\n")
             break
-        if operation not in ("PREDICT", "VJP") or len(command) != 8:
+        if operation not in ("PREDICT", "VJP", "JVP") or len(command) != 8:
             raise RuntimeError(f"invalid FSDP service command: {command}")
         _, name, nz_raw, nx_raw, ny_raw, levels_raw, dx_raw, dy_raw = command
         if name not in backends:
@@ -216,10 +216,14 @@ def serve(configuration, backends, command_group, diagnostics):
                 if operation == "VJP"
                 else None
             )
+            feature_tangent_global = (
+                read_array(stream, (6, nz, nx, ny)) if operation == "JVP" else None
+            )
         else:
             features_global = None
             z_global = None
             population_bar_global = None
+            feature_tangent_global = None
         if rank == 0:
             diagnostics.record("inputs_received", operation=operation, model=name)
             diagnostics.record_array("features_global", features_global)
@@ -250,6 +254,23 @@ def serve(configuration, backends, command_group, diagnostics):
             if rank == 0:
                 stream.sendall(f"OK PREDICT {nz} {nx} {ny} {levels}\n".encode())
                 write_array(stream, populations_global)
+        elif operation == "JVP":
+            feature_tangent_local = scatter_h(
+                feature_tangent_global, (6, nz, nx, ny), 2, device
+            ).cpu().numpy()
+            diagnostics.record("jvp_begin", model=name)
+            population_tangent_local = backend.jvp_local(
+                features_local, z_local, dx, dy, feature_tangent_local
+            )
+            diagnostics.record("jvp_end", model=name)
+            diagnostics.record("gather_begin")
+            population_tangent_global = gather_h(
+                population_tangent_local, (nz, nx, ny, levels), 1, device
+            )
+            diagnostics.record("gather_end")
+            if rank == 0:
+                stream.sendall(f"OK JVP {nz} {nx} {ny} {levels}\n".encode())
+                write_array(stream, population_tangent_global)
         else:
             population_bar_tensor = scatter_h(
                 population_bar_global, (nz, nx, ny, levels), 1, device

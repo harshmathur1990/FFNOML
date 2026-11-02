@@ -1,4 +1,4 @@
-"""FSDP plus distributed-H-slab FFNO inference and input VJPs.
+"""FSDP plus distributed-H-slab FFNO inference, input VJPs and input JVPs.
 
 Each torchrun rank owns one spatial H slab. FSDP shards parameters, while the
 distributed inference adapters preserve the global 2D Fourier operator and
@@ -6,6 +6,7 @@ provide differentiable collectives. FSDP alone would replicate the dominant
 full-volume activations and is therefore not the inversion execution model.
 """
 
+from contextlib import contextmanager
 from functools import partial
 import hashlib
 import importlib
@@ -14,6 +15,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.autograd.forward_ad as fwAD
 import torch.distributed as dist
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import ShardingStrategy
@@ -53,6 +55,21 @@ def _model_inputs(x, z):
         dim=1,
     )
     return features, z / Z_METRES_PER_MODEL_UNIT
+
+
+@contextmanager
+def _without_activation_checkpointing(model):
+    """Run the checkpoint-wrapped blocks directly. Under no_grad a JVP keeps no graph, so recomputation buys
+    nothing, and the saved-tensor hooks of non-reentrant checkpointing do not take part in forward-mode AD."""
+    wrappers = [m for m in model.modules() if isinstance(m, CheckpointWrapper)]
+    saved = [w.checkpoint_fn for w in wrappers]
+    try:
+        for w in wrappers:
+            w.checkpoint_fn = lambda module, *args, **kwargs: module(*args, **kwargs)
+        yield
+    finally:
+        for w, fn in zip(wrappers, saved):
+            w.checkpoint_fn = fn
 
 
 class DistributedFSDPBackend:
@@ -323,3 +340,27 @@ class DistributedFSDPBackend:
             "features": feature_gradient,
             "z_scale": z_gradient,
         }
+
+    def jvp_local(self, features, z_scale, dx, dy, feature_tangent):
+        """Forward-mode derivative of the populations along `feature_tangent` (the SI feature units of
+        `features`; the heights stay fixed), from dual tensors carried through the whole network."""
+        x, z = self._inputs(features, z_scale, requires_grad=False)
+        feature_tangent = np.asarray(feature_tangent, dtype=np.float32)
+        if feature_tangent.shape != features.shape:
+            raise ValueError(
+                f"local feature_tangent has shape {feature_tangent.shape}; expected {features.shape}"
+            )
+        if not np.isfinite(feature_tangent).all():
+            raise ValueError("FSDP FFNO JVP tangent contains NaN or Inf")
+        tangent = torch.as_tensor(feature_tangent, device=self.device)[None]
+        # no_grad does not affect forward-mode AD; it only stops a reverse graph from being recorded.
+        with torch.no_grad(), _without_activation_checkpointing(self.model), fwAD.dual_level():
+            populations = self._forward_linear(fwAD.make_dual(x, tangent), z, dx, dy)
+            population_tangent = fwAD.unpack_dual(populations).tangent
+        if population_tangent is None:
+            raise RuntimeError("FSDP FFNO JVP produced no population tangent")
+        if not torch.isfinite(population_tangent).all():
+            raise RuntimeError("FSDP FFNO JVP returned NaN or Inf")
+        torch.cuda.synchronize(self.device)
+        self.call_count += 1
+        return self._canonical_populations(population_tangent)

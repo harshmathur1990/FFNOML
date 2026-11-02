@@ -8,6 +8,10 @@ layout.  Production FFNO implementations execute this action on the same
 persistent backend used for inference.
 """
 function population_vjp! end
+"""Forward-mode derivative of one population inference along `feature_dot` (`FFNO_INPUT_CHANNELS` layout,
+`(6,nz,nx,ny)`), heights fixed, into `population_dot` `(nz,nx,ny,nlevel)`. The FFNO evaluates it with dual
+tensors on the persistent backend; only the tangent cube is returned, never the Jacobian."""
+function population_jvp! end
 
 const FFNO_INPUT_CHANNELS=(:temperature,:vx,:vy,:vz,:log10_ne,:log10_rho)
 

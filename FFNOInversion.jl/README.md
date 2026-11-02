@@ -519,6 +519,26 @@ control maps; use it with fresh optimizer history.
 `FiniteDifferenceObjectiveGradient` is the validation oracle;
 `gradient_taylor_validation` and `dot_product_validation` check the adjoints.
 
+### Column response functions
+
+`scripts/column_response.jl` (Olivia: `scripts/run_olivia_column_response.sbatch`, submitted from a forward run
+directory) writes R_v(λ, k; x, y) = ∂I(λ, x, y)/∂v(k, x, y) of the intrinsic intensity for every configured
+wavelength and every native log τ500 point, per unit log τ500, for `temperature`, `vz`, `vturb`, `ne` or `pgas`
+(`--variables`, `--stride`, `--crop`). Populations and the HSE structure (pgas, rho, ne, z, chi500) are held at the
+forward run's values, so each column is independent: one formal-solver adjoint sweep plus two opacity evaluations
+per variable, with no FFNO or HSEMHS call. Size: 4 bytes × wavelengths × depths × columns × variables before
+compression (2.7 GB for T and vz at stride 4 on 504²).
+
+With `--population-tangents TANGENTS.h5` the temperature response also lets the FFNO populations respond.
+`scripts/ffno_population_tangents.jl` (Olivia: `scripts/run_olivia_population_tangents.sbatch`, GPU) makes the file:
+for every log τ500 point k0 it asks the FSDP service for one forward-mode JVP (dual tensors through the population
+mesh and the FFNO, `population_jvp!`) seeded with 1 K at k0 in every column, and stores the population tangent
+ṅ(k, x, y; k0) = Σ_{x',y'} ∂n(k, x, y)/∂T(k0, x', y') (Float32, 4 bytes × depths² × levels × columns per species,
+55 GB for H on 504²). The seed in every column keeps the horizontal coupling of the Fourier layers in that sum without
+storing the full Jacobian. `column_response.jl` then adds Σ_{k,l} G_l(k, λ) ṅ_l(k; k0) per column, with
+G_l = ∂I/∂n_l from the same adjoint. pgas, rho, ne and z stay fixed. `test/ffno_jvp_cpu_check.py` checks the
+distributed JVP against finite differences on CPU.
+
 ### Checkpoints
 
 Checkpoints are atomic and bound to the configuration, the baseline atmosphere

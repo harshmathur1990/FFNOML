@@ -14,7 +14,8 @@ wrapped model there and interpolates the populations back:
   * below its bottom (log tau500 ~ 1.4, 0.1-0.3 Mm deep): hydrostatic equilibrium with d ln T/d ln P = `nabla`
     (the near-adiabatic convection zone), rho and ne from the HSEMHS EOS table, velocities held;
   * back: populations log-linear in z.
-The VJP is the transpose of these maps (finite differences for the three bottom values of the deep extension).
+The VJP is the transpose of these maps and the JVP their tangent map (finite differences for the three bottom
+values of the deep extension in both).
 """
 struct PopulationMeshConfig{T<:AbstractFloat}
     bottom_m::T
@@ -212,6 +213,71 @@ function population_vjp!(feature_bar::AbstractArray{T,4},z_bar::AbstractArray{T,
         end
     end
     feature_bar,z_bar
+end
+
+"""Mesh populations of the current atmosphere: the last prediction when its mesh features are unchanged."""
+function _mesh_populations(model,atmosphere,f,::Type{T},levels) where T
+    model.last_features!==nothing && size(model.last_features)==size(f) && model.last_features==f &&
+        size(model.last_populations,4)==levels && return model.last_populations
+    nm=length(model.mesh); nx,ny=size(atmosphere.temperature)[2:3]
+    p=zeros(T,nm,nx,ny,levels); predict_populations!(p,model.inner,_mesh_atmosphere(model,atmosphere,f))
+    model.last_features=f; model.last_populations=p
+end
+
+function population_jvp!(population_dot::AbstractArray{T,4},model::MeshPopulationModel,atmosphere::Atmosphere3D,
+        feature_dot::AbstractArray{<:Real,4}) where T
+    _mesh_active(atmosphere) || return population_jvp!(population_dot,model.inner,atmosphere,feature_dot)
+    nz,nx,ny=size(atmosphere.temperature); levels=size(population_dot,4); mesh=model.mesh; nm=length(mesh)
+    f=_mesh_features(model,atmosphere); pm=_mesh_populations(model,atmosphere,f,T,levels)
+    fm_dot=zeros(Float32,6,nm,nx,ny)
+    Threads.@threads for x in 1:nx
+        for y in 1:ny
+            _mesh_column_jvp!(@view(fm_dot[:,:,x,y]),model,atmosphere,x,y,@view(f[:,:,x,y]),@view(feature_dot[:,:,x,y]))
+        end
+    end
+    pm_dot=zeros(T,nm,nx,ny,levels)
+    population_jvp!(pm_dot,model.inner,_mesh_atmosphere(model,atmosphere,f),fm_dot)
+    # back-map: ln p(z_k) = (1-u) ln pm[j0] + u ln pm[j1], heights fixed
+    Threads.@threads for x in 1:nx
+        for y in 1:ny, k in 1:nz
+            j0,j1,u=_mesh_bracket(mesh,atmosphere.z[k,x,y])
+            for l in 1:levels
+                p=exp((1-u)*log(pm[j0,x,y,l])+u*log(pm[j1,x,y,l]))
+                population_dot[k,x,y,l]=p*((1-u)*pm_dot[j0,x,y,l]/pm[j0,x,y,l]+u*pm_dot[j1,x,y,l]/pm[j1,x,y,l])
+            end
+        end
+    end
+    population_dot
+end
+
+"""Tangent map of `_mesh_column!` for column (x, y), heights fixed: column feature tangents `fd` (6, nz) to the
+mesh-feature tangents `out` (6, nmesh)."""
+function _mesh_column_jvp!(out,model,atmosphere,x,y,f,fd)
+    zc=@view atmosphere.z[:,x,y]; mesh=model.mesh; nz=length(zc)
+    ad(c,k)=c==1 ? fd[1,k]/atmosphere.temperature[k,x,y] : fd[c,k]      # tangents of (ln T, v, log10 ne, log10 rho)
+    k=1; deep=Int[]
+    for m in eachindex(mesh)
+        kind,k,w=_mesh_locate(zc,mesh[m],k)
+        kind===:deep && (push!(deep,m); continue)
+        for c in 1:6; out[c,m]=kind===:top ? ad(c,1) : (1-w)*ad(c,k)+w*ad(c,k+1); end
+        out[1,m]*=f[1,m]
+    end
+    if !isempty(deep)
+        a=_mesh_column_variables(atmosphere,x,y); zs=mesh[deep]
+        dT=ad(1,nz); dr=ad(6,nz)*_LN10; s=max(abs(dT),abs(dr))
+        d=zeros(3,length(deep))
+        if s>0
+            h=1e-6/s
+            ext(e)=_mesh_deep!(Matrix{Float64}(undef,3,length(deep)),model.eos,model.gravity,model.nabla,
+                zc[nz],a[1,nz]+e*dT,a[6,nz]*_LN10+e*dr,zs)
+            d.=(ext(h).-ext(-h))./(2h)
+        end
+        for (i,m) in enumerate(deep)
+            out[1,m]=f[1,m]*d[1,i]; out[2,m]=ad(2,nz); out[3,m]=ad(3,nz); out[4,m]=ad(4,nz)
+            out[5,m]=d[2,i]; out[6,m]=d[3,i]
+        end
+    end
+    out
 end
 
 """Transpose of `_mesh_column!` for column (x, y): mesh-feature cotangents `fb` (6, nmesh) to the column's

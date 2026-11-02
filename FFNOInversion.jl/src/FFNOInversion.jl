@@ -54,7 +54,7 @@ export AbstractEquilibriumBackend, EquilibriumConfig, EquilibriumOutcome, HSEMHS
 export prepare_equilibrium, reconstruct_equilibrium!, close_equilibrium!
 export StokesSet, SpectralCube, ObservationCube, CapabilityManifest
 export NodeField, expand_nodes
-export AbstractPopulationModel, predict_populations!, population_vjp!, MockPopulationModel
+export AbstractPopulationModel, predict_populations!, population_vjp!, population_jvp!, MockPopulationModel
 export FFNO_INPUT_CHANNELS, PopulationMetadata, population_features, RecordedPopulationModel
 export PopulationMeshConfig, MeshPopulationModel, population_mesh, population_mesh_options, wrap_population_mesh
 export save_population_record, load_population_record
