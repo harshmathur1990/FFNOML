@@ -94,8 +94,8 @@ production Muspel and Wittmann-Kurucz paths shift the line centre to λ₀(1 −
 observer, upward at μ = 1) is a blue shift. Recorded as the output attribute `view_doppler_sign`. The mock
 `FFNOTransition` and the table-free `KuruczLTEModel` had the opposite sign (profile at λ(1 − v/c)); they now follow
 the same convention, and a test checks the line centre at λ₀(1 − v/c) in every line model. The code frame is z up,
-as the Bifrost data the FFNO was trained on (corr(T, vz) = +0.84 at z = 0); inputs with z (and vz) positive downward
-are rotated into it with `[atmosphere] frame = "z_down"` (180° about x).
+as the Bifrost data the FFNO was trained on (corr(T, vz) = +0.84 at z = 0); inputs whose positive vz means downward
+set `[atmosphere] vz_positive = "down"`, which negates vz and nothing else.
 
 **Control `vlos`.** The FFNO needs all three components, while the Doppler shift sees only n·v; transverse velocities
 act weakly and indirectly through the FFNO populations (Codex finding 5: they are not independent measurements). The
