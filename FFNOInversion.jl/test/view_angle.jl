@@ -3,6 +3,7 @@ using FFNOInversion
 using LinearAlgebra
 using HDF5
 import HSEMHS
+import Muspel
 
 # Viewing angle (docs/viewing-angle/README.md): geometry, line-of-sight Doppler shift, slanted path length, the periodic
 # shear and its transpose, footprint synthesis on height grids, the inclined population mesh, configuration and the
@@ -362,4 +363,90 @@ end
         forward!(fixture.workspace,fixture.model,fixture.distributed,fixture.context).spectrum.data
     end
     @test spectra[1]==spectra[2]==spectra[3]
+end
+
+@testset "input frame z_down: rotation by 180° about x" begin
+    isdefined(Main,:write_native_z_file) || include(joinpath(@__DIR__,"unit_coordinates.jl"))
+    mktempdir() do dir
+        up=joinpath(dir,"up.h5"); write_native_z_file(up)
+        # the same atmosphere in the rotated frame: z -> -z, y -> -y (arrays reversed along y), vy, vz negated
+        down=joinpath(dir,"down.h5")
+        h5open(up,"r") do f
+            h5open(down,"w") do g
+                g["z_m"]=-read(f["z_m"]); g["x_m"]=read(f["x_m"]); g["y_m"]=reverse(-read(f["y_m"]))
+                for (name,sign) in (("temperature",1),("vx",1),("vy",-1),("vz",-1))
+                    g[name]=sign .* reverse(read(f[name]);dims=2)                 # (z, y, x)
+                end
+            end
+        end
+        cu=load_config(native_z_config(dir,up))
+        cdown=load_config(native_z_config(dir,down;extra_atmos="frame = \"z_down\"",
+            extra="[view]\nmu = 0.8\nazimuth_deg = 30.0\ngeometry = \"inclined\""))
+        @test cu.frame===:z_up && cdown.frame===:z_down && cdown.view.azimuth_deg==-30.0
+        a=read_inversion_inputs(cu).atmosphere; b=read_inversion_inputs(cdown).atmosphere
+        @test native_depth(a.grid)==native_depth(b.grid) && a.grid.y==b.grid.y && a.grid.x==b.grid.x
+        for name in (:temperature,:vx,:vy,:vz,:z); @test getfield(a,name)==getfield(b,name); end
+        # outputs are rotated back into the input frame
+        result=InversionRunResult(nothing,SpectralCube(reshape(collect(1.0:60.0),3,1,5,4),[1e-7,2e-7,3e-7],StokesSet(:I)),
+            b,nothing,nothing,Dict{String,Any}())
+        write_inversion_outputs(cdown,result)
+        h5open(cdown.outputs.atmosphere_file,"r") do f
+            h5open(down,"r") do g
+                @test read(f["z_m"])==sort(read(g["z_m"]))                    # top first: depth increasing
+                @test read(f["y_m"])==read(g["y_m"])
+                ordered(a)=read(g["z_m"])[1]<read(g["z_m"])[end] ? a : reverse(a;dims=1)
+                for name in ("temperature","vy","vz"); @test read(f[name])[1,:,:,:]==ordered(read(g[name])); end
+            end
+            @test read(attributes(f)["frame"])=="z_down" && read(attributes(f)["view_azimuth_deg"])==30.0
+        end
+        h5open(cdown.outputs.synthesis_file,"r") do f
+            @test read(f["intensity"])[1,1,:,:,:]==permutedims(reverse(reshape(collect(1.0:60.0),3,1,5,4);dims=4)[:,1,:,:],(1,3,2))
+        end
+        # controls: vz bounds mirrored, z nodes negated; vlos (n·v) unchanged
+        controls="""
+[inversion]
+[[inversion.controls]]
+variable = "vz"
+z_nodes_m = [2.0e5, 1.0e6]
+lower = -1000.0
+upper = 3000.0
+scale = 1000.0
+[[inversion.controls]]
+variable = "temperature"
+z_nodes_m = [2.0e5, 1.0e6]
+lower = 3000.0
+upper = 9000.0
+scale = 1000.0
+"""
+        raw=FFNOInversion.TOML.parse(controls)
+        c=FFNOInversion._controls_in_code_frame(FFNOInversion._controls(raw["inversion"],:z_m),:z_down)
+        @test c[1].lower==-3000.0 && c[1].upper==1000.0 && c[1].nodes==[-2.0e5,-1.0e6]
+        @test c[2].lower==3000.0 && c[2].upper==9000.0
+        @test_throws ArgumentError FFNOInversion._frame(Dict("frame"=>"sideways"))
+    end
+end
+
+@testset "Doppler sign: positive v (toward the observer, up at μ = 1) is a blue shift in every line model" begin
+    nz=2; grid=Grid3D([-2.0,-1.0],[0.0],[0.0]); shape=(nz,1,1)
+    atmos(v)=Atmosphere3D(grid,reshape([5800.0,6200.0],shape),zeros(shape),zeros(shape),fill(v,shape),fill(1e3,shape);
+        rho=fill(1e-4,shape),ne=reshape([1e19,2e19],shape),pgas=fill(1e4,shape),z=reshape([1e5,0.0],shape))
+    centre(model,λ0,pops)=begin
+        w=collect(range(λ0-0.1e-9,λ0+0.1e-9,length=2001))
+        χ=zeros(nz,length(w)); η=zeros(nz,length(w))
+        add_opacity_emissivity!(χ,η,model,w,atmos(5e3),1,1,pops)
+        w[argmax(χ[1,:])]
+    end
+    pops=cat(fill(1e12,shape...),fill(1e11,shape...);dims=4)
+    line=FFNOTransition(:H,656.28e-9,1,2,0.64,1.6735575e-27,1e8)
+    @test isapprox(centre(line,656.28e-9,pops),656.28e-9*(1-5e3/299792458.0);atol=2e-13)
+    kurucz=KuruczLTEModel([KuruczLine(630.25e-9,"FeI",-1.0,3.6*1.602176634e-19,5.6*1.602176634e-19,1e8)])
+    @test isapprox(centre(kurucz,630.25e-9,nothing),630.25e-9*(1-5e3/299792458.0);atol=2e-13)
+    atom=joinpath(get(ENV,"FFNO_ATOM_DIR","/mn/stornext/u3/harshm/Documents/WorkRepo/multi3d/input/atoms"),"atom.h6_tiago2.yaml")
+    if isfile(atom) && isdefined(Main,:Muspel)
+        hp=fill(1e10,nz,1,1,6); hp[:,:,:,1].=1e16; hp[:,:,:,2].=2e14; hp[:,:,:,6].=1e15
+        m=build_muspel_line_model(atmos(0.0),hp,atom,5,2,3;voigt=(a_min=1f-4,a_max=1f1,a_n=300,v_min=0f0,v_max=5f2,v_n=500),
+            include_continuum=false)
+        λ0=Float64(m.line.λ0)*1e-9
+        @test isapprox(centre(m,λ0,hp),λ0*(1-5e3/299792458.0);atol=2e-13)
+    end
 end

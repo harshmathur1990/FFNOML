@@ -239,7 +239,7 @@ function add_opacity_emissivity_vjp!(atmosphere_bar,population_bar,population_lo
         vturb=atmosphere.vturb[k,x,y]; lambda=wavelength[l]
         thermal=2*_KB*temp/model.atomic_mass_kg+vturb^2
         width=model.wavelength0_m/_C*sqrt(thermal)
-        shifted=lambda*(1-vz/_C); q=(shifted-model.wavelength0_m)/width
+        shifted=lambda*(1+vz/_C); q=(shifted-model.wavelength0_m)/width
         profile=exp(-q^2)/(sqrt(pi)*width)
         nl=populations[k,x,y,model.lower_level]; nu=populations[k,x,y,model.upper_level]
         difference=nl-nu; difference<=0 && continue
@@ -256,7 +256,7 @@ function add_opacity_emissivity_vjp!(atmosphere_bar,population_bar,population_lo
         atmosphere_bar.temperature[k,x,y]+=source_bar*_planck_temperature_derivative(lambda,temp)+
             width_bar*width*(_KB/model.atomic_mass_kg)/thermal
         atmosphere_bar.vturb[k,x,y]+=width_bar*width*vturb/thermal
-        add_los_cotangent!(atmosphere_bar,atmosphere,k,x,y,-shifted_bar*lambda/_C)
+        add_los_cotangent!(atmosphere_bar,atmosphere,k,x,y,shifted_bar*lambda/_C)
     end
     nothing
 end
@@ -271,7 +271,7 @@ function add_opacity_emissivity_vjp!(atmosphere_bar,population_bar,population_lo
         boltzmann=exp(-line.lower_energy_j/(_KB*temp)); lower=rho*boltzmann
         thermal=2*_KB*temp/(56*1.66053906660e-27)+vturb^2
         width=line.wavelength0_m/_C*sqrt(thermal)
-        shifted=lambda*(1-vz/_C); q=(shifted-line.wavelength0_m)/width
+        shifted=lambda*(1+vz/_C); q=(shifted-line.wavelength0_m)/width
         profile=exp(-q^2)/(sqrt(pi)*width); coefficient=1e-2*10^line.loggf
         extinction=coefficient*lower*profile; source=planck_lambda(lambda,temp)
         extinction_bar=chi_bar[k,l]+eta_bar[k,l]*source
@@ -284,7 +284,7 @@ function add_opacity_emissivity_vjp!(atmosphere_bar,population_bar,population_lo
             width_bar*width*(_KB/(56*1.66053906660e-27))/thermal+
             source_bar*_planck_temperature_derivative(lambda,temp)
         atmosphere_bar.vturb[k,x,y]+=width_bar*width*vturb/thermal
-        add_los_cotangent!(atmosphere_bar,atmosphere,k,x,y,-shifted_bar*lambda/_C)
+        add_los_cotangent!(atmosphere_bar,atmosphere,k,x,y,shifted_bar*lambda/_C)
     end
     nothing
 end

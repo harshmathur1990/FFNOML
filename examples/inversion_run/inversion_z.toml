@@ -12,6 +12,11 @@ atmosphere_file = "outputs/inverted_atmosphere_z.h5"
 vertical_coordinate = "z"
 storage_order = "python"
 
+# Right-handed frame of the input: "z_up" (default; z, vz, Bz positive upward, as the FFNO's Bifrost training data)
+# or "z_down" (z and vz positive downward): rotated by 180 degrees about x on input (vy, vz, By, Bz negated, y
+# reversed) and back on output.
+# frame = "z_up"
+
 [atmosphere.datasets]
 z_m = "z_m"                 # height axis [m], positive upward (either order; read top first)
 x_m = "x_m"                 # horizontal axes [m], uniform and increasing (origin kept)

@@ -12,6 +12,11 @@ atmosphere_file = "outputs/inverted_atmosphere.h5"
 vertical_coordinate = "log10tau500"
 storage_order = "python"
 
+# Right-handed frame of the input: "z_up" (default; z, vz, Bz positive upward, as the FFNO's Bifrost training data)
+# or "z_down" (z and vz positive downward): rotated by 180 degrees about x on input (vy, vz, By, Bz negated, y
+# reversed) and back on output.
+# frame = "z_up"
+
 [atmosphere.datasets]
 logtau500 = "logtau_500"
 temperature = "temperature"

@@ -114,11 +114,22 @@ function read_inversion_inputs(config::RunConfig{T}) where T
             T.(_zyx_to_zxy(_time_slice(_from_atmosphere_storage(
                 _read_dataset(file,config.atmosphere.vturb_dataset),storage_order),
                 config.time_index,3,"vturb")))
+        if config.frame===:z_down
+            # rotate the input frame by 180° about x into the code's z-up frame: y -> -y, z -> -z
+            ry(a)=reverse(a;dims=3)
+            temperature=ry(temperature); vx=ry(vx); vy=-ry(vy); vz=-ry(vz); vturb=ry(vturb)
+            magnetic===nothing || (magnetic=MagneticField3D(ry(magnetic.Bx),-ry(magnetic.By),-ry(magnetic.Bz)))
+            y=reverse(-y)
+            kind===:z_m && (vertical=-vertical)
+        end
         # canonical order is top first; reverse the axis and every 3-D field together
         bottom_first=kind===:z_m ? vertical[1]<vertical[end] : vertical[1]>vertical[end]
         flip(a)=bottom_first ? reverse(a;dims=1) : a
         bottom_first && (vertical=reverse(vertical))
-        check_input_view(read_view_attributes(HDF5.attributes(file)),config.view,kind,config.atmosphere.file)
+        file_view=read_view_attributes(HDF5.attributes(file))
+        file_view===nothing || config.frame===:z_up ||
+            (file_view=ViewGeometry(file_view.mu,-file_view.azimuth_deg,file_view.geometry))   # tags are in the input frame
+        check_input_view(file_view,config.view,kind,config.atmosphere.file)
         grid=Grid3D(VerticalAxis(kind,T.(vertical)),x,y,config.view)
         is_slanted(config.view) && warn_view_travel(grid,kind===:z_m ? T.(vertical) : T[0],"input")
         magnetic=magnetic===nothing ? nothing : MagneticField3D(flip(magnetic.Bx),flip(magnetic.By),flip(magnetic.Bz))
@@ -143,6 +154,9 @@ function read_inversion_inputs(config::RunConfig{T}) where T
             "observed wavelength count differs from configured synthesis grid"))
         size(intensity,2)==length(config.stokes.components) || throw(DimensionMismatch(
             "observed Stokes count differs from configuration"))
+        if config.frame===:z_down          # the observation is on the same (x, y) grid as the input atmosphere
+            intensity=reverse(intensity;dims=4); sigma=reverse(sigma;dims=4); spatial_weights=reverse(spatial_weights;dims=2)
+        end
         weights=build_inversion_weights(wavelength_weights,spatial_weights)
         size(weights)==size(intensity) || throw(DimensionMismatch(
             "wavelength/spatial weights do not span the observed cube"))
@@ -161,13 +175,23 @@ function _with_time_slyx(value)
     slyx=permutedims(value,(2,1,4,3)); reshape(slyx,(1,size(slyx)...))
 end
 
-"""Write exactly the configured synthesis and atmosphere products on rank 0."""
+"""Outputs in the input frame: arrays reversed along y (axis `ydim`) and, for `sign = -1`, negated (frame z_down)."""
+_output_frame(config,value,ydim;sign=1)=config.frame===:z_up ? value : sign.*reverse(value;dims=ydim)
+
+"""View attributes in the input frame (the azimuth mirrored back for frame z_down)."""
+function _output_view_attributes(config,view,columns)
+    attrs=view_attributes(config.frame===:z_up ? view : ViewGeometry(view.mu,-view.azimuth_deg,view.geometry,view.footprint),columns)
+    attrs["frame"]=String(config.frame)
+    attrs
+end
+
+"""Write exactly the configured synthesis and atmosphere products on rank 0, in the input frame."""
 function write_inversion_outputs(config::RunConfig,result::InversionRunResult)
     result.synthesis===nothing && return nothing
     mkpath(dirname(abspath(config.outputs.synthesis_file)))
     mkpath(dirname(abspath(config.outputs.atmosphere_file)))
     h5open(config.outputs.synthesis_file,"w") do file
-        file["intensity"]=_with_time_slyx(result.synthesis.data)
+        file["intensity"]=_with_time_slyx(_output_frame(config,result.synthesis.data,4))
         file["wavelength_m"]=result.synthesis.wavelength_m
         if result.objective!==nothing
             file["objective_total"]=result.objective.components.total
@@ -178,35 +202,38 @@ function write_inversion_outputs(config::RunConfig,result::InversionRunResult)
         attributes(file)["provenance_toml"]=sprint(io->TOML.print(io,result.provenance;sorted=true))
         attributes(file)["axis_order"]="time,stokes,wavelength,y,x"
         # the synthesis is on the footprint grid (rays) whenever the view is off the vertical
-        for (key,value) in view_attributes(result.atmosphere.grid.view,"rays"); attributes(file)[key]=value; end
+        for (key,value) in _output_view_attributes(config,result.atmosphere.grid.view,"rays"); attributes(file)[key]=value; end
     end
     atmosphere=result.atmosphere
     h5open(config.outputs.atmosphere_file,"w") do file
         kind=vertical_coordinate(atmosphere.grid)
-        file[kind===:z_m ? "z_m" : "logtau_500"]=native_depth(atmosphere.grid)
-        file["x_m"]=atmosphere.grid.x; file["y_m"]=atmosphere.grid.y
+        down=config.frame===:z_down
+        file[kind===:z_m ? "z_m" : "logtau_500"]=down && kind===:z_m ? -native_depth(atmosphere.grid) : native_depth(atmosphere.grid)
+        file["x_m"]=atmosphere.grid.x; file["y_m"]=down ? reverse(-atmosphere.grid.y) : atmosphere.grid.y
         for name in (:temperature,:vx,:vy,:vz,:vturb,:pgas,:rho,:ne,:z,:logtau500,:chi500)
-            value=getfield(atmosphere,name); value===nothing || (file[string(name)]=_with_time_zyx(value))
+            value=getfield(atmosphere,name)
+            value===nothing || (file[string(name)]=_with_time_zyx(_output_frame(config,value,3;sign=name in (:vy,:vz,:z) ? -1 : 1)))
         end
         if atmosphere.magnetic_field!==nothing
             for name in (:Bx,:By,:Bz)
-                file[string(name)]=_with_time_zyx(getfield(atmosphere.magnetic_field,name))
+                file[string(name)]=_with_time_zyx(_output_frame(config,getfield(atmosphere.magnetic_field,name),3;
+                    sign=name in (:By,:Bz) ? -1 : 1))
             end
         end
         if result.populations isa AbstractDict
             group=create_group(file,"populations")
             for (species,value) in result.populations
-                group[string(species)]=permutedims(value,(4,1,3,2))
+                group[string(species)]=permutedims(_output_frame(config,value,3),(4,1,3,2))
             end
         elseif result.populations!==nothing
-            file["populations"]=permutedims(result.populations,(4,1,3,2))
+            file["populations"]=permutedims(_output_frame(config,result.populations,3),(4,1,3,2))
         end
         attributes(file)["axis_order"]="time,z,y,x; populations=level,z,y,x"
         attributes(file)["vertical_coordinate"]=string(kind)
         attributes(file)["vertical_unit"]=vertical_unit(kind)
         attributes(file)["vertical_order"]="top_first"
         attributes(file)["native_axis_dataset"]=kind===:z_m ? "z_m" : "logtau_500"
-        for (key,value) in view_attributes(atmosphere.grid.view,view_columns(atmosphere.grid))
+        for (key,value) in _output_view_attributes(config,atmosphere.grid.view,view_columns(atmosphere.grid))
             attributes(file)[key]=value
         end
         attributes(file)["execution_mode"]=string(config.mode)
