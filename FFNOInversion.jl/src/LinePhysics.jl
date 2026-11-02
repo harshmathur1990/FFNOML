@@ -187,7 +187,7 @@ function add_opacity_emissivity!(χ,η,model::FFNOTransition,wavelength,atmosphe
     size(populations,4)>=max(model.lower_level,model.upper_level) || throw(DimensionMismatch("population level missing"))
     @inbounds for k in axes(χ,1),l in axes(χ,2)
         temp=atmosphere.temperature[k,x,y]
-        profile=_gaussian_profile(wavelength[l]*(1-los_velocity(atmosphere,k,x,y)/_C),model.wavelength0_m,temp,atmosphere.vturb[k,x,y],model.atomic_mass_kg)
+        profile=_gaussian_profile(wavelength[l]*(1+los_velocity(atmosphere,k,x,y)/_C),model.wavelength0_m,temp,atmosphere.vturb[k,x,y],model.atomic_mass_kg)
         nl=populations[k,x,y,model.lower_level]; nu=populations[k,x,y,model.upper_level]
         χline=max(zero(eltype(χ)),model.oscillator_strength*1e-24*(nl-nu)*profile)
         χ[k,l]+=χline; η[k,l]+=χline*planck_lambda(wavelength[l],temp)
@@ -200,7 +200,7 @@ function add_opacity_emissivity!(χ,η,model::KuruczLTEModel,wavelength,atmosphe
     @inbounds for line in model.lines,k in axes(χ,1),l in axes(χ,2)
         temp=atmosphere.temperature[k,x,y]
         nl=atmosphere.rho[k,x,y]*exp(-line.lower_energy_j/(_KB*temp))
-        profile=_gaussian_profile(wavelength[l]*(1-los_velocity(atmosphere,k,x,y)/_C),line.wavelength0_m,temp,atmosphere.vturb[k,x,y],1.66053906660e-27*56)
+        profile=_gaussian_profile(wavelength[l]*(1+los_velocity(atmosphere,k,x,y)/_C),line.wavelength0_m,temp,atmosphere.vturb[k,x,y],1.66053906660e-27*56)
         χline=max(zero(eltype(χ)),1e-2*10^line.loggf*nl*profile)
         χ[k,l]+=χline; η[k,l]+=χline*planck_lambda(wavelength[l],temp)
     end

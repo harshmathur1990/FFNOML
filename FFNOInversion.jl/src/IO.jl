@@ -100,6 +100,34 @@ struct RunConfig{T<:AbstractFloat}
     equilibrium::EquilibriumConfig
     population_mesh::Union{Nothing,PopulationMeshConfig{T}}
     view::ViewGeometry
+    frame::Symbol
+end
+
+"""
+`[atmosphere] frame`: the right-handed frame of the input files. `"z_up"` (default) is the code's own frame: z, vz
+and Bz positive upward, as in the Bifrost/MULTI3D files the FFNO was trained on. `"z_down"` is the same frame rotated
+by 180° about x (z, vz positive downward, as in Bifrost's native frame): on input y → −y and z → −z for the grid,
+heights, velocities and B (vy, vz, By, Bz change sign, arrays are reversed along y, native-z heights are negated), the
+`[view]` azimuth φ → −φ, and vy, vz, By, Bz control bounds and z nodes are mirrored; every output is rotated back.
+n·v (`vlos`) is the same in both frames.
+"""
+function _frame(atmos)
+    frame=Symbol(lowercase(String(get(atmos,"frame","z_up"))))
+    frame in (:z_up,:z_down) || throw(ArgumentError("atmosphere.frame must be \"z_up\" or \"z_down\", got \"$frame\""))
+    frame
+end
+
+"""Components that change sign under the rotation about x (y and z)."""
+const _FRAME_FLIPPED=(:vy,:vz,:By,:Bz)
+
+"""Controls in the code's frame: vy, vz, By, Bz bounds mirrored, z nodes negated (`frame = "z_down"`)."""
+function _controls_in_code_frame(controls,frame)
+    frame===:z_up && return controls
+    map(controls) do c
+        flip=c.variable in _FRAME_FLIPPED
+        ControlMapConfig(c.variable,c.kind===:z_m ? -c.nodes : c.nodes,c.kind,c.control_nx,c.control_ny,
+            flip ? -c.upper : c.lower,flip ? -c.lower : c.upper,c.scale)
+    end
 end
 
 """`[view]` (design §8): mu, azimuth_deg, geometry; absent = the vertical view."""
@@ -405,7 +433,10 @@ function load_config(path::AbstractString)
     stokes.components == (:I,) || throw(ArgumentError("Release 1 supports Stokes I only"))
     redistribution = Symbol(get(physics,"redistribution","non_prd"))
     redistribution == :non_prd || throw(ArgumentError("Release 1 supports redistribution=non_prd only"))
+    frame = _frame(atmos)
     view = _view(get(cfg,"view",Dict{String,Any}()))
+    # the view's azimuth is given in the input frame; the rotation about x mirrors it
+    frame===:z_down && (view=ViewGeometry(view.mu,-view.azimuth_deg,view.geometry))
     column=equilibrium.column
     if !is_vertical(view) && column isa HSEMHS.ColumnZOptions && !(column.mu in (1.0,view.mu))
         throw(ArgumentError("[equilibrium.column_z] mu = $(column.mu) conflicts with [view] mu = $(view.mu); give one of them"))
@@ -419,6 +450,7 @@ function load_config(path::AbstractString)
         throw(ArgumentError("vertical regularization types 1/4 on a z grid require regularization.vertical.length_scale_m [m]"))
     end
     controls=forward_only ? ControlMapConfig{Float64}[] : _controls(_required(cfg,"inversion"),vertical_coordinate)
+    controls=_controls_in_code_frame(controls,_frame(atmos))
     parallel_raw = get(cfg,"parallel",Dict{String,Any}())
     decomposition = Symbol(lowercase(String(get(parallel_raw,"decomposition","cartesian_2d"))))
     decomposition in (:cartesian_2d,:x_slabs) || throw(ArgumentError("parallel.decomposition must be cartesian_2d or x_slabs"))
@@ -457,7 +489,7 @@ function load_config(path::AbstractString)
         "the HSEMHS equilibrium solves on x slabs: set parallel.decomposition = \"x_slabs\" (got $(parallel.decomposition))"))
     RunConfig(atmosphere,mode,observed,weights,outputs,SynthesisGridConfig(wavelength_m,dx_m,dy_m),regions,
         observation_model,stokes,redistribution,regularization,parallel,controls,solver,time_index,equilibrium,
-        _population_mesh(get(cfg,"population",Dict{String,Any}()),vertical_coordinate),view)
+        _population_mesh(get(cfg,"population",Dict{String,Any}()),vertical_coordinate),view,frame)
 end
 
 const _POPULATION_MESH_KEYS=("enabled","bottom_m","top_m","spacing_m","uniform_top_m","stretch","max_spacing_m","nabla")

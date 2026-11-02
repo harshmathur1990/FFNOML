@@ -91,9 +91,11 @@ derivative of τ or of its top closure, and 1/μ enters once. At μ = 1 the code
 returns `vz` itself when the view is vertical (bitwise μ = 1). The adjoints add n·v̄_LOS to v̄_x, v̄_y, v̄_z; the
 numerical opaque-kernel VJP perturbs vx and vy as well as vz when μ < 1. The sign convention is the code's: the
 production Muspel and Wittmann-Kurucz paths shift the line centre to λ₀(1 − v/c), i.e. positive v_LOS (toward the
-observer, upward at μ = 1) is a blue shift. Recorded as the output attribute `view_doppler_sign`. (The mock
-`FFNOTransition` and the legacy table-free `KuruczLTEModel` evaluate the profile at λ(1 − v/c), the opposite sign; they
-are test models and are left as they are, noted here.)
+observer, upward at μ = 1) is a blue shift. Recorded as the output attribute `view_doppler_sign`. The mock
+`FFNOTransition` and the table-free `KuruczLTEModel` had the opposite sign (profile at λ(1 − v/c)); they now follow
+the same convention, and a test checks the line centre at λ₀(1 − v/c) in every line model. The code frame is z up,
+as the Bifrost data the FFNO was trained on (corr(T, vz) = +0.84 at z = 0); inputs with z (and vz) positive downward
+are rotated into it with `[atmosphere] frame = "z_down"` (180° about x).
 
 **Control `vlos`.** The FFNO needs all three components, while the Doppler shift sees only n·v; transverse velocities
 act weakly and indirectly through the FFNO populations (Codex finding 5: they are not independent measurements). The
