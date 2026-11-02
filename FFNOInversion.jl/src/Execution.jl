@@ -118,7 +118,9 @@ function read_inversion_inputs(config::RunConfig{T}) where T
         bottom_first=kind===:z_m ? vertical[1]<vertical[end] : vertical[1]>vertical[end]
         flip(a)=bottom_first ? reverse(a;dims=1) : a
         bottom_first && (vertical=reverse(vertical))
-        grid=Grid3D(VerticalAxis(kind,T.(vertical)),x,y)
+        check_input_view(read_view_attributes(HDF5.attributes(file)),config.view,kind,config.atmosphere.file)
+        grid=Grid3D(VerticalAxis(kind,T.(vertical)),x,y,config.view)
+        is_slanted(config.view) && warn_view_travel(grid,kind===:z_m ? T.(vertical) : T[0],"input")
         magnetic=magnetic===nothing ? nothing : MagneticField3D(flip(magnetic.Bx),flip(magnetic.By),flip(magnetic.Bz))
         # a native height axis is also the atmosphere's (column-independent) z field
         zfield=kind===:z_m ? repeat(reshape(T.(vertical),:,1,1),1,nx,ny) : nothing
@@ -175,6 +177,8 @@ function write_inversion_outputs(config::RunConfig,result::InversionRunResult)
         attributes(file)["execution_mode"]=string(config.mode)
         attributes(file)["provenance_toml"]=sprint(io->TOML.print(io,result.provenance;sorted=true))
         attributes(file)["axis_order"]="time,stokes,wavelength,y,x"
+        # the synthesis is on the footprint grid (rays) whenever the view is off the vertical
+        for (key,value) in view_attributes(result.atmosphere.grid.view,"rays"); attributes(file)[key]=value; end
     end
     atmosphere=result.atmosphere
     h5open(config.outputs.atmosphere_file,"w") do file
@@ -202,6 +206,9 @@ function write_inversion_outputs(config::RunConfig,result::InversionRunResult)
         attributes(file)["vertical_unit"]=vertical_unit(kind)
         attributes(file)["vertical_order"]="top_first"
         attributes(file)["native_axis_dataset"]=kind===:z_m ? "z_m" : "logtau_500"
+        for (key,value) in view_attributes(atmosphere.grid.view,view_columns(atmosphere.grid))
+            attributes(file)[key]=value
+        end
         attributes(file)["execution_mode"]=string(config.mode)
         attributes(file)["provenance_toml"]=sprint(io->TOML.print(io,result.provenance;sorted=true))
         if result.solver!==nothing
@@ -282,7 +289,7 @@ function run_inversion!(config::RunConfig,root_inputs,
             _equilibrium_provenance!(provenance,model,result.equilibrium)
             _forward_stage(context,"gather begin")
             gathered=InversionRunResult(nothing,gather_spectrum(workspace.output,distributed,context),
-                gather_atmosphere(distributed,context),_gather_populations(workspace.populations,distributed,context),
+                gather_atmosphere(distributed,context),_gather_populations(cartesian_populations(workspace),distributed,context),
                 nothing,provenance)
             _forward_stage(context,"gather done")
             return gathered
@@ -303,7 +310,7 @@ function run_inversion!(config::RunConfig,root_inputs,
         objective=evaluate_objective!(problem,layout,final_parameters,context)
         synthesis=gather_spectrum(workspace.output,distributed,context)
         atmosphere=gather_atmosphere(distributed,context)
-        populations=_gather_populations(workspace.populations,distributed,context)
+        populations=_gather_populations(cartesian_populations(workspace),distributed,context)
         provenance=parallel_provenance(context,distributed.tile;capabilities=["intensity","non_prd",
             "matrix_free_vjp","lbfgs","fsdp_distributed_h_slab"])
         _equilibrium_provenance!(provenance,model,objective.equilibrium)

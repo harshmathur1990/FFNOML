@@ -16,7 +16,9 @@
 #
 # Output (HDF5, Julia shapes; h5py sees them reversed):
 #   R/<variable>         (nλ, nz, ny', nx')  per unit log10 tau500: δI(λ) = Σ_k R[λ, k] δv(k) Δlog τ(k)
-#                        temperature [I/K], vz [I/(m/s)], vturb [I/(m/s)], ne and pgas [I per unit ln v]
+#                        temperature [I/K], vz [I/(m/s)], vturb [I/(m/s)], ne and pgas [I per unit ln v],
+#                        vlos [I/(m/s)]: v moved along the line of sight n (equals vz for a vertical view; off the
+#                        vertical vz is the vertical component only, docs/viewing-angle/README.md)
 #   intensity            (nλ, ny', nx')      intrinsic Stokes I of the same columns
 #   wavelength_air_m, wavelength_vacuum_m (nλ); logtau500, dlogtau500 (nz); x_index, y_index (0-based), x_m, y_m
 #
@@ -42,7 +44,7 @@ function parse_arguments(args)
     end
     variables=Symbol.(split(options["variables"],','))
     for v in variables
-        v in (:temperature,:vz,:vturb,:ne,:pgas) || error("variable $v is not one of temperature, vz, vturb, ne, pgas")
+        v in (:temperature,:vz,:vlos,:vturb,:ne,:pgas) || error("variable $v is not one of temperature, vz, vlos, vturb, ne, pgas")
     end
     crop=isempty(options["crop"]) ? nothing : parse.(Int,split(options["crop"],','))
     tangents=isempty(options["population-tangents"]) ? nothing : options["population-tangents"]
@@ -65,7 +67,7 @@ end
 fixed step because Muspel works in Float32, where a m/s Doppler shift is below the wavelength resolution."""
 function perturbation(variable,value)
     variable===:temperature && return 1e-3*value,1.0
-    variable in (:vz,:vturb) && return 250.0,1.0
+    variable in (:vz,:vlos,:vturb) && return 250.0,1.0
     1e-3*value,value
 end
 
@@ -123,12 +125,17 @@ function column_response!(R,I,j,setups,ranges,variables,atmosphere,x,y,widths,te
         chi_bar.*=weight; eta_bar.*=weight      # chi500 fixed: χ' = wχ, η' = wη
         chi_plus=similar(chi); eta_plus=similar(eta); chi_minus=similar(chi); eta_minus=similar(eta)
         for (iv,variable) in enumerate(variables)
-            column=@view getfield(atmosphere,variable)[:,x,y]; saved=copy(column)
-            steps=perturbation.(variable,saved)
+            # vlos moves (vx, vy, vz) along n; the other variables are one stored field
+            names=variable===:vlos ? (:vx,:vy,:vz) : (variable,)
+            direction=variable===:vlos ? F.view_direction(atmosphere.grid.view) : (1.0,)
+            columns=[@view(getfield(atmosphere,name)[:,x,y]) for name in names]; saved=copy.(columns)
+            steps=perturbation.(variable,variable===:vlos ? [F.los_velocity(atmosphere,k,x,y) for k in 1:nz] : saved[1])
             h=first.(steps); chain=last.(steps)
-            column.=saved.+h; opacity!(chi_plus,eta_plus,synthesizer,wavelength,atmosphere,x,y)
-            column.=saved.-h; opacity!(chi_minus,eta_minus,synthesizer,wavelength,atmosphere,x,y)
-            column.=saved
+            for (c,s,n) in zip(columns,saved,direction); c.=s.+n.*h; end
+            opacity!(chi_plus,eta_plus,synthesizer,wavelength,atmosphere,x,y)
+            for (c,s,n) in zip(columns,saved,direction); c.=s.-n.*h; end
+            opacity!(chi_minus,eta_minus,synthesizer,wavelength,atmosphere,x,y)
+            for (c,s) in zip(columns,saved); c.=s; end
             out=R[iv]
             for k in 1:nz, l in 1:nl
                 d=(chi_bar[k,l]*(chi_plus[k,l]-chi_minus[k,l])+eta_bar[k,l]*(eta_plus[k,l]-eta_minus[k,l]))/(2h[k])
@@ -241,6 +248,7 @@ function main(a)
         attributes(file)["source_atmosphere"]=abspath(a.atmosphere)
         attributes(file)["config"]=abspath(a.config)
         tangents===nothing || (attributes(file)["population_tangents"]=abspath(a.tangents))
+        for (key,value) in F.view_attributes(atmosphere.grid.view,"rays"); attributes(file)[key]=value; end
         tangents===nothing || (attributes(datasets[findfirst(==(:temperature),a.variables)])["populations"]=
             "FFNO populations respond (forward-mode tangents seeded in every column); pgas, rho, ne, z fixed")
         block=nl*nz*nys

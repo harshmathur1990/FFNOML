@@ -190,13 +190,14 @@ function _prepare_hsemhs(eq,distributed,context,synthesis_eos)
     table,provenance=local_state
     column=eq.column
     ws=HSEMHS.prepare_embedded(comm,eq.mode;axis=native_depth(grid),x=grid.x,y=grid.y,eos=table,g=eq.gravity_m_s2,
-        column=column,poisson=eq.poisson,progress=isroot(context))
+        column=column,poisson=eq.poisson,view=hsemhs_view(grid.view),progress=isroot(context))
     ok=HSEMHS.agree(comm,"equilibrium slab ownership") do
         HSEMHS.owned_columns(ws)==distributed.tile.xrange && distributed.tile.yrange==1:length(grid.y) ||
             throw(ArgumentError("HSEMHS owns x $(HSEMHS.owned_columns(ws)) but this rank's tile is x $(distributed.tile.xrange), y $(distributed.tile.yrange)"))
         true
     end
     provenance["mode"]=hsemhs_mode_name(eq.mode); provenance["gravity_m_s2"]=eq.gravity_m_s2
+    is_vertical(grid.view) || merge!(provenance,view_attributes(grid.view,view_columns(grid)))
     provenance["eos_table_file"]=abspath(eq.eos_table_file); provenance["hsemhs_version"]=string(pkgversion(HSEMHS))
     HSEMHSBackend(eq,ws,provenance,false)
 end

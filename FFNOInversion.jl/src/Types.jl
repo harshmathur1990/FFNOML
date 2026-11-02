@@ -32,18 +32,58 @@ struct VerticalAxis{T<:AbstractFloat}
     end
 end
 
+"""
+Viewing angle of a run (docs/viewing-angle/README.md): `mu` = cos θ, `azimuth_deg` = φ from +x toward +y,
+`geometry` :plane_parallel (vertical columns, path dz/μ) or :inclined (rays x = ξ + t_x (z − z_ref), y = η + t_y (z − z_ref)
+through each footprint (ξ, η), t = tan θ (cos φ, sin φ), z_ref = 0). `footprint` marks an atmosphere whose columns are
+rays (a native-z atmosphere sheared to the footprint grid for the synthesis); a native-log-τ atmosphere's columns are
+rays by contract. The default is the vertical view, which every code path treats exactly as before the view existed.
+"""
+struct ViewGeometry
+    mu::Float64
+    azimuth_deg::Float64
+    geometry::Symbol
+    footprint::Bool
+    function ViewGeometry(mu::Real, azimuth_deg::Real, geometry::Symbol, footprint::Bool=false)
+        isfinite(mu) && 0 < mu <= 1 || throw(ArgumentError("view mu must be in (0, 1], got $mu"))
+        isfinite(azimuth_deg) || throw(ArgumentError("view azimuth_deg must be finite"))
+        geometry in (:plane_parallel, :inclined) || throw(ArgumentError(
+            "view geometry must be :plane_parallel or :inclined, got :$geometry"))
+        new(Float64(mu), Float64(azimuth_deg), geometry, footprint)
+    end
+end
+ViewGeometry(; mu=1.0, azimuth_deg=0.0, geometry=:plane_parallel, footprint=false) =
+    ViewGeometry(mu, azimuth_deg, Symbol(geometry), footprint)
+
+"""True for μ = 1: no projection, no path factor, no shear (either geometry)."""
+is_vertical(v::ViewGeometry) = v.mu == 1.0
+"""True when the rays are slanted through the cube (inclined geometry, μ < 1)."""
+is_slanted(v::ViewGeometry) = v.geometry === :inclined && !is_vertical(v)
+"""Direction to the observer n = (sin θ cos φ, sin θ sin φ, μ)."""
+view_direction(v::ViewGeometry) = (s = sqrt(1 - v.mu^2); (s * cosd(v.azimuth_deg), s * sind(v.azimuth_deg), v.mu))
+"""Slant vector t = tan θ (cos φ, sin φ) of the rays; (0, 0) unless `is_slanted`."""
+slant(v::ViewGeometry) = is_slanted(v) ? (s = sqrt(1 - v.mu^2) / v.mu; (s * cosd(v.azimuth_deg), s * sind(v.azimuth_deg))) :
+    (0.0, 0.0)
+"""The same view with the footprint flag set."""
+footprint_view(v::ViewGeometry) = ViewGeometry(v.mu, v.azimuth_deg, v.geometry, true)
+Base.:(==)(a::ViewGeometry, b::ViewGeometry) =
+    a.mu == b.mu && a.azimuth_deg == b.azimuth_deg && a.geometry === b.geometry && a.footprint == b.footprint
+
 """Three-dimensional inversion grid: a native vertical axis plus horizontal pixel
-coordinates. x and y must be finite and strictly increasing (one point allowed)."""
+coordinates. x and y must be finite and strictly increasing (one point allowed).
+`view` is the viewing angle of the run (default: vertical)."""
 struct Grid3D{T<:AbstractFloat}
     vertical::VerticalAxis{T}
     x::Vector{T}
     y::Vector{T}
-    function Grid3D(vertical::VerticalAxis{T}, x::AbstractVector{T}, y::AbstractVector{T}) where {T<:AbstractFloat}
+    view::ViewGeometry
+    function Grid3D(vertical::VerticalAxis{T}, x::AbstractVector{T}, y::AbstractVector{T},
+                    view::ViewGeometry=ViewGeometry()) where {T<:AbstractFloat}
         length(x) >= 1 && length(y) >= 1 || throw(ArgumentError("x and y cannot be empty"))
         all(isfinite, x) && all(isfinite, y) || throw(ArgumentError("grid values must be finite"))
         all(>(zero(T)), diff(x)) || throw(ArgumentError("x must be strictly increasing; decreasing horizontal axes are not normalized"))
         all(>(zero(T)), diff(y)) || throw(ArgumentError("y must be strictly increasing; decreasing horizontal axes are not normalized"))
-        new{T}(vertical, collect(x), collect(y))
+        new{T}(vertical, collect(x), collect(y), view)
     end
 end
 

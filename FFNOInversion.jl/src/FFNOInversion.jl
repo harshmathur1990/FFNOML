@@ -14,6 +14,7 @@ import HSEMHS
 import FFTW
 
 include("Types.jl")
+include("ViewAngle.jl")
 include("Parallel.jl")
 include("Diagnostics.jl")
 include("Nodes.jl")
@@ -38,6 +39,8 @@ include("IO.jl")
 include("Execution.jl")
 
 export Grid3D, MagneticField3D, Atmosphere3D
+export ViewGeometry, is_vertical, is_slanted, view_direction, slant, los_velocity, view_attributes
+export ShearPlan, shear_levels!, shear_levels_transpose!
 export VerticalAxis, VERTICAL_KINDS, vertical_unit, vertical_coordinate, native_depth, nlevels
 export log_tau500_axis, z_axis, check_coordinate_consistency
 export ParallelOptions, ParallelContext, Tile2D, DistributedField

@@ -33,7 +33,8 @@ function distribute_atmosphere(::Type{T},root_atmosphere,context::ParallelContex
         bz=distribute_field(T,isroot(context) ? rootB.Bz : nothing,shape,context;tag=312).values
         MagneticField3D(bx,by,bz)
     else nothing end
-    local_grid=Grid3D(metadata.grid.vertical,copy(metadata.grid.x[tile.xrange]),copy(metadata.grid.y[tile.yrange]))
+    local_grid=Grid3D(metadata.grid.vertical,copy(metadata.grid.x[tile.xrange]),copy(metadata.grid.y[tile.yrange]),
+        metadata.grid.view)
     local_atmos=Atmosphere3D(local_grid,temperature,vx,vy,vz,vturb;magnetic_field=B,pgas=pgas,rho=rho,ne=ne,z=z,
         logtau500=logtau500,chi500=chi500)
     DistributedAtmosphere(local_atmos,metadata.grid,tile)
@@ -121,11 +122,45 @@ function predict_distributed_populations!(out::AbstractDict,backend::CompositeDi
     out
 end
 
+"""
+Inclined view on a native height grid (docs/viewing-angle/README.md §6): the synthesis runs on the footprint
+atmosphere, whose columns are the rays x = ξ + t z, built every forward by shifting the Cartesian state level by level
+(`footprint_state!`). `populations` holds the Cartesian FFNO prediction; the workspace's own `populations` arrays,
+which the synthesis contributors reference, then hold the footprint populations.
+"""
+mutable struct FootprintState{A,P}
+    atmosphere::A
+    populations::P
+end
+
 mutable struct HybridForwardWorkspace{T<:AbstractFloat,P}
     populations::P
     intrinsic::SpectralCube{T,Array{T,4}}
     output::SpectralCube{T,Array{T,4}}
     synthesis_cache::ThreadedSynthesisCache{T}
+    footprint::Union{Nothing,FootprintState}
+end
+HybridForwardWorkspace(populations,intrinsic::SpectralCube,output::SpectralCube,cache::ThreadedSynthesisCache)=
+    HybridForwardWorkspace(populations,intrinsic,output,cache,nothing)
+
+"""True when the synthesis needs footprint columns: an inclined view on a native height grid."""
+needs_footprint(grid::Grid3D)=vertical_coordinate(grid)===:z_m && is_slanted(grid.view)
+
+"""Populations the FFNO predicts into: the Cartesian ones (equal to `workspace.populations` unless footprint)."""
+cartesian_populations(workspace::HybridForwardWorkspace)=
+    workspace.footprint===nothing ? workspace.populations : workspace.footprint.populations
+"""Atmosphere the synthesis reads: the footprint atmosphere when there is one."""
+synthesis_atmosphere(workspace::HybridForwardWorkspace,distributed)=
+    workspace.footprint===nothing ? distributed.local_atmosphere : workspace.footprint.atmosphere
+
+function _footprint_state(distributed::DistributedAtmosphere,populations)
+    needs_footprint(distributed.global_grid) || return nothing
+    a=distributed.local_atmosphere; g=a.grid
+    grid=Grid3D(g.vertical,g.x,g.y,footprint_view(g.view))
+    f()=fill!(similar(a.temperature),one(eltype(a.temperature)))   # filled by footprint_state! before every synthesis
+    atmosphere=Atmosphere3D(grid,copy(a.temperature),copy(a.vx),copy(a.vy),copy(a.vz),copy(a.vturb);
+        pgas=f(),rho=f(),ne=f(),z=copy(a.z))
+    FootprintState(atmosphere,deepcopy(populations))
 end
 
 """Wall-clock breakdown for one complete distributed forward evaluation."""
@@ -140,7 +175,9 @@ end
 function HybridForwardWorkspace(::Type{T},distributed::DistributedAtmosphere,wavelength,stokes,levels) where T
     a=distributed.local_atmosphere; nz,nx,ny=size(a.temperature); nλ=length(wavelength)
     cube()=SpectralCube(zeros(T,nλ,length(stokes.components),nx,ny),T.(wavelength),stokes)
-    HybridForwardWorkspace(zeros(T,nz,nx,ny,levels),cube(),cube(),ThreadedSynthesisCache(T,nz,nλ))
+    populations=zeros(T,nz,nx,ny,levels)
+    HybridForwardWorkspace(populations,cube(),cube(),ThreadedSynthesisCache(T,nz,nλ),
+        _footprint_state(distributed,populations))
 end
 
 function HybridForwardWorkspace(::Type{T},distributed::DistributedAtmosphere,wavelength,stokes,
@@ -149,7 +186,72 @@ function HybridForwardWorkspace(::Type{T},distributed::DistributedAtmosphere,wav
     cube()=SpectralCube(zeros(T,nλ,length(stokes.components),nx,ny),T.(wavelength),stokes)
     populations=Dict{Symbol,Array{T,4}}(Symbol(species)=>zeros(T,nz,nx,ny,Int(count))
         for (species,count) in levels)
-    HybridForwardWorkspace(populations,cube(),cube(),ThreadedSynthesisCache(T,nz,nλ))
+    HybridForwardWorkspace(populations,cube(),cube(),ThreadedSynthesisCache(T,nz,nλ),
+        _footprint_state(distributed,populations))
+end
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Footprint state (inclined view, native z)
+# ---------------------------------------------------------------------------------------------------------------------
+
+# positive fields are shifted in log, velocities linearly (design §6)
+const _FOOTPRINT_LOG_FIELDS=(:temperature,:pgas,:rho,:ne)
+const _FOOTPRINT_LINEAR_FIELDS=(:vx,:vy,:vz,:vturb)
+
+_population_dict(populations::AbstractDict)=populations
+_population_dict(populations::AbstractArray)=Dict(:_single=>populations)
+
+"""Global Cartesian populations on the root rank (species => (nz, nx, ny, levels)); `nothing` elsewhere."""
+function _gather_population_dict(populations,distributed,context;tag)
+    grid=distributed.global_grid; shape=(nlevels(grid),length(grid.x),length(grid.y))
+    out=Dict{Symbol,Any}()
+    for (offset,species) in enumerate(sort!(collect(keys(populations));by=string))
+        value=populations[species]; L=size(value,4)
+        packed=gather_field(_field(permutedims(value,(1,4,2,3)),distributed.tile,(shape[1],L,shape[2],shape[3])),
+            context;tag=tag+offset)
+        isroot(context) && (out[species]=permutedims(packed,(1,3,4,2)))
+    end
+    isroot(context) ? out : nothing
+end
+
+"""Scatter global (nz, nx, ny, levels) arrays from the root into the rank-local arrays of `destination`."""
+function _scatter_population_dict!(destination,root_values,distributed,context;tag)
+    grid=distributed.global_grid; shape=(nlevels(grid),length(grid.x),length(grid.y))
+    for (offset,species) in enumerate(sort!(collect(keys(destination));by=string))
+        local_value=destination[species]; L=size(local_value,4)
+        packed=isroot(context) ? permutedims(root_values[species],(1,4,2,3)) : nothing
+        field=distribute_field(eltype(local_value),packed,(shape[1],L,shape[2],shape[3]),context;tag=tag+offset)
+        local_value.=permutedims(field.values,(1,3,4,2))
+    end
+    destination
+end
+
+"""Shift `A` (nz, nx, ny) by the plan, in log when `logarithmic`."""
+_footprint_shift(A,plan,logarithmic)=logarithmic ? exp.(shear_levels!(similar(A),log.(A),plan)) :
+    shear_levels!(similar(A),A,plan)
+
+"""
+Build the footprint atmosphere and populations from the Cartesian state (collective): gathered on the root rank,
+shifted there by +t z per grid level, scattered back (design §6). The heights are the grid's, so `z` is unchanged.
+"""
+function footprint_state!(workspace::HybridForwardWorkspace,distributed::DistributedAtmosphere,context::ParallelContext)
+    fp=workspace.footprint; fp===nothing && return nothing
+    grid=distributed.global_grid; shape=(nlevels(grid),length(grid.x),length(grid.y))
+    global_atmosphere=gather_atmosphere(distributed,context)
+    global_populations=_gather_population_dict(_population_dict(fp.populations),distributed,context;tag=900)
+    plan=isroot(context) ? ShearPlan(grid,native_depth(grid),1) : nothing
+    for (i,name) in enumerate((_FOOTPRINT_LOG_FIELDS...,_FOOTPRINT_LINEAR_FIELDS...))
+        destination=getfield(fp.atmosphere,name)
+        root_values=isroot(context) ? _footprint_shift(getfield(global_atmosphere,name),plan,name in _FOOTPRINT_LOG_FIELDS) : nothing
+        destination.=distribute_field(eltype(destination),root_values,shape,context;tag=920+i).values
+    end
+    shifted=isroot(context) ? Dict(species=>begin
+            out=similar(value)
+            for l in axes(value,4); out[:,:,:,l].=_footprint_shift(value[:,:,:,l],plan,true); end
+            out
+        end for (species,value) in global_populations) : nothing
+    _scatter_population_dict!(_population_dict(workspace.populations),shifted,distributed,context;tag=940)
+    fp.atmosphere
 end
 
 """Distributed forward model. `equilibrium` is an `AbstractEquilibriumBackend`
@@ -225,7 +327,7 @@ function forward!(workspace::HybridForwardWorkspace,model::HybridForwardModel,
         end
         stage_start=time_ns()
         _forward_stage(context,"populations begin")
-        predict_distributed_populations!(workspace.populations,model.populations,distributed,context)
+        predict_distributed_populations!(cartesian_populations(workspace),model.populations,distributed,context)
         populations_elapsed=(time_ns()-stage_start)/1e9
         _forward_stage(context,"populations done seconds=$(round(populations_elapsed;digits=1))")
         (equilibrium,equilibrium_elapsed,populations_elapsed)
@@ -234,9 +336,13 @@ function forward!(workspace::HybridForwardWorkspace,model::HybridForwardModel,
         (prepared,0.0,0.0)
     end
     stage_start=time_ns()
+    if workspace.footprint!==nothing
+        _forward_stage(context,"footprint begin")
+        footprint_state!(workspace,distributed,context)
+    end
     _forward_stage(context,"synthesis begin integration=$(_tau_integration(distributed.local_atmosphere) ? "log10tau500" : "z")")
     Base.ScopedValues.with(SYNTHESIS_PROGRESS=>isroot(context)) do
-        synthesize!(workspace.intrinsic,model.synthesizer,model.redistribution,distributed.local_atmosphere,
+        synthesize!(workspace.intrinsic,model.synthesizer,model.redistribution,synthesis_atmosphere(workspace,distributed),
             workspace.populations,workspace.synthesis_cache)
     end
     synthesis_seconds=(time_ns()-stage_start)/1e9

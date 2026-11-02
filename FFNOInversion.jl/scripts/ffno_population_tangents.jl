@@ -72,6 +72,9 @@ function main(a)
                 "pgas, rho, ne and z fixed"
             attributes(file)["source_atmosphere"]=abspath(a.atmosphere)
             attributes(file)["stride"]=a.stride; attributes(file)["linearization_atmosphere"]=abspath(a.atmosphere_out)
+            for (key,value) in view_attributes(atmosphere.grid.view,F.view_columns(atmosphere.grid))
+                attributes(file)[key]=value
+            end
             for species in a.species
                 levels=length(Main.LEVEL_NAMES[species])
                 model=wrap_population_mesh(FSDPFFNOModel(service,species,metadata(species),0),options,eos)

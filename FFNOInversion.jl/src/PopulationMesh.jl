@@ -16,6 +16,12 @@ wrapped model there and interpolates the populations back:
   * back: populations log-linear in z.
 The VJP is the transpose of these maps and the JVP their tangent map (finite differences for the three bottom
 values of the deep extension in both).
+
+Inclined view (docs/viewing-angle/README.md §5): each column is a ray whose point at height z sits t·z off its
+footprint, so the network must see the features at their Cartesian positions. Every mesh level has one height, so
+ray ↔ Cartesian is a periodic horizontal shift per level: the mesh features (ln T, v, log10 nₑ, log10 ρ) are shifted by
+−t z_m before the network and ln n by +t z_m after it (`ShearPlan`, bilinear). Plane-parallel and vertical views skip
+both shifts.
 """
 struct PopulationMeshConfig{T<:AbstractFloat}
     bottom_m::T
@@ -58,10 +64,11 @@ mutable struct MeshPopulationModel{M<:AbstractPopulationModel,E,T<:AbstractFloat
     nabla::T
     last_features::Any        # mesh features and populations of the last prediction (reused by the VJP)
     last_populations::Any
+    last_cartesian::Any       # inclined view: the Cartesian mesh features and populations of that prediction
 end
 function MeshPopulationModel(inner::AbstractPopulationModel,config::PopulationMeshConfig,eos,gravity)
     gravity>0 || throw(ArgumentError("population mesh gravity must be positive"))
-    MeshPopulationModel(inner,population_mesh(config),eos,Float64(gravity),config.nabla,nothing,nothing)
+    MeshPopulationModel(inner,population_mesh(config),eos,Float64(gravity),config.nabla,nothing,nothing,nothing)
 end
 
 _mesh_active(atmosphere)=vertical_coordinate(atmosphere.grid)===:log10tau500
@@ -151,6 +158,46 @@ function _mesh_atmosphere(model,atmosphere,f)
     Atmosphere3D(grid,c(1),c(2),c(3),c(4),zeros(T,nm,nx,ny);rho=T.(exp10.(f[6,:,:,:])),ne=T.(exp10.(f[5,:,:,:])),z=z)
 end
 
+_mesh_slanted(atmosphere)=is_slanted(atmosphere.grid.view)
+
+"""Cartesian mesh features from the ray features `f` (6, nmesh, nx, ny): ln T, v, log10 nₑ and log10 ρ shifted by
+−t z_m on every mesh level (T exponentiated back)."""
+function _rays_to_cartesian_features(model,atmosphere,f)
+    plan=ShearPlan(atmosphere.grid,model.mesh,-1); fc=similar(f)
+    buffer=Array{eltype(f)}(undef,size(f)[2:4]); out=similar(buffer)
+    for c in 1:6
+        c==1 ? (buffer.=log.(@view f[1,:,:,:])) : (buffer.=@view f[c,:,:,:])
+        shear_levels!(out,buffer,plan)
+        c==1 ? (fc[1,:,:,:].=exp.(out)) : (fc[c,:,:,:].=out)
+    end
+    fc
+end
+
+"""Ray mesh populations from the Cartesian ones `pc` (nmesh, nx, ny, levels): ln n shifted by +t z_m."""
+function _cartesian_to_ray_populations(model,atmosphere,pc)
+    plan=ShearPlan(atmosphere.grid,model.mesh,1); pr=similar(pc); out=Array{eltype(pc)}(undef,size(pc)[1:3])
+    for l in axes(pc,4)
+        shear_levels!(out,log.(@view pc[:,:,:,l]),plan); pr[:,:,:,l].=exp.(out)
+    end
+    pr
+end
+
+"""Predict the mesh populations of the ray features `f` (inclined: through the Cartesian mesh) and cache them."""
+function _mesh_predict!(model,atmosphere,f,::Type{T},levels) where T
+    nm=length(model.mesh); nx,ny=size(atmosphere.temperature)[2:3]
+    if _mesh_slanted(atmosphere)
+        warn_view_travel(atmosphere.grid,model.mesh,"population mesh")
+        fc=_rays_to_cartesian_features(model,atmosphere,f)
+        pc=zeros(T,nm,nx,ny,levels); predict_populations!(pc,model.inner,_mesh_atmosphere(model,atmosphere,fc))
+        pm=_cartesian_to_ray_populations(model,atmosphere,pc)
+        model.last_cartesian=(features=fc,populations=pc)
+    else
+        pm=zeros(T,nm,nx,ny,levels); predict_populations!(pm,model.inner,_mesh_atmosphere(model,atmosphere,f))
+        model.last_cartesian=nothing
+    end
+    model.last_features=f; model.last_populations=pm
+end
+
 """Mesh index pair and weight for a height: mesh[j] >= zeta >= mesh[j+1] (clamped to the mesh ends)."""
 function _mesh_bracket(mesh,zeta)
     zeta>=mesh[1] && return 1,1,0.0
@@ -164,11 +211,9 @@ function predict_populations!(out::AbstractArray{T,4},model::MeshPopulationModel
     _mesh_active(atmosphere) || return predict_populations!(out,model.inner,atmosphere,cache)
     size(out)[1:3]==size(atmosphere.temperature) || throw(DimensionMismatch("population shape differs from atmosphere"))
     atmosphere.z===nothing && throw(ArgumentError("population mesh needs the equilibrium heights z"))
-    f=_mesh_features(model,atmosphere); mesh_atmosphere=_mesh_atmosphere(model,atmosphere,f)
+    f=_mesh_features(model,atmosphere)
     nz,nx,ny=size(atmosphere.temperature); levels=size(out,4)
-    pm=zeros(T,length(model.mesh),nx,ny,levels)
-    predict_populations!(pm,model.inner,mesh_atmosphere)
-    model.last_features=f; model.last_populations=pm
+    pm=_mesh_predict!(model,atmosphere,f,T,levels)
     Threads.@threads for x in 1:nx
         for y in 1:ny, k in 1:nz
             j0,j1,u=_mesh_bracket(model.mesh,atmosphere.z[k,x,y])
@@ -184,13 +229,8 @@ function population_vjp!(feature_bar::AbstractArray{T,4},z_bar::AbstractArray{T,
         atmosphere::Atmosphere3D,population_bar::AbstractArray{T,4}) where T
     _mesh_active(atmosphere) || return population_vjp!(feature_bar,z_bar,model.inner,atmosphere,population_bar)
     nz,nx,ny=size(atmosphere.temperature); levels=size(population_bar,4); mesh=model.mesh; nm=length(mesh)
-    f=_mesh_features(model,atmosphere); mesh_atmosphere=_mesh_atmosphere(model,atmosphere,f)
-    pm=if model.last_features!==nothing && size(model.last_features)==size(f) && model.last_features==f &&
-            size(model.last_populations,4)==levels
-        model.last_populations
-    else
-        p=zeros(T,nm,nx,ny,levels); predict_populations!(p,model.inner,mesh_atmosphere); p
-    end
+    f=_mesh_features(model,atmosphere)
+    pm=_mesh_populations(model,atmosphere,f,T,levels)
     fill!(feature_bar,zero(T)); fill!(z_bar,zero(T))
     # back-map: ln p(z_k) = (1-u) ln pm[j0] + u ln pm[j1]
     pm_bar=zeros(T,nm,nx,ny,levels)
@@ -205,7 +245,25 @@ function population_vjp!(feature_bar::AbstractArray{T,4},z_bar::AbstractArray{T,
         end
     end
     fm_bar=zeros(T,6,nm,nx,ny); zm_bar=zeros(T,nm,nx,ny)
-    population_vjp!(fm_bar,zm_bar,model.inner,mesh_atmosphere,pm_bar)        # mesh heights are fixed: zm_bar unused
+    if _mesh_slanted(atmosphere)
+        # transposes of the two shifts around the network (the chain rules of exp/log stay outside them)
+        cart=model.last_cartesian; pc=cart.populations; fc=cart.features
+        pc_bar=_shear_log_transpose(pm_bar,pm,pc,ShearPlan(atmosphere.grid,mesh,1))
+        fmc_bar=zeros(T,6,nm,nx,ny)
+        population_vjp!(fmc_bar,zm_bar,model.inner,_mesh_atmosphere(model,atmosphere,fc),pc_bar)
+        plan=ShearPlan(atmosphere.grid,mesh,-1); buffer=zeros(T,nm,nx,ny)
+        for c in 1:6
+            fill!(buffer,zero(T))
+            if c==1
+                shear_levels_transpose!(buffer,@view(fmc_bar[1,:,:,:]).*@view(fc[1,:,:,:]),plan)
+                fm_bar[1,:,:,:].=buffer./@view(f[1,:,:,:])
+            else
+                shear_levels_transpose!(buffer,@view(fmc_bar[c,:,:,:]),plan); fm_bar[c,:,:,:].=buffer
+            end
+        end
+    else
+        population_vjp!(fm_bar,zm_bar,model.inner,_mesh_atmosphere(model,atmosphere,f),pm_bar)  # mesh heights fixed: zm_bar unused
+    end
     Threads.@threads for x in 1:nx
         for y in 1:ny
             _mesh_column_vjp!(@view(feature_bar[:,:,x,y]),@view(z_bar[:,x,y]),model,atmosphere,x,y,
@@ -218,10 +276,21 @@ end
 """Mesh populations of the current atmosphere: the last prediction when its mesh features are unchanged."""
 function _mesh_populations(model,atmosphere,f,::Type{T},levels) where T
     model.last_features!==nothing && size(model.last_features)==size(f) && model.last_features==f &&
-        size(model.last_populations,4)==levels && return model.last_populations
-    nm=length(model.mesh); nx,ny=size(atmosphere.temperature)[2:3]
-    p=zeros(T,nm,nx,ny,levels); predict_populations!(p,model.inner,_mesh_atmosphere(model,atmosphere,f))
-    model.last_features=f; model.last_populations=p
+        size(model.last_populations,4)==levels &&
+        (model.last_cartesian!==nothing)==_mesh_slanted(atmosphere) && return model.last_populations
+    _mesh_predict!(model,atmosphere,f,T,levels)
+end
+
+"""Cotangent of the Cartesian populations `pc` from that of the ray populations `pr` = exp(S ln pc):
+pc̄ = Sᵀ(pr̄ pr)/pc, level by level."""
+function _shear_log_transpose(pr_bar,pr,pc,plan)
+    pc_bar=zero(pc); buffer=Array{eltype(pc)}(undef,size(pc)[1:3])
+    for l in axes(pc,4)
+        fill!(buffer,zero(eltype(pc)))
+        shear_levels_transpose!(buffer,@view(pr_bar[:,:,:,l]).*@view(pr[:,:,:,l]),plan)
+        pc_bar[:,:,:,l].=buffer./@view(pc[:,:,:,l])
+    end
+    pc_bar
 end
 
 function population_jvp!(population_dot::AbstractArray{T,4},model::MeshPopulationModel,atmosphere::Atmosphere3D,
@@ -236,7 +305,27 @@ function population_jvp!(population_dot::AbstractArray{T,4},model::MeshPopulatio
         end
     end
     pm_dot=zeros(T,nm,nx,ny,levels)
-    population_jvp!(pm_dot,model.inner,_mesh_atmosphere(model,atmosphere,f),fm_dot)
+    if _mesh_slanted(atmosphere)
+        # tangents of the two shifts: Cartesian features ḟc = (Tc S(Ṫ/T), S(ḟ)), ray populations ṗ = p S(ṗc/pc)
+        cart=model.last_cartesian; fc=cart.features; pc=cart.populations
+        plan=ShearPlan(atmosphere.grid,mesh,-1); fmc_dot=similar(fm_dot); out=Array{eltype(fm_dot)}(undef,nm,nx,ny)
+        for c in 1:6
+            if c==1
+                shear_levels!(out,@view(fm_dot[1,:,:,:])./@view(f[1,:,:,:]),plan); fmc_dot[1,:,:,:].=out.*@view(fc[1,:,:,:])
+            else
+                shear_levels!(out,@view(fm_dot[c,:,:,:]),plan); fmc_dot[c,:,:,:].=out
+            end
+        end
+        pc_dot=zeros(T,nm,nx,ny,levels)
+        population_jvp!(pc_dot,model.inner,_mesh_atmosphere(model,atmosphere,fc),fmc_dot)
+        plan=ShearPlan(atmosphere.grid,mesh,1); buffer=Array{T}(undef,nm,nx,ny)
+        for l in 1:levels
+            shear_levels!(buffer,@view(pc_dot[:,:,:,l])./@view(pc[:,:,:,l]),plan)
+            pm_dot[:,:,:,l].=buffer.*@view(pm[:,:,:,l])
+        end
+    else
+        population_jvp!(pm_dot,model.inner,_mesh_atmosphere(model,atmosphere,f),fm_dot)
+    end
     # back-map: ln p(z_k) = (1-u) ln pm[j0] + u ln pm[j1], heights fixed
     Threads.@threads for x in 1:nx
         for y in 1:ny, k in 1:nz

@@ -99,6 +99,27 @@ struct RunConfig{T<:AbstractFloat}
     time_index::Int
     equilibrium::EquilibriumConfig
     population_mesh::Union{Nothing,PopulationMeshConfig{T}}
+    view::ViewGeometry
+end
+
+"""`[view]` (design §8): mu, azimuth_deg, geometry; absent = the vertical view."""
+function _view(raw)
+    unknown=setdiff(collect(keys(raw)),["mu","azimuth_deg","geometry"])
+    isempty(unknown) || throw(ArgumentError("unknown key(s) in [view]: $(join(sort(unknown),", "))"))
+    ViewGeometry(Float64(get(raw,"mu",1.0)),Float64(get(raw,"azimuth_deg",0.0)),
+        Symbol(lowercase(String(get(raw,"geometry","plane_parallel")))))
+end
+
+"""Sky FWHMs [m] of the spatial PSF on the footprint grid: stretched by 1/μ along the tilt (design §7). Only
+axis-aligned azimuths keep the kernel separable; others are rejected while a spatial PSF is set."""
+function _footprint_psf(fwhm_x,fwhm_y,view::ViewGeometry)
+    is_vertical(view) && return fwhm_x,fwhm_y
+    fwhm_x==0 && fwhm_y==0 && return fwhm_x,fwhm_y
+    φ=mod(view.azimuth_deg,360.0)
+    φ in (0.0,180.0) && return fwhm_x/view.mu,fwhm_y
+    φ in (90.0,270.0) && return fwhm_x,fwhm_y/view.mu
+    throw(ArgumentError("a spatial PSF at view azimuth $(view.azimuth_deg)° is not separable on the footprint grid; "*
+        "use an azimuth of 0, 90, 180 or 270 degrees or no spatial PSF"))
 end
 
 function _regions(cfg)
@@ -189,6 +210,7 @@ function _controls(section,vertical_coordinate::Symbol=:log10tau500)
     end
     variables=getfield.(controls,:variable)
     length(unique(variables))==length(variables) || throw(ArgumentError("inversion control variables must be unique"))
+    _check_velocity_controls(variables)
     controls
 end
 
@@ -231,7 +253,7 @@ end
 function _sample_control_field(atmosphere::Atmosphere3D{T},config::ControlMapConfig{T}) where T
     config.kind===vertical_coordinate(atmosphere.grid) || throw(ArgumentError(
         "control nodes for $(config.variable) are on :$(config.kind) but the atmosphere's native coordinate is :$(vertical_coordinate(atmosphere.grid))"))
-    source=_control_destination(atmosphere,config.variable); depth=native_depth(atmosphere.grid)
+    source=_control_values(atmosphere,config.variable); depth=native_depth(atmosphere.grid)
     xsource=length(atmosphere.grid.x)==1 ? T[0] : collect(range(zero(T),one(T),length=length(atmosphere.grid.x)))
     ysource=length(atmosphere.grid.y)==1 ? T[0] : collect(range(zero(T),one(T),length=length(atmosphere.grid.y)))
     xtarget=config.control_nx==1 ? T[0] : collect(range(zero(T),one(T),length=config.control_nx))
@@ -383,9 +405,14 @@ function load_config(path::AbstractString)
     stokes.components == (:I,) || throw(ArgumentError("Release 1 supports Stokes I only"))
     redistribution = Symbol(get(physics,"redistribution","non_prd"))
     redistribution == :non_prd || throw(ArgumentError("Release 1 supports redistribution=non_prd only"))
+    view = _view(get(cfg,"view",Dict{String,Any}()))
+    column=equilibrium.column
+    if !is_vertical(view) && column isa HSEMHS.ColumnZOptions && !(column.mu in (1.0,view.mu))
+        throw(ArgumentError("[equilibrium.column_z] mu = $(column.mu) conflicts with [view] mu = $(view.mu); give one of them"))
+    end
     psf = get(obs,"gaussian_psf",Dict{String,Any}())
-    observation_model = GaussianPSFObservation(Float64(get(psf,"spectral_fwhm_nm",0.0))*1e-9,
-        Float64(get(psf,"spatial_fwhm_x_m",0.0)),Float64(get(psf,"spatial_fwhm_y_m",0.0)),dx_m,dy_m)
+    psf_x,psf_y=_footprint_psf(Float64(get(psf,"spatial_fwhm_x_m",0.0)),Float64(get(psf,"spatial_fwhm_y_m",0.0)),view)
+    observation_model = GaussianPSFObservation(Float64(get(psf,"spectral_fwhm_nm",0.0))*1e-9,psf_x,psf_y,dx_m,dy_m)
     regularization = forward_only ? _regularization(Dict{String,Any}()) : _regularization(get(cfg,"regularization",Dict{String,Any}()))
     if vertical_coordinate===:z_m && regularization.vertical.length_scale_m===nothing &&
             any(t->t in (1,4),regularization.vertical.types)
@@ -430,7 +457,7 @@ function load_config(path::AbstractString)
         "the HSEMHS equilibrium solves on x slabs: set parallel.decomposition = \"x_slabs\" (got $(parallel.decomposition))"))
     RunConfig(atmosphere,mode,observed,weights,outputs,SynthesisGridConfig(wavelength_m,dx_m,dy_m),regions,
         observation_model,stokes,redistribution,regularization,parallel,controls,solver,time_index,equilibrium,
-        _population_mesh(get(cfg,"population",Dict{String,Any}()),vertical_coordinate))
+        _population_mesh(get(cfg,"population",Dict{String,Any}()),vertical_coordinate),view)
 end
 
 const _POPULATION_MESH_KEYS=("enabled","bottom_m","top_m","spacing_m","uniform_top_m","stretch","max_spacing_m","nabla")
@@ -454,7 +481,8 @@ function dry_run_summary(config::RunConfig)
     nsources=sum(length(r.sources) for r in config.regions)
     controlvars=join(getfield.(config.controls,:variable),',')
     solver_name=config.solver isa LBFGSSolverOptions ? "bounded_lbfgs" : "prototype_pattern_search"
-    "mode=$(config.mode) observation_input=$(config.observed===nothing ? "none" : config.observed.file) atmosphere_input=$(config.atmosphere.file) atmosphere_storage_order=$(config.atmosphere.storage_order) synthesis_output=$(config.outputs.synthesis_file) atmosphere_output=$(config.outputs.atmosphere_file) time_index=$(config.time_index) vertical_coordinate=$(config.atmosphere.vertical_coordinate) vertical_dataset=$(config.atmosphere.vertical_dataset) nodes_unit=$(vertical_unit(config.atmosphere.vertical_coordinate)) dx_m=$(config.synthesis.dx_m) dy_m=$(config.synthesis.dy_m) spectral_regions=$(length(config.regions)) spectral_sources=$nsources synthesis_wavelengths=$nlambda full_grid_psf=true zero_weight_exclusion=true stokes=$(join(config.stokes.components,',')) redistribution=$(config.redistribution) equilibrium=HSEMHS:$(hsemhs_mode_name(config.equilibrium.mode)) eos_table=$(config.equilibrium.eos_table_file) controls=$controlvars solver=$solver_name max_iterations=$(config.solver.max_iterations) checkpoint=$(config.solver.checkpoint_path) regularized=$(join(regvars,',')) mpi=$(config.parallel.enabled) decomposition=$(config.parallel.decomposition) threads_per_rank=$(config.parallel.threads_per_rank) gpu_launcher_rank=$(config.parallel.gpu_launcher_rank) gpu_connect_timeout_seconds=$(config.parallel.gpu_connect_timeout_seconds) gpu_status_timeout_seconds=$(config.parallel.gpu_status_timeout_seconds) gpu_diagnostic_interval_seconds=$(config.parallel.gpu_diagnostic_interval_seconds)"
+    "mode=$(config.mode) observation_input=$(config.observed===nothing ? "none" : config.observed.file) atmosphere_input=$(config.atmosphere.file) atmosphere_storage_order=$(config.atmosphere.storage_order) synthesis_output=$(config.outputs.synthesis_file) atmosphere_output=$(config.outputs.atmosphere_file) time_index=$(config.time_index) vertical_coordinate=$(config.atmosphere.vertical_coordinate) vertical_dataset=$(config.atmosphere.vertical_dataset) nodes_unit=$(vertical_unit(config.atmosphere.vertical_coordinate)) dx_m=$(config.synthesis.dx_m) dy_m=$(config.synthesis.dy_m) spectral_regions=$(length(config.regions)) spectral_sources=$nsources synthesis_wavelengths=$nlambda full_grid_psf=true zero_weight_exclusion=true stokes=$(join(config.stokes.components,',')) redistribution=$(config.redistribution) equilibrium=HSEMHS:$(hsemhs_mode_name(config.equilibrium.mode)) eos_table=$(config.equilibrium.eos_table_file) controls=$controlvars solver=$solver_name max_iterations=$(config.solver.max_iterations) checkpoint=$(config.solver.checkpoint_path) regularized=$(join(regvars,',')) mpi=$(config.parallel.enabled) decomposition=$(config.parallel.decomposition) threads_per_rank=$(config.parallel.threads_per_rank) gpu_launcher_rank=$(config.parallel.gpu_launcher_rank) gpu_connect_timeout_seconds=$(config.parallel.gpu_connect_timeout_seconds) gpu_status_timeout_seconds=$(config.parallel.gpu_status_timeout_seconds) gpu_diagnostic_interval_seconds=$(config.parallel.gpu_diagnostic_interval_seconds)"*
+        (is_vertical(config.view) ? "" : " view_mu=$(config.view.mu) view_azimuth_deg=$(config.view.azimuth_deg) view_geometry=$(config.view.geometry)")
 end
 
 function checkpoint!(path::AbstractString,state;manifest::CapabilityManifest=CapabilityManifest())

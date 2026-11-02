@@ -130,13 +130,35 @@ end
 
 function _control_destination(atmosphere::Atmosphere3D,variable::Symbol)
     variable===:temperature && return atmosphere.temperature
-    variable===:vlos && return atmosphere.vz
+    if variable===:vlos
+        is_vertical(atmosphere.grid.view) && return atmosphere.vz
+        throw(ArgumentError("vlos off the vertical is n·v, not one stored field: use _control_values/_set_vlos!"))
+    end
     variable in (:vx,:vy,:vz,:vturb) && return getfield(atmosphere,variable)
     if variable in (:Bx,:By,:Bz)
         atmosphere.magnetic_field===nothing && throw(ArgumentError("$variable control requested but B is unavailable"))
         return getfield(atmosphere.magnetic_field,variable)
     end
     throw(ArgumentError("unsupported control variable $variable"))
+end
+
+"""Values of a control variable: n·v for `vlos` off the vertical (design §4), else the stored field itself."""
+_control_values(atmosphere::Atmosphere3D,variable::Symbol)=
+    variable===:vlos ? los_velocity_field(atmosphere) : _control_destination(atmosphere,variable)
+
+"""Set n·v to `vlos` keeping the velocity component perpendicular to n: v ← v + (vlos − n·v) n."""
+function _set_vlos!(atmosphere::Atmosphere3D,vlos)
+    is_vertical(atmosphere.grid.view) && return copyto!(atmosphere.vz,vlos)
+    n=view_direction(atmosphere.grid.view); delta=vlos.-los_velocity_field(atmosphere)
+    atmosphere.vx.+=n[1].*delta; atmosphere.vy.+=n[2].*delta; atmosphere.vz.+=n[3].*delta
+    atmosphere
+end
+
+"""`vlos` and a Cartesian velocity component describe the same velocity twice: reject the pair (design §4)."""
+function _check_velocity_controls(variables)
+    :vlos in variables && any(v->v in variables,(:vx,:vy,:vz)) && throw(ArgumentError(
+        "the vlos control overlaps the vx/vy/vz controls; control either vlos or Cartesian velocities"))
+    nothing
 end
 
 """Apply global coarse controls directly to the current rank-owned tile."""
@@ -146,7 +168,11 @@ function apply_control_maps!(distributed::DistributedAtmosphere,layout::ControlM
     for spec in layout.specs
         field=parameter_nodefield(layout,parameters,spec.variable)
         expanded=expand_nodes(field,distributed.global_grid,distributed.tile)
-        copyto!(_control_destination(distributed.local_atmosphere,spec.variable),expanded)
+        if spec.variable===:vlos
+            _set_vlos!(distributed.local_atmosphere,expanded)
+        else
+            copyto!(_control_destination(distributed.local_atmosphere,spec.variable),expanded)
+        end
     end
     all(isfinite,distributed.local_atmosphere.temperature) || throw(ArgumentError("control expansion produced invalid temperature"))
     minimum(distributed.local_atmosphere.temperature)>0 || throw(ArgumentError("control expansion produced non-positive temperature"))
@@ -190,8 +216,13 @@ function DistributedInversionProblem(model,workspace,distributed::DistributedAtm
     T=eltype(a.temperature)
     controls=Dict{Symbol,Array{T,3}}()
     if control_layout!==nothing
+        _check_velocity_controls([spec.variable for spec in control_layout.specs])
         for spec in control_layout.specs
-            controls[spec.variable]=copy(_control_destination(a,spec.variable))
+            controls[spec.variable]=copy(_control_values(a,spec.variable))
+            if spec.variable===:vlos && !is_vertical(a.grid.view)
+                # immutable prior of every component: each trial is v_prior + δ n (design §4)
+                controls[:vlos_prior_vx]=copy(a.vx); controls[:vlos_prior_vy]=copy(a.vy); controls[:vlos_prior_vz]=copy(a.vz)
+            end
         end
         valid=all(all(v->isfinite(v)&&spec.lower<=v<=spec.upper,controls[spec.variable]) for spec in control_layout.specs)
         allreduce_sum(valid ? 1 : 0,context)==context.size || throw(ArgumentError(
@@ -234,8 +265,16 @@ function apply_control_maps!(problem::DistributedInversionProblem,layout::Contro
     for (spec,indices) in zip(layout.specs,layout.ranges)
         delta=reshape(parameters[indices],size(spec.initial)).-spec.initial
         correction=expand_nodes(NodeField(delta,spec.nodes,spec.kind),problem.distributed.global_grid,problem.distributed.tile)
-        destination=_control_destination(problem.distributed.local_atmosphere,spec.variable)
-        destination.=problem.control_reference[spec.variable].+correction
+        a=problem.distributed.local_atmosphere
+        if spec.variable===:vlos && !is_vertical(a.grid.view)
+            n=view_direction(a.grid.view); ref=problem.control_reference
+            a.vx.=ref[:vlos_prior_vx].+n[1].*correction
+            a.vy.=ref[:vlos_prior_vy].+n[2].*correction
+            a.vz.=ref[:vlos_prior_vz].+n[3].*correction
+        else
+            destination=_control_destination(a,spec.variable)
+            destination.=problem.control_reference[spec.variable].+correction
+        end
     end
     problem.distributed
 end
@@ -243,11 +282,18 @@ end
 function _physical_controls_valid(problem,layout,context)
     isempty(problem.control_reference) && return true
     valid=all(all(v->isfinite(v)&&spec.lower<=v<=spec.upper,
-        _control_destination(problem.distributed.local_atmosphere,spec.variable)) for spec in layout.specs)
+        _control_values(problem.distributed.local_atmosphere,spec.variable)) for spec in layout.specs)
     allreduce_sum(valid ? 1 : 0,context)==context.size
 end
 
-_checkpoint_mapping(problem)=(mapping=problem.correction_signature,reference_id=problem.reference_id)
+# Off the vertical the view is part of the mapping, so a restart under another view is rejected; vertical runs keep the
+# old mapping and their checkpoints.
+function _checkpoint_mapping(problem)
+    view=problem.distributed.global_grid.view
+    is_vertical(view) && return (mapping=problem.correction_signature,reference_id=problem.reference_id)
+    (mapping=problem.correction_signature,reference_id=problem.reference_id,
+     view=(view.mu,view.azimuth_deg,String(view.geometry)))
+end
 function _check_checkpoint_mapping(payload,problem)
     hasproperty(payload,:control_mapping) && payload.control_mapping==_checkpoint_mapping(problem) ||
         throw(ArgumentError("checkpoint atmosphere reference or control representation differs; old checkpoints require a fresh run"))

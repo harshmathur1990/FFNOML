@@ -5,7 +5,9 @@
 function read_forward_atmosphere(path)
     h5open(path,"r") do file
         field(name)=haskey(file,name) ? permutedims(read(file[name])[1,:,:,:],(1,3,2)) : nothing
-        grid=FFNOInversion.Grid3D(FFNOInversion.VerticalAxis(:log10tau500,read(file["logtau_500"])),read(file["x_m"]),read(file["y_m"]))
+        view=something(FFNOInversion.read_view_attributes(HDF5.attributes(file)),FFNOInversion.ViewGeometry())
+        grid=FFNOInversion.Grid3D(FFNOInversion.VerticalAxis(:log10tau500,read(file["logtau_500"])),read(file["x_m"]),
+            read(file["y_m"]),view)
         atmosphere=FFNOInversion.Atmosphere3D(grid,field("temperature"),field("vx"),field("vy"),field("vz"),field("vturb");
             pgas=field("pgas"),rho=field("rho"),ne=field("ne"),z=field("z"),logtau500=field("logtau500"),
             chi500=field("chi500"))
@@ -26,6 +28,9 @@ function write_forward_atmosphere(path,atmosphere,populations;attributes_=Dict{S
         file["logtau_500"]=collect(native_depth(atmosphere.grid))
         file["x_m"]=collect(atmosphere.grid.x); file["y_m"]=collect(atmosphere.grid.y)
         for (species,value) in populations; file["populations/$species"]=permutedims(value,(4,1,3,2)); end
+        for (key,value) in FFNOInversion.view_attributes(atmosphere.grid.view,FFNOInversion.view_columns(atmosphere.grid))
+            HDF5.attributes(file)[key]=value
+        end
         for (key,value) in attributes_; HDF5.attributes(file)[key]=value; end
     end
     path
@@ -37,7 +42,7 @@ function subsample_atmosphere(atmosphere,stride)
     xs=1:stride:size(atmosphere.temperature,2); ys=1:stride:size(atmosphere.temperature,3)
     pick(a)=a===nothing ? nothing : a[:,xs,ys]
     g=atmosphere.grid
-    FFNOInversion.Atmosphere3D(FFNOInversion.Grid3D(g.vertical,g.x[xs],g.y[ys]),pick(atmosphere.temperature),
+    FFNOInversion.Atmosphere3D(FFNOInversion.Grid3D(g.vertical,g.x[xs],g.y[ys],g.view),pick(atmosphere.temperature),
         pick(atmosphere.vx),pick(atmosphere.vy),pick(atmosphere.vz),pick(atmosphere.vturb);pgas=pick(atmosphere.pgas),
         rho=pick(atmosphere.rho),ne=pick(atmosphere.ne),z=pick(atmosphere.z),logtau500=pick(atmosphere.logtau500),
         chi500=pick(atmosphere.chi500))

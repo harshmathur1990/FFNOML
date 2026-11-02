@@ -347,7 +347,7 @@ end
 """Copy one rank-local atmosphere. The returned object owns no global arrays."""
 function local_atmosphere(atmosphere::Atmosphere3D,tile::Tile2D)
     g = atmosphere.grid
-    grid = Grid3D(g.vertical,copy(g.x[tile.xrange]),copy(g.y[tile.yrange]))
+    grid = Grid3D(g.vertical,copy(g.x[tile.xrange]),copy(g.y[tile.yrange]),g.view)
     cut(value) = value === nothing ? nothing : _tile_array(value,tile)
     B = atmosphere.magnetic_field
     local_B = B === nothing ? nothing : MagneticField3D(cut(B.Bx),cut(B.By),cut(B.Bz))

@@ -243,6 +243,26 @@ with only LTE sources does not call FFNO.
 ∇ = 0.13) lie inside the range of the training grids. See
 [Population mesh](#population-mesh-for-log-tau-atmospheres).
 
+### `[view]` (viewing angle)
+
+`mu` (cos θ, 0 < μ ≤ 1, default 1), `azimuth_deg` (φ from +x toward +y, default 0) and `geometry`
+(`"plane_parallel"`, default, or `"inclined"`). Without the section, or at μ = 1, every result is bit for bit the
+vertical one. Design, decisions and validation: [`docs/viewing-angle/README.md`](docs/viewing-angle/README.md).
+
+- The Doppler shift uses the line-of-sight velocity n·v. The `vlos` control moves v along n and keeps the
+  perpendicular part at the starting atmosphere's; it cannot be combined with `vx`, `vy` or `vz` controls.
+- **Native log τ:** the input columns must already be lines of sight: T on τ along the ray, on a regular deprojected
+  footprint grid, tagged with `view_mu`, `view_azimuth_deg` and `view_geometry` (a file without the tags is accepted only
+  at μ = 1). HSEMHS balances each ray. With `inclined`, the population mesh shifts every mesh level by −t·z to the
+  Cartesian positions before the FFNO and the populations back by +t·z (t = tan θ (cos φ, sin φ), rays through the
+  footprints at the run's z = 0).
+- **Native z:** the cube is Cartesian and the FFNO sees it unchanged. The formal solution uses the path dz/μ;
+  with `inclined` it runs on footprint columns: the state and populations shifted by +t·z per level on the root rank.
+- The spatial PSF FWHMs are in sky metres and are stretched by 1/μ along the tilt; only φ = 0, 90, 180, 270° are
+  accepted with a spatial PSF.
+- Outputs record `view_*` attributes; `column_response.jl --variables vlos` gives the response to n·v (`vz` is the
+  vertical component).
+
 ### `[physics]`, `[observation]`
 
 | Key | Meaning |
