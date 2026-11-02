@@ -71,10 +71,13 @@ function build_production_model(config, distributed, workspace, context)
         outcome = reconstruct_equilibrium!(equilibrium, distributed, context)
         outcome.valid || throw(ArgumentError(
             "the initial atmosphere has no valid equilibrium: $(outcome.reason); $(join(outcome.messages, "; "))"))
-        predict_distributed_populations!(workspace.populations, populations, distributed, context)
+        # The FFNO predicts on the Cartesian atmosphere. With an inclined view on a native height grid the synthesis
+        # reads footprint columns (rays), built from it; otherwise both are the atmosphere and its populations.
+        predict_distributed_populations!(cartesian_populations(workspace), populations, distributed, context)
+        footprint_state!(workspace, distributed, context)
         synthesizer = build_synthesis_setup(
             config,
-            distributed.local_atmosphere,
+            synthesis_atmosphere(workspace, distributed),
             workspace.populations,
             eos;
             atom_files=ATOM_FILES,

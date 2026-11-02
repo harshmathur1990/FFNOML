@@ -20,6 +20,7 @@ MULTI3D / Bifrost ──► pipeline.py --build ──► --train ──► chec
           atmosphere ──► --buildforpredict ──► --predict / --fsdppredict ──► populations (HDF5) ──► Forward.jl
                                                              │
 log-tau or z atmosphere ──► FFNOInversion.jl ── HSEMHS ── FFNO service ── synthesis ──► spectra, atmosphere
+   (any viewing angle μ)
                                   ▲                                             │
                             observations ◄──────── L-BFGS (inversion mode) ◄────┘
 ```
@@ -746,6 +747,11 @@ In brief:
   Ca II 8542 through Muspel) and Kurucz LTE lines in one formal solution. On log-tau
   grids the optical depth is integrated on the native tau grid, with sub-stepping
   across opacity jumps.
+- **Viewing angle.** `[view]` μ, azimuth and `plane_parallel` or `inclined` geometry for
+  off-disk-centre observations, in both vertical coordinates, forward and inversion. Log-tau
+  inputs must already be lines of sight at that angle; height-grid cubes are used as they
+  are, with the synthesis along slanted rays. Validated against MULTI3D at μ = 0.8. See
+  [`FFNOInversion.jl/docs/viewing-angle/`](FFNOInversion.jl/docs/viewing-angle/README.md).
 - **Inversion.** Temperature, velocity, microturbulence and magnetic-field
   corrections on coarse node maps, weighted chi-square plus vertical and horizontal
   regularization, and bounded L-BFGS with matrix-free adjoint gradients.
@@ -754,6 +760,10 @@ In brief:
   multi-GPU FFNO service. Production runs go on Olivia through
   `FFNOInversion.jl/scripts/submit_olivia_inversion.sh`, which runs a login-node
   preflight before `sbatch`.
+
+- **Response functions.** `FFNOInversion.jl/scripts/column_response.jl` writes per-column
+  ∂I/∂v of a forward run; `ffno_population_tangents.jl` adds the response of the FFNO
+  populations to temperature through forward-mode (dual-tensor) JVPs on the GPU service.
 
 Start with [`examples/inversion_run/START_HERE.md`](examples/inversion_run/START_HERE.md).
 Run-directory templates are in [`examples/`](examples/README.md).
@@ -778,6 +788,14 @@ Map those names in the run's `[atmosphere.datasets]` with
 (K, m/s, T).
 
 Native-z inputs need `z_m`, `x_m` and `y_m` axes in metres in addition to the fields.
+
+For an off-disk-centre (μ < 1) log-tau run the input must hold τ along the line of sight on
+a deprojected footprint grid, tagged with `view_mu`, `view_azimuth_deg` and
+`view_geometry`. `response_run/view_check/build_slanted_input.jl MU AZIMUTH STRIDE OUT.h5`
+builds one from the en024048 Bifrost cube (rays traced through the cube, written in the
+run-input layout with `storage_order = "julia"`); HSEMHS's
+`scripts/viewing/make_slanted_tau.jl` does the same for T and B. A height-grid cube needs
+no conversion: set `[view]` in a `forward_z.toml`-style run.
 
 ## Other Scripts
 
@@ -822,8 +840,8 @@ The MPI parity checks and the Olivia regression chain are described in the
 - `docs/paper_draft_ffno_nlte.md`: paper draft.
 - `output/pdf/`: inversion development plan, implementation report and HSE bootstrap
   review.
-- `FFNOInversion.jl/docs/`: architecture decisions, the HSEMHS integration plan and
-  validation reports.
+- `FFNOInversion.jl/docs/`: architecture decisions, the HSEMHS integration plan,
+  the viewing-angle design (`docs/viewing-angle/`) and validation reports.
 
 ## Caveats
 
@@ -834,6 +852,7 @@ The MPI parity checks and the Olivia regression chain are described in the
 - config values are the source of truth for splits, active atoms, paths, and model dimensions
 - `FFNOInversion.jl` overwrites its configured output files; use a new run directory per experiment
 - the inversion supports Stokes I, non-PRD synthesis and column HSE only; see the [package limitations](FFNOInversion.jl/README.md#known-limitations)
+- off-disk-centre log-tau inputs must already be lines of sight at the configured μ; a vertical-τ file run at μ < 1 is rejected
 
 ## Usage And Citation
 

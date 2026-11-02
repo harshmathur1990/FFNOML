@@ -75,6 +75,7 @@ export DistributedAtmosphere, distribute_atmosphere, gather_atmosphere
 export AbstractDistributedPopulationModel
 export LocalDistributedPopulationModel, RootDistributedPopulationModel, CompositeDistributedPopulationModel, predict_distributed_populations!
 export HybridForwardWorkspace, HybridForwardModel, HybridForwardTimings, gather_spectrum, distributed_chi2, distributed_regularization_penalty
+export cartesian_populations, synthesis_atmosphere, footprint_state!
 export distributed_memory_report
 export FSDPModelSpec, FSDPServiceClient, FSDPFFNOModel
 export launch_fsdp_service, close_fsdp_service!, launch_fsdp_population_models
