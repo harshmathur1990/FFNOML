@@ -1,4 +1,5 @@
 import torch
+import torch.autograd.forward_ad as fwAD
 import torch.distributed as dist
 import torch.distributed.nn.functional as dist_nn
 import torch.nn as nn
@@ -64,6 +65,24 @@ def _to_spacing_value(spacing):
     raise TypeError(f"Unsupported spacing type: {type(spacing)}")
 
 
+def _dual_parts(tensor):
+    """(primal, tangent) of a forward-mode AD dual tensor; the tangent is None for an ordinary tensor."""
+    unpacked = fwAD.unpack_dual(tensor)
+    return unpacked.primal, unpacked.tangent
+
+
+def _linear_collective(operation, tensor):
+    """Apply a linear communication step to a dual tensor: to its primal and to its tangent separately.
+
+    The collectives and the halo exchange are autograd Functions without forward-mode rules; being linear, the
+    tangent goes through the same exchange. Every rank holds a dual during a JVP, so the calls stay matched.
+    """
+    primal, tangent = _dual_parts(tensor)
+    if tangent is None:
+        return operation(tensor)
+    return fwAD.make_dual(operation(primal), operation(tangent))
+
+
 def _as_dist_tensor(tensor):
     if tensor.is_complex():
         return torch.view_as_real(tensor)
@@ -80,6 +99,16 @@ def _all_to_all_tensor_list(input_list, output_shapes, concat_dim=None):
         return input_list[0] if concat_dim is not None else [input_list[0]]
 
     world_size = get_world_size()
+
+    parts = [_dual_parts(value) for value in input_list]
+    if any(tangent is not None for _, tangent in parts):
+        primals = [primal for primal, _ in parts]
+        tangents = [torch.zeros_like(primal) if tangent is None else tangent for primal, tangent in parts]
+        out_primal = _all_to_all_tensor_list(primals, output_shapes, concat_dim)
+        out_tangent = _all_to_all_tensor_list(tangents, output_shapes, concat_dim)
+        if concat_dim is not None:
+            return fwAD.make_dual(out_primal, out_tangent)
+        return [fwAD.make_dual(p, t) for p, t in zip(out_primal, out_tangent)]
 
     if len(input_list) != world_size or len(output_shapes) != world_size:
         raise ValueError(
@@ -156,8 +185,9 @@ class DistributedGroupNorm(nn.Module):
             dtype=x.dtype,
         )
 
-        local_sum = dist_nn.all_reduce(local_sum, op=dist.ReduceOp.SUM)
-        local_sq = dist_nn.all_reduce(local_sq, op=dist.ReduceOp.SUM)
+        reduce_sum = lambda t: dist_nn.all_reduce(t, op=dist.ReduceOp.SUM)
+        local_sum = _linear_collective(reduce_sum, local_sum)
+        local_sq = _linear_collective(reduce_sum, local_sq)
         local_count = dist_nn.all_reduce(local_count, op=dist.ReduceOp.SUM)
 
         mean = local_sum / local_count
@@ -250,7 +280,7 @@ class DistributedHDepthwiseConv3d(nn.Module):
         if not is_dist():
             return self.conv(x)
         self._progress("halo exchange")
-        x_halo = _HaloExchangeH.apply(x)
+        x_halo = _linear_collective(_HaloExchangeH.apply, x)
         self._progress("local depthwise conv")
         y = F.conv3d(
             x_halo,

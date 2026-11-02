@@ -27,6 +27,16 @@ vz = "vz"
 # Bz = "Bz"
 
 
+# Viewing angle (docs/viewing-angle/README.md). Without this section, or with mu = 1, the view is vertical.
+# A height-grid cube is Cartesian and needs no special input: the FFNO sees it unchanged, the formal solution uses
+# the path dz/mu, and "inclined" synthesizes along the slanted rays (footprint columns, x = xi + tan(theta)
+# cos(azimuth) z, ...) while "plane_parallel" keeps the grid columns. The spectra are on the footprint grid. Spatial
+# PSF FWHMs are in sky metres and are stretched by 1/mu along the tilt.
+# [view]
+# mu = 0.8                     # cos(theta), 0 < mu <= 1
+# azimuth_deg = 0.0            # direction of the tilt, from +x toward +y; 0, 90, 180 or 270 with a spatial PSF
+# geometry = "inclined"        # or "plane_parallel"
+
 [equilibrium]
 # HSEMHS reconstructs Pgas, rho, ne and the derived coordinate (log10 tau500 here) in process. The mode follows from
 # atmosphere.vertical_coordinate and model:

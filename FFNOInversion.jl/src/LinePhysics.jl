@@ -187,7 +187,7 @@ function add_opacity_emissivity!(χ,η,model::FFNOTransition,wavelength,atmosphe
     size(populations,4)>=max(model.lower_level,model.upper_level) || throw(DimensionMismatch("population level missing"))
     @inbounds for k in axes(χ,1),l in axes(χ,2)
         temp=atmosphere.temperature[k,x,y]
-        profile=_gaussian_profile(wavelength[l]*(1-atmosphere.vz[k,x,y]/_C),model.wavelength0_m,temp,atmosphere.vturb[k,x,y],model.atomic_mass_kg)
+        profile=_gaussian_profile(wavelength[l]*(1-los_velocity(atmosphere,k,x,y)/_C),model.wavelength0_m,temp,atmosphere.vturb[k,x,y],model.atomic_mass_kg)
         nl=populations[k,x,y,model.lower_level]; nu=populations[k,x,y,model.upper_level]
         χline=max(zero(eltype(χ)),model.oscillator_strength*1e-24*(nl-nu)*profile)
         χ[k,l]+=χline; η[k,l]+=χline*planck_lambda(wavelength[l],temp)
@@ -200,7 +200,7 @@ function add_opacity_emissivity!(χ,η,model::KuruczLTEModel,wavelength,atmosphe
     @inbounds for line in model.lines,k in axes(χ,1),l in axes(χ,2)
         temp=atmosphere.temperature[k,x,y]
         nl=atmosphere.rho[k,x,y]*exp(-line.lower_energy_j/(_KB*temp))
-        profile=_gaussian_profile(wavelength[l]*(1-atmosphere.vz[k,x,y]/_C),line.wavelength0_m,temp,atmosphere.vturb[k,x,y],1.66053906660e-27*56)
+        profile=_gaussian_profile(wavelength[l]*(1-los_velocity(atmosphere,k,x,y)/_C),line.wavelength0_m,temp,atmosphere.vturb[k,x,y],1.66053906660e-27*56)
         χline=max(zero(eltype(χ)),1e-2*10^line.loggf*nl*profile)
         χ[k,l]+=χline; η[k,l]+=χline*planck_lambda(wavelength[l],temp)
     end
@@ -236,7 +236,7 @@ function _add_wittmann_kurucz!(χ,η,model,wavelength,atmosphere,x,y)
         Bji=λ0^3/(2*_H*_C)*Aji; Bij=line.upper_g/line.lower_g*Bji
         @inbounds for k in 1:nz,l in eachindex(wavelength)
             vb=sqrt(2*_KB*temp[k]/line.atomic_mass_kg+atmosphere.vturb[k,x,y]^2)
-            v=(wavelength[l]/λ0-1)*_C/vb+atmosphere.vz[k,x,y]/vb
+            v=(wavelength[l]/λ0-1)*_C/vb+los_velocity(atmosphere,k,x,y)/vb
             gamma=line.grad_s+line.gstark_m3_s*atmosphere.ne[k,x,y]+line.gvdwaals_m3_s*nh[k]
             adamp=gamma*λ0/(4pi*vb); profile=_voigt_armstrong(adamp,v)/(sqrt(pi)*vb)
             nu=line.upper_g/line.lower_g*lower[k]*exp(-(_H*_C/λ0)/(_KB*temp[k]))

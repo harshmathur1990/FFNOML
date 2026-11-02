@@ -14,6 +14,7 @@ import HSEMHS
 import FFTW
 
 include("Types.jl")
+include("ViewAngle.jl")
 include("Parallel.jl")
 include("Diagnostics.jl")
 include("Nodes.jl")
@@ -38,6 +39,8 @@ include("IO.jl")
 include("Execution.jl")
 
 export Grid3D, MagneticField3D, Atmosphere3D
+export ViewGeometry, is_vertical, is_slanted, view_direction, slant, los_velocity, view_attributes
+export ShearPlan, shear_levels!, shear_levels_transpose!
 export VerticalAxis, VERTICAL_KINDS, vertical_unit, vertical_coordinate, native_depth, nlevels
 export log_tau500_axis, z_axis, check_coordinate_consistency
 export ParallelOptions, ParallelContext, Tile2D, DistributedField
@@ -54,7 +57,7 @@ export AbstractEquilibriumBackend, EquilibriumConfig, EquilibriumOutcome, HSEMHS
 export prepare_equilibrium, reconstruct_equilibrium!, close_equilibrium!
 export StokesSet, SpectralCube, ObservationCube, CapabilityManifest
 export NodeField, expand_nodes
-export AbstractPopulationModel, predict_populations!, population_vjp!, MockPopulationModel
+export AbstractPopulationModel, predict_populations!, population_vjp!, population_jvp!, MockPopulationModel
 export FFNO_INPUT_CHANNELS, PopulationMetadata, population_features, RecordedPopulationModel
 export PopulationMeshConfig, MeshPopulationModel, population_mesh, population_mesh_options, wrap_population_mesh
 export save_population_record, load_population_record
@@ -72,6 +75,7 @@ export DistributedAtmosphere, distribute_atmosphere, gather_atmosphere
 export AbstractDistributedPopulationModel
 export LocalDistributedPopulationModel, RootDistributedPopulationModel, CompositeDistributedPopulationModel, predict_distributed_populations!
 export HybridForwardWorkspace, HybridForwardModel, HybridForwardTimings, gather_spectrum, distributed_chi2, distributed_regularization_penalty
+export cartesian_populations, synthesis_atmosphere, footprint_state!
 export distributed_memory_report
 export FSDPModelSpec, FSDPServiceClient, FSDPFFNOModel
 export launch_fsdp_service, close_fsdp_service!, launch_fsdp_population_models

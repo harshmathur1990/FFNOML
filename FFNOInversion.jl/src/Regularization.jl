@@ -51,7 +51,7 @@ end
 
 function _atmospheric_variable(atmosphere::Atmosphere3D, variable::Symbol)
     variable === :temperature && return atmosphere.temperature
-    variable === :vlos && return atmosphere.vz
+    variable === :vlos && return los_velocity_field(atmosphere)
     variable in (:vx,:vy,:vz,:vturb) && return getfield(atmosphere,variable)
     if variable in (:pgas,:rho,:ne,:z)
         value = getfield(atmosphere,variable)

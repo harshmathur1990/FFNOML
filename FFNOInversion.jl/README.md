@@ -46,7 +46,9 @@ population mesh (log tau)   columns mapped onto a training-like height mesh
    ▼
 FFNO3D populations          persistent multi-GPU FSDP service, one model per species
    ▼
-mixed synthesis             FFNO NLTE lines + Kurucz LTE lines + continuum, per region
+footprint columns (z, μ<1)  inclined view on a height grid: state and populations shifted onto the rays
+   ▼
+mixed synthesis             FFNO NLTE lines + Kurucz LTE lines + continuum, per region; Doppler n·v, path dz/μ
    ▼
 observation model           Gaussian spectral/spatial PSF on the full grid
    ▼
@@ -65,6 +67,7 @@ One-rank development runs and multi-rank production runs use the same
 | Equilibrium | HSEMHS column HSE (`column-hse-ltau`, `column-hse-z`). MHS Poisson modes (`model = "mhs"`) are rejected until HSEMHS-integration Phase 4. |
 | Populations | FFNO3D through the persistent FSDP GPU service (H and Ca II, 6 levels each in the example factory). At least two GPU ranks are required. |
 | Spectral lines | FFNO: H alpha (`halpha`), Ca II 8542 (`ca_ii_8542`). LTE: any Kurucz line list. |
+| Viewing angle | `[view]` μ, azimuth, `plane_parallel` or `inclined`, both native coordinates, forward and inversion (ADR-013). Validated against MULTI3D at μ = 0.8. |
 | Stokes / redistribution | Stokes I, non-PRD (Release 1). The type boundaries for PRD and full Stokes exist (ADR-004) but are not implemented. |
 | Clusters | Olivia (Slurm `accel` partition, NVIDIA GPUs) for production; any MPI machine for CPU tests. |
 
@@ -243,6 +246,26 @@ with only LTE sources does not call FFNO.
 ∇ = 0.13) lie inside the range of the training grids. See
 [Population mesh](#population-mesh-for-log-tau-atmospheres).
 
+### `[view]` (viewing angle)
+
+`mu` (cos θ, 0 < μ ≤ 1, default 1), `azimuth_deg` (φ from +x toward +y, default 0) and `geometry`
+(`"plane_parallel"`, default, or `"inclined"`). Without the section, or at μ = 1, every result is bit for bit the
+vertical one. Design, decisions and validation: [`docs/viewing-angle/README.md`](docs/viewing-angle/README.md).
+
+- The Doppler shift uses the line-of-sight velocity n·v. The `vlos` control moves v along n and keeps the
+  perpendicular part at the starting atmosphere's; it cannot be combined with `vx`, `vy` or `vz` controls.
+- **Native log τ:** the input columns must already be lines of sight: T on τ along the ray, on a regular deprojected
+  footprint grid, tagged with `view_mu`, `view_azimuth_deg` and `view_geometry` (a file without the tags is accepted only
+  at μ = 1). HSEMHS balances each ray. With `inclined`, the population mesh shifts every mesh level by −t·z to the
+  Cartesian positions before the FFNO and the populations back by +t·z (t = tan θ (cos φ, sin φ), rays through the
+  footprints at the run's z = 0).
+- **Native z:** the cube is Cartesian and the FFNO sees it unchanged. The formal solution uses the path dz/μ;
+  with `inclined` it runs on footprint columns: the state and populations shifted by +t·z per level on the root rank.
+- The spatial PSF FWHMs are in sky metres and are stretched by 1/μ along the tilt; only φ = 0, 90, 180, 270° are
+  accepted with a spatial PSF.
+- Outputs record `view_*` attributes; `column_response.jl --variables vlos` gives the response to n·v (`vz` is the
+  vertical component).
+
 ### `[physics]`, `[observation]`
 
 | Key | Meaning |
@@ -319,8 +342,10 @@ is the production example. Its `build_production_model`:
 2. prepares the HSEMHS equilibrium (`prepare_equilibrium`);
 3. launches one persistent FSDP service for H and Ca
    (`launch_fsdp_population_models`, with `population_mesh_options(config)`);
-4. reconstructs the initial equilibrium, predicts populations once and builds the
-   cached synthesis setup (`build_synthesis_setup`);
+4. reconstructs the initial equilibrium, predicts populations once into
+   `cartesian_populations(workspace)`, builds the footprint state (`footprint_state!`, a no-op unless the view is
+   inclined on a height grid) and builds the cached synthesis setup (`build_synthesis_setup`) on
+   `synthesis_atmosphere(workspace, distributed)`;
 5. returns a `HybridForwardModel`.
 
 On an error it aborts all MPI ranks (`abort_on_rank_failure`) rather than leaving
@@ -458,6 +483,30 @@ the populations back:
 
 The VJP is the transpose of these maps. Native-z atmospheres skip the mesh.
 
+### Viewing angle
+
+`[view]` (configuration reference above; design, decisions and validation in
+[`docs/viewing-angle/README.md`](docs/viewing-angle/README.md), ADR-013) sets the direction to the observer
+n = (sin θ cos φ, sin θ sin φ, μ). The view lives in `Grid3D.view` (`ViewGeometry`), so every tile and output carries
+it; `src/ViewAngle.jl` holds the line-of-sight velocity, the path factor and the periodic shift.
+
+- **What changes.** HSEMHS balances along the line of sight (`ViewOptions`). Every Doppler shift uses n·v. Native
+  log τ: the axis is τ along the ray, so the formal solution is unchanged; with `inclined` the population mesh
+  shifts each mesh level by −t·z before the FFNO and the populations back by +t·z (t = tan θ (cos φ, sin φ)), so the
+  network sees every ray point at its Cartesian position. Native z: the FFNO sees the cube unchanged; the formal
+  solution uses the path dz/μ; with `inclined` the synthesis runs on footprint columns (state and populations
+  shifted by +t·z per level, log for positive fields) — long characteristics sampled where each ray crosses each
+  level plane.
+- **Rays** are x = ξ + t (z − z_ref) with z_ref = 0 (HSEMHS's gauge for log τ, the grid's z = 0 for height grids),
+  periodic; a warning is printed when they travel farther than the box.
+- **Adjoints**: n·v̄ for velocities, the exact transpose of the shift (`shear_levels_transpose!`) for the population
+  mesh and the footprint state, z̄/μ for the path.
+- **Validation** (design doc §9): μ = 1 bit-identical to the vertical code on production data; adjoint against
+  finite differences 4e-10 (log τ) and 3e-9 (z) at μ = 0.8; 1, 2, 3 MPI ranks identical; the footprint synthesis
+  equals an independent ray tracer, and 4× finer sampling along the ray changes it by 0.6 % rms; FFNO H-alpha
+  core against MULTI3D at μ = 0.8 r = 0.81 on the Bifrost cube's own height grid (0.82 at μ = 1), while
+  plane-parallel gives 0.04.
+
 ### Synthesis
 
 `build_synthesis_setup` reads and caches all line physics outside the pixel loops:
@@ -519,6 +568,26 @@ control maps; use it with fresh optimizer history.
 `FiniteDifferenceObjectiveGradient` is the validation oracle;
 `gradient_taylor_validation` and `dot_product_validation` check the adjoints.
 
+### Column response functions
+
+`scripts/column_response.jl` (Olivia: `scripts/run_olivia_column_response.sbatch`, submitted from a forward run
+directory) writes R_v(λ, k; x, y) = ∂I(λ, x, y)/∂v(k, x, y) of the intrinsic intensity for every configured
+wavelength and every native log τ500 point, per unit log τ500, for `temperature`, `vz`, `vlos` (n·v; equals `vz` at μ = 1), `vturb`, `ne` or `pgas`
+(`--variables`, `--stride`, `--crop`). Populations and the HSE structure (pgas, rho, ne, z, chi500) are held at the
+forward run's values, so each column is independent: one formal-solver adjoint sweep plus two opacity evaluations
+per variable, with no FFNO or HSEMHS call. Size: 4 bytes × wavelengths × depths × columns × variables before
+compression (2.7 GB for T and vz at stride 4 on 504²).
+
+With `--population-tangents TANGENTS.h5` the temperature response also lets the FFNO populations respond.
+`scripts/ffno_population_tangents.jl` (Olivia: `scripts/run_olivia_population_tangents.sbatch`, GPU) makes the file:
+for every log τ500 point k0 it asks the FSDP service for one forward-mode JVP (dual tensors through the population
+mesh and the FFNO, `population_jvp!`) seeded with 1 K at k0 in every column, and stores the population tangent
+ṅ(k, x, y; k0) = Σ_{x',y'} ∂n(k, x, y)/∂T(k0, x', y') (Float32, 4 bytes × depths² × levels × columns per species,
+55 GB for H on 504²). The seed in every column keeps the horizontal coupling of the Fourier layers in that sum without
+storing the full Jacobian. `column_response.jl` then adds Σ_{k,l} G_l(k, λ) ṅ_l(k; k0) per column, with
+G_l = ∂I/∂n_l from the same adjoint. pgas, rho, ne and z stay fixed. `test/ffno_jvp_cpu_check.py` checks the
+distributed JVP against finite differences on CPU.
+
 ### Checkpoints
 
 Checkpoints are atomic and bound to the configuration, the baseline atmosphere
@@ -553,7 +622,8 @@ The scheduler chooses the rank count and Julia the threads per rank. For example
 
 | File | Role |
 | --- | --- |
-| `src/Types.jl` | grids, vertical axes, atmospheres, magnetic fields, spectral and observation cubes |
+| `src/Types.jl` | grids (with their `ViewGeometry`), vertical axes, atmospheres, magnetic fields, spectral and observation cubes |
+| `src/ViewAngle.jl` | viewing angle: line-of-sight velocity, path factor, periodic shift and transpose, view attributes |
 | `src/Parallel.jl` | MPI context, tiles, process grids, scatter/gather, halos, rank-0 GPU coordination |
 | `src/Diagnostics.jl` | GPU-control diagnostics and failure records |
 | `src/Nodes.jl` | node fields and their expansion onto tiles |
@@ -599,7 +669,10 @@ julia --project=. scripts/validate_phase6_mpi.jl
 and configuration, Wittmann and continuum opacity, population backends and the
 population mesh, synthesis and Muspel integration, the HSEMHS equilibrium, the
 Phase 5 and 6 solvers and gradients, the FSDP protocol, the correction mapping, and
-the Olivia setup and preflight scripts. The `test/mpi_*_worker.jl` and
+the Olivia setup and preflight scripts, and the viewing angle (`test/view_angle.jl`: geometry, Doppler, shift and
+transpose, slanted path, footprint synthesis, inclined population mesh, configuration, gradients at μ = 0.8 and the
+μ = 1 identity). `test/mpi_view_worker.jl` checks an inclined height-grid run on 1, 2 and 3 ranks
+(`mpiexec -n R julia --project test/mpi_view_worker.jl OUT`). The `test/mpi_*_worker.jl` and
 `test/olivia_*` files are driven by the validation scripts and the Olivia
 regression chain (`scripts/run_olivia_runtime_tests.sbatch`), which also exercises
 CUDA/NCCL probes, deliberate CPU and GPU stalls, timeouts and recovery.
@@ -617,7 +690,9 @@ float32 round-off).
   objective, ADR-006 two-input/two-output contract, ADR-007 vertical regularization,
   ADR-008 mixed-line synthesis, ADR-009 hybrid MPI/threads/GPU, ADR-010 prototype
   solver, ADR-011 matrix-free L-BFGS, ADR-012 HSEMHS equilibrium (supersedes the
-  force-balance ADR-003).
+  force-balance ADR-003), ADR-013 viewing angle.
+- [`docs/viewing-angle/`](docs/viewing-angle/README.md): viewing-angle design, the Codex review and the validation
+  results.
 - [`docs/hsemhs-integration/`](docs/hsemhs-integration/README.md): the six-phase
   HSEMHS integration plan. Phases 1–3 are done; MHS modes, equilibrium-aware
   inversion examples and the implicit equilibrium VJP are Phases 4–6.
@@ -640,3 +715,8 @@ float32 round-off).
 - FFNO lines are limited to H alpha and Ca II 8542, with the 6-level H and Ca II
   atoms used in training.
 - The FSDP service needs CUDA (NVIDIA) GPUs and at least two GPU ranks.
+- **Viewing angle:** one angle per run. Native log-τ inputs at μ < 1 must already be lines of sight on a deprojected
+  footprint grid (resampling sky pixels and transforming B is the caller's job). A spatial PSF requires an azimuth of
+  0, 90, 180 or 270°. The inclined shifts run on the root rank (a gather and a scatter per forward and per gradient).
+  `plane_parallel` with log-τ inputs feeds the FFNO the rays as vertical columns, which does not reproduce 3-D NLTE
+  at μ = 0.8.

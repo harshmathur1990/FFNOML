@@ -235,7 +235,7 @@ function add_opacity_emissivity_vjp!(atmosphere_bar,population_bar,population_lo
         chi_bar,eta_bar,model::FFNOTransition,wavelength,atmosphere,x,y,populations)
     populations===nothing && throw(ArgumentError("FFNO transition VJP requires populations"))
     for k in axes(chi_bar,1),l in axes(chi_bar,2)
-        temp=atmosphere.temperature[k,x,y]; vz=atmosphere.vz[k,x,y]
+        temp=atmosphere.temperature[k,x,y]; vz=los_velocity(atmosphere,k,x,y)
         vturb=atmosphere.vturb[k,x,y]; lambda=wavelength[l]
         thermal=2*_KB*temp/model.atomic_mass_kg+vturb^2
         width=model.wavelength0_m/_C*sqrt(thermal)
@@ -256,7 +256,7 @@ function add_opacity_emissivity_vjp!(atmosphere_bar,population_bar,population_lo
         atmosphere_bar.temperature[k,x,y]+=source_bar*_planck_temperature_derivative(lambda,temp)+
             width_bar*width*(_KB/model.atomic_mass_kg)/thermal
         atmosphere_bar.vturb[k,x,y]+=width_bar*width*vturb/thermal
-        atmosphere_bar.vz[k,x,y]-=shifted_bar*lambda/_C
+        add_los_cotangent!(atmosphere_bar,atmosphere,k,x,y,-shifted_bar*lambda/_C)
     end
     nothing
 end
@@ -267,7 +267,7 @@ function add_opacity_emissivity_vjp!(atmosphere_bar,population_bar,population_lo
         wavelength,atmosphere,x,y,populations)
     for line in model.lines,k in axes(chi_bar,1),l in axes(chi_bar,2)
         temp=atmosphere.temperature[k,x,y]; rho=atmosphere.rho[k,x,y]
-        vz=atmosphere.vz[k,x,y]; vturb=atmosphere.vturb[k,x,y]; lambda=wavelength[l]
+        vz=los_velocity(atmosphere,k,x,y); vturb=atmosphere.vturb[k,x,y]; lambda=wavelength[l]
         boltzmann=exp(-line.lower_energy_j/(_KB*temp)); lower=rho*boltzmann
         thermal=2*_KB*temp/(56*1.66053906660e-27)+vturb^2
         width=line.wavelength0_m/_C*sqrt(thermal)
@@ -284,7 +284,7 @@ function add_opacity_emissivity_vjp!(atmosphere_bar,population_bar,population_lo
             width_bar*width*(_KB/(56*1.66053906660e-27))/thermal+
             source_bar*_planck_temperature_derivative(lambda,temp)
         atmosphere_bar.vturb[k,x,y]+=width_bar*width*vturb/thermal
-        atmosphere_bar.vz[k,x,y]-=shifted_bar*lambda/_C
+        add_los_cotangent!(atmosphere_bar,atmosphere,k,x,y,-shifted_bar*lambda/_C)
     end
     nothing
 end
@@ -303,7 +303,10 @@ function _opaque_opacity_vjp!(atmosphere_bar,chi_bar,eta_bar,model,wavelength,
         add_opacity_emissivity!(chi,eta,model,wavelength,atmosphere,x,y,populations)
         sum(chi.*chi_bar)+sum(eta.*eta_bar)
     end
-    for (name,bar) in ((:temperature,atmosphere_bar.temperature),(:vz,atmosphere_bar.vz),
+    # off the vertical the Doppler shift reads n·v, so vx and vy are perturbed too
+    velocities=is_vertical(atmosphere.grid.view) ? ((:vz,atmosphere_bar.vz),) :
+        ((:vx,atmosphere_bar.vx),(:vy,atmosphere_bar.vy),(:vz,atmosphere_bar.vz))
+    for (name,bar) in ((:temperature,atmosphere_bar.temperature),velocities...,
             (:vturb,atmosphere_bar.vturb),(:pgas,atmosphere_bar.pgas),
             (:rho,atmosphere_bar.rho),(:ne,atmosphere_bar.ne))
         values=getfield(atmosphere,name); values===nothing && continue
@@ -376,6 +379,7 @@ function _mixed_synthesis_vjp!(atmosphere_bar,population_bar,model::MixedIntensi
         populations,wavelength,intrinsic_bar)
     model.solver isa ScalarFormalSolver || throw(ArgumentError(
         "production synthesis VJP requires ScalarFormalSolver"))
+    _check_synthesis_columns(atmosphere)
     lookup(source)=_population_lookup(populations,population_bar,source)
     nz,nx,ny=size(atmosphere.temperature); nlambda=length(wavelength); T=eltype(intrinsic_bar)
     for x in 1:nx,y in 1:ny
@@ -395,7 +399,9 @@ function _mixed_synthesis_vjp!(atmosphere_bar,population_bar,model::MixedIntensi
             chi_bar.*=weight; eta_bar.*=weight
         else
             _formal_solve_vjp!(chi_bar,eta_bar,z_bar,model.solver,chi,eta,
-                @view(atmosphere.z[:,x,y]),@view(intrinsic_bar[:,1,x,y]))
+                _geometric_path(atmosphere,x,y),@view(intrinsic_bar[:,1,x,y]))
+            v=atmosphere.grid.view
+            is_vertical(v) || (z_bar.*=T(path_factor(v)))       # path z/μ
             @views atmosphere_bar.z[:,x,y].+=z_bar
         end
         for contributor in model.contributors
@@ -406,6 +412,52 @@ function _mixed_synthesis_vjp!(atmosphere_bar,population_bar,model::MixedIntensi
         end
     end
     population_bar
+end
+
+# ---------------------------------------------------------------------------
+# Footprint shift (inclined view, native z): transpose of footprint_state!
+# ---------------------------------------------------------------------------
+
+"""
+Add the Cartesian cotangents of the footprint shift to `bar` and return the Cartesian population cotangents
+(collective). Footprint cotangents `fp_bar` and `population_bar` are gathered on the root rank, where each field goes
+through the transpose of its shift: Sᵀ(x̄) for velocities and heights, Sᵀ(x̄ x_fp)/x for the log-shifted fields.
+"""
+function footprint_vjp!(bar::AtmosphereCotangent,fp_bar::AtmosphereCotangent,population_bar,
+        workspace,distributed::DistributedAtmosphere,context::ParallelContext)
+    fp=workspace.footprint; grid=distributed.global_grid; tile=distributed.tile
+    shape=(nlevels(grid),length(grid.x),length(grid.y))
+    cartesian=gather_atmosphere(distributed,context)
+    footprint=gather_atmosphere(DistributedAtmosphere(fp.atmosphere,grid,tile),context)
+    plan=isroot(context) ? ShearPlan(grid,native_depth(grid),1) : nothing
+    shear_t(g)=shear_levels_transpose!(zero(g),g,plan)
+    for (i,name) in enumerate((_FOOTPRINT_LOG_FIELDS...,_FOOTPRINT_LINEAR_FIELDS...,:z))
+        g=gather_field(_field(getfield(fp_bar,name),tile,shape),context;tag=960+i)
+        root_values=if !isroot(context)
+            nothing
+        elseif name in _FOOTPRINT_LOG_FIELDS
+            shear_t(g.*getfield(footprint,name))./getfield(cartesian,name)
+        else
+            shear_t(g)
+        end
+        getfield(bar,name).+=distribute_field(eltype(getfield(bar,name)),root_values,shape,context;tag=980+i).values
+    end
+    bars=_population_dict(population_bar)
+    global_bar=_gather_population_dict(bars,distributed,context;tag=1000)
+    global_fp=_gather_population_dict(_population_dict(workspace.populations),distributed,context;tag=1020)
+    global_cart=_gather_population_dict(_population_dict(fp.populations),distributed,context;tag=1040)
+    # the footprint cotangent dict is keyed like the workspace (`:_single` for one array)
+    keyed(d,k)=haskey(d,k) ? d[k] : d[only(keys(d))]
+    cart_values=isroot(context) ? Dict(k=>begin
+            out=similar(v)
+            for l in axes(v,4)
+                out[:,:,:,l].=shear_t(v[:,:,:,l].*keyed(global_fp,k)[:,:,:,l])./keyed(global_cart,k)[:,:,:,l]
+            end
+            out
+        end for (k,v) in global_bar) : nothing
+    cart_bar=Dict(k=>zero(v) for (k,v) in bars)
+    _scatter_population_dict!(cart_bar,cart_values,distributed,context;tag=1060)
+    population_bar isa AbstractDict ? cart_bar : cart_bar[:_single]
 end
 
 # ---------------------------------------------------------------------------
@@ -538,8 +590,12 @@ function _force_regularization_vjp!(gradient,backend::HybridAdjointObjectiveGrad
     gradient
 end
 
-function _direct_bar(bar::AtmosphereCotangent,variable::Symbol)
-    variable===:vlos && return bar.vz
+function _direct_bar(bar::AtmosphereCotangent,variable::Symbol,view::ViewGeometry=ViewGeometry())
+    if variable===:vlos
+        is_vertical(view) && return bar.vz
+        n=view_direction(view)              # v = v_prior + δ n: ∂/∂δ = n·v̄
+        return n[1].*bar.vx.+n[2].*bar.vy.+n[3].*bar.vz
+    end
     variable in (:temperature,:vx,:vy,:vz,:vturb) && return getfield(bar,variable)
     if variable in (:Bx,:By,:Bz)
         bar.magnetic_field===nothing && throw(ArgumentError("$variable gradient requested without B"))
@@ -560,16 +616,27 @@ function objective_gradient!(backend::HybridAdjointObjectiveGradient,
     observation_vjp!(intrinsic_bar,output_bar,problem.model.observation,
         problem.workspace.intrinsic,problem.distributed,context)
     atmosphere_bar=AtmosphereCotangent(problem.distributed.local_atmosphere)
-    population_bar=synthesis_vjp!(atmosphere_bar,problem.model.synthesizer,
-        problem.model.redistribution,problem.distributed.local_atmosphere,
-        problem.workspace.populations,problem.workspace.intrinsic,intrinsic_bar,
-        problem.workspace.synthesis_cache)
+    population_bar=if problem.workspace.footprint===nothing
+        synthesis_vjp!(atmosphere_bar,problem.model.synthesizer,
+            problem.model.redistribution,problem.distributed.local_atmosphere,
+            problem.workspace.populations,problem.workspace.intrinsic,intrinsic_bar,
+            problem.workspace.synthesis_cache)
+    else
+        # inclined view on a height grid: the synthesis read the footprint state (design §6)
+        footprint_bar=AtmosphereCotangent(problem.workspace.footprint.atmosphere)
+        footprint_population_bar=synthesis_vjp!(footprint_bar,problem.model.synthesizer,
+            problem.model.redistribution,problem.workspace.footprint.atmosphere,
+            problem.workspace.populations,problem.workspace.intrinsic,intrinsic_bar,
+            problem.workspace.synthesis_cache)
+        footprint_vjp!(atmosphere_bar,footprint_bar,footprint_population_bar,problem.workspace,
+            problem.distributed,context)
+    end
     predict_distributed_populations_vjp!(atmosphere_bar,problem.model.populations,
         problem.distributed,population_bar,context)
     gradient=zeros(T,layout.parameter_count)
     for spec in layout.specs
-        accumulate_control_vjp!(gradient,layout,spec.variable,_direct_bar(atmosphere_bar,spec.variable),
-            problem.distributed,context)
+        accumulate_control_vjp!(gradient,layout,spec.variable,
+            _direct_bar(atmosphere_bar,spec.variable,problem.distributed.global_grid.view),problem.distributed,context)
     end
     _force_regularization_vjp!(gradient,backend,atmosphere_bar,problem,layout,parameters,evaluation,context)
     ObjectiveGradientEvaluation(evaluation,gradient,1)

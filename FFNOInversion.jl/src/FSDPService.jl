@@ -119,6 +119,31 @@ function population_vjp!(feature_bar::AbstractArray{T,4},z_bar::AbstractArray{T,
     model.calls+=1; feature_bar,z_bar
 end
 
+function population_jvp!(population_dot::AbstractArray{T,4},model::FSDPFFNOModel,
+        atmosphere::Atmosphere3D,feature_dot::AbstractArray{<:Real,4}) where T
+    service=model.service; service.closed && error("FSDP service is closed")
+    size(feature_dot)==(6,size(atmosphere.temperature)...) || throw(DimensionMismatch(
+        "FFNO feature tangent shape differs from atmosphere"))
+    size(population_dot)[1:3]==size(atmosphere.temperature) || throw(DimensionMismatch(
+        "FFNO population tangent grid differs from atmosphere"))
+    size(population_dot,4)==length(model.metadata.level_names) || throw(DimensionMismatch(
+        "FFNO population tangent level count differs from FSDP metadata"))
+    features=population_features(atmosphere); z=Float32.(atmosphere.z)
+    dx=_spacing(atmosphere.grid.x,:x); dy=_spacing(atmosphere.grid.y,:y)
+    nz,nx,ny=size(z); levels=size(population_dot,4)
+    lock(service.lock) do
+        println(service.socket,"JVP $(model.name) $nz $nx $ny $levels $dx $dy")
+        _write_float32_array(service.socket,features)
+        _write_float32_array(service.socket,z)
+        _write_float32_array(service.socket,feature_dot)
+        flush(service.socket)
+        _service_response(service.socket,"JVP",(nz,nx,ny,levels))
+        population_dot.=T.(_read_float32_array(service.socket,(nz,nx,ny,levels)))
+    end
+    all(isfinite,population_dot) || error("FSDP FFNO JVP returned NaN or Inf")
+    model.calls+=1; population_dot
+end
+
 function _available_service_port()
     server=listen(ip"0.0.0.0",0)
     port=Int(getsockname(server)[2]); close(server); port

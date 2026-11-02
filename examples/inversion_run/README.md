@@ -79,3 +79,31 @@ inversion configuration; nodes and observations will be ignored. This is still
 HSEMHS equilibrium reconstruction followed by FFNO populations and synthesis,
 with no optimization or gradient work. The example factory currently loads both
 H and Ca assets even when only one species contributes to the configured lines.
+
+## Viewing angle (off disk centre)
+
+Add a `[view]` section (commented templates in all four configurations) to synthesize or invert at μ = cos θ < 1;
+without it, or at μ = 1, everything is the vertical run. Design, validation and the comparison with MULTI3D at
+μ = 0.8: [`FFNOInversion.jl/docs/viewing-angle/README.md`](../../FFNOInversion.jl/docs/viewing-angle/README.md).
+
+- **Native log tau** (`forward.toml`, `inversion.toml`): `inputs/initial_atmosphere.h5` must already be one line of
+  sight per pixel: T and velocities on log10 tau500 along the ray, on a regular deprojected footprint grid, with the
+  file attributes `view_mu`, `view_azimuth_deg` and `view_geometry` equal to the configuration (a file without them is
+  accepted only at μ = 1). Set `[grid] dx_m`, `dy_m` to the footprint spacings (a sky pixel p becomes p across the
+  tilt and p/μ along it). Use `geometry = "inclined"`: the FFNO then sees every ray point at its 3-D position.
+- **Native z** (`forward_z.toml`, `inversion_z.toml`): the cube is used as it is; `inclined` synthesizes along the
+  slanted rays through it. This is the direct route for an off-centre view of a simulation.
+- **Inversions** at μ < 1 control `vlos` (n·v), not `vz` (see the comment in the inversion configurations).
+- **PSF:** `[observation.gaussian_psf]` FWHMs stay in sky metres; the run stretches them by 1/μ along the tilt and
+  accepts only azimuths 0, 90, 180 or 270° with a spatial PSF.
+- Outputs carry `view_*` attributes. `model_factory.jl` predicts the populations on the Cartesian atmosphere and
+  builds the synthesis setup on `synthesis_atmosphere(workspace, distributed)`, which is the footprint atmosphere for
+  an inclined height-grid run; keep that if you write your own factory.
+
+## Column response functions
+
+After a forward run, `FFNOInversion.jl/scripts/column_response.jl` (Olivia: `run_olivia_column_response.sbatch`)
+writes ∂I/∂v per column and log tau point for temperature, `vz`, `vlos`, `vturb`, `ne` and `pgas`;
+`ffno_population_tangents.jl` (GPU) adds the response of the FFNO populations to temperature. See the package
+README, "Column response functions".
+

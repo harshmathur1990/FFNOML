@@ -27,3 +27,5 @@ include("phase6_fsdp_protocol.jl")
 include("fsdp_only_architecture.jl")
 
 include("correction_mapping.jl")
+
+include("view_angle.jl")

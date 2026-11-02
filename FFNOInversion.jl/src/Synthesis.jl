@@ -123,15 +123,21 @@ _tau_integration(atmosphere)=vertical_coordinate(atmosphere.grid)===:log10tau500
 
 """Formal solution of one column. On a native log-tau grid the integration variable is s = -ln τ500
 (decreasing with depth index, like z): `chi` and `eta` are scaled in place by τ500/χ500, so each step's
-optical depth is the trapezoid of (χ/χ500)·τ500 in ln τ500. Otherwise the geometric height `z` is used."""
+optical depth is the trapezoid of (χ/χ500)·τ500 in ln τ500; off the vertical the axis is τ along the line of sight,
+so nothing changes. Otherwise the path is the geometric height `z`, divided by μ off the vertical (ds = dz/μ)."""
 function formal_column!(out,solver,chi,eta,atmosphere,x,y)
-    _tau_integration(atmosphere) || return formal_solve!(out,solver,chi,eta,@view(atmosphere.z[:,x,y]))
+    _tau_integration(atmosphere) || return formal_solve!(out,solver,chi,eta,_geometric_path(atmosphere,x,y))
     coordinate=_log_tau_coordinate(atmosphere,x,y)
     weight=_log_tau_weight(atmosphere,x,y)
     chi.*=weight; eta.*=weight
     formal_solve!(out,solver,chi,eta,coordinate)
 end
 _log_tau_coordinate(atmosphere,x,y)=-log(eltype(atmosphere.chi500)(10)) .* @view(atmosphere.logtau500[:,x,y])
+"""Geometric path coordinate of column (x, y): z, or z/μ off the vertical."""
+function _geometric_path(atmosphere,x,y)
+    z=@view(atmosphere.z[:,x,y]); v=atmosphere.grid.view
+    is_vertical(v) ? z : z.*eltype(z)(path_factor(v))
+end
 _log_tau_weight(atmosphere,x,y)=exp10.(@view(atmosphere.logtau500[:,x,y])) ./ @view(atmosphere.chi500[:,x,y])
 
 function synthesize!(cube::SpectralCube{T},model::MixedIntensitySynthesizer,redistribution::AbstractRedistributionModel,
@@ -172,11 +178,21 @@ function _region_ranges(wavelength_m,setups)
     ranges
 end
 
+"""An inclined native-z atmosphere has Cartesian columns, which are not rays: only its footprint atmosphere
+(`footprint_atmosphere`) may be synthesized."""
+function _check_synthesis_columns(atmosphere)
+    v=atmosphere.grid.view
+    vertical_coordinate(atmosphere.grid)===:z_m && is_slanted(v) && !v.footprint && throw(ArgumentError(
+        "inclined view on a native height grid: synthesize the footprint atmosphere (rays), not the Cartesian columns"))
+    nothing
+end
+
 function _mixed_synthesis_cache(cube::SpectralCube{T},redistribution,atmosphere,cache) where T
     redistribution isa NonPRD || throw(ArgumentError("mixed intensity synthesis currently supports non-PRD only"))
     cube.stokes.components==(:I,) || throw(ArgumentError("mixed synthesizer supports only Stokes I"))
     _tau_integration(atmosphere) || atmosphere.z!==nothing ||
         throw(ArgumentError("formal synthesis requires geometrical z or (on a log-tau grid) chi500"))
+    _check_synthesis_columns(atmosphere)
     nz,nx,ny=size(atmosphere.temperature); nλ=length(cube.wavelength_m)
     size(cube.data)[3:4]==(nx,ny) || throw(DimensionMismatch("spectral spatial shape mismatch"))
     threaded=cache===nothing ? ThreadedSynthesisCache(T,nz,nλ) : cache

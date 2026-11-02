@@ -156,6 +156,12 @@ subsequent corrections. Setting `solver.max_iterations = 0` also selects forward
 mode and ignores observations/nodes. See [the full example configuration](inversion.toml)
 for fitting options.
 
+## Off disk centre
+
+To synthesize or invert at a viewing angle μ < 1, uncomment `[view]` in the configuration. A log-tau input must then
+already be lines of sight along that angle, tagged with `view_*` attributes; a height-grid input is used as it is.
+See [README.md](README.md#viewing-angle-off-disk-centre).
+
 ## If the GPU service crashes
 
 Set these when submitting (the job inherits them); all are off by default:

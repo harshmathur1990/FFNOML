@@ -24,6 +24,17 @@ vz = "vz"
 # Bz = "Bz"
 
 
+# Viewing angle (docs/viewing-angle/README.md). Without this section, or with mu = 1, the view is vertical.
+# A native log-tau input at mu < 1 must already hold one line of sight per pixel: T and v on log10 tau500 counted
+# along the ray, on a regular deprojected footprint grid (dx, dy: footprint spacings), tagged with the HDF5
+# attributes view_mu, view_azimuth_deg and view_geometry equal to this section. "inclined" places every ray's points
+# at their 3-D positions for the FFNO (x = xi + tan(theta) cos(azimuth) z, ...); "plane_parallel" treats the columns
+# as vertical (the 1.5-D shortcut). Spatial PSF FWHMs are in sky metres and are stretched by 1/mu along the tilt.
+# [view]
+# mu = 0.8                     # cos(theta), 0 < mu <= 1
+# azimuth_deg = 0.0            # direction of the tilt, from +x toward +y; 0, 90, 180 or 270 with a spatial PSF
+# geometry = "inclined"        # or "plane_parallel"
+
 [equilibrium]
 # HSEMHS reconstructs Pgas, rho, ne and the derived coordinate (height here) in process. The mode follows from
 # atmosphere.vertical_coordinate and model:
@@ -148,6 +159,8 @@ upper = 12000.0
 scale = 1000.0
 
 [[inversion.controls]]
+# With [view] mu < 1 use variable = "vlos": the line-of-sight velocity n.v, moving v along n and keeping the
+# perpendicular part at the starting atmosphere ("vz" is then only the vertical component). Not with vx/vy/vz controls.
 variable = "vz"
 log_tau_nodes = [-5.0, -3.0, -1.0, 1.0]
 control_nx = 8
