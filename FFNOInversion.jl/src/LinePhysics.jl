@@ -282,43 +282,56 @@ function add_opacity_emissivity!(χ,η,model::KuruczLTEModel,wavelength,atmosphe
     end
 end
 
-function _add_wittmann_kurucz!(χ,η,model,wavelength,atmosphere,x,y)
+"""Continuum state from the persistent backend (a library built before `witt_continuum_state` falls back to a new EOS per call)."""
+function continuum_state(state::WittmannKuruczState,temp::AbstractVector,pgas::AbstractVector;threads::Int=1)
+    fn=Libdl.dlsym(state.library_handle,:witt_continuum_state;throw_error=false)
+    fn===nothing && return continuum_state(state.eos,temp,pgas;threads)
+    length(temp)==length(pgas) || throw(DimensionMismatch("temperature and pressure differ"))
+    t=Float64.(temp); p=Float64.(pgas); n=length(t)
+    rho=zeros(n); xna=zeros(n); xne=zeros(n); partials=zeros(17,n)
+    status=ccall(fn,Cint,(Ptr{Cvoid},Ptr{Cdouble},Ptr{Cdouble},Ptr{Cdouble},Ptr{Cdouble},Ptr{Cdouble},Ptr{Cdouble},Csize_t),
+        state.backend,t,p,rho,xna,xne,partials,n)
+    status==0 || throw(ErrorException("Wittmann continuum-state calculation failed"))
+    ContinuumState(rho,xna,xne,partials)
+end
+
+"""Add the Wittmann continuum and lines of `levels` of column (x, y); row i of `χ` and `η` is `levels[i]`."""
+function _add_wittmann_kurucz!(χ,η,model,wavelength,atmosphere,x,y;levels=axes(atmosphere.temperature,1))
     atmosphere.pgas===nothing && throw(ArgumentError("Wittmann Kurucz synthesis requires gas pressure"))
-    nz=size(atmosphere.temperature,1); temp=Float64.(atmosphere.temperature[:,x,y]); pgas=Float64.(atmosphere.pgas[:,x,y])
+    nz=length(levels); temp=Float64.(atmosphere.temperature[levels,x,y]); pgas=Float64.(atmosphere.pgas[levels,x,y])
     continuum=zeros(Float64,nz); lower=zeros(Float64,nz); nh=zeros(Float64,nz)
     state=model.eos isa WittmannKuruczState ? model.eos : WittmannKuruczState(model.eos)
     fn=Libdl.dlsym(state.library_handle,:witt_kurucz_populations)
     # Mixed synthesis already distributes independent columns over Julia
     # threads. Keep the short depth-only kernels serial within each column to
     # avoid nesting a C++ and Julia thread team inside every column task.
-    continuum_state_column=model.include_continuum ? continuum_state(state.eos,temp,pgas;threads=1) : nothing
-    continuum_done=false
+    continuum_state_column=model.include_continuum ? continuum_state(state,temp,pgas;threads=1) : nothing
+    if model.include_continuum
+        @inbounds for l in eachindex(wavelength)
+            continuum.=continuum_extinction_m(continuum_state_column,temp,wavelength[l]*1e10;threaded=false)
+            for k in 1:nz
+                χ[k,l]+=continuum[k]; η[k,l]+=continuum[k]*source_planck(wavelength[l],temp[k])
+            end
+        end
+    end
     for line in model.lines
         line.atomic_number>0 || throw(ArgumentError("production Kurucz synthesis requires K94 species metadata"))
         status=ccall(fn,Cint,(Ptr{Cvoid},Ptr{Cdouble},Ptr{Cdouble},Cint,Cint,Cdouble,Cdouble,Ptr{Cdouble},Ptr{Cdouble},Csize_t),
             state.backend,temp,pgas,line.atomic_number,line.ion_stage,
             line.lower_energy_j,line.lower_g,lower,nh,nz)
         status==0 || throw(ErrorException("Wittmann Kurucz state calculation failed"))
-        if model.include_continuum && !continuum_done
-            @inbounds for l in eachindex(wavelength)
-                continuum.=continuum_extinction_m(continuum_state_column,temp,wavelength[l]*1e10;threaded=false)
-                for k in 1:nz
-                    χ[k,l]+=continuum[k]; η[k,l]+=continuum[k]*source_planck(wavelength[l],temp[k])
-                end
-            end
-            continuum_done=true
-        end
         λ0=line.wavelength0_m; Aji=6.670e13/(λ0*1e9)^2*10^line.loggf/line.upper_g
         Bji=λ0^3/(2*_H*_C)*Aji; Bij=line.upper_g/line.lower_g*Bji
-        @inbounds for k in 1:nz,l in eachindex(wavelength)
-            vb=sqrt(2*_KB*temp[k]/line.atomic_mass_kg+atmosphere.vturb[k,x,y]^2)
+        @inbounds for i in 1:nz,l in eachindex(wavelength)
+            k=levels[i]
+            vb=sqrt(2*_KB*temp[i]/line.atomic_mass_kg+atmosphere.vturb[k,x,y]^2)
             v=(wavelength[l]/λ0-1)*_C/vb+los_velocity(atmosphere,k,x,y)/vb
-            gamma=line.grad_s+line.gstark_m3_s*atmosphere.ne[k,x,y]+(line.gvdwaals_m3_s+line.vdw_coefficient*temp[k]^line.vdw_exponent)*nh[k]
+            gamma=line.grad_s+line.gstark_m3_s*atmosphere.ne[k,x,y]+(line.gvdwaals_m3_s+line.vdw_coefficient*temp[i]^line.vdw_exponent)*nh[i]
             adamp=gamma*λ0/(4pi*vb); profile=_voigt_armstrong(adamp,v)/(sqrt(pi)*vb)
-            nu=line.upper_g/line.lower_g*lower[k]*exp(-(_H*_C/λ0)/(_KB*temp[k]))
+            nu=line.upper_g/line.lower_g*lower[i]*exp(-(_H*_C/λ0)/(_KB*temp[i]))
             factor=_H*_C/(4pi)*Bij*line.lower_g
-            χline=factor*(lower[k]/line.lower_g-nu/line.upper_g)*profile
-            χ[k,l]+=χline; η[k,l]+=χline*source_planck(wavelength[l],temp[k])
+            χline=factor*(lower[i]/line.lower_g-nu/line.upper_g)*profile
+            χ[i,l]+=χline; η[i,l]+=χline*source_planck(wavelength[l],temp[i])
         end
     end
     nothing

@@ -724,6 +724,20 @@ extern "C" void witt_destroy_backend(void* backend) {
     delete static_cast<WittEOS*>(backend);
 }
 
+extern "C" int witt_continuum_state(
+    void* backend,const double* temp,const double* pgas_pa,
+    double* rho_kg_m3,double* xna_cm3,double* xne_cm3,double* partials,std::size_t n
+) {
+    try {
+        if(!backend) return 1;
+        const WittEOS& eos=*static_cast<WittEOS*>(backend);
+        for(std::size_t i=0;i<n;++i) {
+            eos.continuum_state_si(temp[i],pgas_pa[i],rho_kg_m3[i],xna_cm3[i],xne_cm3[i],partials+17*i);
+        }
+        return 0;
+    } catch(...) { return 1; }
+}
+
 extern "C" int witt_kurucz_populations(
     void* backend,const double* temp,const double* pgas_pa,
     int atomic_number,int stage,double energy_j,double statistical_weight,

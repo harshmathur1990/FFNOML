@@ -63,39 +63,43 @@ end
 
 """Build and cache all line physics for configured mixed regions. This performs all file I/O. A region may combine
 FFNO and Kurucz LTE sources: their opacities and emissivities (one unit, see `source_planck`) add before a single
-formal solution, the first source supplies the continuum, and Kurucz lines that are the region's FFNO transitions
+formal solution, every region has one continuum whatever the order of the sources (Wittmann's with hydrogen from the EOS, or
+with `continuum_populations = :ffno` the region's first FFNO source's, with FFNO hydrogen), and Kurucz lines that are the region's FFNO transitions
 are dropped."""
 function build_synthesis_setup(config,atmosphere::Atmosphere3D,populations::AbstractDict,
                                eos::WittmannEOS;atom_files::AbstractDict)
     setups=RegionSynthesisSetup[]
+    mode=hasproperty(config,:continuum_populations) ? config.continuum_populations : :eos
     aliases=Dict(:halpha=>(:H,5,2,3),:h_alpha=>(:H,5,2,3),:ca_ii_8542=>(:CA,5,3,5))
     for region in config.regions
         air=wavelengths(region); vacuum=eltype(air).(_air_to_vacuum_nm.(air.*1e9).*1e-9)
-        contributors=OpacityContributor[]; continuum_available=true
+        isempty(region.sources) && throw(ArgumentError("every region needs at least one opacity source"))
+        ffno_continuum=mode===:ffno ? findfirst(source->source.mode===:ffno,region.sources) : nothing
+        contributors=ffno_continuum===nothing ?
+            OpacityContributor[OpacityContributor(KuruczLTEModel(KuruczLine{Float64}[],eos;include_continuum=true))] :
+            OpacityContributor[]
         ffno_lines=[FFNO_KURUCZ_IDENTITY[source.line] for source in region.sources
                     if source.mode==:ffno && haskey(FFNO_KURUCZ_IDENTITY,source.line)]
-        for source in region.sources
+        for (position,source) in enumerate(region.sources)
             if source.mode==:ffno
-                haskey(populations,:H) || throw(ArgumentError("H FFNO populations are required for Muspel continuum setup"))
+                haskey(populations,:H) || throw(ArgumentError("H FFNO populations are required for the Muspel line model"))
                 haskey(aliases,source.line) || throw(ArgumentError("unknown FFNO transition $(source.line)"))
                 species,index,lower,upper=aliases[source.line]
                 species==source.species || throw(ArgumentError("transition $(source.line) belongs to $species"))
                 haskey(populations,species) || throw(ArgumentError("missing $species FFNO populations"))
                 haskey(atom_files,species) || throw(ArgumentError("missing $species atom_file"))
                 model=build_muspel_line_model(atmosphere,populations[:H],atom_files[species],index,lower,upper;
-                    include_continuum=continuum_available)
-                push!(contributors,OpacityContributor(model,populations[species])); continuum_available=false
+                    include_continuum=position==ffno_continuum)
+                push!(contributors,OpacityContributor(model,populations[species]))
             elseif source.mode==:kurucz_lte
                 cache=load_kurucz_linelist(source.linelist_file)
                 selected=select_kurucz_lines(cache,vacuum;margin_m=maximum(vacuum)*20*2.5e3/_C)
                 isempty(selected) && throw(ArgumentError("no Kurucz lines overlap configured region: $(source.linelist_file)"))
                 selected=_without_ffno_transitions(selected,ffno_lines)
                 isempty(selected) && (@warn "every Kurucz line in the region is an FFNO transition; source skipped" source.linelist_file; continue)
-                push!(contributors,OpacityContributor(KuruczLTEModel(selected,eos;include_continuum=continuum_available)))
-                continuum_available=false
+                push!(contributors,OpacityContributor(KuruczLTEModel(selected,eos;include_continuum=false)))
             end
         end
-        isempty(contributors) && throw(ArgumentError("every region needs at least one opacity source"))
         push!(setups,RegionSynthesisSetup(collect(air),collect(vacuum),MixedIntensitySynthesizer(contributors)))
     end
     setups

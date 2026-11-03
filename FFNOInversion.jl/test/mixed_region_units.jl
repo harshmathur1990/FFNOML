@@ -264,3 +264,50 @@ threads_per_rank = 1
         end
     end
 end
+
+# FFNO lines (Muspel): the Doppler width includes microturbulence, Δλ_D = λ0/c sqrt(2kT/m + vturb²), as in RH and the
+# Kurucz path. The damping parameter uses the same width, vturb = 0 is the thermal width exactly, and the adjoint holds.
+@testset "Microturbulence in the FFNO line opacity" begin
+    T=Float32; nz,nx,ny=3,1,1; shape=(nz,nx,ny)
+    grid=Grid3D(T[-3,-2,-1],T[0],T[0])
+    state(vturb)=FFNOInversion.Atmosphere3D(grid,reshape(T[5000,5500,6000],shape),zeros(T,shape),zeros(T,shape),zeros(T,shape),
+        fill(T(vturb),shape);pgas=fill(T(100),shape),rho=fill(T(1e-7),shape),ne=reshape(T[5e16,1e17,2e17],shape),
+        z=reshape(T[2e5,1e5,0],shape))
+    hp=fill(T(1e10),nz,nx,ny,6); hp[:,:,:,1].=T(1e20); hp[:,:,:,2].=T(1e14); hp[:,:,:,3].=T(1e10); hp[:,:,:,6].=T(1e15)
+    atom_dir=get(ENV,"FFNO_ATOM_DIR","/mn/stornext/u3/harshm/Documents/WorkRepo/multi3d/input/atoms")
+    voigt=(a_min=1f-4,a_max=1f1,a_n=300,v_min=0f0,v_max=5f2,v_n=500)
+    model=build_muspel_line_model(state(0),hp,joinpath(atom_dir,"atom.h6_tiago2.yaml"),5,2,3;voigt,include_continuum=false)
+    line=model.line
+    wave=T.(line.λ0 .+ [-0.2,-0.05,0.0,0.03,0.1]).*T(1e-9)
+    function opacity(a)
+        chi=zeros(T,nz,length(wave)); eta=zeros(T,nz,length(wave))
+        add_opacity_emissivity!(chi,eta,model,wave,a,1,1,hp)
+        chi,eta
+    end
+    vt=T(8e3); χ,η=opacity(state(vt))
+    for k in 1:nz,l in eachindex(wave)
+        temp=T(state(0).temperature[k,1,1]); ne=T(state(0).ne[k,1,1]); hi=T(sum(hp[k,1,1,1:5]))
+        thermal=Muspel.doppler_width(line.λ0,line.mass,temp)
+        width=hypot(thermal,T(line.λ0*vt/299792458.0))
+        gamma=Muspel.calc_broadening(line.γ,temp,ne,hi); λ=wave[l]*1e9
+        a=Muspel.damping(gamma,λ,width); v=(λ-line.λ0)/width
+        factor=6.62607015e-34*299792458.0/(4pi*line.λ0*1e-9)*real(model.voigt(a,abs(v)))/(sqrt(pi)*width)
+        @test χ[k,l]≈factor*(hp[k,1,1,2]*line.Blu-hp[k,1,1,3]*line.Bul)*1e9 rtol=1e-3
+    end
+    # vturb broadens the line: the centre drops; vturb = 0 is unchanged by repetition
+    χ0,_=opacity(state(0))
+    @test all(χ[:,3].<χ0[:,3])
+    @test opacity(state(0))[1]==χ0
+    @test χ0≠χ
+    # the adjoint's vturb term against a centred difference of the same pairing
+    chi_bar=T.(reshape(sin.(1:nz*length(wave)),nz,:)); eta_bar=T.(reshape(cos.(1:nz*length(wave)),nz,:))
+    function pairing(v)
+        c,e=opacity(state(v))
+        sum(Float64.(chi_bar).*Float64.(c))+sum(Float64.(eta_bar).*Float64.(e))
+    end
+    a=state(vt); bar=FFNOInversion.AtmosphereCotangent(a); population_bar=zeros(T,size(hp))
+    FFNOInversion.add_opacity_emissivity_vjp!(bar,population_bar,_->zeros(T,size(hp)),chi_bar,eta_bar,model,wave,a,1,1,hp)
+    h=T(50); finite=(pairing(vt+h)-pairing(vt-h))/(2h)
+    @test sum(bar.vturb)≈finite rtol=0.02
+    @test abs(finite)>0
+end

@@ -165,7 +165,7 @@ from it:
 | Vertical dataset | `logtau500` | `z_m`, plus `x_m` and `y_m` |
 | HSEMHS mode | `column-hse-ltau`: heights derived per column | `column-hse-z`: log10 tau500 derived per column |
 | Pressure boundary | HSEMHS tau-hydrostatic top closure (`[equilibrium.column_ltau]`) | `[equilibrium.column_z] anchor`, `P_ref_pa` |
-| FFNO populations | on the `[population.mesh]` height mesh, then interpolated back | directly on the native grid |
+| FFNO populations | on the `[population.mesh]` height mesh, then interpolated back | directly on the native grid, or on the mesh with `[population.mesh] enabled = true` |
 | Formal solution | optical depth integrated on the native log tau500 grid using chi500 | optical depth integrated in geometric height |
 | Control nodes | `log_tau_nodes` | `z_nodes_m` |
 | Regularization length | `length_scale_dex` (default 1) | `length_scale_m` (required for derivative types 1 and 4) |
@@ -246,8 +246,9 @@ Sources in one region share a single formal solution, so blends are synthesized
 together: Kurucz lines inside an FFNO line's window (Fe I 656.92 nm next to H alpha,
 Si I 853.62 nm next to Ca II 854.2 nm) add their opacity and emissivity to the FFNO
 line's. Every model writes emissivity in one unit (kW m⁻³ sr⁻¹ nm⁻¹, Muspel's), so the
-synthesized intensity is in kW m⁻² sr⁻¹ nm⁻¹ before the output conversion. The first
-source owns the continuum, so it is not counted twice. A Kurucz line of the FFNO
+synthesized intensity is in kW m⁻² sr⁻¹ nm⁻¹ before the output conversion. Every region
+has one continuum, which does not depend on the order of the sources; by default it is Wittmann's with hydrogen from
+the EOS and reads no FFNO populations (`[physics] continuum_populations`). A Kurucz line of the FFNO
 transition's own ion within 0.1 nm of it (H alpha, Ca II 854.2 nm in a full Kurucz list)
 is dropped and logged, so the FFNO line is not added a second time in LTE. A region
 with only LTE sources does not call FFNO.
@@ -274,9 +275,10 @@ from the tables for a neutral atom whose level labels give s-p, p-d or d-f, as i
 entry adds Unsöld broadening by helium. Ca II and H I lines are outside the tables, so
 for them σ and α must be given or Unsöld is used.
 
-### `[population.mesh]` (log-tau runs)
+### `[population.mesh]`
 
-`enabled` (default true for log tau, ignored for z), `bottom_m`, `top_m`,
+`enabled` (default true for log tau, false for z; set it on z for a grid unlike the training grids, such as a
+1-D model's uneven levels), `bottom_m`, `top_m`,
 `spacing_m`, `uniform_top_m`, `stretch`, `max_spacing_m`, `nabla`. The defaults
 (−1 Mm to 14 Mm, 20 km spacing up to 4.5 Mm, then growing by 1 % per point to 100 km,
 ∇ = 0.13) lie inside the range of the training grids. See
@@ -307,6 +309,7 @@ vertical one. Design, decisions and validation: [`docs/viewing-angle/README.md`]
 | Key | Meaning |
 | --- | --- |
 | `[physics] redistribution` | `"non_prd"` |
+| `[physics] continuum_populations` | `"eos"` (default): one Wittmann continuum per region, hydrogen from the EOS, no FFNO populations. `"ffno"`: a region's first FFNO source supplies the continuum (Muspel, with FFNO neutral H and protons); a region without an FFNO source keeps the EOS continuum |
 | `[observation] stokes` | `["I"]` |
 | `[observation.datasets]` | names of `intensity`, `sigma`, `wavelength_weights`, `spatial_weights` |
 | `[observation.gaussian_psf]` | `spatial_fwhm_x_m`, `spatial_fwhm_y_m`, `spectral_fwhm_nm` (0 disables a direction) |

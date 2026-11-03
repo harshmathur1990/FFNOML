@@ -263,8 +263,7 @@ end
 
 function add_opacity_emissivity_vjp!(atmosphere_bar,population_bar,population_lookup,
         chi_bar,eta_bar,model::KuruczLTEModel,wavelength,atmosphere,x,y,populations)
-    model.eos===nothing || return _opaque_opacity_vjp!(atmosphere_bar,chi_bar,eta_bar,model,
-        wavelength,atmosphere,x,y,populations)
+    model.eos===nothing || return _local_wittmann_vjp!(atmosphere_bar,chi_bar,eta_bar,model,wavelength,atmosphere,x,y)
     for line in model.lines,k in axes(chi_bar,1),l in axes(chi_bar,2)
         temp=atmosphere.temperature[k,x,y]; rho=atmosphere.rho[k,x,y]
         vz=los_velocity(atmosphere,k,x,y); vturb=atmosphere.vturb[k,x,y]; lambda=wavelength[l]
@@ -289,11 +288,38 @@ function add_opacity_emissivity_vjp!(atmosphere_bar,population_bar,population_lo
     nothing
 end
 
+"""Numerical pullback of the Wittmann opacities. They are local in depth: perturbing one level changes only that level, so only that
+level is recomputed. The continuum reads T and P; lines also read velocities, vturb and ne."""
+function _local_wittmann_vjp!(atmosphere_bar,chi_bar,eta_bar,model,wavelength,atmosphere,x,y;relative_step=1e-5)
+    nz,nlambda=size(chi_bar); T=eltype(chi_bar)
+    chi=zeros(T,1,nlambda); eta=zeros(T,1,nlambda)
+    function pairing(k)
+        fill!(chi,zero(T)); fill!(eta,zero(T))
+        _add_wittmann_kurucz!(chi,eta,model,wavelength,atmosphere,x,y;levels=k:k)
+        sum(chi[1,l]*chi_bar[k,l]+eta[1,l]*eta_bar[k,l] for l in 1:nlambda)
+    end
+    fields=Any[(:temperature,atmosphere_bar.temperature),(:pgas,atmosphere_bar.pgas)]
+    if !isempty(model.lines)
+        append!(fields,((:vturb,atmosphere_bar.vturb),(:ne,atmosphere_bar.ne),(:vz,atmosphere_bar.vz)))
+        is_vertical(atmosphere.grid.view) || append!(fields,((:vx,atmosphere_bar.vx),(:vy,atmosphere_bar.vy)))
+    end
+    for (name,bar) in fields
+        values=getfield(atmosphere,name); values===nothing && continue
+        for k in 1:nz
+            center=values[k,x,y]; h=T(relative_step)*max(abs(center),one(T))
+            values[k,x,y]=center+h; plus=pairing(k)
+            values[k,x,y]=center-h; minus=pairing(k)
+            values[k,x,y]=center; bar[k,x,y]+=(plus-minus)/(2h)
+        end
+    end
+    nothing
+end
+
 """Numerical local pullback for opaque C-backed opacity kernels.
 
 This perturbs one column scalar at a time but never reruns force balance,
 population inference, the formal solution, or the distributed forward model.
-It is the correctness fallback for the Wittmann Kurucz adapter.
+The whole-column check on the Wittmann adjoint (`_local_wittmann_vjp!`).
 """
 function _opaque_opacity_vjp!(atmosphere_bar,chi_bar,eta_bar,model,wavelength,
         atmosphere,x,y,populations;relative_step=1e-5)

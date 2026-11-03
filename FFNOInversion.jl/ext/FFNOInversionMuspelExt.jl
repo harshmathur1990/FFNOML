@@ -54,7 +54,8 @@ function FFNOInversion.add_opacity_emissivity!(chi,eta,model::MuspelLineOpacityM
         alpha_c=Muspel.α_cont(model.continuum,temp,ne,hi,proton)
         j_c=alpha_c*Muspel.blackbody_λ(line.λ0,temp)
         gamma=Muspel.calc_broadening(line.γ,temp,ne,hi)
-        dwidth=Muspel.doppler_width(line.λ0,line.mass,temp)
+        # thermal and microturbulent widths in quadrature; vturb = 0 is exactly the thermal width
+        dwidth=hypot(Muspel.doppler_width(line.λ0,line.mass,temp),Float32(line.λ0*atmosphere.vturb[k,x,y]/299792458.0))
         nu=populations[k,x,y,model.upper_level]; nl=populations[k,x,y,model.lower_level]
         gamma_energy=6.62607015e-34*299792458.0/(4pi*line.λ0*1e-9)
         for l in eachindex(wavelength)
@@ -70,12 +71,12 @@ function FFNOInversion.add_opacity_emissivity!(chi,eta,model::MuspelLineOpacityM
     end
 end
 
-function _cell_pairing(model,wavelength,chi_bar,eta_bar,temp,ne,vz,hi,proton,nu,nl)
+function _cell_pairing(model,wavelength,chi_bar,eta_bar,temp,ne,vz,hi,proton,nu,nl,vturb)
     line=model.line
     alpha_c=Muspel.α_cont(model.continuum,temp,ne,hi,proton)
     j_c=alpha_c*Muspel.blackbody_λ(line.λ0,temp)
     gamma=Muspel.calc_broadening(line.γ,temp,ne,hi)
-    dwidth=Muspel.doppler_width(line.λ0,line.mass,temp)
+    dwidth=hypot(Muspel.doppler_width(line.λ0,line.mass,temp),line.λ0*vturb/299792458.0)
     gamma_energy=6.62607015e-34*299792458.0/(4pi*line.λ0*1e-9)
     result=zero(promote_type(typeof(temp),eltype(chi_bar)))
     for l in eachindex(wavelength)
@@ -109,11 +110,12 @@ function FFNOInversion.add_opacity_emissivity_vjp!(atmosphere_bar,population_bar
         proton=Float32(hydrogen[k,x,y,6]); nu=Float32(populations[k,x,y,model.upper_level])
         nl=Float32(populations[k,x,y,model.lower_level])
         cb=@view chi_bar[k,:]; eb=@view eta_bar[k,:]
-        values=Float32[temp,ne,vz,hi,proton,nu,nl]
+        vturb=Float32(atmosphere.vturb[k,x,y])
+        values=Float32[temp,ne,vz,hi,proton,nu,nl,vturb]
         derivatives=zeros(Float64,length(values))
         for q in eachindex(values)
             center=values[q]
-            scale=q==3 ? max(abs(center),1f3) : max(abs(center),1f0)
+            scale=q in (3,8) ? max(abs(center),1f3) : max(abs(center),1f0)    # velocities
             h=1f-3*scale
             q!=3 && center>0 && (h=min(h,center/2))
             plus=copy(values); minus=copy(values); plus[q]+=h; minus[q]-=h
@@ -128,6 +130,7 @@ function FFNOInversion.add_opacity_emissivity_vjp!(atmosphere_bar,population_bar
         hydrogen_bar[k,x,y,6]+=derivatives[5]
         population_bar[k,x,y,model.upper_level]+=derivatives[6]
         population_bar[k,x,y,model.lower_level]+=derivatives[7]
+        atmosphere_bar.vturb[k,x,y]+=derivatives[8]
     end
     nothing
 end

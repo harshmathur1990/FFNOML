@@ -1,5 +1,5 @@
 """
-FFNO populations for a native log-tau atmosphere are predicted on a height mesh.
+FFNO populations for a native log-tau atmosphere are predicted on a height mesh; a native z atmosphere can ask for it too.
 
 The FFNO checkpoints were trained on simulation height grids: one set of heights shared by every column, 12-30 km
 spacing through the photosphere and chromosphere and bottoms 1-2.5 Mm below the surface. Its vertical layers are
@@ -65,13 +65,14 @@ mutable struct MeshPopulationModel{M<:AbstractPopulationModel,E,T<:AbstractFloat
     last_features::Any        # mesh features and populations of the last prediction (reused by the VJP)
     last_populations::Any
     last_cartesian::Any       # inclined view: the Cartesian mesh features and populations of that prediction
+    native_z::Bool            # also on a native z atmosphere ([population.mesh] enabled = true); columns stay Cartesian
 end
-function MeshPopulationModel(inner::AbstractPopulationModel,config::PopulationMeshConfig,eos,gravity)
+function MeshPopulationModel(inner::AbstractPopulationModel,config::PopulationMeshConfig,eos,gravity;native_z::Bool=false)
     gravity>0 || throw(ArgumentError("population mesh gravity must be positive"))
-    MeshPopulationModel(inner,population_mesh(config),eos,Float64(gravity),config.nabla,nothing,nothing,nothing)
+    MeshPopulationModel(inner,population_mesh(config),eos,Float64(gravity),config.nabla,nothing,nothing,nothing,native_z)
 end
 
-_mesh_active(atmosphere)=vertical_coordinate(atmosphere.grid)===:log10tau500
+_mesh_active(model,atmosphere)=vertical_coordinate(atmosphere.grid)===:log10tau500 || model.native_z
 
 const _LN10=log(10.0)
 
@@ -158,7 +159,7 @@ function _mesh_atmosphere(model,atmosphere,f)
     Atmosphere3D(grid,c(1),c(2),c(3),c(4),zeros(T,nm,nx,ny);rho=T.(exp10.(f[6,:,:,:])),ne=T.(exp10.(f[5,:,:,:])),z=z)
 end
 
-_mesh_slanted(atmosphere)=is_slanted(atmosphere.grid.view)
+_mesh_slanted(atmosphere)=vertical_coordinate(atmosphere.grid)===:log10tau500 && is_slanted(atmosphere.grid.view)
 
 """Cartesian mesh features from the ray features `f` (6, nmesh, nx, ny): ln T, v, log10 nₑ and log10 ρ shifted by
 −t z_m on every mesh level (T exponentiated back)."""
@@ -208,7 +209,7 @@ end
 
 function predict_populations!(out::AbstractArray{T,4},model::MeshPopulationModel,atmosphere::Atmosphere3D,
         cache=nothing) where T
-    _mesh_active(atmosphere) || return predict_populations!(out,model.inner,atmosphere,cache)
+    _mesh_active(model,atmosphere) || return predict_populations!(out,model.inner,atmosphere,cache)
     size(out)[1:3]==size(atmosphere.temperature) || throw(DimensionMismatch("population shape differs from atmosphere"))
     atmosphere.z===nothing && throw(ArgumentError("population mesh needs the equilibrium heights z"))
     f=_mesh_features(model,atmosphere)
@@ -227,7 +228,7 @@ end
 
 function population_vjp!(feature_bar::AbstractArray{T,4},z_bar::AbstractArray{T,3},model::MeshPopulationModel,
         atmosphere::Atmosphere3D,population_bar::AbstractArray{T,4}) where T
-    _mesh_active(atmosphere) || return population_vjp!(feature_bar,z_bar,model.inner,atmosphere,population_bar)
+    _mesh_active(model,atmosphere) || return population_vjp!(feature_bar,z_bar,model.inner,atmosphere,population_bar)
     nz,nx,ny=size(atmosphere.temperature); levels=size(population_bar,4); mesh=model.mesh; nm=length(mesh)
     f=_mesh_features(model,atmosphere)
     pm=_mesh_populations(model,atmosphere,f,T,levels)
@@ -295,7 +296,7 @@ end
 
 function population_jvp!(population_dot::AbstractArray{T,4},model::MeshPopulationModel,atmosphere::Atmosphere3D,
         feature_dot::AbstractArray{<:Real,4}) where T
-    _mesh_active(atmosphere) || return population_jvp!(population_dot,model.inner,atmosphere,feature_dot)
+    _mesh_active(model,atmosphere) || return population_jvp!(population_dot,model.inner,atmosphere,feature_dot)
     nz,nx,ny=size(atmosphere.temperature); levels=size(population_dot,4); mesh=model.mesh; nm=length(mesh)
     f=_mesh_features(model,atmosphere); pm=_mesh_populations(model,atmosphere,f,T,levels)
     fm_dot=zeros(Float32,6,nm,nx,ny)
@@ -407,18 +408,18 @@ function _mesh_column_vjp!(feature_bar,z_bar,model,atmosphere,x,y,f,fb)
     feature_bar
 end
 
-"""Population-mesh settings of a run, or `nothing` when FFNO runs on the native grid (native z, or disabled)."""
+"""Population-mesh settings of a run, or `nothing` when FFNO runs on the native grid (the default for native z, or disabled)."""
 function population_mesh_options(config)
     config.population_mesh===nothing && return nothing
     (config=config.population_mesh,eos_table_file=config.equilibrium.eos_table_file,
-     gravity=config.equilibrium.gravity_m_s2)
+     gravity=config.equilibrium.gravity_m_s2,native_z=config.atmosphere.vertical_coordinate===:z_m)
 end
 
 """Wrap `model` for prediction on the population mesh (`options` from `population_mesh_options`; `eos` the loaded
 HSEMHS table, shared between species)."""
 wrap_population_mesh(model,::Nothing,eos=nothing)=model
 wrap_population_mesh(model,options,eos=HSEMHS.load_table(options.eos_table_file))=
-    MeshPopulationModel(model,options.config,eos,options.gravity)
+    MeshPopulationModel(model,options.config,eos,options.gravity;native_z=options.native_z)
 
 _unwrap_population_model(model)=model
 _unwrap_population_model(model::MeshPopulationModel)=_unwrap_population_model(model.inner)

@@ -102,7 +102,7 @@ linelist_file = "inputs/kurucz_6302.list"
 # FFNO was trained on simulation height grids, not on log tau: for a native log-tau atmosphere its populations are
 # predicted on this height mesh (each column interpolated onto it using the HSEMHS heights, extended below its
 # bottom in hydrostatic equilibrium with d ln T/d ln P = nabla) and interpolated back. On by default for log tau;
-# the values below are the defaults. Not used for a native z grid.
+# the values below are the defaults. On a native z grid it is off unless enabled = true.
 [population.mesh]
 # enabled = true
 bottom_m = -1.0e6            # mesh bottom [m] (training grids: -1 to -2.5 Mm)
@@ -115,6 +115,7 @@ nabla = 0.13                 # d ln T / d ln P of the deep extension (near-adiab
 
 [physics]
 redistribution = "non_prd"
+# continuum_populations = "eos"   # "eos": continuum hydrogen from the EOS; "ffno": from the FFNO populations
 
 [observation]
 stokes = ["I"]

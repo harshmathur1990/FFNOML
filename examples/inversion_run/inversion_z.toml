@@ -105,6 +105,7 @@ linelist_file = "inputs/kurucz_6302.list"
 
 [physics]
 redistribution = "non_prd"
+# continuum_populations = "eos"   # "eos": continuum hydrogen from the EOS; "ffno": from the FFNO populations
 
 [observation]
 stokes = ["I"]

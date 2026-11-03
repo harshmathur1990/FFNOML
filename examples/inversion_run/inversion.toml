@@ -114,6 +114,7 @@ nabla = 0.13                 # d ln T / d ln P of the deep extension (near-adiab
 
 [physics]
 redistribution = "non_prd"
+# continuum_populations = "eos"   # "eos": continuum hydrogen from the EOS; "ffno": from the FFNO populations
 
 [observation]
 stokes = ["I"]
