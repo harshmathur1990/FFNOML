@@ -128,9 +128,9 @@ outputs, and SLURM resources. It validates the configuration, required HDF5
 datasets and shapes, model-factory assets, and MPI topology; it calls `sbatch`
 only after printing `Sanity check OK`. This preflight resets inherited Julia
 settings, loads Olivia's `NRIS/Login` stack, and instantiates dependencies in
-the project depot `/cluster/projects/nn2834k/harshm/julia-depot` (the home directory has no storage; login and
-accelerator nodes share it, with `FFNO_PREFLIGHT_JULIA_DEPOT` and `OLIVIA_JULIA_DEPOT` to override); it never loads
-the accelerator runtime environment.
+the separate login-only depot `/cluster/projects/nn2834k/harshm/julia-depot-login` (`FFNO_PREFLIGHT_JULIA_DEPOT` overrides it); it never
+loads the accelerator runtime environment or depot. Accelerator jobs use `/cluster/projects/nn2834k/harshm/julia-depot-prod`
+(`OLIVIA_JULIA_DEPOT`). Both are under the project because the home directory has no storage.
 
 After the allocation starts, the same production job first recreates its
 disposable Julia project, writes Olivia MPI preferences, instantiates and
