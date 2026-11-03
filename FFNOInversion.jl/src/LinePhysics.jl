@@ -21,6 +21,7 @@ struct MuspelLineOpacityModel{L,C,V,H} <: AbstractLineOpacityModel
     lower_level::Int
     upper_level::Int
     include_continuum::Bool
+    neutral_hydrogen::Any     # Wittmann backend: neutral H in broadening from the EOS; nothing: from `hydrogen_populations`
 end
 struct MuspelFormalSolver <: AbstractFormalSolver end
 
@@ -49,9 +50,19 @@ struct KuruczLine{T<:AbstractFloat}
     gstark_m3_s::T
     gvdwaals_m3_s::T
     atomic_mass_kg::T
+    # temperature-dependent van der Waals broadening γ/n_H = vdw_coefficient*T^vdw_exponent [m^3 s^-1], added to
+    # gvdwaals_m3_s: ABO (Barklem) with exponent (1-α)/2 or Unsöld with 0.3; zero when the list's γ_vdW is used
+    vdw_coefficient::T
+    vdw_exponent::T
+    vdw_recipe::Symbol  # :abo_explicit, :abo_table, :list, :unsold or :none
 end
+KuruczLine(wavelength0_m::T,species::String,atomic_number::Int,ion_stage::Int,loggf::T,lower_energy_j::T,upper_energy_j::T,
+           lower_g::T,upper_g::T,grad_s::T,gstark_m3_s::T,gvdwaals_m3_s::T,atomic_mass_kg::T) where T =
+    KuruczLine(wavelength0_m,species,atomic_number,ion_stage,loggf,lower_energy_j,upper_energy_j,lower_g,upper_g,
+               grad_s,gstark_m3_s,gvdwaals_m3_s,atomic_mass_kg,zero(T),zero(T),iszero(gvdwaals_m3_s) ? :none : :list)
 KuruczLine(wavelength0_m::T,species::String,loggf::T,lower_energy_j::T,upper_energy_j::T,damping_s::T) where T =
-    KuruczLine(wavelength0_m,species,0,0,loggf,lower_energy_j,upper_energy_j,one(T),one(T),damping_s,zero(T),zero(T),T(56*1.66053906660e-27))
+    KuruczLine(wavelength0_m,species,0,0,loggf,lower_energy_j,upper_energy_j,one(T),one(T),damping_s,zero(T),zero(T),
+               T(56*1.66053906660e-27))
 struct KuruczLTEModel{T<:AbstractFloat,E} <: AbstractLineOpacityModel
     lines::Vector{KuruczLine{T}}
     eos::E
@@ -89,6 +100,56 @@ const _HC_J_CM=6.62607015e-34*299792458.0*100.0
 const _AMASS_KG = (1.008,4.003,6.941,9.012,10.811,12.011,14.007,15.999,18.998,20.179,
     22.990,24.305,26.982,28.086,30.974,32.060,35.453,39.948,39.102,40.080,
     44.956,47.900,50.941,51.996,54.938,55.847,58.933,58.710,63.546,65.370)
+# First and second ionization potentials [eV] (NIST) for Z = 1-28, for the Unsöld van der Waals cross-section.
+const _IONPOT_EV=((13.598,0.0),(24.587,54.418),(5.392,75.640),(9.323,18.211),(8.298,25.155),(11.260,24.383),
+    (14.534,29.601),(13.618,35.121),(17.423,34.971),(21.565,40.963),(5.139,47.286),(7.646,15.035),(5.986,18.829),
+    (8.152,16.346),(10.487,19.770),(10.360,23.338),(12.968,23.814),(15.760,27.630),(4.341,31.630),(6.113,11.872),
+    (6.561,12.800),(6.828,13.576),(6.746,14.618),(6.767,16.486),(7.434,15.640),(7.902,16.199),(7.881,17.084),
+    (7.640,18.169))
+
+"""Ionization energy [J] of `ion_stage` (0 = neutral) of element `atomic_number`, or `nothing` if not tabulated."""
+function _ionization_energy(atomic_number,ion_stage)
+    (1<=atomic_number<=length(_IONPOT_EV) && 0<=ion_stage<=1) || return nothing
+    value=_IONPOT_EV[atomic_number][ion_stage+1]; value>0 ? value*_EV_J : nothing
+end
+
+"""Unsöld van der Waals cross-section as RH computes it (`getUnsoldcross` in RH's kurucz.c): γ_vdW = cross*T^0.3*n_H
+with collisions with H and He. Zero when the ion is not tabulated or the upper level lies above the lower one's
+effective radius (RH falls back to the list's γ_vdW)."""
+function _unsold_cross(atomic_number,ion_stage,lower_energy_j,upper_energy_j,mass_amu)
+    ionpot=_ionization_energy(atomic_number,ion_stage); ionpot===nothing && return 0.0
+    rydberg=2.1798741e-18; eps4pi=4pi*8.8541878128e-12; abar_h=7.42e-41; bohr=5.29177210903e-11
+    ionpot>upper_energy_j || return 0.0
+    delta=(rydberg/(ionpot-upper_energy_j))^2-(rydberg/(ionpot-lower_energy_j))^2
+    delta>0 || return 0.0
+    z=ion_stage+1; amu=1.66053906660e-27; helium=10^(10.93-12)
+    vrel(w)=(8*_KB/(pi*amu*mass_amu)*(1+mass_amu/w))^0.3
+    c625=(2.5*(_EV_J^2/eps4pi)*(abar_h/eps4pi)*2pi*(z*bohr)^2/_H*delta)^0.4
+    8.08*(vrel(1.008)+helium*vrel(4.003))*c625
+end
+
+"""Van der Waals broadening of a K94 line, in this order: ABO σ.α given in the γ_vdW field (a value ≥ 20: σ [a_0²] its
+integer part, α its fraction, RH's convention); ABO from RH's tables for a neutral atom with s-p, p-d or d-f valence
+electrons (orbitals from the level labels, RH's `RLKdet_level`); the list's log γ_vdW (non-zero); Unsöld (H and He).
+As in RH the upper level lies hc/λ above the lower one, and ABO counts hydrogen only. Returns the list γ/n_H [m^3 s^-1],
+the coefficient and exponent of the temperature-dependent γ/n_H, and the recipe."""
+function _kurucz_vdw(z,stage,lower_j,λ_vacuum_m,log_gamma,labels,mass_amu)
+    upper_j=lower_j+_H*_C/λ_vacuum_m
+    if log_gamma>=20
+        sigma=floor(log_gamma); alpha=log_gamma-sigma
+        return 0.0,barklem_coefficient(sigma,alpha,mass_amu),(1-alpha)/2,:abo_explicit
+    end
+    ionpot=_ionization_energy(z,stage)
+    if stage==0 && ionpot!==nothing
+        neff(e)=effective_n(ionpot,e,1,mass_amu)
+        abo=barklem_sigma_alpha(kurucz_label_orbital(labels[1]),kurucz_label_orbital(labels[2]),neff(lower_j),neff(upper_j))
+        abo===nothing || return 0.0,barklem_coefficient(abo...,mass_amu),(1-abo[2])/2,:abo_table
+    end
+    log_gamma!=0 && return 10^log_gamma*1e-6,0.0,0.0,:list
+    cross=_unsold_cross(z,stage,lower_j,upper_j,mass_amu)
+    0.0,cross,0.3,cross>0 ? :unsold : :none
+end
+
 @inline function _air_to_vacuum_nm(λ)
     λ<200.0 && return λ
     sq=(1e7/λ)^2
@@ -107,16 +168,29 @@ function load_kurucz_linelist(path::AbstractString;T::Type{<:AbstractFloat}=Floa
         for (line_number,line) in enumerate(eachline(io))
             isempty(strip(line)) && continue; startswith(strip(line),'#') && continue
             if ncodeunits(line)>=97
-                head=split(line[1:35]); length(head)>=4 || throw(ArgumentError("invalid K94 line $line_number"))
-                λair=parse(T,head[1]); loggf=parse(T,head[2]); code=parse(T,head[3]); ei=parse(T,head[4])
+                # as RH's sscanf: fields may abut, and a predicted level's negative energy counts by its magnitude
+                head=[m.match for m in eachmatch(r"[-+]?\d*\.?\d+",line[1:35])]
+                length(head)>=4 || throw(ArgumentError("invalid K94 line $line_number"))
+                λair=parse(T,head[1]); loggf=parse(T,head[2]); code=parse(T,head[3]); ei=abs(parse(T,head[4]))
                 z=floor(Int,code); stage=round(Int,(code-z)*100)
-                ji=parse(T,strip(line[36:41])); ej=parse(T,strip(line[54:63])); jj=parse(T,strip(line[64:69]))
+                ji=parse(T,strip(line[36:41])); ej=abs(parse(T,strip(line[54:63]))); jj=parse(T,strip(line[64:69]))
                 elo,eup,gl,gu = ei<=ej ? (ei,ej,2ji+1,2jj+1) : (ej,ei,2jj+1,2ji+1)
-                broad=split(strip(line[80:97])); length(broad)==3 || throw(ArgumentError("invalid K94 damping at line $line_number"))
-                grad,gs,gv=T(10)^parse(T,broad[1]),T(10)^parse(T,broad[2])*T(1e-6),T(10)^parse(T,broad[3])*T(1e-6)
-                mass=z<=length(_AMASS_KG) ? T(_AMASS_KG[z]*1.66053906660e-27) : T(z*2*1.66053906660e-27)
+                # as RH: 20 characters, three numbers ending where the record's next field starts; a σ.α in the third
+                # (e.g. 312.250) runs 2-3 characters past the 18 of the plain format
+                broad=collect(eachmatch(r"[-+]?\d*\.?\d+",line[80:min(99,ncodeunits(line))]))
+                length(broad)>=3 || throw(ArgumentError("invalid K94 damping at line $line_number"))
+                lgrad,lgs,lgv=(parse(T,broad[i].match) for i in 1:3)
+                mass_amu=z<=length(_AMASS_KG) ? _AMASS_KG[z] : 2z; mass=T(mass_amu*1.66053906660e-27)
                 λ=T(_air_to_vacuum_nm(λair)*1e-9)
-                push!(lines,KuruczLine(λ,"Z$(z).$(stage)",z,stage,loggf,T(elo*_HC_J_CM),T(eup*_HC_J_CM),gl,gu,grad,gs,gv,mass))
+                # a zero damping constant is "not given" (as in RH): radiative -> A_ul, Stark -> 0
+                aul=6.670e13/(λ*1e9)^2*10^loggf/gu
+                grad=lgrad!=0 ? T(10)^lgrad : T(aul)
+                gs=lgs!=0 ? T(10)^lgs*T(1e-6) : zero(T)
+                # level labels (RH reads them at columns 42 and 70) in the order of the energies
+                labels = ei<=ej ? (line[42:51],line[70:79]) : (line[70:79],line[42:51])
+                gv,cvdw,evdw,recipe=_kurucz_vdw(z,stage,elo*_HC_J_CM,λ,lgv,labels,mass_amu)
+                push!(lines,KuruczLine(λ,"Z$(z).$(stage)",z,stage,loggf,T(elo*_HC_J_CM),T(eup*_HC_J_CM),gl,gu,grad,gs,
+                    T(gv),mass,T(cvdw),T(evdw),recipe))
             else
                 f=_kurucz_fields(line,line_number); f===nothing && continue
                 λ=parse(T,f[1])*T(1e-10); loggf=parse(T,f[3]); elo=parse(T,f[4])*T(_EV_J); eup=parse(T,f[5])*T(_EV_J)
@@ -138,6 +212,9 @@ end
 
 const _H=6.62607015e-34; const _C=299792458.0; const _KB=1.380649e-23
 @inline planck_lambda(λ,T)=(2*_H*_C^2/λ^5)/expm1(_H*_C/(λ*_KB*T))
+"""Planck function in kW m^-2 sr^-1 nm^-1 (λ in m): the unit of every model's emissivity η (kW m^-3 sr^-1 nm^-1,
+Muspel's), so lines from different models add in one region and the intensity is in kW m^-2 sr^-1 nm^-1."""
+@inline source_planck(λ,T)=planck_lambda(λ,T)*1e-12
 function _gaussian_profile(λ,λ0,T,vturb,mass)
     width=λ0/_C*sqrt(2*_KB*T/mass+vturb^2)
     exp(-((λ-λ0)/width)^2)/(sqrt(pi)*width)
@@ -190,7 +267,7 @@ function add_opacity_emissivity!(χ,η,model::FFNOTransition,wavelength,atmosphe
         profile=_gaussian_profile(wavelength[l]*(1+los_velocity(atmosphere,k,x,y)/_C),model.wavelength0_m,temp,atmosphere.vturb[k,x,y],model.atomic_mass_kg)
         nl=populations[k,x,y,model.lower_level]; nu=populations[k,x,y,model.upper_level]
         χline=max(zero(eltype(χ)),model.oscillator_strength*1e-24*(nl-nu)*profile)
-        χ[k,l]+=χline; η[k,l]+=χline*planck_lambda(wavelength[l],temp)
+        χ[k,l]+=χline; η[k,l]+=χline*source_planck(wavelength[l],temp)
     end
 end
 function add_opacity_emissivity!(χ,η,model::KuruczLTEModel,wavelength,atmosphere,x,y,populations=nothing)
@@ -202,47 +279,69 @@ function add_opacity_emissivity!(χ,η,model::KuruczLTEModel,wavelength,atmosphe
         nl=atmosphere.rho[k,x,y]*exp(-line.lower_energy_j/(_KB*temp))
         profile=_gaussian_profile(wavelength[l]*(1+los_velocity(atmosphere,k,x,y)/_C),line.wavelength0_m,temp,atmosphere.vturb[k,x,y],1.66053906660e-27*56)
         χline=max(zero(eltype(χ)),1e-2*10^line.loggf*nl*profile)
-        χ[k,l]+=χline; η[k,l]+=χline*planck_lambda(wavelength[l],temp)
+        χ[k,l]+=χline; η[k,l]+=χline*source_planck(wavelength[l],temp)
     end
 end
 
-function _add_wittmann_kurucz!(χ,η,model,wavelength,atmosphere,x,y)
+"""Continuum state from the persistent backend (a library built before `witt_continuum_state` falls back to a new EOS per call)."""
+function continuum_state(state::WittmannKuruczState,temp::AbstractVector,pgas::AbstractVector;threads::Int=1)
+    fn=Libdl.dlsym(state.library_handle,:witt_continuum_state;throw_error=false)
+    fn===nothing && return continuum_state(state.eos,temp,pgas;threads)
+    length(temp)==length(pgas) || throw(DimensionMismatch("temperature and pressure differ"))
+    t=Float64.(temp); p=Float64.(pgas); n=length(t)
+    rho=zeros(n); xna=zeros(n); xne=zeros(n); partials=zeros(17,n)
+    status=ccall(fn,Cint,(Ptr{Cvoid},Ptr{Cdouble},Ptr{Cdouble},Ptr{Cdouble},Ptr{Cdouble},Ptr{Cdouble},Ptr{Cdouble},Csize_t),
+        state.backend,t,p,rho,xna,xne,partials,n)
+    status==0 || throw(ErrorException("Wittmann continuum-state calculation failed"))
+    ContinuumState(rho,xna,xne,partials)
+end
+
+"""Neutral hydrogen [m⁻³] from the EOS at (T, P), one value per element."""
+function eos_neutral_hydrogen!(nh,state::WittmannKuruczState,temp,pgas)
+    lower=similar(nh); fn=Libdl.dlsym(state.library_handle,:witt_kurucz_populations)
+    status=ccall(fn,Cint,(Ptr{Cvoid},Ptr{Cdouble},Ptr{Cdouble},Cint,Cint,Cdouble,Cdouble,Ptr{Cdouble},Ptr{Cdouble},Csize_t),
+        state.backend,temp,pgas,26,0,0.0,1.0,lower,nh,length(nh))
+    status==0 || throw(ErrorException("Wittmann neutral hydrogen calculation failed"))
+    nh
+end
+
+"""Add the Wittmann continuum and lines of `levels` of column (x, y); row i of `χ` and `η` is `levels[i]`."""
+function _add_wittmann_kurucz!(χ,η,model,wavelength,atmosphere,x,y;levels=axes(atmosphere.temperature,1))
     atmosphere.pgas===nothing && throw(ArgumentError("Wittmann Kurucz synthesis requires gas pressure"))
-    nz=size(atmosphere.temperature,1); temp=Float64.(atmosphere.temperature[:,x,y]); pgas=Float64.(atmosphere.pgas[:,x,y])
+    nz=length(levels); temp=Float64.(atmosphere.temperature[levels,x,y]); pgas=Float64.(atmosphere.pgas[levels,x,y])
     continuum=zeros(Float64,nz); lower=zeros(Float64,nz); nh=zeros(Float64,nz)
     state=model.eos isa WittmannKuruczState ? model.eos : WittmannKuruczState(model.eos)
     fn=Libdl.dlsym(state.library_handle,:witt_kurucz_populations)
     # Mixed synthesis already distributes independent columns over Julia
     # threads. Keep the short depth-only kernels serial within each column to
     # avoid nesting a C++ and Julia thread team inside every column task.
-    continuum_state_column=model.include_continuum ? continuum_state(state.eos,temp,pgas;threads=1) : nothing
-    continuum_done=false
+    continuum_state_column=model.include_continuum ? continuum_state(state,temp,pgas;threads=1) : nothing
+    if model.include_continuum
+        @inbounds for l in eachindex(wavelength)
+            continuum.=continuum_extinction_m(continuum_state_column,temp,wavelength[l]*1e10;threaded=false)
+            for k in 1:nz
+                χ[k,l]+=continuum[k]; η[k,l]+=continuum[k]*source_planck(wavelength[l],temp[k])
+            end
+        end
+    end
     for line in model.lines
         line.atomic_number>0 || throw(ArgumentError("production Kurucz synthesis requires K94 species metadata"))
         status=ccall(fn,Cint,(Ptr{Cvoid},Ptr{Cdouble},Ptr{Cdouble},Cint,Cint,Cdouble,Cdouble,Ptr{Cdouble},Ptr{Cdouble},Csize_t),
             state.backend,temp,pgas,line.atomic_number,line.ion_stage,
             line.lower_energy_j,line.lower_g,lower,nh,nz)
         status==0 || throw(ErrorException("Wittmann Kurucz state calculation failed"))
-        if model.include_continuum && !continuum_done
-            @inbounds for l in eachindex(wavelength)
-                continuum.=continuum_extinction_m(continuum_state_column,temp,wavelength[l]*1e10;threaded=false)
-                for k in 1:nz
-                    χ[k,l]+=continuum[k]; η[k,l]+=continuum[k]*planck_lambda(wavelength[l],temp[k])*1e-12
-                end
-            end
-            continuum_done=true
-        end
         λ0=line.wavelength0_m; Aji=6.670e13/(λ0*1e9)^2*10^line.loggf/line.upper_g
         Bji=λ0^3/(2*_H*_C)*Aji; Bij=line.upper_g/line.lower_g*Bji
-        @inbounds for k in 1:nz,l in eachindex(wavelength)
-            vb=sqrt(2*_KB*temp[k]/line.atomic_mass_kg+atmosphere.vturb[k,x,y]^2)
+        @inbounds for i in 1:nz,l in eachindex(wavelength)
+            k=levels[i]
+            vb=sqrt(2*_KB*temp[i]/line.atomic_mass_kg+atmosphere.vturb[k,x,y]^2)
             v=(wavelength[l]/λ0-1)*_C/vb+los_velocity(atmosphere,k,x,y)/vb
-            gamma=line.grad_s+line.gstark_m3_s*atmosphere.ne[k,x,y]+line.gvdwaals_m3_s*nh[k]
+            gamma=line.grad_s+line.gstark_m3_s*atmosphere.ne[k,x,y]+(line.gvdwaals_m3_s+line.vdw_coefficient*temp[i]^line.vdw_exponent)*nh[i]
             adamp=gamma*λ0/(4pi*vb); profile=_voigt_armstrong(adamp,v)/(sqrt(pi)*vb)
-            nu=line.upper_g/line.lower_g*lower[k]*exp(-(_H*_C/λ0)/(_KB*temp[k]))
+            nu=line.upper_g/line.lower_g*lower[i]*exp(-(_H*_C/λ0)/(_KB*temp[i]))
             factor=_H*_C/(4pi)*Bij*line.lower_g
-            χline=factor*(lower[k]/line.lower_g-nu/line.upper_g)*profile
-            χ[k,l]+=χline; η[k,l]+=χline*planck_lambda(wavelength[l],temp[k])*1e-12
+            χline=factor*(lower[i]/line.lower_g-nu/line.upper_g)*profile
+            χ[i,l]+=χline; η[i,l]+=χline*source_planck(wavelength[l],temp[i])
         end
     end
     nothing

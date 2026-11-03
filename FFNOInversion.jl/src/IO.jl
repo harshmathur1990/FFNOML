@@ -15,6 +15,7 @@ struct AtmosphereInputConfig{T<:AbstractFloat}
     vz_dataset::String
     magnetic_datasets::Union{Nothing,NTuple{3,String}}
     vturb_dataset::Union{Nothing,String}
+    ne_dataset::Union{Nothing,String}      # given electron density: the truth, HSEMHS derives P and rho from it
 end
 
 struct ObservedDataConfig
@@ -29,11 +30,14 @@ struct WeightInputConfig
     spatial_dataset::String
 end
 
-"""The two scientific products written by one inversion run."""
+"""The two scientific products written by one inversion run. `intensity_units` (:si or :cgs) is the per-frequency unit of the written spectra, before each region's
+`normalization` divides them (see `output_intensity_scale`)."""
 struct OutputConfig
     synthesis_file::String
     atmosphere_file::String
+    intensity_units::Symbol
 end
+OutputConfig(synthesis_file,atmosphere_file)=OutputConfig(synthesis_file,atmosphere_file,:si)
 
 struct SynthesisGridConfig{T<:AbstractFloat}
     wavelength_m::Vector{T}
@@ -101,6 +105,7 @@ struct RunConfig{T<:AbstractFloat}
     population_mesh::Union{Nothing,PopulationMeshConfig{T}}
     view::ViewGeometry
     vz_positive::Symbol
+    continuum_populations::Symbol
 end
 
 """
@@ -114,6 +119,15 @@ function _vz_positive(atmos)
         "atmosphere.frame has been removed: z is always positive upward; use atmosphere.vz_positive = \"up\" or \"down\""))
     value=Symbol(lowercase(String(get(atmos,"vz_positive","up"))))
     value in (:up,:down) || throw(ArgumentError("atmosphere.vz_positive must be \"up\" or \"down\", got \"$value\""))
+    value
+end
+
+"""`[physics] continuum_populations`: whether FFNO populations enter the continuum opacity. `"eos"` (default): one Wittmann
+continuum per region, hydrogen from the EOS, no FFNO populations. `"ffno"`: a region's first FFNO source supplies the continuum
+(Muspel, with FFNO neutral H and protons); a region without an FFNO source keeps the EOS continuum."""
+function _continuum_populations(physics)
+    value=Symbol(lowercase(String(get(physics,"continuum_populations","eos"))))
+    value in (:eos,:ffno) || throw(ArgumentError("physics.continuum_populations must be \"eos\" or \"ffno\", got \"$value\""))
     value
 end
 
@@ -178,6 +192,13 @@ function _regions(cfg)
         psf_type != :none && (psf_file === nothing || isempty(psf_file)) &&
             throw(ArgumentError("regions[$i].psf_file is required for psf_type=$psf_type"))
         push!(regions,SpectralRegionConfig(start,step,count,normalization,psf_type,psf_file,sources))
+    end
+    # a wavelength has one unit: overlapping regions give the same normalization (stated in each)
+    for i in eachindex(regions),j in i+1:length(regions)
+        a,b=regions[i],regions[j]
+        last_a=a.start_m+(a.count-1)*a.step_m; last_b=b.start_m+(b.count-1)*b.step_m
+        a.start_m<=last_b && b.start_m<=last_a && a.normalization!=b.normalization && throw(ArgumentError(
+            "regions[$i] and regions[$j] overlap but have normalizations $(a.normalization) and $(b.normalization)"))
     end
     regions
 end
@@ -414,15 +435,21 @@ function load_config(path::AbstractString)
         vertical_coordinate,vertical_dataset,x_dataset,y_dataset,
         String(_required(datasets,"temperature")),String(_required(datasets,"vx")),String(_required(datasets,"vy")),
         String(_required(datasets,"vz")),magnetic,
-        haskey(datasets,"vturb") ? String(datasets["vturb"]) : nothing)
+        haskey(datasets,"vturb") ? String(datasets["vturb"]) : nothing,
+        haskey(datasets,"ne") ? String(datasets["ne"]) : nothing)
 
+    forward_only || !haskey(datasets,"ne") || throw(ArgumentError(
+        "atmosphere.datasets.ne is for forward synthesis only: an inversion always takes the electron density from the EOS"))
     observed=nothing; weights=nothing
     if !forward_only
         data = _required(obs,"datasets")
         observed = ObservedDataConfig(String(_required(inputs,"observation_file")),String(_required(data,"intensity")),String(_required(data,"sigma")))
         weights = WeightInputConfig(String(_required(data,"wavelength_weights")),String(_required(data,"spatial_weights")))
     end
-    outputs = OutputConfig(String(_required(outputs_raw,"synthesis_file")),String(_required(outputs_raw,"atmosphere_file")))
+    intensity_units = Symbol(get(outputs_raw,"intensity_units","si"))
+    haskey(INTENSITY_UNITS,intensity_units) || throw(ArgumentError("outputs.intensity_units must be \"si\" or \"cgs\""))
+    outputs = OutputConfig(String(_required(outputs_raw,"synthesis_file")),String(_required(outputs_raw,"atmosphere_file")),
+                           intensity_units)
     outputs.synthesis_file == outputs.atmosphere_file && throw(ArgumentError("synthesis_file and atmosphere_file must differ"))
 
     stokes = StokesSet(Tuple(Symbol.(get(obs,"stokes",["I"]))))
@@ -483,10 +510,10 @@ function load_config(path::AbstractString)
         "the HSEMHS equilibrium solves on x slabs: set parallel.decomposition = \"x_slabs\" (got $(parallel.decomposition))"))
     RunConfig(atmosphere,mode,observed,weights,outputs,SynthesisGridConfig(wavelength_m,dx_m,dy_m),regions,
         observation_model,stokes,redistribution,regularization,parallel,controls,solver,time_index,equilibrium,
-        _population_mesh(get(cfg,"population",Dict{String,Any}()),vertical_coordinate),view,vz_positive)
+        _population_mesh(get(cfg,"population",Dict{String,Any}()),vertical_coordinate),view,vz_positive,_continuum_populations(physics))
 end
 
-const _POPULATION_MESH_KEYS=("enabled","bottom_m","top_m","spacing_m","uniform_top_m","stretch","max_spacing_m","nabla")
+const _POPULATION_MESH_KEYS=("enabled","bottom_m","top_m","spacing_m","uniform_top_m","stretch","max_spacing_m","nabla","corona_temperature_k","corona_transition_m")
 
 """`[population.mesh]`: the height mesh FFNO runs on for a native log-tau atmosphere (on by default there;
 `enabled = false` feeds FFNO the log-tau grid). Not used for a native height grid."""
@@ -496,8 +523,9 @@ function _population_mesh(raw,vertical_coordinate)
     mesh=get(raw,"mesh",Dict{String,Any}())
     unknown=setdiff(collect(keys(mesh)),collect(_POPULATION_MESH_KEYS))
     isempty(unknown) || throw(ArgumentError("unknown key(s) in [population.mesh]: $(join(sort(unknown),", "))"))
-    vertical_coordinate===:log10tau500 && Bool(get(mesh,"enabled",true)) || return nothing
-    PopulationMeshConfig(;(Symbol(k)=>Float64(v) for (k,v) in mesh if k!="enabled")...)
+    # on by default for log tau; a native z grid uses the mesh only when asked for
+    Bool(get(mesh,"enabled",vertical_coordinate===:log10tau500)) || return nothing
+    PopulationMeshConfig(;corona_temperature_k=1.0e6,(Symbol(k)=>Float64(v) for (k,v) in mesh if k!="enabled")...)
 end
 
 function dry_run_summary(config::RunConfig)
@@ -507,7 +535,7 @@ function dry_run_summary(config::RunConfig)
     nsources=sum(length(r.sources) for r in config.regions)
     controlvars=join(getfield.(config.controls,:variable),',')
     solver_name=config.solver isa LBFGSSolverOptions ? "bounded_lbfgs" : "prototype_pattern_search"
-    "mode=$(config.mode) observation_input=$(config.observed===nothing ? "none" : config.observed.file) atmosphere_input=$(config.atmosphere.file) atmosphere_storage_order=$(config.atmosphere.storage_order) synthesis_output=$(config.outputs.synthesis_file) atmosphere_output=$(config.outputs.atmosphere_file) time_index=$(config.time_index) vertical_coordinate=$(config.atmosphere.vertical_coordinate) vertical_dataset=$(config.atmosphere.vertical_dataset) nodes_unit=$(vertical_unit(config.atmosphere.vertical_coordinate)) dx_m=$(config.synthesis.dx_m) dy_m=$(config.synthesis.dy_m) spectral_regions=$(length(config.regions)) spectral_sources=$nsources synthesis_wavelengths=$nlambda full_grid_psf=true zero_weight_exclusion=true stokes=$(join(config.stokes.components,',')) redistribution=$(config.redistribution) equilibrium=HSEMHS:$(hsemhs_mode_name(config.equilibrium.mode)) eos_table=$(config.equilibrium.eos_table_file) controls=$controlvars solver=$solver_name max_iterations=$(config.solver.max_iterations) checkpoint=$(config.solver.checkpoint_path) regularized=$(join(regvars,',')) mpi=$(config.parallel.enabled) decomposition=$(config.parallel.decomposition) threads_per_rank=$(config.parallel.threads_per_rank) gpu_launcher_rank=$(config.parallel.gpu_launcher_rank) gpu_connect_timeout_seconds=$(config.parallel.gpu_connect_timeout_seconds) gpu_status_timeout_seconds=$(config.parallel.gpu_status_timeout_seconds) gpu_diagnostic_interval_seconds=$(config.parallel.gpu_diagnostic_interval_seconds)"*
+    "mode=$(config.mode) observation_input=$(config.observed===nothing ? "none" : config.observed.file) atmosphere_input=$(config.atmosphere.file) atmosphere_storage_order=$(config.atmosphere.storage_order) synthesis_output=$(config.outputs.synthesis_file) intensity_units=$(config.outputs.intensity_units) atmosphere_output=$(config.outputs.atmosphere_file) time_index=$(config.time_index) vertical_coordinate=$(config.atmosphere.vertical_coordinate) vertical_dataset=$(config.atmosphere.vertical_dataset) nodes_unit=$(vertical_unit(config.atmosphere.vertical_coordinate)) dx_m=$(config.synthesis.dx_m) dy_m=$(config.synthesis.dy_m) spectral_regions=$(length(config.regions)) spectral_sources=$nsources synthesis_wavelengths=$nlambda full_grid_psf=true zero_weight_exclusion=true stokes=$(join(config.stokes.components,',')) redistribution=$(config.redistribution) continuum_populations=$(config.continuum_populations) equilibrium=HSEMHS:$(hsemhs_mode_name(config.equilibrium.mode)) eos_table=$(config.equilibrium.eos_table_file) controls=$controlvars solver=$solver_name max_iterations=$(config.solver.max_iterations) checkpoint=$(config.solver.checkpoint_path) regularized=$(join(regvars,',')) mpi=$(config.parallel.enabled) decomposition=$(config.parallel.decomposition) threads_per_rank=$(config.parallel.threads_per_rank) gpu_launcher_rank=$(config.parallel.gpu_launcher_rank) gpu_connect_timeout_seconds=$(config.parallel.gpu_connect_timeout_seconds) gpu_status_timeout_seconds=$(config.parallel.gpu_status_timeout_seconds) gpu_diagnostic_interval_seconds=$(config.parallel.gpu_diagnostic_interval_seconds)"*
         (is_vertical(config.view) ? "" : " view_mu=$(config.view.mu) view_azimuth_deg=$(config.view.azimuth_deg) view_geometry=$(config.view.geometry)")
 end
 

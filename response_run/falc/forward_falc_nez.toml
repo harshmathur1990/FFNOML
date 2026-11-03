@@ -1,0 +1,88 @@
+# FALC extended to 14 Mm with a 1 MK corona, on z, with the FFNO on the population mesh.
+mode = "forward"
+
+[inputs]
+initial_atmosphere_file = "falc/falc_ne_z.h5"
+time_index = 1
+
+[outputs]
+intensity_units = "si"
+synthesis_file = "falc/falc_nez_synthesis.h5"
+atmosphere_file = "falc/falc_nez_atmosphere.h5"
+
+[atmosphere]
+vertical_coordinate = "z"
+storage_order = "python"
+
+[atmosphere.datasets]
+z_m = "z_m"
+x_m = "x_m"
+y_m = "y_m"
+temperature = "temperature"
+ne = "ne"
+vturb = "vturb"
+vx = "vx"
+vy = "vy"
+vz = "vz"
+
+[equilibrium]
+backend = "HSEMHS"
+model = "column_hse"
+gravity_m_s2 = 274.0
+eos_table_file = "/mn/stornext/d9/data/harshm/hsemhs_env112/work/e2e/inputs/eos_table_fullz.h5"
+on_nonconvergence = "abort"
+
+[equilibrium.column_z]
+anchor = "bottom"
+P_ref_pa = 1.944e4           # FALC at z = -100 km, (1.1 nH + ne) k T
+tau_top = "exp_tail"
+
+[[regions]]
+start_angstrom = 6558.0
+step_angstrom = 0.02
+count = 701
+normalization = 1.0
+psf_type = "none"
+
+[[regions.sources]]
+mode = "ffno"
+species = "H"
+line = "halpha"
+
+[[regions.sources]]
+mode = "kurucz_lte"
+linelist_file = "falc/kurucz_halpha_blend.list"
+
+[[regions]]
+start_angstrom = 8534.0
+step_angstrom = 0.02
+count = 601
+normalization = 1.0
+psf_type = "none"
+
+[[regions.sources]]
+mode = "ffno"
+species = "CA"
+line = "ca_ii_8542"
+
+[[regions.sources]]
+mode = "kurucz_lte"
+linelist_file = "falc/kurucz_8542_blend.list"
+
+[physics]
+redistribution = "non_prd"
+
+[observation]
+stokes = ["I"]
+
+[parallel]
+enabled = true
+decomposition = "x_slabs"
+gpu_launcher_rank = 0
+gpu_connect_timeout_seconds = 300.0
+gpu_status_timeout_seconds = 600.0
+gpu_diagnostic_interval_seconds = 30.0
+gpu_diagnostics_directory = ""
+
+[population.mesh]
+enabled = true

@@ -27,34 +27,81 @@ struct RegionSynthesisSetup{T<:AbstractFloat,S<:AbstractSynthesizer}
     synthesizer::S
 end
 
-"""Build and cache all line physics for configured mixed regions. This performs all file I/O."""
+"""Unit of every synthesized intensity (Muspel's; RH's per-Hz SI intensity is this × 1e12 λ²/c with λ in m)."""
+const SYNTHESIS_INTENSITY_UNITS="kW m^-2 sr^-1 nm^-1"
+
+"""Per-frequency output units: name and factor from W m^-2 Hz^-1 sr^-1."""
+const INTENSITY_UNITS=Dict(:si=>("J s^-1 m^-2 Hz^-1 sr^-1",1.0),:cgs=>("erg s^-1 cm^-2 Hz^-1 sr^-1",1e3))
+
+"""Factor per synthesis wavelength (the regions' grids in order) that turns the synthesized intensity
+(`SYNTHESIS_INTENSITY_UNITS`) into `units` (:si or :cgs, per Hz as RH and STiC write it: I_ν = I_λ λ²/c with the
+vacuum λ) divided by the region's `normalization`. It multiplies every Stokes parameter."""
+function output_intensity_scale(regions,units::Symbol)
+    _,factor=INTENSITY_UNITS[units]
+    scale=Float64[]
+    for region in regions
+        vacuum=_air_to_vacuum_nm.(wavelengths(region).*1e9).*1e-9
+        append!(scale,factor*1e12 .* vacuum.^2 ./ _C ./ region.normalization)  # kW -> W, nm^-1 -> m^-1, per λ -> per ν
+    end
+    scale
+end
+
+"""Kurucz identity of each FFNO transition: atomic number, ion stage (0 = neutral) and vacuum wavelength [m]."""
+const FFNO_KURUCZ_IDENTITY=Dict(:halpha=>(1,0,656.461e-9),:h_alpha=>(1,0,656.461e-9),:ca_ii_8542=>(20,1,854.444e-9))
+"""Kurucz lines of an FFNO transition's ion within this distance of its wavelength are that transition."""
+const FFNO_KURUCZ_TOLERANCE_M=0.1e-9
+
+"""Kurucz lines that are not one of the region's FFNO transitions (those would be counted twice, once in LTE)."""
+function _without_ffno_transitions(lines,ffno_lines)
+    duplicate(line)=any(((z,stage,λ0),)->line.atomic_number==z && line.ion_stage==stage &&
+        abs(line.wavelength0_m-λ0)<=FFNO_KURUCZ_TOLERANCE_M,ffno_lines)
+    kept=filter(!duplicate,lines)
+    length(kept)<length(lines) && @info "Kurucz lines dropped as the region's FFNO transitions" wavelengths_nm=
+        [round(line.wavelength0_m*1e9;digits=4) for line in lines if duplicate(line)]
+    kept
+end
+
+"""Build and cache all line physics for configured mixed regions. This performs all file I/O. A region may combine
+FFNO and Kurucz LTE sources: their opacities and emissivities (one unit, see `source_planck`) add before a single
+formal solution, every region has one continuum whatever the order of the sources (Wittmann's with hydrogen from the EOS, or
+with `continuum_populations = :ffno` the region's first FFNO source's, with FFNO hydrogen; neutral H in line broadening
+follows the same choice), and Kurucz lines that are the region's FFNO transitions
+are dropped."""
 function build_synthesis_setup(config,atmosphere::Atmosphere3D,populations::AbstractDict,
                                eos::WittmannEOS;atom_files::AbstractDict)
     setups=RegionSynthesisSetup[]
+    mode=hasproperty(config,:continuum_populations) ? config.continuum_populations : :eos
     aliases=Dict(:halpha=>(:H,5,2,3),:h_alpha=>(:H,5,2,3),:ca_ii_8542=>(:CA,5,3,5))
     for region in config.regions
         air=wavelengths(region); vacuum=eltype(air).(_air_to_vacuum_nm.(air.*1e9).*1e-9)
-        contributors=OpacityContributor[]; continuum_available=true
-        for source in region.sources
+        isempty(region.sources) && throw(ArgumentError("every region needs at least one opacity source"))
+        ffno_continuum=mode===:ffno ? findfirst(source->source.mode===:ffno,region.sources) : nothing
+        contributors=ffno_continuum===nothing ?
+            OpacityContributor[OpacityContributor(KuruczLTEModel(KuruczLine{Float64}[],eos;include_continuum=true))] :
+            OpacityContributor[]
+        ffno_lines=[FFNO_KURUCZ_IDENTITY[source.line] for source in region.sources
+                    if source.mode==:ffno && haskey(FFNO_KURUCZ_IDENTITY,source.line)]
+        for (position,source) in enumerate(region.sources)
             if source.mode==:ffno
-                haskey(populations,:H) || throw(ArgumentError("H FFNO populations are required for Muspel continuum setup"))
+                haskey(populations,:H) || throw(ArgumentError("H FFNO populations are required for the Muspel line model"))
                 haskey(aliases,source.line) || throw(ArgumentError("unknown FFNO transition $(source.line)"))
                 species,index,lower,upper=aliases[source.line]
                 species==source.species || throw(ArgumentError("transition $(source.line) belongs to $species"))
                 haskey(populations,species) || throw(ArgumentError("missing $species FFNO populations"))
                 haskey(atom_files,species) || throw(ArgumentError("missing $species atom_file"))
                 model=build_muspel_line_model(atmosphere,populations[:H],atom_files[species],index,lower,upper;
-                    include_continuum=continuum_available)
-                push!(contributors,OpacityContributor(model,populations[species])); continuum_available=false
+                    include_continuum=position==ffno_continuum,
+                    neutral_hydrogen=mode===:eos ? WittmannKuruczState(eos) : nothing)
+                push!(contributors,OpacityContributor(model,populations[species]))
             elseif source.mode==:kurucz_lte
                 cache=load_kurucz_linelist(source.linelist_file)
                 selected=select_kurucz_lines(cache,vacuum;margin_m=maximum(vacuum)*20*2.5e3/_C)
                 isempty(selected) && throw(ArgumentError("no Kurucz lines overlap configured region: $(source.linelist_file)"))
-                push!(contributors,OpacityContributor(KuruczLTEModel(selected,eos;include_continuum=continuum_available)))
-                continuum_available=false
+                selected=_without_ffno_transitions(selected,ffno_lines)
+                isempty(selected) && (@warn "every Kurucz line in the region is an FFNO transition; source skipped" source.linelist_file; continue)
+                push!(contributors,OpacityContributor(KuruczLTEModel(selected,eos;include_continuum=false)))
             end
         end
-        isempty(contributors) && throw(ArgumentError("every region needs at least one opacity source"))
         push!(setups,RegionSynthesisSetup(collect(air),collect(vacuum),MixedIntensitySynthesizer(contributors)))
     end
     setups

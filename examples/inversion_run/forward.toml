@@ -5,6 +5,9 @@ initial_atmosphere_file = "inputs/initial_atmosphere.h5"
 time_index = 1
 
 [outputs]
+# per-frequency unit of the written spectra and of an observation file: "si" (J s^-1 m^-2 Hz^-1 sr^-1) or "cgs"
+# (erg s^-1 cm^-2 Hz^-1 sr^-1); each region's normalization then divides them (below: cgs disk-centre continua)
+intensity_units = "cgs"
 synthesis_file = "outputs/synthesis.h5"
 atmosphere_file = "outputs/forward_atmosphere.h5"
 
@@ -99,19 +102,22 @@ linelist_file = "inputs/kurucz_6302.list"
 # FFNO was trained on simulation height grids, not on log tau: for a native log-tau atmosphere its populations are
 # predicted on this height mesh (each column interpolated onto it using the HSEMHS heights, extended below its
 # bottom in hydrostatic equilibrium with d ln T/d ln P = nabla) and interpolated back. On by default for log tau;
-# the values below are the defaults. Not used for a native z grid.
+# the values below are the defaults. On a native z grid it is off unless enabled = true.
 [population.mesh]
 # enabled = true
 bottom_m = -1.0e6            # mesh bottom [m] (training grids: -1 to -2.5 Mm)
 top_m = 1.4e7                # mesh top [m]
 spacing_m = 2.0e4            # spacing up to uniform_top_m [m] (training grids: 12-30 km)
 uniform_top_m = 4.5e6
+# corona_temperature_k = 1.0e6   # above a column's top: a corona in hydrostatic balance; 0 holds the top values
+# corona_transition_m = 2.4e5
 stretch = 1.01               # spacing growth per point above uniform_top_m
 max_spacing_m = 1.0e5
 nabla = 0.13                 # d ln T / d ln P of the deep extension (near-adiabatic convection zone)
 
 [physics]
 redistribution = "non_prd"
+# continuum_populations = "eos"   # "eos": continuum hydrogen from the EOS; "ffno": from the FFNO populations
 
 [observation]
 stokes = ["I"]

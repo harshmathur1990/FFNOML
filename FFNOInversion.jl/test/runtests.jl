@@ -30,3 +30,7 @@ include("correction_mapping.jl")
 
 include("view_angle.jl")
 include("vz_positive.jl")
+include("mixed_region_units.jl")
+include("z_mesh.jl")
+include("continuum_source.jl")
+include("continuum_adjoint.jl")

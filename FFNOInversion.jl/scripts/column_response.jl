@@ -233,11 +233,13 @@ function main(a)
         datasets=[create_dataset(group,string(v),datatype(Float32),dataspace(nl,nz,nys,length(xs));
             chunk=(nl,nz,nys,1),filters=filters) for v in a.variables]
         for (dataset,v) in zip(datasets,a.variables)
-            attributes(dataset)["unit"]=v in (:ne,:pgas) ? "intensity per unit ln $v per unit log10 tau500" :
-                v===:temperature ? "intensity per K per unit log10 tau500" : "intensity per m/s per unit log10 tau500"
+            attributes(dataset)["unit"]=v in (:ne,:pgas) ? "$(FFNOInversion.SYNTHESIS_INTENSITY_UNITS) per unit ln $v per unit log10 tau500" :
+                v===:temperature ? "$(FFNOInversion.SYNTHESIS_INTENSITY_UNITS) per K per unit log10 tau500" :
+                "$(FFNOInversion.SYNTHESIS_INTENSITY_UNITS) per m/s per unit log10 tau500"
         end
         intensity=create_dataset(file,"intensity",datatype(Float32),dataspace(nl,nys,length(xs));
             chunk=(nl,nys,1),filters=filters)
+        attributes(intensity)["units"]=FFNOInversion.SYNTHESIS_INTENSITY_UNITS
         file["wavelength_air_m"]=wavelength_air; file["wavelength_vacuum_m"]=wavelength_vacuum
         file["logtau500"]=collect(logtau); file["dlogtau500"]=widths
         file["x_index"]=xs.-1; file["y_index"]=ys.-1

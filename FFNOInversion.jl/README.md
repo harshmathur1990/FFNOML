@@ -42,7 +42,7 @@ control maps (inversion only)
    ▼
 HSEMHS equilibrium          Pgas, rho, ne, z (or log10 tau500) and chi500 from T (and B)
    ▼
-population mesh (log tau)   columns mapped onto a training-like height mesh
+population mesh             columns mapped onto a training-like height mesh (log tau; z on request), extended above and below
    ▼
 FFNO3D populations          persistent multi-GPU FSDP service, one model per species
    ▼
@@ -165,8 +165,9 @@ from it:
 | Vertical dataset | `logtau500` | `z_m`, plus `x_m` and `y_m` |
 | HSEMHS mode | `column-hse-ltau`: heights derived per column | `column-hse-z`: log10 tau500 derived per column |
 | Pressure boundary | HSEMHS tau-hydrostatic top closure (`[equilibrium.column_ltau]`) | `[equilibrium.column_z] anchor`, `P_ref_pa` |
-| FFNO populations | on the `[population.mesh]` height mesh, then interpolated back | directly on the native grid |
+| FFNO populations | on the `[population.mesh]` height mesh, then interpolated back | directly on the native grid, or on the mesh with `[population.mesh] enabled = true` |
 | Formal solution | optical depth integrated on the native log tau500 grid using chi500 | optical depth integrated in geometric height |
+| Above and below the column | on the mesh: corona above, hydrostatic extension below ([Population mesh](#population-mesh)) | the same with `[population.mesh] enabled = true`; otherwise not extended |
 | Control nodes | `log_tau_nodes` | `z_nodes_m` |
 | Regularization length | `length_scale_dex` (default 1) | `length_scale_m` (required for derivative types 1 and 4) |
 
@@ -186,6 +187,7 @@ Unknown keys in `[equilibrium]` and its subsections are errors.
 | `mode` | `"inversion"` (default) or `"forward"`. `[solver] max_iterations = 0` also selects forward. |
 | `[inputs] initial_atmosphere_file`, `observation_file`, `time_index` | input paths (relative to the run directory) and 1-based snapshot |
 | `[outputs] synthesis_file`, `atmosphere_file` | output paths |
+| `[outputs] intensity_units` | `"si"` (J s⁻¹ m⁻² Hz⁻¹ sr⁻¹, RH's; default) or `"cgs"` (erg s⁻¹ cm⁻² Hz⁻¹ sr⁻¹, STiC's): the per-frequency unit (I_ν = I_λ λ²/c, vacuum λ) of the written synthesis and of the observation file's `intensity` and `sigma`, before the region `normalization` divides them. A written synthesis can be read back as an observation. The file records it in the `units` attribute of `intensity` and the divisor per wavelength in `normalization` |
 
 ### `[atmosphere]`
 
@@ -193,6 +195,9 @@ Unknown keys in `[equilibrium]` and its subsections are errors.
 (`logtau500` or `z_m`, `x_m`, `y_m`, `temperature`, `vx`, `vy`, `vz`, optional
 `vturb`, `Bx`, `By`, `Bz`). There is no top-pressure or top-density option: configs
 that still contain `pressure_top_pa` or `pressure_top_dataset` are rejected.
+
+An optional `ne` dataset in `[atmosphere.datasets]` (m⁻³) is taken as the truth, **in forward synthesis only**: an inversion
+always takes nₑ from the EOS, and `load_config` refuses the dataset there. See [Equilibrium](#equilibrium).
 
 `vz_positive` says what a positive `vz` means in the input files. `"up"` (default) is the code's own sign, as in the
 Bifrost/MULTI3D files the FFNO was trained on (rising hot granules have positive `vz`). `"down"` negates `vz` on input
@@ -231,7 +236,7 @@ others:
 | Key | Meaning |
 | --- | --- |
 | `start_angstrom`, `step_angstrom`, `count` | uniform air-wavelength grid (Å) |
-| `normalization` | positive number, validated (see [Known limitations](#known-limitations)) |
+| `normalization` | positive number: the observation file and the written synthesis both hold `[outputs] intensity_units` divided by it, for every Stokes parameter (1: plain SI or cgs). Overlapping regions must state the same value |
 | `psf_type`, `psf_file` | `"none"`, `"fpi"` or `"file"`; a file is required unless `none` (see [Known limitations](#known-limitations)) |
 
 Each region has one or more sources:
@@ -242,16 +247,51 @@ Each region has one or more sources:
 | `"kurucz_lte"` | `linelist_file` | LTE lines from a Kurucz list, Wittmann EOS |
 
 Sources in one region share a single formal solution, so blends are synthesized
-together. The first source owns the continuum, so it is not counted twice. A region
+together: Kurucz lines inside an FFNO line's window (Fe I 656.92 nm next to H alpha,
+Si I 853.62 nm next to Ca II 854.2 nm) add their opacity and emissivity to the FFNO
+line's. Every model writes emissivity in one unit (kW m⁻³ sr⁻¹ nm⁻¹, Muspel's), so the
+synthesized intensity is in kW m⁻² sr⁻¹ nm⁻¹ before the output conversion. Every region
+has one continuum, which does not depend on the order of the sources; by default it is Wittmann's with hydrogen from
+the EOS and reads no FFNO populations (`[physics] continuum_populations`). A Kurucz line of the FFNO
+transition's own ion within 0.1 nm of it (H alpha, Ca II 854.2 nm in a full Kurucz list)
+is dropped and logged, so the FFNO line is not added a second time in LTE. A region
 with only LTE sources does not call FFNO.
 
-### `[population.mesh]` (log-tau runs)
+K94 damping constants of zero mean "not given", as in RH: radiative damping becomes
+A_ul and Stark broadening is off. Van der Waals broadening of a Kurucz line is, in
+this order (`KuruczLine.vdw_recipe`):
 
-`enabled` (default true for log tau, ignored for z), `bottom_m`, `top_m`,
-`spacing_m`, `uniform_top_m`, `stretch`, `max_spacing_m`, `nabla`. The defaults
-(−1 Mm to 14 Mm, 20 km spacing up to 4.5 Mm, then growing by 1 % per point to 100 km,
-∇ = 0.13) lie inside the range of the training grids. See
-[Population mesh](#population-mesh-for-log-tau-atmospheres).
+1. ABO (Anstee, Barklem & O'Mara) with σ and α given in the γ_vdW field as σ.α
+   (a value ≥ 20: σ in a₀² is the integer part, α the fraction; RH's convention);
+2. ABO from RH's tables (`data/barklem`, s-p, p-d and d-f) for a neutral atom whose
+   level labels give the valence-electron orbitals (RH reads them the same way);
+3. the list's log γ_vdW when non-zero;
+4. Unsöld (γ = C T^0.3 n_H, collisions with H and He).
+
+ABO gives γ = C(σ, α) T^((1−α)/2) n_H, as RH computes it. RH itself puts Unsöld
+before the list's γ_vdW; here a value in the list is used.
+
+FFNO atom lines (Muspel atom files) take the same theory through a
+`{type: VanderWaals_ABO}` broadening entry. With `σ` and `α` (numbers or
+`{value: ...}`) they are used as given, as in RH's `ABO_EXPL`. Without them they come
+from the tables for a neutral atom whose level labels give s-p, p-d or d-f, as in RH's
+`BARKLEM`; otherwise the entry falls back to Unsöld with a warning. As in RH, each ABO
+entry adds Unsöld broadening by helium. Ca II and H I lines are outside the tables, so
+for them σ and α must be given or Unsöld is used.
+
+### `[population.mesh]`
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | true for log tau, false for z | predict the FFNO populations on the mesh; set it on z for a grid unlike the training grids, such as a 1-D model's uneven levels |
+| `bottom_m`, `top_m` | −1 Mm, 14 Mm | mesh limits |
+| `spacing_m`, `uniform_top_m` | 20 km, 4.5 Mm | uniform spacing up to this height |
+| `stretch`, `max_spacing_m` | 1.01, 100 km | spacing above it grows by this factor per point, up to this spacing |
+| `nabla` | 0.13 | d ln T / d ln P of the extension below a column's bottom |
+| `corona_temperature_k` | 1 MK | temperature of the corona above a column's top; 0 holds the top values instead |
+| `corona_transition_m` | 240 km | height over which the corona reaches that temperature |
+
+The defaults lie inside the range of the training grids. See [Population mesh](#population-mesh).
 
 ### `[view]` (viewing angle)
 
@@ -278,6 +318,7 @@ vertical one. Design, decisions and validation: [`docs/viewing-angle/README.md`]
 | Key | Meaning |
 | --- | --- |
 | `[physics] redistribution` | `"non_prd"` |
+| `[physics] continuum_populations` | `"eos"` (default): one Wittmann continuum per region, hydrogen from the EOS, no FFNO populations. `"ffno"`: a region's first FFNO source supplies the continuum (Muspel, with FFNO neutral H and protons); a region without an FFNO source keeps the EOS continuum |
 | `[observation] stokes` | `["I"]` |
 | `[observation.datasets]` | names of `intensity`, `sigma`, `wavelength_weights`, `spatial_weights` |
 | `[observation.gaussian_psf]` | `spatial_fwhm_x_m`, `spatial_fwhm_y_m`, `spectral_fwhm_nm` (0 disables a direction) |
@@ -467,28 +508,47 @@ for physics failures (EOS envelope, non-finite or folded columns). Instead
 `outcome.valid` is false. With `on_nonconvergence = "reject_trial"` the solver
 rejects that trial step.
 
+**Given electron density (forward synthesis only).** With an `ne` dataset, HSEMHS does no hydrostatic integration: at every level
+P is the pressure at which the EOS gives that nₑ at that T, and ρ and χ₅₀₀ follow from the EOS (`solve_embedded!(...; lnne)`,
+column modes). On a z grid τ₅₀₀ is integrated on the heights as usual. On a log-τ grid the heights are ∫ μ dτ/χ₅₀₀, gauged to mean
+z(τ = 1) = 0, so the τ axis must fit that nₑ: take it from a z run with the same `ne`, otherwise the heights are wrong. The written
+`ne` is the given one, and the continuum follows it because P does. The EOS is LTE, so where an atmosphere's nₑ is far from LTE (the
+chromosphere of FALC, or of a non-equilibrium simulation) the derived P and ρ differ from the model's: by up to 9× for FALC and 10× or
+more for Bifrost near 1 Mm. An inversion never uses this path.
+
 FFNO owns MPI and threading and passes HSEMHS its communicator. HSEMHS solves on
 x slabs, which is why `decomposition = "x_slabs"` is required.
 
-### Population mesh for log-tau atmospheres
+### Population mesh
 
 The FFNO checkpoints were trained on simulation height grids: one set of heights for
-every column, 12–30 km spacing in the photosphere and chromosphere, and bottoms
-1–2.5 Mm below the surface. A 95-point log-tau column has 30 km to several Mm
+every column, 12–30 km spacing in the photosphere and chromosphere, bottoms
+1–2.5 Mm below the surface, and tops up to 14 Mm. A 95-point log-tau column has 30 km to several Mm
 spacing and a different height at every point, which is far outside that. Fed
-directly, H n2 is about 100× off in the chromosphere.
+directly, H n2 is about 100× off in the chromosphere. A 1-D model on z has the same problem with its uneven levels.
 
 `MeshPopulationModel` (`src/PopulationMesh.jl`) therefore maps each column onto a
-fixed height mesh using its HSEMHS heights, calls the FFNO there, and interpolates
-the populations back:
+fixed height mesh using its heights, calls the FFNO there, and interpolates
+the populations back. It is on by default for log tau and on request for z (`[population.mesh] enabled = true`).
+The rule is the same for every species and both axes:
 
-- inside the column: log T, log ne and log rho log-linear in z, velocities linear;
-- above its top: the top values;
-- below its bottom (log tau500 ≈ 1.4, 0.1–0.3 Mm deep): hydrostatic extension with
-  d ln T / d ln P = `nabla`, rho and ne from the HSEMHS EOS table, velocities held;
-- back to the column: populations log-linear in z.
+- **inside the column:** ln T, log nₑ and log ρ log-linear in z, velocities linear;
+- **above its top (corona):** only where the mesh must extrapolate. ln T rises linearly in z from the column's top value to
+  `corona_temperature_k` over `corona_transition_m`, then stays there; a column already hotter keeps its temperature. P is
+  integrated hydrostatically upward from the top state (RK4, g = `gravity_m_s2`), ρ and nₑ come from the HSEMHS EOS table, and
+  velocities are held. Above the table's low-pressure end the last state is held. With `corona_temperature_k = 0` the top values
+  are held instead;
+- **below its bottom:** only where the mesh must extrapolate. Hydrostatic downward from the bottom state with
+  d ln T / d ln P = `nabla`, ρ and nₑ from the HSEMHS EOS table, velocities held;
+- **back to the column:** populations log-linear in z.
 
-The VJP is the transpose of these maps. Native-z atmospheres skip the mesh.
+The VJP is the transpose of these maps and the JVP their tangent (finite differences of the top and bottom values in
+the corona and the deep extension). The extensions exist only for the FFNO: synthesis uses the column's own levels.
+
+The corona matters because the FFNO is not local in height: its deep populations respond to what fills the mesh above. For
+FALC, which stops at 2.16 Mm, holding the 100,000 K top values to 14 Mm made total H up to 15× too high in the photosphere, and
+changing a corona from 1 MK to 0.5 MK doubled it at 250 km. Columns that already reach the mesh top, like Bifrost cubes on log τ,
+never use it.
 
 ### Viewing angle
 
@@ -533,6 +593,16 @@ details matter for log-tau grids:
 - Steps where ln χ or ln η changes by more than 1 are split into sub-steps (at most
   256) with χ and η log-linear inside, so the emergent intensity is not set by the
   coronal source function.
+
+Every region has one continuum, and the order of its sources does not change it. `[physics] continuum_populations`:
+
+- `"eos"` (default): Wittmann's continuum at (T, P), with hydrogen from the EOS. The only FFNO populations synthesis reads are the
+  line's own two levels: neutral H in van der Waals broadening comes from the EOS too.
+- `"ffno"`: the region's first FFNO source supplies Muspel's continuum with FFNO neutral H and protons, and FFNO neutral H in
+  broadening. A region without an FFNO source keeps the EOS continuum.
+
+Doppler widths include `vturb` in quadrature, in FFNO and Kurucz lines alike (`vturb` is not an FFNO input, so populations do
+not respond to it). The Wittmann adjoint is local in depth: perturbing a level recomputes only that level.
 
 Columns are synthesized in parallel with one workspace per Julia thread.
 
@@ -637,7 +707,7 @@ The scheduler chooses the rank count and Julia the threads per rank. For example
 | `src/EOS.jl` | Wittmann EOS adapter (synthesis), ideal-gas test EOS |
 | `src/ContinuumOpacity.jl` | Julia continuum opacity |
 | `src/PopulationModels.jl` | population interface, six-channel FFNO request, recorded/mock models |
-| `src/PopulationMesh.jl` | height mesh for log-tau atmospheres and its VJP |
+| `src/PopulationMesh.jl` | height mesh with its corona and deep extension, and their VJP and JVP |
 | `src/LinePhysics.jl` | FFNO transitions, Muspel line model, Kurucz LTE lines |
 | `src/Synthesis.jl` | mixed-source synthesis setup, formal solver, synthesis VJP |
 | `src/Observations.jl` | Gaussian PSF observation model, inversion weights |
@@ -708,9 +778,6 @@ float32 round-off).
 
 ## Known limitations
 
-- **Region `normalization` is validated but not applied.** Synthetic intensities are
-  in the solver's absolute units. Observations must be in the same units, or be
-  scaled before they are written.
 - **Region `psf_type`/`psf_file` are validated, and the preflight checks the file
   exists, but no per-region spectral PSF is applied.** The only instrumental profile
   is the global `[observation.gaussian_psf]`.

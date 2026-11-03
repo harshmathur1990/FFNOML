@@ -13,6 +13,11 @@ The repository has two halves:
    its hydrostatic structure with HSEMHS, gets populations from the trained networks
    through a persistent multi-GPU service, synthesizes spectra (H alpha, Ca II 8542 and
    Kurucz LTE lines), and fits the whole 3D volume to observations with bounded L-BFGS.
+   The networks predict on a fixed height mesh: above a column's top the atmosphere is extended
+   with a hydrostatic corona, below its bottom hydrostatically with a fixed gradient, and the
+   continuum takes its hydrogen from the EOS. A forward run may supply the electron density
+   itself, in which case P and ρ follow from it through the EOS; inversions always use the EOS.
+   [Details](FFNOInversion.jl/README.md#population-mesh).
 
 ```text
 MULTI3D / Bifrost ──► pipeline.py --build ──► --train ──► checkpoint (.pt)

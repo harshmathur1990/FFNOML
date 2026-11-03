@@ -5,6 +5,9 @@ initial_atmosphere_file = "inputs/initial_atmosphere_z.h5"
 time_index = 1
 
 [outputs]
+# per-frequency unit of the written spectra and of an observation file: "si" (J s^-1 m^-2 Hz^-1 sr^-1) or "cgs"
+# (erg s^-1 cm^-2 Hz^-1 sr^-1); each region's normalization then divides them (below: cgs disk-centre continua)
+intensity_units = "cgs"
 synthesis_file = "outputs/synthesis_z.h5"
 atmosphere_file = "outputs/forward_atmosphere_z.h5"
 
@@ -22,6 +25,7 @@ z_m = "z_m"                 # height axis [m], positive upward (either order; re
 x_m = "x_m"                 # horizontal axes [m], uniform and increasing (origin kept)
 y_m = "y_m"
 temperature = "temperature"
+# ne = "ne"                   # forward only, optional: electron density [m^-3] as the truth; P and rho then come from (T, ne) through the EOS
 # vturb = "vturb" # optional; defaults to zero if not configured
 vx = "vx"
 vy = "vy"
@@ -101,8 +105,17 @@ psf_type = "none"
 mode = "kurucz_lte"
 linelist_file = "inputs/kurucz_6302.list"
 
+# Native z: the FFNO predicts on the levels above unless the mesh is enabled. Enable it for anything unlike a simulation grid
+# (a 1-D model's uneven levels). Above a column's top it builds a corona, below its bottom a hydrostatic extension.
+# [population.mesh]
+# enabled = true
+# corona_temperature_k = 1.0e6   # 0 holds the top values
+# corona_transition_m = 2.4e5
+# nabla = 0.13                   # d ln T / d ln P below the bottom
+
 [physics]
 redistribution = "non_prd"
+# continuum_populations = "eos"   # "eos": continuum hydrogen from the EOS; "ffno": from the FFNO populations
 
 [observation]
 stokes = ["I"]

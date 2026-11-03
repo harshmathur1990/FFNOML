@@ -2,7 +2,7 @@
 
 julia_version = "1.12.3"
 manifest_format = "2.0"
-project_hash = "4e582acf91d89cc2ef5196e2ec41141f0382ede0"
+project_hash = "9b0d0cbf49f1667c5638dc936f2a0eda2589894e"
 
 [[deps.AbstractFFTs]]
 deps = ["LinearAlgebra"]
@@ -164,7 +164,7 @@ uuid = "f43a241f-c20a-4ad4-852c-f6b1247861c6"
 version = "1.7.0"
 
 [[deps.FFNOInversion]]
-deps = ["AtomicData", "Dates", "FFTW", "HDF5", "HSEMHS", "Libdl", "LinearAlgebra", "MPI", "MPIPreferences", "Muspel", "ProgressMeter", "SHA", "Serialization", "Sockets", "TOML"]
+deps = ["AtomicData", "Dates", "FFTW", "HDF5", "HSEMHS", "Libdl", "LinearAlgebra", "MPI", "MPIPreferences", "Muspel", "ProgressMeter", "SHA", "Serialization", "Sockets", "TOML", "YAML"]
 path = "."
 uuid = "5f657311-4af4-4e09-9b93-d21004ee51b8"
 version = "0.1.0"
@@ -211,8 +211,8 @@ version = "2.1.2+0"
 
 [[deps.HSEMHS]]
 deps = ["Dates", "DelimitedFiles", "FFTW", "HDF5", "Libdl", "LinearAlgebra", "MPI", "MPIPreferences", "OffsetArrays", "Printf", "ProgressMeter", "Random", "SHA", "Statistics", "TOML"]
-git-tree-sha1 = "f9d2a8174879bca55d58c91361f21aa27e159399"
-repo-rev = "5c8444e768ff9dac8037043d2d3aaf09ad825d15"
+git-tree-sha1 = "cde13992225c1ba89b08a143df9afaac179bb779"
+repo-rev = "29f2310a44b043bfecc3097ca88dfa2497eb9edd"
 repo-subdir = "HSEMHS"
 repo-url = "https://github.com/harshmathur1990/1DHSE3dMHS.git"
 uuid = "3f8a2c4e-6b1d-4e7a-9c55-2d0f7e1a9b31"
