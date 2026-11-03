@@ -40,7 +40,7 @@ OLIVIA_JULIA=$(command -v "${OLIVIA_JULIA:-julia}")
 OLIVIA_PYTHON=$(command -v "${OLIVIA_PYTHON:-python3}")
 export OLIVIA_JULIA OLIVIA_PYTHON
 export JULIA_PROJECT=${OLIVIA_JULIA_PROJECT:-${FFNOML_RUN_DIR}/julia-environment}
-export JULIA_DEPOT_PATH=${OLIVIA_JULIA_DEPOT:-${JULIA_DEPOT_PATH:-${HOME}/.julia}}
+export JULIA_DEPOT_PATH=${OLIVIA_JULIA_DEPOT:-${JULIA_DEPOT_PATH:-/cluster/projects/nn2834k/harshm/julia-depot-prod}}
 "${OLIVIA_REPO_DIR}/scripts/initialize_olivia_environment.sh"
 
 export FFNO_GPU_DIAGNOSTICS_DIR=${FFNO_GPU_DIAGNOSTICS_DIR:-${FFNOML_RUN_DIR}/diagnostics/slurm-${SLURM_JOB_ID}}

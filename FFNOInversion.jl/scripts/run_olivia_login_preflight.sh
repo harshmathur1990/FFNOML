@@ -11,13 +11,14 @@ package_dir=$(dirname "${script_dir}")
 preflight_script=${script_dir}/preflight_olivia_inversion.jl
 
 # Never inherit accelerator-node Julia paths or package selections from the
-# login shell. Keep login-node packages and compiled caches in their own depot.
-preflight_depot=${FFNO_PREFLIGHT_JULIA_DEPOT:-${HOME}/julia-depot-ffno-login-1.12.2}
+# login shell. Login-node packages and compiled caches stay in their own depot, under the project because the home
+# directory has no storage: Julia differs between login and accelerator nodes.
+preflight_depot=${FFNO_PREFLIGHT_JULIA_DEPOT:-/cluster/projects/nn2834k/harshm/julia-depot-login}
 case "${preflight_depot}" in
   /*) ;;
   *)
     echo "FFNO_PREFLIGHT_JULIA_DEPOT must be one absolute directory, not '${preflight_depot}'" >&2
-    echo "Unset it to use ${HOME}/julia-depot-ffno-login-1.12.2" >&2
+    echo "Unset it to use /cluster/projects/nn2834k/harshm/julia-depot-login" >&2
     exit 2
     ;;
 esac

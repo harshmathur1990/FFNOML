@@ -4,4 +4,4 @@ bash "$repo/FFNOInversion.jl/scripts/bootstrap_olivia_regression.sh" \
   --atmosphere-dir /cluster/projects/nn2834k/harshm/bifrost_data/en024048_hion/385 \
   --atom-dir /cluster/projects/nn2834k/harshm/multi3d/input/atoms \
   --muspel-dir /cluster/projects/nn2834k/harshm/julia-sources/Muspel.jl \
-  --julia-depot /cluster/home/harshm/julia-depot-1.12.2
+  --julia-depot /cluster/projects/nn2834k/harshm/julia-depot-prod
