@@ -186,6 +186,7 @@ Unknown keys in `[equilibrium]` and its subsections are errors.
 | `mode` | `"inversion"` (default) or `"forward"`. `[solver] max_iterations = 0` also selects forward. |
 | `[inputs] initial_atmosphere_file`, `observation_file`, `time_index` | input paths (relative to the run directory) and 1-based snapshot |
 | `[outputs] synthesis_file`, `atmosphere_file` | output paths |
+| `[outputs] intensity_units` | `"si"` (J s⁻¹ m⁻² Hz⁻¹ sr⁻¹, RH's; default) or `"cgs"` (erg s⁻¹ cm⁻² Hz⁻¹ sr⁻¹, STiC's): the per-frequency unit (I_ν = I_λ λ²/c, vacuum λ) of the written synthesis and of the observation file's `intensity` and `sigma`, before the region `normalization` divides them. A written synthesis can be read back as an observation. The file records it in the `units` attribute of `intensity` and the divisor per wavelength in `normalization` |
 
 ### `[atmosphere]`
 
@@ -231,7 +232,7 @@ others:
 | Key | Meaning |
 | --- | --- |
 | `start_angstrom`, `step_angstrom`, `count` | uniform air-wavelength grid (Å) |
-| `normalization` | positive number, validated (see [Known limitations](#known-limitations)) |
+| `normalization` | positive number: the observation file and the written synthesis both hold `[outputs] intensity_units` divided by it, for every Stokes parameter (1: plain SI or cgs). Overlapping regions must state the same value |
 | `psf_type`, `psf_file` | `"none"`, `"fpi"` or `"file"`; a file is required unless `none` (see [Known limitations](#known-limitations)) |
 
 Each region has one or more sources:
@@ -242,8 +243,36 @@ Each region has one or more sources:
 | `"kurucz_lte"` | `linelist_file` | LTE lines from a Kurucz list, Wittmann EOS |
 
 Sources in one region share a single formal solution, so blends are synthesized
-together. The first source owns the continuum, so it is not counted twice. A region
+together: Kurucz lines inside an FFNO line's window (Fe I 656.92 nm next to H alpha,
+Si I 853.62 nm next to Ca II 854.2 nm) add their opacity and emissivity to the FFNO
+line's. Every model writes emissivity in one unit (kW m⁻³ sr⁻¹ nm⁻¹, Muspel's), so the
+synthesized intensity is in kW m⁻² sr⁻¹ nm⁻¹ before the output conversion. The first
+source owns the continuum, so it is not counted twice. A Kurucz line of the FFNO
+transition's own ion within 0.1 nm of it (H alpha, Ca II 854.2 nm in a full Kurucz list)
+is dropped and logged, so the FFNO line is not added a second time in LTE. A region
 with only LTE sources does not call FFNO.
+
+K94 damping constants of zero mean "not given", as in RH: radiative damping becomes
+A_ul and Stark broadening is off. Van der Waals broadening of a Kurucz line is, in
+this order (`KuruczLine.vdw_recipe`):
+
+1. ABO (Anstee, Barklem & O'Mara) with σ and α given in the γ_vdW field as σ.α
+   (a value ≥ 20: σ in a₀² is the integer part, α the fraction; RH's convention);
+2. ABO from RH's tables (`data/barklem`, s-p, p-d and d-f) for a neutral atom whose
+   level labels give the valence-electron orbitals (RH reads them the same way);
+3. the list's log γ_vdW when non-zero;
+4. Unsöld (γ = C T^0.3 n_H, collisions with H and He).
+
+ABO gives γ = C(σ, α) T^((1−α)/2) n_H, as RH computes it. RH itself puts Unsöld
+before the list's γ_vdW; here a value in the list is used.
+
+FFNO atom lines (Muspel atom files) take the same theory through a
+`{type: VanderWaals_ABO}` broadening entry. With `σ` and `α` (numbers or
+`{value: ...}`) they are used as given, as in RH's `ABO_EXPL`. Without them they come
+from the tables for a neutral atom whose level labels give s-p, p-d or d-f, as in RH's
+`BARKLEM`; otherwise the entry falls back to Unsöld with a warning. As in RH, each ABO
+entry adds Unsöld broadening by helium. Ca II and H I lines are outside the tables, so
+for them σ and α must be given or Unsöld is used.
 
 ### `[population.mesh]` (log-tau runs)
 
@@ -708,9 +737,6 @@ float32 round-off).
 
 ## Known limitations
 
-- **Region `normalization` is validated but not applied.** Synthetic intensities are
-  in the solver's absolute units. Observations must be in the same units, or be
-  scaled before they are written.
 - **Region `psf_type`/`psf_file` are validated, and the preflight checks the file
   exists, but no per-region spectral PSF is applied.** The only instrumental profile
   is the global `[observation.gaussian_psf]`.

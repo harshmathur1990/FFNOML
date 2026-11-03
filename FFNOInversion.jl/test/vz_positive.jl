@@ -41,7 +41,8 @@ include(joinpath(@__DIR__,"..","scripts","forward_atmosphere_io.jl"))
             @test read(attributes(f)["view_azimuth_deg"])==30.0
         end
         h5open(cd_.outputs.synthesis_file,"r") do f
-            @test read(f["intensity"])[1,1,:,:,:]==permutedims(spectrum[:,1,:,:],(1,3,2))   # not reversed along y
+            scale=output_intensity_scale(cd_.regions,cd_.outputs.intensity_units)
+            @test read(f["intensity"])[1,1,:,:,:]≈permutedims((spectrum.*scale)[:,1,:,:],(1,3,2)) rtol=1e-14   # not reversed along y
         end
 
         # controls: vz bounds in the file's sign are mirrored; other bounds and every node stay

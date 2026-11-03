@@ -4,6 +4,9 @@ initial_atmosphere_file = "inputs/initial_atmosphere.h5"
 time_index = 1
 
 [outputs]
+# per-frequency unit of the written spectra and of an observation file: "si" (J s^-1 m^-2 Hz^-1 sr^-1) or "cgs"
+# (erg s^-1 cm^-2 Hz^-1 sr^-1); each region's normalization then divides them (below: cgs disk-centre continua)
+intensity_units = "cgs"
 synthesis_file = "outputs/synthesis.h5"
 atmosphere_file = "outputs/inverted_atmosphere.h5"
 

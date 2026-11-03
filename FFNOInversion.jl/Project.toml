@@ -19,6 +19,7 @@ SHA = "ea8e919c-243c-51af-8825-aaa63cd721ce"
 Serialization = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
 Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"
 TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
+YAML = "ddb6d928-2868-570f-bddf-ab3f9cf99eb6"
 
 [sources]
 HSEMHS = {rev = "5c8444e768ff9dac8037043d2d3aaf09ad825d15", subdir = "HSEMHS", url = "https://github.com/harshmathur1990/1DHSE3dMHS.git"}
@@ -36,6 +37,7 @@ MPI = "0.20"
 MPIPreferences = "0.1"
 Muspel = "0.2.5"
 ProgressMeter = "1.7"
+YAML = "0.4"
 
 [extras]
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"

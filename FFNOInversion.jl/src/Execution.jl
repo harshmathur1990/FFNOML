@@ -145,6 +145,10 @@ function read_inversion_inputs(config::RunConfig{T}) where T
             "observed wavelength count differs from configured synthesis grid"))
         size(intensity,2)==length(config.stokes.components) || throw(DimensionMismatch(
             "observed Stokes count differs from configuration"))
+        # the file holds [outputs] intensity_units divided by the region normalization; the objective works in the
+        # synthesis unit (chi-square is the same in either, sigma scales with the intensity)
+        scale=T.(output_intensity_scale(config.regions,config.outputs.intensity_units))
+        intensity=intensity./scale; sigma=sigma./scale
         weights=build_inversion_weights(wavelength_weights,spatial_weights)
         size(weights)==size(intensity) || throw(DimensionMismatch(
             "wavelength/spatial weights do not span the observed cube"))
@@ -176,7 +180,13 @@ function write_inversion_outputs(config::RunConfig,result::InversionRunResult)
     mkpath(dirname(abspath(config.outputs.synthesis_file)))
     mkpath(dirname(abspath(config.outputs.atmosphere_file)))
     h5open(config.outputs.synthesis_file,"w") do file
-        file["intensity"]=_with_time_slyx(result.synthesis.data)
+        # every Stokes parameter in the configured per-frequency unit, divided by its region's normalization
+        scale=output_intensity_scale(config.regions,config.outputs.intensity_units)
+        length(scale)==size(result.synthesis.data,1) || throw(DimensionMismatch("synthesis and region grids differ"))
+        file["intensity"]=_with_time_slyx(result.synthesis.data.*scale)
+        attributes(file["intensity"])["units"]=first(INTENSITY_UNITS[config.outputs.intensity_units])
+        attributes(file["intensity"])["normalization"]="divided by the region normalization (dataset normalization)"
+        file["normalization"]=reduce(vcat,[fill(region.normalization,region.count) for region in config.regions])
         file["wavelength_m"]=result.synthesis.wavelength_m
         if result.objective!==nothing
             file["objective_total"]=result.objective.components.total

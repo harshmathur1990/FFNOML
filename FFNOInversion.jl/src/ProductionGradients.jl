@@ -226,7 +226,7 @@ function add_opacity_emissivity_vjp!(atmosphere_bar,population_bar,population_lo
 end
 
 @inline function _planck_temperature_derivative(lambda,temperature)
-    value=planck_lambda(lambda,temperature)
+    value=source_planck(lambda,temperature)
     argument=_H*_C/(lambda*_KB*temperature)
     value*argument/temperature/(one(argument)-exp(-argument))
 end
@@ -245,7 +245,7 @@ function add_opacity_emissivity_vjp!(atmosphere_bar,population_bar,population_lo
         difference=nl-nu; difference<=0 && continue
         coefficient=model.oscillator_strength*1e-24
         extinction=coefficient*difference*profile
-        source=planck_lambda(lambda,temp)
+        source=source_planck(lambda,temp)
         extinction_bar=chi_bar[k,l]+eta_bar[k,l]*source
         source_bar=eta_bar[k,l]*extinction
         population_bar[k,x,y,model.lower_level]+=extinction_bar*coefficient*profile
@@ -273,7 +273,7 @@ function add_opacity_emissivity_vjp!(atmosphere_bar,population_bar,population_lo
         width=line.wavelength0_m/_C*sqrt(thermal)
         shifted=lambda*(1+vz/_C); q=(shifted-line.wavelength0_m)/width
         profile=exp(-q^2)/(sqrt(pi)*width); coefficient=1e-2*10^line.loggf
-        extinction=coefficient*lower*profile; source=planck_lambda(lambda,temp)
+        extinction=coefficient*lower*profile; source=source_planck(lambda,temp)
         extinction_bar=chi_bar[k,l]+eta_bar[k,l]*source
         source_bar=eta_bar[k,l]*extinction; lower_bar=extinction_bar*coefficient*profile
         profile_bar=extinction_bar*coefficient*lower

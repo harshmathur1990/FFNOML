@@ -34,7 +34,7 @@ function FFNOInversion.build_muspel_line_model(atmosphere,hydrogen_populations,a
                                                 lower_level::Integer,upper_level::Integer;
                                                 voigt=(a_min=1f-4,a_max=1f1,a_n=20000,v_min=0f0,v_max=5f2,v_n=2500),
                                                 include_continuum=true)
-    atom=Muspel.read_atom(atom_file); line=atom.lines[line_index]
+    atom=Muspel.read_atom(FFNOInversion.resolve_abo_broadening(atom_file)); line=atom.lines[line_index]
     matmos=_muspel_atmosphere(atmosphere,hydrogen_populations)
     names=("Al.yaml","C.yaml","Ca.yaml","Fe.yaml","H_6.yaml","He.yaml","KI.yaml","Mg.yaml","N.yaml","Na.yaml","NiI.yaml","O.yaml","S.yaml","Si.yaml")
     files=[joinpath(Muspel.AtomicData.get_atom_dir(),name) for name in names]
