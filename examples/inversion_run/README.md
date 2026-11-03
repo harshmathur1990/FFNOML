@@ -80,6 +80,16 @@ HSEMHS equilibrium reconstruction followed by FFNO populations and synthesis,
 with no optimization or gradient work. The example factory currently loads both
 H and Ca assets even when only one species contributes to the configured lines.
 
+## How the atmosphere is treated
+
+- **P, ρ, nₑ:** from HSEMHS, by hydrostatic balance and the EOS. In a forward run only, `ne = "ne"` in `[atmosphere.datasets]` makes nₑ the truth, and P and ρ follow from (T, nₑ) through the EOS with no hydrostatic balance. An inversion refuses it.
+- **Population mesh:** the FFNO predicts on a fixed height mesh, on by default for log tau and with `[population.mesh] enabled = true` on z.
+- **Above a column's top:** where the mesh goes higher, a corona: T rises to `corona_temperature_k` (1 MK) over `corona_transition_m` (240 km), hydrostatic from the top, ρ and nₑ from the EOS, velocities held. `corona_temperature_k = 0` holds the top values.
+- **Below a column's bottom:** a hydrostatic extension with d ln T / d ln P = `nabla` (0.13), ρ and nₑ from the EOS, velocities held.
+- **Continuum:** hydrogen from the EOS, no FFNO populations, unless `[physics] continuum_populations = "ffno"`.
+
+See [the package README](../../FFNOInversion.jl/README.md#population-mesh) for the details.
+
 ## Viewing angle (off disk centre)
 
 Add a `[view]` section (commented templates in all four configurations) to synthesize or invert at μ = cos θ < 1;

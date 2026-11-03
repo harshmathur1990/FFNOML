@@ -253,6 +253,12 @@ threads_per_rank = 1
             chi_file=sum(abs2,(model.-intrinsic).*output_intensity_scale(config.regions,config.outputs.intensity_units)./sigma_in_file)
             chi_read=sum(abs2,(model.-observation.spectrum.data)./observation.sigma)
             @test chi_read≈chi_file rtol=1e-10
+            # a given electron density is for forward synthesis only: an inversion always takes nₑ from the EOS
+            given=joinpath(directory,"given_ne_$units.toml"); withne=replace(read(path,String),"temperature = \"temperature\"\n"=>"temperature = \"temperature\"\nne = \"ne\"\n",count=1)
+            write(given,withne); err=try load_config(given); "" catch e; sprint(showerror,e) end
+            @test occursin("forward synthesis only",err)
+            write(given,replace(withne,"max_iterations = 1"=>"max_iterations = 0")); @test load_config(given).atmosphere.ne_dataset=="ne"
+            write(given,"mode = \"forward\"\n"*withne); @test load_config(given).atmosphere.ne_dataset=="ne"
             # overlapping regions must share one normalization (given twice); separate regions need not
             text=read(path,String); other=joinpath(directory,"overlap_$units.toml")
             write(other,replace(text,"start_angstrom = 8541.0"=>"start_angstrom = 6562.5"))

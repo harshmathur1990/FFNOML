@@ -101,6 +101,15 @@ Before submission, set:
 - `[[regions]]` wavelengths (Å), counts and line lists. The example synthesizes H alpha and Ca II 8542 through FFNO and an LTE Fe 6302 region; only the last needs a Kurucz line list. Each region's `normalization` divides that region's spectra, written and observed, in the `[outputs] intensity_units` unit (`cgs` in the examples); overlapping regions must state the same value. Its `psf_type`/`psf_file` are checked but no per-region PSF is applied.
 - `[observation.gaussian_psf]`: the example applies a **96 km spatial blur**. Set both spatial FWHM values to `0.0` for unblurred spectra. This section controls synthetic output even without observations.
 
+How the run treats the atmosphere (details in the [package README](../../FFNOInversion.jl/README.md#physics-and-numerics)):
+
+- **Pressure, density and electron density** come from HSEMHS: hydrostatic balance plus the EOS. A forward run may instead add `ne = "ne"` to `[atmosphere.datasets]`: nₑ is then the truth, and P and ρ come from (T, nₑ) through the EOS at every level, with no hydrostatic balance. An inversion refuses this and always takes nₑ from the EOS. On log tau, a given nₑ needs a τ axis that fits it: take it from a z run with the same `ne`.
+- **FFNO populations** are predicted on a fixed height mesh and interpolated back. This is on by default for log tau; on z add `[population.mesh] enabled = true`, which you want for anything unlike a simulation grid, such as a 1-D model.
+- **Above a column's top**, if the mesh goes higher, a corona is built: T rises to `corona_temperature_k` (1 MK) over `corona_transition_m` (240 km), hydrostatic from the top, with ρ and nₑ from the EOS and velocities held. `corona_temperature_k = 0` holds the top values instead.
+- **Below a column's bottom**, the column is extended hydrostatically with d ln T / d ln P = `nabla` (0.13), with ρ and nₑ from the EOS and velocities held.
+- Both extensions are the same for every species and axis, and feed only the FFNO: synthesis uses your levels.
+- **Continuum:** one per region, with hydrogen from the EOS and no FFNO populations (`[physics] continuum_populations = "eos"`, the default; `"ffno"` uses FFNO hydrogen). Neutral H in line broadening follows the same choice.
+
 Keep `mode = "forward"`, `stokes = ["I"]`, and `redistribution = "non_prd"`
 for this starter run. Do not add nodes or a solver to `forward.toml`.
 

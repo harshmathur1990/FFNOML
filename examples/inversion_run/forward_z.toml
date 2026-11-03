@@ -25,7 +25,7 @@ z_m = "z_m"                 # height axis [m], positive upward (either order; re
 x_m = "x_m"                 # horizontal axes [m], uniform and increasing (origin kept)
 y_m = "y_m"
 temperature = "temperature"
-# ne = "ne"                   # optional: electron density [m^-3] as the truth; P and rho then come from (T, ne) through the EOS
+# ne = "ne"                   # forward only, optional: electron density [m^-3] as the truth; P and rho then come from (T, ne) through the EOS
 # vturb = "vturb" # optional; defaults to zero if not configured
 vx = "vx"
 vy = "vy"
@@ -104,6 +104,14 @@ psf_type = "none"
 [[regions.sources]]
 mode = "kurucz_lte"
 linelist_file = "inputs/kurucz_6302.list"
+
+# Native z: the FFNO predicts on the levels above unless the mesh is enabled. Enable it for anything unlike a simulation grid
+# (a 1-D model's uneven levels). Above a column's top it builds a corona, below its bottom a hydrostatic extension.
+# [population.mesh]
+# enabled = true
+# corona_temperature_k = 1.0e6   # 0 holds the top values
+# corona_transition_m = 2.4e5
+# nabla = 0.13                   # d ln T / d ln P below the bottom
 
 [physics]
 redistribution = "non_prd"

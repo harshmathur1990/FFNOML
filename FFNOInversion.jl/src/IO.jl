@@ -438,6 +438,8 @@ function load_config(path::AbstractString)
         haskey(datasets,"vturb") ? String(datasets["vturb"]) : nothing,
         haskey(datasets,"ne") ? String(datasets["ne"]) : nothing)
 
+    forward_only || !haskey(datasets,"ne") || throw(ArgumentError(
+        "atmosphere.datasets.ne is for forward synthesis only: an inversion always takes the electron density from the EOS"))
     observed=nothing; weights=nothing
     if !forward_only
         data = _required(obs,"datasets")
@@ -511,7 +513,7 @@ function load_config(path::AbstractString)
         _population_mesh(get(cfg,"population",Dict{String,Any}()),vertical_coordinate),view,vz_positive,_continuum_populations(physics))
 end
 
-const _POPULATION_MESH_KEYS=("enabled","bottom_m","top_m","spacing_m","uniform_top_m","stretch","max_spacing_m","nabla")
+const _POPULATION_MESH_KEYS=("enabled","bottom_m","top_m","spacing_m","uniform_top_m","stretch","max_spacing_m","nabla","corona_temperature_k","corona_transition_m")
 
 """`[population.mesh]`: the height mesh FFNO runs on for a native log-tau atmosphere (on by default there;
 `enabled = false` feeds FFNO the log-tau grid). Not used for a native height grid."""
@@ -523,7 +525,7 @@ function _population_mesh(raw,vertical_coordinate)
     isempty(unknown) || throw(ArgumentError("unknown key(s) in [population.mesh]: $(join(sort(unknown),", "))"))
     # on by default for log tau; a native z grid uses the mesh only when asked for
     Bool(get(mesh,"enabled",vertical_coordinate===:log10tau500)) || return nothing
-    PopulationMeshConfig(;(Symbol(k)=>Float64(v) for (k,v) in mesh if k!="enabled")...)
+    PopulationMeshConfig(;corona_temperature_k=1.0e6,(Symbol(k)=>Float64(v) for (k,v) in mesh if k!="enabled")...)
 end
 
 function dry_run_summary(config::RunConfig)

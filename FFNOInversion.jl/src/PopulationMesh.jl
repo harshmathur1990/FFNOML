@@ -10,7 +10,9 @@ outside that: H n2 is ~100x off in the chromosphere with the simulation's own T,
 `MeshPopulationModel` maps each column from its log-tau points (HSE heights `z`) onto a fixed mesh, calls the
 wrapped model there and interpolates the populations back:
   * inside the column: log T, log ne, log rho log-linear in z, velocities linear;
-  * above its top: the top values;
+  * above its top: a transition region (ln T linear in z) to `corona_temperature_k` over `corona_transition_m`, then that
+    temperature, hydrostatic from the column's top, rho and ne from the HSEMHS EOS table, velocities held; a column already
+    hotter keeps its temperature (`corona_temperature_k` = 0: the top values held);
   * below its bottom (log tau500 ~ 1.4, 0.1-0.3 Mm deep): hydrostatic equilibrium with d ln T/d ln P = `nabla`
     (the near-adiabatic convection zone), rho and ne from the HSEMHS EOS table, velocities held;
   * back: populations log-linear in z.
@@ -31,19 +33,23 @@ struct PopulationMeshConfig{T<:AbstractFloat}
     stretch::T
     max_spacing_m::T
     nabla::T
-    function PopulationMeshConfig{T}(bottom_m,top_m,spacing_m,uniform_top_m,stretch,max_spacing_m,nabla) where T
+    corona_temperature_k::T
+    corona_transition_m::T
+    function PopulationMeshConfig{T}(bottom_m,top_m,spacing_m,uniform_top_m,stretch,max_spacing_m,nabla,corona_temperature_k,corona_transition_m) where T
         bottom_m<uniform_top_m<=top_m || throw(ArgumentError("population mesh needs bottom_m < uniform_top_m <= top_m"))
         0<spacing_m<=max_spacing_m || throw(ArgumentError("population mesh needs 0 < spacing_m <= max_spacing_m"))
         stretch>=1 || throw(ArgumentError("population mesh stretch must be >= 1"))
         0<nabla<1 || throw(ArgumentError("population mesh nabla must lie in (0, 1)"))
-        new{T}(bottom_m,top_m,spacing_m,uniform_top_m,stretch,max_spacing_m,nabla)
+        corona_temperature_k>=0 || throw(ArgumentError("population mesh corona_temperature_k must not be negative"))
+        corona_transition_m>0 || throw(ArgumentError("population mesh corona_transition_m must be positive"))
+        new{T}(bottom_m,top_m,spacing_m,uniform_top_m,stretch,max_spacing_m,nabla,corona_temperature_k,corona_transition_m)
     end
 end
 """Defaults inside the range of the training grids (bottoms -1 to -2.5 Mm, spacing 12-30 km stretching to
 100-160 km in the corona, tops up to 14.4 Mm)."""
 PopulationMeshConfig(;bottom_m=-1.0e6,top_m=1.4e7,spacing_m=2.0e4,uniform_top_m=4.5e6,stretch=1.01,
-    max_spacing_m=1.0e5,nabla=0.13)=PopulationMeshConfig{Float64}(Float64.((bottom_m,top_m,spacing_m,uniform_top_m,
-    stretch,max_spacing_m,nabla))...)
+    max_spacing_m=1.0e5,nabla=0.13,corona_temperature_k=0.0,corona_transition_m=2.4e5)=PopulationMeshConfig{Float64}(
+    Float64.((bottom_m,top_m,spacing_m,uniform_top_m,stretch,max_spacing_m,nabla,corona_temperature_k,corona_transition_m))...)
 
 """Mesh heights [m], top first: `spacing_m` up to `uniform_top_m`, then growing by `stretch` per point up to
 `max_spacing_m`."""
@@ -66,10 +72,13 @@ mutable struct MeshPopulationModel{M<:AbstractPopulationModel,E,T<:AbstractFloat
     last_populations::Any
     last_cartesian::Any       # inclined view: the Cartesian mesh features and populations of that prediction
     native_z::Bool            # also on a native z atmosphere ([population.mesh] enabled = true); columns stay Cartesian
+    corona_temperature::Float64
+    corona_transition::Float64
 end
 function MeshPopulationModel(inner::AbstractPopulationModel,config::PopulationMeshConfig,eos,gravity;native_z::Bool=false)
     gravity>0 || throw(ArgumentError("population mesh gravity must be positive"))
-    MeshPopulationModel(inner,population_mesh(config),eos,Float64(gravity),config.nabla,nothing,nothing,nothing,native_z)
+    MeshPopulationModel(inner,population_mesh(config),eos,Float64(gravity),config.nabla,nothing,nothing,nothing,native_z,
+        Float64(config.corona_temperature_k),Float64(config.corona_transition_m))
 end
 
 _mesh_active(model,atmosphere)=vertical_coordinate(atmosphere.grid)===:log10tau500 || model.native_z
@@ -106,6 +115,27 @@ function _mesh_deep!(out,eos,g,nabla,zb,lnTb,lnrhob,zs)
     out
 end
 
+"""Corona above a column's top (zt, T_t, rho_t): ln T linear in z from T_t to `Tc` over `transition`, then Tc (a hotter top keeps its T);
+hydrostatic from the top. Writes (ln T, log10 ne, log10 rho) at the heights `zs` (decreasing, all above zt) into `out` (3, length(zs)).
+Above the EOS table's low-pressure end the last state is held."""
+function _mesh_corona!(out,eos,g,zt,lnTt,lnrhot,Tc,transition,zs)
+    lnTc=max(log(Tc),lnTt); lnT(z)=lnTt+(lnTc-lnTt)*min((z-zt)/transition,1.0)
+    lnP=_mesh_lnP(eos,lnTt,lnrhot); z=zt; held=false
+    rate(zz,lp)=(r=HSEMHS.state(eos,lnT(zz),lp)[1]; exp(r)*g/exp(lp))      # -d ln P / dz
+    for m in length(zs):-1:1
+        target=zs[m]
+        while z<target && !held
+            h=min(2.0e4,target-z)
+            k1=rate(z,lnP); k2=rate(z+h/2,lnP-h/2*k1); k3=rate(z+h/2,lnP-h/2*k2); k4=rate(z+h,lnP-h*k3)
+            next=lnP-h/6*(k1+2k2+2k3+k4)
+            isfinite(next) ? (lnP=next; z+=h) : (held=true)
+        end
+        r,n,_,_=HSEMHS.state(eos,lnT(z),lnP)
+        out[1,m]=lnT(z); out[2,m]=n/_LN10; out[3,m]=r/_LN10
+    end
+    out
+end
+
 """Interpolation variables of one log-tau column: (ln T, vx, vy, vz, log10 ne, log10 rho) by point."""
 function _mesh_column_variables(atmosphere,x,y)
     nz=size(atmosphere.temperature,1); a=Matrix{Float64}(undef,6,nz)
@@ -127,12 +157,20 @@ end
 """Mesh features `(6, nmesh)` (T, vx, vy, vz, log10 ne, log10 rho) of column (x, y)."""
 function _mesh_column!(f,model,atmosphere,x,y)
     a=_mesh_column_variables(atmosphere,x,y); zc=@view atmosphere.z[:,x,y]; mesh=model.mesh
-    k=1; deep=Int[]
+    k=1; deep=Int[]; top=Int[]
     for m in eachindex(mesh)
         kind,k,w=_mesh_locate(zc,mesh[m],k)
         kind===:deep && (push!(deep,m); continue)
+        kind===:top && model.corona_temperature>0 && mesh[m]>zc[1] && (push!(top,m); continue)
         for c in 1:6; f[c,m]=kind===:top ? a[c,1] : (1-w)*a[c,k]+w*a[c,k+1]; end
         f[1,m]=exp(f[1,m])
+    end
+    if !isempty(top)
+        d=_mesh_corona!(Matrix{Float64}(undef,3,length(top)),model.eos,model.gravity,zc[1],a[1,1],a[6,1]*_LN10,
+            model.corona_temperature,model.corona_transition,mesh[top])
+        for (i,m) in enumerate(top)
+            f[1,m]=exp(d[1,i]); f[2,m]=a[2,1]; f[3,m]=a[3,1]; f[4,m]=a[4,1]; f[5,m]=d[2,i]; f[6,m]=d[3,i]
+        end
     end
     if !isempty(deep)
         nz=length(zc); d=_mesh_deep!(Matrix{Float64}(undef,3,length(deep)),model.eos,model.gravity,model.nabla,
@@ -345,12 +383,26 @@ mesh-feature tangents `out` (6, nmesh)."""
 function _mesh_column_jvp!(out,model,atmosphere,x,y,f,fd)
     zc=@view atmosphere.z[:,x,y]; mesh=model.mesh; nz=length(zc)
     ad(c,k)=c==1 ? fd[1,k]/atmosphere.temperature[k,x,y] : fd[c,k]      # tangents of (ln T, v, log10 ne, log10 rho)
-    k=1; deep=Int[]
+    k=1; deep=Int[]; top=Int[]
     for m in eachindex(mesh)
         kind,k,w=_mesh_locate(zc,mesh[m],k)
         kind===:deep && (push!(deep,m); continue)
+        kind===:top && model.corona_temperature>0 && mesh[m]>zc[1] && (push!(top,m); continue)
         for c in 1:6; out[c,m]=kind===:top ? ad(c,1) : (1-w)*ad(c,k)+w*ad(c,k+1); end
         out[1,m]*=f[1,m]
+    end
+    if !isempty(top)
+        top_a=_mesh_column_variables(atmosphere,x,y); top_z=mesh[top]
+        top_dT=ad(1,1); top_dr=ad(6,1)*_LN10; top_s=max(abs(top_dT),abs(top_dr)); top_d=zeros(3,length(top))
+        if top_s>0
+            top_h=1e-6/top_s
+            top_ext(e)=_mesh_corona!(Matrix{Float64}(undef,3,length(top)),model.eos,model.gravity,zc[1],top_a[1,1]+e*top_dT,
+                top_a[6,1]*_LN10+e*top_dr,model.corona_temperature,model.corona_transition,top_z)
+            top_d.=(top_ext(top_h).-top_ext(-top_h))./(2top_h)
+        end
+        for (i,m) in enumerate(top)
+            out[1,m]=f[1,m]*top_d[1,i]; out[2,m]=ad(2,1); out[3,m]=ad(3,1); out[4,m]=ad(4,1); out[5,m]=top_d[2,i]; out[6,m]=top_d[3,i]
+        end
     end
     if !isempty(deep)
         a=_mesh_column_variables(atmosphere,x,y); zs=mesh[deep]
@@ -374,10 +426,11 @@ end
 feature cotangents (6, nz) and height cotangents."""
 function _mesh_column_vjp!(feature_bar,z_bar,model,atmosphere,x,y,f,fb)
     a=_mesh_column_variables(atmosphere,x,y); zc=@view atmosphere.z[:,x,y]; mesh=model.mesh; nz=length(zc)
-    a_bar=zeros(6,nz); k=1; deep=Int[]
+    a_bar=zeros(6,nz); k=1; deep=Int[]; top=Int[]
     for m in eachindex(mesh)
         kind,k,w=_mesh_locate(zc,mesh[m],k)
         kind===:deep && (push!(deep,m); continue)
+        kind===:top && model.corona_temperature>0 && mesh[m]>zc[1] && (push!(top,m); continue)
         G=ntuple(c->fb[c,m]*(c==1 ? f[1,m] : 1.0),6)      # cotangents of the interpolated variables
         if kind===:top
             for c in 1:6; a_bar[c,1]+=G[c]; end
@@ -400,6 +453,17 @@ function _mesh_column_vjp!(feature_bar,z_bar,model,atmosphere,x,y,f,fb)
         dz=(project(ext(hz,0.0,0.0))-project(ext(-hz,0.0,0.0)))/(2hz)
         a_bar[1,nz]+=dT; a_bar[6,nz]+=dr*_LN10; z_bar[nz]+=dz
         for m in deep, c in 2:4; a_bar[c,nz]+=fb[c,m]; end
+    end
+    if !isempty(top)
+        top_z=mesh[top]; top_zt=zc[1]; top_lnT=a[1,1]; top_lnrho=a[6,1]*_LN10
+        top_ext(δz,δT,δr)=_mesh_corona!(Matrix{Float64}(undef,3,length(top)),model.eos,model.gravity,top_zt+δz,top_lnT+δT,top_lnrho+δr,
+            model.corona_temperature,model.corona_transition,top_z)
+        top_project(d)=sum(fb[1,m]*exp(d[1,i])+fb[5,m]*d[2,i]+fb[6,m]*d[3,i] for (i,m) in enumerate(top))
+        hT=1e-6; hz=1.0
+        a_bar[1,1]+=(top_project(top_ext(0.0,hT,0.0))-top_project(top_ext(0.0,-hT,0.0)))/(2hT)
+        a_bar[6,1]+=(top_project(top_ext(0.0,0.0,hT))-top_project(top_ext(0.0,0.0,-hT)))/(2hT)*_LN10
+        z_bar[1]+=(top_project(top_ext(hz,0.0,0.0))-top_project(top_ext(-hz,0.0,0.0)))/(2hz)
+        for m in top, c in 2:4; a_bar[c,1]+=fb[c,m]; end
     end
     for k in 1:nz
         feature_bar[1,k]+=a_bar[1,k]/atmosphere.temperature[k,x,y]
