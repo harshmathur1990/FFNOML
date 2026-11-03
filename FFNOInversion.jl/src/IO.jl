@@ -15,6 +15,7 @@ struct AtmosphereInputConfig{T<:AbstractFloat}
     vz_dataset::String
     magnetic_datasets::Union{Nothing,NTuple{3,String}}
     vturb_dataset::Union{Nothing,String}
+    ne_dataset::Union{Nothing,String}      # given electron density: the truth, HSEMHS derives P and rho from it
 end
 
 struct ObservedDataConfig
@@ -434,7 +435,8 @@ function load_config(path::AbstractString)
         vertical_coordinate,vertical_dataset,x_dataset,y_dataset,
         String(_required(datasets,"temperature")),String(_required(datasets,"vx")),String(_required(datasets,"vy")),
         String(_required(datasets,"vz")),magnetic,
-        haskey(datasets,"vturb") ? String(datasets["vturb"]) : nothing)
+        haskey(datasets,"vturb") ? String(datasets["vturb"]) : nothing,
+        haskey(datasets,"ne") ? String(datasets["ne"]) : nothing)
 
     observed=nothing; weights=nothing
     if !forward_only

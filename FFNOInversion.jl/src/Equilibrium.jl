@@ -117,6 +117,7 @@ mutable struct HSEMHSBackend <: AbstractEquilibriumBackend
     workspace::Any                    # HSEMHS.EmbeddedWorkspace
     provenance::Dict{String,Any}
     closed::Bool
+    ne_given::Bool                    # the input supplies nₑ: HSEMHS derives P and rho from it on every reconstruction
 end
 
 function _backend_comm(context::ParallelContext)
@@ -199,7 +200,9 @@ function _prepare_hsemhs(eq,distributed,context,synthesis_eos)
     provenance["mode"]=hsemhs_mode_name(eq.mode); provenance["gravity_m_s2"]=eq.gravity_m_s2
     is_vertical(grid.view) || merge!(provenance,view_attributes(grid.view,view_columns(grid)))
     provenance["eos_table_file"]=abspath(eq.eos_table_file); provenance["hsemhs_version"]=string(pkgversion(HSEMHS))
-    HSEMHSBackend(eq,ws,provenance,false)
+    ne_given=distributed.local_atmosphere.ne!==nothing
+    ne_given && (provenance["ne_given"]=true)
+    HSEMHSBackend(eq,ws,provenance,false,ne_given)
 end
 
 _zxy_to_zyx(a)=permutedims(a,(1,3,2))
@@ -218,13 +221,14 @@ function reconstruct_equilibrium!(backend::HSEMHSBackend,distributed::Distribute
     B=a.magnetic_field
     started=time()
     _forward_stage(context,"equilibrium begin mode=$(hsemhs_mode_name(backend.config.mode))")
+    given=backend.ne_given ? (;lnne=_zxy_to_zyx(log.(a.ne))) : (;)
     res=try
         if B===nothing
             # no magnetic data means B = 0 (the τ-grid alignment then uses the gas pressure alone)
-            backend.config.mode===:column_hse_z ? HSEMHS.solve_embedded!(backend.workspace,lnT) :
-                HSEMHS.solve_embedded!(backend.workspace,lnT,zero(lnT),zero(lnT),zero(lnT))
+            backend.config.mode===:column_hse_z ? HSEMHS.solve_embedded!(backend.workspace,lnT;given...) :
+                HSEMHS.solve_embedded!(backend.workspace,lnT,zero(lnT),zero(lnT),zero(lnT);given...)
         else
-            HSEMHS.solve_embedded!(backend.workspace,lnT,_zxy_to_zyx(B.Bx),_zxy_to_zyx(B.By),_zxy_to_zyx(B.Bz))
+            HSEMHS.solve_embedded!(backend.workspace,lnT,_zxy_to_zyx(B.Bx),_zxy_to_zyx(B.By),_zxy_to_zyx(B.Bz);given...)
         end
     catch e
         e isa HSEMHS.InvalidInput ? throw(ArgumentError(e.msg)) : rethrow()

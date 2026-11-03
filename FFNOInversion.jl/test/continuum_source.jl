@@ -64,6 +64,29 @@ import Muspel
         @test FFNOInversion._continuum_populations(Dict{String,Any}())===:eos
         @test FFNOInversion._continuum_populations(Dict{String,Any}("continuum_populations"=>"ffno"))===:ffno
         @test_throws ArgumentError FFNOInversion._continuum_populations(Dict{String,Any}("continuum_populations"=>"both"))
+        # with "eos" nothing but the line's own two levels comes from the FFNO: neutral H in broadening does not either
+        core(H,mode)=begin
+            region=SpectralRegionConfig(656.20e-9,0.01e-9,21,1.0,:none,nothing,[ffno])
+            pops=Dict(:H=>H); built=build_synthesis_setup((regions=[region],continuum_populations=mode),atmosphere,pops,eos;atom_files=Dict(:H=>atom))
+            wave=built[1].wavelength_air_m; c=SpectralCube(zeros(length(wave),1,nx,ny),wave,StokesSet(:I))
+            synthesize!(c,built,NonPRD(),atmosphere,pops,ThreadedSynthesisCache(Float64,nz,length(wave))); c.data[:,1,1,1]
+        end
+        levels(neutral)=(p=fill(1.0,nz,nx,ny,6); p[:,:,:,1].=neutral; p[:,:,:,2].=1e15; p[:,:,:,3].=1e11; p[:,:,:,6].=1e20; p)
+        @test core(levels(1e22),:eos)==core(levels(1e24),:eos)
+        @test core(levels(1e22),:ffno)!=core(levels(1e24),:ffno)
+        # the line adjoint carries the EOS neutral H: against centred differences in T and P
+        lp=levels(1e23); line_model=build_muspel_line_model(atmosphere,lp,atom,5,2,3;include_continuum=false,neutral_hydrogen=FFNOInversion.WittmannKuruczState(eos))
+        lw=collect(range(656.40e-9,656.52e-9;length=7)); cb=Float32.(reshape(sin.(1:nz*7),nz,7)); eb=Float32.(reshape(cos.(1:nz*7),nz,7))
+        function linepair(a)
+            ch=zeros(Float32,nz,7); et=zeros(Float32,nz,7); add_opacity_emissivity!(ch,et,line_model,lw,a,1,1,lp)
+            sum(Float64.(cb).*Float64.(ch))+sum(Float64.(eb).*Float64.(et))
+        end
+        lb=FFNOInversion.AtmosphereCotangent(atmosphere); FFNOInversion.add_opacity_emissivity_vjp!(lb,zeros(size(lp)),_->zeros(size(lp)),cb,eb,line_model,lw,atmosphere,1,1,lp)
+        for (name,bar,h) in ((:temperature,lb.temperature,5.0),(:pgas,lb.pgas,nothing))
+            k=3; f=getfield(atmosphere,name); v=f[k,1,1]; δ=h===nothing ? 2e-2*v : h
+            f[k,1,1]=v+δ; up=linepair(atmosphere); f[k,1,1]=v-δ; dn=linepair(atmosphere); f[k,1,1]=v
+            @test bar[k,1,1]≈(up-dn)/(2δ) rtol=0.05
+        end
         # the adjoint sees the continuum: temperature and pressure cotangents are finite and not all zero
         bar=FFNOInversion.AtmosphereCotangent(atmosphere); weights=ones(size(cube.data))
         FFNOInversion.synthesis_vjp!(bar,setup,NonPRD(),atmosphere,pops,cube,weights)

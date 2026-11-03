@@ -195,6 +195,11 @@ Unknown keys in `[equilibrium]` and its subsections are errors.
 `vturb`, `Bx`, `By`, `Bz`). There is no top-pressure or top-density option: configs
 that still contain `pressure_top_pa` or `pressure_top_dataset` are rejected.
 
+An optional `ne` dataset in `[atmosphere.datasets]` (m⁻³) is taken as the truth: HSEMHS derives P and ρ from (T, nₑ) through the
+EOS at every level with no hydrostatic integration (column modes), on every reconstruction, and on a log-τ grid the heights
+follow from dτ/χ₅₀₀. Without it, P and ρ come from hydrostatic balance as usual. The electron density then enters the
+FFNO features, the line physics and, through (T, P), the continuum.
+
 `vz_positive` says what a positive `vz` means in the input files. `"up"` (default) is the code's own sign, as in the
 Bifrost/MULTI3D files the FFNO was trained on (rising hot granules have positive `vz`). `"down"` negates `vz` on input
 and on output (attribute `vz_positive`) and mirrors `vz` control bounds. Only that sign changes: z is positive upward

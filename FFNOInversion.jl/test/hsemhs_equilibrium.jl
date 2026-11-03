@@ -205,3 +205,32 @@ logtau500 = "l"\ntemperature = "t"\nvx = "x"\nvy = "y"\nvz = "z"\n[grid]\ndx_m =
     end
 end
 end
+
+# An atmosphere that supplies nₑ: HSEMHS takes it as the truth and derives P and ρ through the EOS, on every reconstruction.
+@testset "Given electron density" begin
+    context=serial_context()
+    for kind in (:z_m,:log10tau500)
+        hse=equilibrium_atmosphere(kind)
+        d0=distribute_atmosphere(Float64,hse,context); b0=prepare_equilibrium(equilibrium_config(kind),d0,context)
+        @test reconstruct_equilibrium!(b0,d0,context).valid
+        base=d0.local_atmosphere; given=1.2 .* base.ne; close_equilibrium!(b0)
+        a=equilibrium_atmosphere(kind); a.ne=copy(given)
+        d=distribute_atmosphere(Float64,a,context); b=prepare_equilibrium(equilibrium_config(kind),d,context)
+        @test reconstruct_equilibrium!(b,d,context).valid
+        l=d.local_atmosphere
+        @test l.ne≈given rtol=1e-12
+        @test maximum(abs.(l.pgas./base.pgas.-1))>0.05                  # the pressure follows nₑ, not hydrostatic balance
+        table=HSEMHS.load_table(equilibrium_config(kind).eos_table_file)
+        for I in CartesianIndices(l.temperature)
+            r,n,_=HSEMHS.state(table,log(l.temperature[I]),log(l.pgas[I]))
+            @test n≈log(given[I]) atol=1e-8
+            @test log(l.rho[I])≈r atol=1e-8
+        end
+        # a later trial with another T keeps the given nₑ
+        l.temperature.*=1.01; p=copy(l.pgas)
+        @test reconstruct_equilibrium!(b,d,context).valid
+        @test l.ne≈given rtol=1e-12
+        @test l.pgas!=p
+        close_equilibrium!(b)
+    end
+end

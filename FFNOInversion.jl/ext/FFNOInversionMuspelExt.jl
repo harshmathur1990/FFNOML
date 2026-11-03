@@ -33,7 +33,7 @@ end
 function FFNOInversion.build_muspel_line_model(atmosphere,hydrogen_populations,atom_file::AbstractString,line_index::Integer,
                                                 lower_level::Integer,upper_level::Integer;
                                                 voigt=(a_min=1f-4,a_max=1f1,a_n=20000,v_min=0f0,v_max=5f2,v_n=2500),
-                                                include_continuum=true)
+                                                include_continuum=true,neutral_hydrogen=nothing)
     atom=Muspel.read_atom(FFNOInversion.resolve_abo_broadening(atom_file)); line=atom.lines[line_index]
     matmos=_muspel_atmosphere(atmosphere,hydrogen_populations)
     names=("Al.yaml","C.yaml","Ca.yaml","Fe.yaml","H_6.yaml","He.yaml","KI.yaml","Mg.yaml","N.yaml","Na.yaml","NiI.yaml","O.yaml","S.yaml","Si.yaml")
@@ -42,17 +42,20 @@ function FFNOInversion.build_muspel_line_model(atmosphere,hydrogen_populations,a
     table=Muspel.create_voigt_itp(LinRange(Float32(voigt.a_min),Float32(voigt.a_max),voigt.a_n),
                                    LinRange(Float32(voigt.v_min),Float32(voigt.v_max),voigt.v_n))
     vitp=BoundedVoigt(table,Float32(voigt.a_min),Float32(voigt.a_max),Float32(voigt.v_max))
-    MuspelLineOpacityModel(line,continuum,vitp,hydrogen_populations,Int(lower_level),Int(upper_level),include_continuum)
+    MuspelLineOpacityModel(line,continuum,vitp,hydrogen_populations,Int(lower_level),Int(upper_level),include_continuum,neutral_hydrogen)
 end
 
 function FFNOInversion.add_opacity_emissivity!(chi,eta,model::MuspelLineOpacityModel,wavelength,atmosphere,x,y,populations)
     populations===nothing && throw(ArgumentError("Muspel FFNO line populations are required"))
     hp=model.hydrogen_populations; line=model.line
+    neutral=model.neutral_hydrogen===nothing ? nothing :
+        FFNOInversion.eos_neutral_hydrogen!(zeros(Float64,size(chi,1)),model.neutral_hydrogen,
+            Float64.(atmosphere.temperature[:,x,y]),Float64.(atmosphere.pgas[:,x,y]))
     @inbounds for k in axes(chi,1)
         temp=Float32(atmosphere.temperature[k,x,y]); ne=Float32(atmosphere.ne[k,x,y])
-        hi=Float32(sum(@view hp[k,x,y,1:5])); proton=Float32(hp[k,x,y,6])
-        alpha_c=Muspel.α_cont(model.continuum,temp,ne,hi,proton)
-        j_c=alpha_c*Muspel.blackbody_λ(line.λ0,temp)
+        hi=neutral===nothing ? Float32(sum(@view hp[k,x,y,1:5])) : Float32(neutral[k]); proton=Float32(hp[k,x,y,6])
+        alpha_c=model.include_continuum ? Muspel.α_cont(model.continuum,temp,ne,hi,proton) : zero(temp)
+        j_c=model.include_continuum ? alpha_c*Muspel.blackbody_λ(line.λ0,temp) : zero(temp)
         gamma=Muspel.calc_broadening(line.γ,temp,ne,hi)
         # thermal and microturbulent widths in quadrature; vturb = 0 is exactly the thermal width
         dwidth=hypot(Muspel.doppler_width(line.λ0,line.mass,temp),Float32(line.λ0*atmosphere.vturb[k,x,y]/299792458.0))
@@ -73,8 +76,8 @@ end
 
 function _cell_pairing(model,wavelength,chi_bar,eta_bar,temp,ne,vz,hi,proton,nu,nl,vturb)
     line=model.line
-    alpha_c=Muspel.α_cont(model.continuum,temp,ne,hi,proton)
-    j_c=alpha_c*Muspel.blackbody_λ(line.λ0,temp)
+    alpha_c=model.include_continuum ? Muspel.α_cont(model.continuum,temp,ne,hi,proton) : zero(temp)
+    j_c=model.include_continuum ? alpha_c*Muspel.blackbody_λ(line.λ0,temp) : zero(temp)
     gamma=Muspel.calc_broadening(line.γ,temp,ne,hi)
     dwidth=hypot(Muspel.doppler_width(line.λ0,line.mass,temp),line.λ0*vturb/299792458.0)
     gamma_energy=6.62607015e-34*299792458.0/(4pi*line.λ0*1e-9)
@@ -104,9 +107,12 @@ function FFNOInversion.add_opacity_emissivity_vjp!(atmosphere_bar,population_bar
     populations===nothing && throw(ArgumentError("Muspel VJP requires line populations"))
     hydrogen=model.hydrogen_populations; hydrogen_bar=population_lookup(hydrogen)
     line=model.line
+    state=model.neutral_hydrogen; column_T=Float64.(atmosphere.temperature[:,x,y]); column_P=Float64.(atmosphere.pgas[:,x,y])
+    neutral=state===nothing ? nothing : FFNOInversion.eos_neutral_hydrogen!(zeros(Float64,length(column_T)),state,column_T,column_P)
     for k in axes(chi_bar,1)
         temp=Float32(atmosphere.temperature[k,x,y]); ne=Float32(atmosphere.ne[k,x,y])
-        vz=Float32(FFNOInversion.los_velocity(atmosphere,k,x,y)); hi=Float32(sum(@view hydrogen[k,x,y,1:5]))
+        vz=Float32(FFNOInversion.los_velocity(atmosphere,k,x,y))
+        hi=neutral===nothing ? Float32(sum(@view hydrogen[k,x,y,1:5])) : Float32(neutral[k])
         proton=Float32(hydrogen[k,x,y,6]); nu=Float32(populations[k,x,y,model.upper_level])
         nl=Float32(populations[k,x,y,model.lower_level])
         cb=@view chi_bar[k,:]; eb=@view eta_bar[k,:]
@@ -126,7 +132,15 @@ function FFNOInversion.add_opacity_emissivity_vjp!(atmosphere_bar,population_bar
         atmosphere_bar.temperature[k,x,y]+=derivatives[1]
         atmosphere_bar.ne[k,x,y]+=derivatives[2]
         FFNOInversion.add_los_cotangent!(atmosphere_bar,atmosphere,k,x,y,derivatives[3])
-        @views hydrogen_bar[k,x,y,1:5].+=derivatives[4]
+        if state===nothing
+            @views hydrogen_bar[k,x,y,1:5].+=derivatives[4]
+        else
+            # n_H⁰ from the EOS at this level: its derivative in T and P joins theirs
+            eos_at(t,p)=FFNOInversion.eos_neutral_hydrogen!(zeros(1),state,[t],[p])[1]
+            dT=1e-3*column_T[k]; dP=1e-3*column_P[k]
+            atmosphere_bar.temperature[k,x,y]+=derivatives[4]*(eos_at(column_T[k]+dT,column_P[k])-eos_at(column_T[k]-dT,column_P[k]))/(2dT)
+            atmosphere_bar.pgas[k,x,y]+=derivatives[4]*(eos_at(column_T[k],column_P[k]+dP)-eos_at(column_T[k],column_P[k]-dP))/(2dP)
+        end
         hydrogen_bar[k,x,y,6]+=derivatives[5]
         population_bar[k,x,y,model.upper_level]+=derivatives[6]
         population_bar[k,x,y,model.lower_level]+=derivatives[7]

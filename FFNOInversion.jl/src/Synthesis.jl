@@ -64,7 +64,8 @@ end
 """Build and cache all line physics for configured mixed regions. This performs all file I/O. A region may combine
 FFNO and Kurucz LTE sources: their opacities and emissivities (one unit, see `source_planck`) add before a single
 formal solution, every region has one continuum whatever the order of the sources (Wittmann's with hydrogen from the EOS, or
-with `continuum_populations = :ffno` the region's first FFNO source's, with FFNO hydrogen), and Kurucz lines that are the region's FFNO transitions
+with `continuum_populations = :ffno` the region's first FFNO source's, with FFNO hydrogen; neutral H in line broadening
+follows the same choice), and Kurucz lines that are the region's FFNO transitions
 are dropped."""
 function build_synthesis_setup(config,atmosphere::Atmosphere3D,populations::AbstractDict,
                                eos::WittmannEOS;atom_files::AbstractDict)
@@ -89,7 +90,8 @@ function build_synthesis_setup(config,atmosphere::Atmosphere3D,populations::Abst
                 haskey(populations,species) || throw(ArgumentError("missing $species FFNO populations"))
                 haskey(atom_files,species) || throw(ArgumentError("missing $species atom_file"))
                 model=build_muspel_line_model(atmosphere,populations[:H],atom_files[species],index,lower,upper;
-                    include_continuum=position==ffno_continuum)
+                    include_continuum=position==ffno_continuum,
+                    neutral_hydrogen=mode===:eos ? WittmannKuruczState(eos) : nothing)
                 push!(contributors,OpacityContributor(model,populations[species]))
             elseif source.mode==:kurucz_lte
                 cache=load_kurucz_linelist(source.linelist_file)

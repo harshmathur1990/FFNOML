@@ -25,6 +25,7 @@ z_m = "z_m"                 # height axis [m], positive upward (either order; re
 x_m = "x_m"                 # horizontal axes [m], uniform and increasing (origin kept)
 y_m = "y_m"
 temperature = "temperature"
+# ne = "ne"                   # optional: electron density [m^-3] as the truth; P and rho then come from (T, ne) through the EOS
 # vturb = "vturb" # optional; defaults to zero if not configured
 vx = "vx"
 vy = "vy"

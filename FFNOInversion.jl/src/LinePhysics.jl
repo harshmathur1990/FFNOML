@@ -21,6 +21,7 @@ struct MuspelLineOpacityModel{L,C,V,H} <: AbstractLineOpacityModel
     lower_level::Int
     upper_level::Int
     include_continuum::Bool
+    neutral_hydrogen::Any     # Wittmann backend: neutral H in broadening from the EOS; nothing: from `hydrogen_populations`
 end
 struct MuspelFormalSolver <: AbstractFormalSolver end
 
@@ -293,6 +294,15 @@ function continuum_state(state::WittmannKuruczState,temp::AbstractVector,pgas::A
         state.backend,t,p,rho,xna,xne,partials,n)
     status==0 || throw(ErrorException("Wittmann continuum-state calculation failed"))
     ContinuumState(rho,xna,xne,partials)
+end
+
+"""Neutral hydrogen [m⁻³] from the EOS at (T, P), one value per element."""
+function eos_neutral_hydrogen!(nh,state::WittmannKuruczState,temp,pgas)
+    lower=similar(nh); fn=Libdl.dlsym(state.library_handle,:witt_kurucz_populations)
+    status=ccall(fn,Cint,(Ptr{Cvoid},Ptr{Cdouble},Ptr{Cdouble},Cint,Cint,Cdouble,Cdouble,Ptr{Cdouble},Ptr{Cdouble},Csize_t),
+        state.backend,temp,pgas,26,0,0.0,1.0,lower,nh,length(nh))
+    status==0 || throw(ErrorException("Wittmann neutral hydrogen calculation failed"))
+    nh
 end
 
 """Add the Wittmann continuum and lines of `levels` of column (x, y); row i of `χ` and `η` is `levels[i]`."""

@@ -114,6 +114,10 @@ function read_inversion_inputs(config::RunConfig{T}) where T
             T.(_zyx_to_zxy(_time_slice(_from_atmosphere_storage(
                 _read_dataset(file,config.atmosphere.vturb_dataset),storage_order),
                 config.time_index,3,"vturb")))
+        ne=config.atmosphere.ne_dataset===nothing ? nothing : T.(_zyx_to_zxy(_time_slice(_from_atmosphere_storage(
+            _read_dataset(file,config.atmosphere.ne_dataset),storage_order),config.time_index,3,"electron density")))
+        ne===nothing || (size(ne)==(nz,nx,ny) && all(>(0),ne)) || throw(ArgumentError(
+            "electron density $(config.atmosphere.ne_dataset) must have the atmosphere's shape and be positive"))
         config.vz_positive===:down && (vz=-vz)   # the file's vz sign; nothing else differs
         # canonical order is top first; reverse the axis and every 3-D field together
         bottom_first=kind===:z_m ? vertical[1]<vertical[end] : vertical[1]>vertical[end]
@@ -127,7 +131,7 @@ function read_inversion_inputs(config::RunConfig{T}) where T
         # a native height axis is also the atmosphere's (column-independent) z field
         zfield=kind===:z_m ? repeat(reshape(T.(vertical),:,1,1),1,nx,ny) : nothing
         atmosphere=Atmosphere3D(grid,flip(T.(temperature)),flip(T.(vx)),flip(T.(vy)),flip(T.(vz)),flip(vturb);
-            magnetic_field=magnetic,z=zfield)
+            magnetic_field=magnetic,z=zfield,ne=ne===nothing ? nothing : flip(ne))
         (atmosphere=atmosphere,)
     end
     config.mode===:forward && return InversionInputBundle(atmosphere_data.atmosphere,nothing)
