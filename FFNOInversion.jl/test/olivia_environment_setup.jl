@@ -25,7 +25,7 @@ end
     accelerator_environment=read(joinpath(scripts,"..","..","examples","inversion_run","olivia_runtime_environment.sh"),String)
     model_factory=read(joinpath(scripts,"..","..","examples","inversion_run","model_factory.jl"),String)
     @test occursin("module load \"\${FFNO_PREFLIGHT_STACK_MODULE:-NRIS/Login}\"",preflight)
-    @test occursin("julia-depot-ffno-login-1.12.2",preflight)
+    @test occursin("/cluster/projects/nn2834k/harshm/julia-depot",preflight)
     @test occursin("must be one absolute directory",preflight)
     @test occursin("Pkg.instantiate(; allow_autoprecomp=false)",preflight)
     @test first(findfirst("Pkg.instantiate",preflight)) <

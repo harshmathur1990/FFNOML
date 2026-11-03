@@ -31,7 +31,7 @@ source "${FFNO_RUNTIME_ENV_FILE:-${FFNOML_RUN_DIR}/olivia_runtime_environment.sh
 module --quiet reset
 source "${OLIVIA_ENV_SCRIPT:-/cluster/home/harshm/loadnvidiampi.sh}"
 export JULIA_PROJECT=${OLIVIA_JULIA_PROJECT:-${FFNOML_RUN_DIR}/julia-environment}
-export JULIA_DEPOT_PATH=${OLIVIA_JULIA_DEPOT:-${JULIA_DEPOT_PATH:-${HOME}/.julia}}
+export JULIA_DEPOT_PATH=${OLIVIA_JULIA_DEPOT:-${JULIA_DEPOT_PATH:-/cluster/projects/nn2834k/harshm/julia-depot}}
 "${OLIVIA_REPO_DIR}/scripts/initialize_olivia_environment.sh"
 
 config_file=${FFNO_FORWARD_CONFIG:-${FFNOML_RUN_DIR}/forward.toml}
