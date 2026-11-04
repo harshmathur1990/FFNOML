@@ -1,0 +1,675 @@
+\input{../preamble.tex}
+\begin{document}
+\doctitle{FFNOML: technical reference}{Implementation of the Python training and inference code, the GPU service and the FFNOInversion.jl synthesis and inversion package. Written from the source at commit \code{3cb9c14} on \code{main}, 4 November 2026. The physics is in \code{docs/physics/ffno-physics.pdf}.}
+
+\tableofcontents
+
+\section{System overview}
+
+\subsection{Two halves and one boundary}
+The repository has a Python half and a Julia half, and they meet at a checkpoint file and a socket.
+
+\begin{figure}[H]\centering
+\begin{tikzpicture}[node distance=5mm and 6mm]
+\node[box,fill=boxc,text width=23mm](m){MULTI3D output\\\code{atm3d}, \code{mesh}, populations};
+\node[box,right=of m,text width=22mm](b){\code{pipeline.py --build}\\patch HDF5 in \code{IO/}};
+\node[box,right=of b,text width=22mm](t){\code{--train}\\FSDP on $N$ GPUs};
+\node[box,fill=boxb,right=of t,text width=22mm](c){Checkpoint\\\code{3D_sim_train_H.pt}, \code{_CA.pt}};
+\node[box,below=8mm of c,text width=22mm](s){\code{ffno_fsdp_service.py}\\torchrun, GPU};
+\node[box,fill=boxd,left=of s,text width=30mm](j){\code{FFNOInversion.jl}\\MPI ranks $\times$ threads, CPU};
+\node[box,left=of j,text width=20mm](h){HSEMHS\\in process};
+\node[box,fill=boxc,below=of j,text width=30mm](o){\code{synthesis.h5}\\\code{forward_atmosphere.h5}};
+\draw[arr](m)--(b);\draw[arr](b)--(t);\draw[arr](t)--(c);\draw[arr](c)--(s);
+\draw[arr,<->](j)--node[above,font=\scriptsize]{TCP}node[below,font=\scriptsize]{Float32}(s);\draw[arr,<->](h)--(j);\draw[arr](j)--(o);
+\end{tikzpicture}
+\caption{Components and their boundaries. Only Julia rank 0 talks to the service.}
+\end{figure}
+
+\subsection{Repository map}
+\begin{longtable}{L{5.2cm}L{11.3cm}}
+\toprule Path&Role\\\midrule\endhead
+\code{config.py}&Every Python setting: simulations, splits, atoms, model and training parameters\\
+\code{pipeline.py}&Python command line: \code{--build}, \code{--train}, \code{--val}, \code{--test}, \code{--predict}, \code{--fsdppredict}, \code{--buildforpredict}, \code{--inspectfreqgate}\\
+\code{FFNONet.py}&Dataset building, training driver, validation test, tiled and distributed prediction\\
+\code{models/ffno_model.py}&The network\\
+\code{model_builder.py}&Construction, FSDP or DDP wrapping, optimizer, scheduler, loss\\
+\code{train_utils.py}&Training loop, checkpoints, resume, expansion\\
+\code{data/dataset.py}, \code{data_builder.py}&Lazy HDF5 datasets and loaders\\
+\code{loss/}&\code{nlte_composite_loss.py}, \code{weighted_mse_loss.py}, \code{gradient_loss.py}\\
+\code{normalize_utils.py}&Channel statistics\\
+\code{distributed_inference.py}&H-slab versions of FFT, GroupNorm and depthwise convolution\\
+\code{ffno_fsdp_service.py}, \code{ffno_fsdp_runtime.py}, \code{ffno_fsdp_diagnostics.py}, \code{ffno_model_factory.py}&Persistent GPU service\\
+\code{Forward.jl}&Older stand-alone synthesis from predicted HDF5 populations\\
+\code{errorplots.py}, \code{make_paper_plots.py}, \code{compare_population_models.py}&Evaluation and figures\\
+\code{scripts/}&Input builders (\code{build_input_ltau.py}, \code{build_input_logm.py}), Wittmann EOS (\code{witt_eos_cpp.cpp}, \code{witt.py}), UQ tools (\code{uq_*})\\
+\code{uq/}&UQ driver scripts; outputs are git-ignored\\
+\code{FFNOInversion.jl/}&Julia package: \code{src/}, \code{ext/}, \code{scripts/}, \code{test/}, \code{docs/}\\
+\code{examples/}&Run-directory templates: \code{inversion_run}, \code{python_run}, \code{runtime_test_run}\\
+\code{response_run/}, \code{figures/}&Experiments and plotting scripts; data and images are not tracked\\
+\code{tests/}&Python tests\\\bottomrule
+\end{longtable}
+
+\subsection{Conventions that differ between the halves}
+\begin{table}[H]\centering\small
+\begin{tabularx}{\linewidth}{lYY}
+\toprule
+&Python and network&Julia\\\midrule
+Tensor layout&\code{[B, C, D, H, W]}, with $D$ depth, $H=n_x$, $W=n_y$&atmosphere \code{(nz,nx,ny)}, populations \code{(nz,nx,ny,level)}, spectra \code{(wavelength,Stokes,x,y)}\\
+Vertical order&As in the source; MULTI3D grids top first&Always top first: index 1 is the top; $z$ decreases, $\log\tau$ and $\log m$ increase\\
+Temperature&$\log_{10}T$&$T$ [K]\\
+Velocity&km\,s$^{-1}$&m\,s$^{-1}$\\
+Height&Mm (\code{_normalize_z_scale}: $z/10^6$)&m\\
+$\nel$, $\rho$&$\log_{10}$, m$^{-3}$ and kg\,m$^{-3}$&linear in the atmosphere; $\log_{10}$ in the feature cube\\
+Output&normalized $\log_{10}n$&linear $n$ [m$^{-3}$]\\
+Horizontal spacing&m&m\\\bottomrule
+\end{tabularx}
+\caption{The service converts between the two inside the differentiated forward pass, so VJP cotangents stay with respect to the SI quantities Julia sent.}
+\end{table}
+
+\section{Python configuration}
+\code{config.py} is imported with \code{from config import *}. Nothing is passed on the command line except the mode, so a run is defined by this file and the environment.
+
+\begin{table}[H]\centering\small
+\begin{tabularx}{\linewidth}{lrY}
+\toprule
+Name&Value&Meaning\\\midrule
+\code{DATA_DIR}&\code{EAGLE7_DIR}&Root of \code{bifrost_data}; edit to \code{OLIVIA_DIR} on Olivia\\
+\code{RUN_DIR}&env \code{FFNOML_RUN_DIR}&Disposable files: \code{IO/}, checkpoints. Defaults to the repository\\
+\code{ACTIVE_ATOMS}&\code{["H"]}&env \code{FFNOML_ACTIVE_ATOMS}, comma separated\\
+\code{MODEL_DIR}&\code{training_FFNO3D_zscale_expand_lognlte}&Under \code{RUN_DIR}\\
+\code{PATCH}, \code{STRIDE}, \code{SCALES}&40, 20, 1--8&Patch extraction\\
+\code{NUM_EPOCHS}&400&env \code{FFNOML_NUM_EPOCHS}\\
+\code{BATCH_SIZE}&1&Required: depth varies between simulations\\
+\code{LEARNING_RATE}, \code{MIN_LEARNING_RATE}&$10^{-3}$, $10^{-8}$&Cosine schedule endpoints\\
+\code{WEIGHT_DECAY}, \code{GRAD_CLIP}&$3\times10^{-4}$, 1.0&AdamW; gradient norm clip\\
+\code{PATIENCE}, \code{MIN_DELTA}&50, $5\times10^{-5}$&Early stopping\\
+\code{TRAINSELECT}, \code{TRAINSELECT_SEED}&1, 12345&Fraction of patches per epoch\\
+\code{MULTI_GPU}, \code{DEVICE}&True, \code{cuda}&\\
+\code{TILED}, \code{TENSOR_SCALE}&True, 1.0&Prediction options\\
+\code{EXPAND_FROM_CHECKPOINT}&\code{training_FFNO3D_zscale_lognlte/...}&Source for \code{--expand}\\
+\code{ZERO_INIT_NEW_BLOCKS}, \code{FORCE_EXPAND_VALIDATION_BASELINE}&True, True&Expansion behaviour\\\bottomrule
+\end{tabularx}
+\caption{Main settings in \code{config.py}.}
+\end{table}
+
+\code{ATOM_CONFIG} gives, per species, the MULTI3D output subdirectory, line level pairs and wavelengths [\AA], level energies \code{chi} [J] for levels above the ground and the level count. It is only needed for the loss's source-function term.
+
+\code{MODEL_CONFIG} is \code{in_channels=6, out_channels=6, width=48, n_layers=4, dropout=0, spec_dropout=vertical_dropout=0.08} in all four layers, \code{hidden_spectral=hidden_vertical=128, checkpoint_blocks=True}. \code{MODEL_CONFIG} must match the checkpoint: \code{ffno_model_factory.create_ffno3d} builds from it, and the service loads with \code{strict=True}.
+
+\section{Data}
+
+\subsection{Reading MULTI3D}
+\code{pipeline.load_multi3d_blocks} uses \code{helita.sim.multi3d}. Units are converted on read:
+
+\begin{lstlisting}
+lte = m3d.atom.nstar * 1e6;  nlte = m3d.atom.n * 1e6   # cm-3 -> m-3
+rho = atmos.rho * 1e3;       ne = atmos.ne * 1e6       # g cm-3 -> kg m-3, cm-3 -> m-3
+vx, vy, vz = atmos.v*                                  # km/s, unchanged
+z_scale = m3d.geometry.z * 1e-2                        # cm -> m
+dx, dy = median spacing of mesh x, y, cm -> m
+\end{lstlisting}
+
+\code{read_mesh} parses the whitespace-separated mesh file (\code{nx, x..., ny, y..., nz, z...}). Array layout from helita is \code{[nx, ny, nz, nlev]}.
+
+\subsection{Features and targets}
+\code{_make_inputs_ch_first} stacks $(\log_{10}T,v_x,v_y,v_z,\log_{10}\nel,\log_{10}\rho)$ to \code{[Cin, nz, nx, ny]}. \code{_make_targets_ch_first} discards LTE and returns $\log_{10}\max(n,10^{-30})$. \code{_make_log_lte_ch_first} keeps $\log_{10}n^*$, unnormalized, solely for the source term of the loss.
+
+\subsection{Dataset construction: \texttt{build\_dataset\_ffno}}
+Two passes over all snapshots of the split:
+\begin{enumerate}
+\item Accumulate global sums in \code{float64} and compute per-channel means and standard deviations. For the validation set, \code{stat_file} reuses the training statistics.
+\item For each snapshot: normalize, then for each scale $s$ apply \code{gaussian_filter} with $\sigma=(0,0,s/2,s/2)$ and subsample by $s$, extract patches, and multiply \code{dx}, \code{dy} by $s$. $z$ is subsampled but not filtered, and log LTE is filtered and subsampled. Scales whose grid is smaller than the patch are skipped.
+\end{enumerate}
+Each simulation forms its own HDF5 group because depth differs. For a 256-pixel box: 121, 25, 9, 4, 1, 1 patches for $s=1,\dots,6$, 161 in total, or 805 for five simulations. Each file is about 20\,GB per species.
+
+\begin{table}[H]\centering\small
+\begin{tabularx}{\linewidth}{lY}
+\toprule
+Item&Content\\\midrule
+\code{train_1/inputs}, \code{targets}&\code{[N, 6, D, 40, 40]}, normalized float32\\
+\code{train_1/log_lte_populations}&\code{[N, 6, D, 40, 40]}, unnormalized\\
+\code{train_1/z_scale}&\code{[N, D, 40, 40]}, Mm, unnormalized\\
+\code{train_1/dx}, \code{dy}, \code{scale}, \code{weights}&per patch\\
+\code{mean_X}, \code{std_X}, \code{mean_Y}, \code{std_Y}&root datasets\\
+\code{patch_dataset_names}&group list\\
+File attributes&\code{Cin}, \code{Cout}, \code{N}, \code{patch}, \code{stride}, \code{scales}, \code{normalized}, \code{n_patch_datasets}, \code{target_representation = log10_nlte_population_m-3}, \code{lte_representation = log10_lte_population_m-3}\\\bottomrule
+\end{tabularx}
+\caption{Patch file schema. The name is \code{3D_sim_<split>_<sims>_atoms<A>_target-lognlte_patch40_stride20.hdf5}.}
+\end{table}
+
+\code{weights} are the inverse scale count, normalized to mean 1. See Section~\ref{sec:issues} for why they currently have no effect.
+
+\subsection{Loaders}
+\code{H5PatchDataset} opens the file lazily in each worker and returns \code{(x, y, z, dx, dy, scale, weight, log_lte)}. It reads both flat legacy and grouped layouts. With \code{train_select < 1} it selects, per weight class, a fraction of patches and reassigns weights so that each class total is conserved; \code{resample_train_dataset} redraws at each epoch with seed derived from the epoch. \code{DataLoaderBuilder} rejects \code{batch_size != 1} for variable depth, uses \code{DistributedSampler} when distributed, and turns off persistent workers for dynamic lengths.
+
+\code{build_solving_set_ffno} writes an unnormalized single cube for prediction (\code{_save_hdf5_cube}). Normalization for prediction is taken from the checkpoint.
+
+\section{The network}
+
+\subsection{Forward pass}
+\code{FFNO3D.forward(x, z_scale, dx, dy)}, with $x$ \code{[B,6,D,H,W]} normalized and $z$ \code{[B,D,H,W]} in Mm:
+\begin{lstlisting}
+x = GELU(GroupNorm(Conv3d(6 -> 48, kernel 1, no bias)(x)))    # lift
+for block in 4 x FFNOBlock3dBalanced: x = block(x, z, dx, dy)
+y = Conv3d(96 -> 6, kernel 1)(GELU(Conv3d(48 -> 96, kernel 1, no bias)(x)))    # head
+\end{lstlisting}
+
+\code{_gn(c)} is \code{GroupNorm} with the largest group count $\le 8$ dividing $c$. Over 48 channels this is 8 groups. GroupNorm statistics cover the whole input volume, \emph{so the normalization itself makes every output depend on the whole box and its size}.
+
+\subsection{Block}
+\begin{lstlisting}
+spec = spec_drop(GELU(norm_spec(SpectralConv2dFull(x, dx, dy))))
+vert = vert_drop(GELU(norm_vert(BalancedVerticalPhysicsStack(x, z))))
+g_s, g_v = chunk(branch_gate(cat[x, spec, vert]))              # sigmoid, 2*48 channels
+s, v = spec*g_s, vert*g_v
+fused = GELU(norm_fuse(fuse(cat[s, v]) + 0.5*(s + v)))
+x1 = x + res_fused * fused                                     # init 1.0
+x2 = x1 + res_pw * norm_pw(pw(x1))                             # init 0.15
+out = x2 + res_mlp * tanh(norm_mlp(mlp(x2)))                   # init 0.15
+\end{lstlisting}
+\code{branch_gate}: Conv3d($3w\to w$, 1), GELU, Conv3d($w\to2w$, 1, bias), Sigmoid. \code{fuse}: Conv3d($2w\to2w$, 1), GELU, depthwise Conv3d($2w$, kernel 3, padding 1), GELU, Conv3d($2w\to w$, 1). \code{pw} and \code{mlp} are two-layer kernel-1 convolutions with expansion 2. Both are pointwise. With \code{collect_stats} or a \code{branch_mask} the block returns diagnostics or supports ablation.
+
+\subsection{Spectral branch: \texttt{SpectralConv2dFull}}
+\begin{lstlisting}
+x = x * input_gate(x)                          # pointwise sigmoid gate
+X = rfft2(x, dim=(-2,-1))                      # all modes kept, on every depth plane
+ky = fftfreq(H, d=dy) * 1e5;  kx = rfftfreq(W, d=dx) * 1e5
+g = freq_mlp([kx, ky, sqrt(kx^2+ky^2+1e-12), sign(ky)])   # 4 -> 128 -> 128 -> 2, complex gate
+Y_o = sum_i X_i * (W_real + i W_imag)_io * (g_r + i g_i)  # 48 x 48 complex matrix, shared over all k and depths
+y = post(irfft2(Y, s=(H, W)))                  # Conv3d 48 -> 96 -> 48, kernel 1
+\end{lstlisting}
+Frequencies are in m$^{-1}$, scaled by $10^5$, so the map applies at any grid size. No modes are truncated. Note that the same 48$\times$48 matrix is modulated by one scalar gate per $\mathbf k$: every channel pair sees the same $\mathbf k$ dependence.
+
+\subsection{Vertical branch: \texttt{BalancedVerticalPhysicsStack}}
+Columns are reshaped to \code{[B*chunk, C, D]} and processed in chunks of 4 columns to bound memory.
+\begin{lstlisting}
+z_feat = cat[z, (z-zmin)/span, |dz|/mean|dz|, span]   # with span clamped; dz central differences
+y = in_proj(x) + z_proj(z_feat)                       # both to 128 channels
+y = LiteMultiScaleVertical(kernels 3,7,15)(y)
+y = LiteVerticalResidualBlock(k=5,d=1)(y); (k=5,d=2); (k=5,d=4); (k=7,d=1)
+y = y * depth_gate(y)
+y = out_gn(out_proj(y))                               # back to 48 channels
+\end{lstlisting}
+All convolutions are depthwise-separable 1D with zero padding at the top and bottom, with hidden multiplier 2. The filters act on grid index, not on physical $z$.
+
+\subsection{Parameter counts}
+\begin{table}[H]\centering\small
+\begin{tabular}{lrlr}
+\toprule
+Component (one block)&Parameters&Component (one block)&Parameters\\\midrule
+Spectral branch&35\,842&\code{branch_gate}&11\,616\\
+Vertical branch&697\,056&\code{fuse}&16\,416\\
+\code{pw}&9\,216&\code{mlp}&9\,216\\\midrule
+\multicolumn{3}{l}{Whole model (4 blocks, lift, head)}&\textbf{3\,124\,954}\\\bottomrule
+\end{tabular}
+\caption{Counted by instantiating \code{FFNO3D(**MODEL_CONFIG)}. The vertical branch holds most of the weights.}
+\end{table}
+
+\subsection{Activation checkpointing}
+With \code{checkpoint_blocks=True}, lift, head and each block use non-reentrant \code{torch.utils.checkpoint} when gradients are enabled and stats are not collected. The switch is gradient mode, not train or eval mode, so inversion VJPs in eval mode also checkpoint. When the service wraps blocks itself, \code{external_block_checkpointing} disables the inner call for blocks.
+
+\section{Training}
+
+\subsection{Launch}
+\code{train_gpu.sh} requests 8 nodes with 4 GPUs each on the Olivia \code{accel} partition, \code{mem-per-gpu=40G}, and runs torchrun. \code{examples/python_run} is the run directory template.
+
+\subsection{Construction}
+\code{ModelBuilder.build}: \code{init_process_group("nccl")}; \code{FFNO3D} on the local device; FSDP with \code{transformer_auto_wrap_policy} on \code{FFNOBlock3dBalanced}, so each block is one sharded unit; \code{AdamW}; \code{CosineAnnealingLR(T_max=NUM_EPOCHS, eta_min)}; \code{NLTECompositeLoss} over \code{WeightedMSE_L1}.
+
+With env \code{FFNOML_TRAIN_ONLY=proj1,proj2}, other top-level modules are frozen and DDP replaces FSDP, because FSDP makes every wrapped unit's output require gradients, so frozen blocks would still be recomputed. This is the head-only fine-tuning of the UQ work.
+
+\subsection{Loss as actually configured}
+\code{NLTECompositeLoss} takes \code{lam=0, lam_S=0, lam_g=0} by default and \code{ModelBuilder} passes none of them:
+\begin{equation}
+L=\underbrace{\tfrac12\langle(1+|y|)(\hat y-y)^2\rangle+\tfrac12\langle|\hat y-y|\rangle}_{\texttt{WeightedMSE\_L1}}+0\cdot L_S+0\cdot L_g .
+\end{equation}
+The source term is still evaluated on every step for logging. It compares $x_{lu}$ between prediction and truth, where $x_{lu}$ is built from de-normalized $\log n-\log n^*$ and $\Delta E/kT$, $T$ being de-normalized from channel 0. It therefore costs compute without influencing the weights. \code{logb} in that file is a historical name for $\log_{10}n$.
+
+\subsection{The loop}
+\code{train_one_epoch}: forward over the patch, then flatten to columns \code{(B*Ny*Nx, L, Nz)} for the loss, backward, clip (\code{model.clip_grad_norm_} under FSDP), step. After each epoch: scheduler step, validation, checkpoints. Early stopping: an improvement needs \code{best_val - val > MIN_DELTA}, and training stops when \code{epochs_no_improve > PATIENCE}. There is no AMP.
+
+\subsection{Checkpoints}
+\code{save_checkpoint_fsdp} gathers the full state with \code{get_model_state_dict(full_state_dict=True, cpu_offload=True)}. All ranks call it; rank 0 writes.
+
+\begin{table}[H]\centering\small
+\begin{tabularx}{\linewidth}{lY}
+\toprule
+File&Content\\\midrule
+\code{MODEL_FILE}, e.g.\ \code{3D_sim_train_H.pt}&Best validation: \code{epoch}, \code{model_state}, \code{opt_state}, \code{train_loss}, \code{val_loss}, \code{train_components}, \code{val_components}, \code{normalization_stats}, \code{io_metadata}\\
+Resume file (\code{get_resume_checkpoint_path})&Latest state, with scheduler and \code{completed_epochs}, \code{current_lr}, \code{training_stats}\\\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{table}[H]\centering\small
+\begin{tabular}{lrrr}
+\toprule
+Production checkpoint&Epoch&Train loss&Validation loss\\\midrule
+\code{3D_sim_train_H.pt}&171&$4.32\times10^{-3}$&$5.88\times10^{-3}$\\
+\code{3D_sim_train_CA.pt}&252&$3.59\times10^{-3}$&$7.31\times10^{-3}$\\\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Resume and expansion}
+\begin{itemize}
+\item \code{--train --resume}: from the resume file, with optimizer and scheduler.
+\item \code{--train --resume --bestpath}: from the best file with fresh optimizer state, with \code{RESUME_LAST_LR}, \code{RESUME_LAST_EPOCH}, and a validation baseline first.
+\item \code{--train --expand}: \code{expand_model_from_checkpoint} copies matching tensors, zero-pads \code{vertical.z_proj.0.weight} when it grew from 1 to 4 geometry channels, and sets \code{res_*} of new blocks to zero so the expanded model starts out equal to the old one. \code{MODEL_FILE} must be a new path.
+\item \code{LOAD_EARLIER_VAL=False} discards the earlier best validation value.
+\item \code{--val}: one validation pass, printing loss terms.
+\end{itemize}
+
+\code{load_checkpoint} tries \code{weights_only=True} with a NumPy allowlist, then falls back to a full unpickle with a warning. Only use trusted files.
+
+\section{Inference without the service}
+
+\subsection{Tiled: \texttt{--predict}}
+\code{_predict_tiled}: tiles of side \code{patch} with stride \code{stride}, blended with a 2D Hann window clamped at $10^{-3}$. NaN and Inf in a tile are zeroed with a warning. This path is memory-light but is a different operator from the full domain, because of GroupNorm statistics and the zero-padded convolution: 40$^2$ tiles differ from the full domain by a median of 0.064\,dex, 192$^2$ tiles by 0.003--0.009\,dex with p99 0.03--0.05\,dex.
+
+\subsection{Distributed full domain: \texttt{--fsdppredict}}
+\code{ffno_predict_populations_distributed_full} splits $H$ into slabs by \code{partition_range}, and \code{enable_distributed_inference} replaces modules in place, with weights shared:
+
+\begin{table}[H]\centering\small
+\begin{tabularx}{\linewidth}{lY}
+\toprule
+Module&Distributed behaviour\\\midrule
+\code{SpectralConv2dFull}&\code{rfft} over $W$; all-to-all so that each rank owns a slab of $W$-frequencies with all of $H$; \code{fft} over $H$; the spectral multiply on local frequencies; reverse transforms and all-to-all. Needs $\lfloor n_y/2\rfloor+1\ge$ world size.\\
+\code{nn.GroupNorm}&\code{DistributedGroupNorm}: all-reduce of the sum, sum of squares and count, reproducing whole-volume statistics. Differentiable.\\
+Depthwise \code{Conv3d}, kernel 3&\code{DistributedHDepthwiseConv3d}: one-cell halo exchange in $H$ (a custom autograd function with a reversed exchange as its VJP), with zeros at the outer edges, matching single-GPU zero padding.\\
+\code{BalancedVerticalPhysicsStack}&Local columns, wrapped for progress reports.\\
+Fusion at inference&\code{chunked_fuse_branches}: over depth in chunks of 32 with a one-cell depth halo, because the concatenations exceed T4 memory at $384^3$.\\\bottomrule
+\end{tabularx}
+\end{table}
+
+\code{_linear_collective} applies a collective to the primal and tangent separately, which makes these layers usable in forward-mode AD as well.
+
+\section{The GPU service}
+
+\subsection{Purpose}
+A checkpoint load and FSDP setup per evaluation would dominate the cost of an inversion. One torchrun job therefore keeps H and Ca loaded for the entire run and answers requests, and \code{PROTOCOL_VERSION} is 2.
+
+\subsection{Startup}
+\begin{enumerate}
+\item Rank 0 of the Julia job writes a TOML manifest, \code{ffno-fsdp-service-<pid>.toml}, with the models, port and a token (\code{<pid>-<time_ns>}). \textbf{The manifest holds the token: do not commit these files.}
+\item It starts the launcher: \code{scripts/ffno_fsdp_service.sh} (Slurm, nested \code{srun --overlap}, static rendezvous, node rank from hostname order) or \code{ffno_fsdp_service_local.sh} (one host, \code{--standalone}, \code{FFNO_FSDP_NPROC}, used on eagle7).
+\item Each rank initializes NCCL, plus a CPU Gloo group for command broadcast, so idle GPU ranks block in a socket rather than spin. Only torchrun rank 0 reads each checkpoint. Other ranks receive states by FSDP's \code{sync_module_states} broadcast.
+\item The composition is \code{FSDP(checkpoint(block))}, with \code{FULL_SHARD}, \code{use_orig_params}, \code{limit_all_gathers}. Wrapping the other way round is unsupported.
+\item Rank 0 listens and accepts one client. Handshake: \code{HELLO <token>}, reply \code{READY 2 <world> <models> FULL_SHARD_H_SLAB}.
+\end{enumerate}
+
+\subsection{Wire protocol}
+Commands are one text line; arrays are raw little-endian Float32 in Fortran order.
+\begin{table}[H]\centering\small
+\begin{tabularx}{\linewidth}{lYY}
+\toprule
+Command&Client sends after the line&Service replies\\\midrule
+\code{PREDICT name nz nx ny levels dx dy}&features \code{(6,nz,nx,ny)}, z \code{(nz,nx,ny)}&\code{OK PREDICT ...}, populations \code{(nz,nx,ny,levels)}\\
+\code{VJP name nz nx ny levels dx dy}&features, z, cotangent \code{(nz,nx,ny,levels)}&\code{OK VJP ...}, feature cotangent, z cotangent\\
+\code{JVP name nz nx ny levels dx dy}&features, z, tangent \code{(6,nz,nx,ny)}&\code{OK JVP ...}, population tangent\\
+\code{SHUTDOWN}&&\code{BYE}\\\bottomrule
+\end{tabularx}
+\end{table}
+Features are $(T,v_x,v_y,v_z,\log_{10}\nel,\log_{10}\rho)$ in SI. Rank 0 scatters along $n_x$ using matched NCCL P2P. Constraint: $n_x\ge$ world size.
+
+\subsection{Evaluation}
+\begin{lstlisting}
+features, z_model = cat[log10(x[:,0:1]), x[:,1:4]/1e3, x[:,4:6]], z/1e6
+pred = model((features - mean_x)/std_x, z_model, dx, dy)
+populations = 10 ** (pred*std_y + mean_y)         # linear m^-3
+\end{lstlisting}
+Normalization comes from the checkpoint. The service checks inputs for finiteness and positive temperature, and outputs for positivity.
+
+\begin{itemize}
+\item \textbf{VJP.} \code{torch.autograd.backward} with the cotangent, then read leaf gradients. \code{autograd.grad} restricted to inputs is deliberately not used, because it can prune FSDP's parameter accumulators, skip its post-backward reshard hooks and corrupt later calls.
+\item \textbf{JVP.} Dual tensors under \code{no_grad} with activation checkpointing bypassed (\code{_without_activation_checkpointing}). Heights stay fixed.
+\end{itemize}
+
+\subsection{Diagnostics}
+\begin{table}[H]\centering\small
+\begin{tabularx}{\linewidth}{lY}
+\toprule
+Variable&Effect\\\midrule
+\code{FFNO_FSDP_DIAGNOSTICS=1,2}&Per-rank logs: versions, libraries, input statistics, memory, block progress. 2 adds every submodule. Slow.\\
+\code{FFNO_FSDP_CORE_DUMPS=1}&Raises the core limit and gives each rank its own directory\\
+\code{FFNO_FSDP_TRACEBACK_INTERVAL}&Periodic stack dumps. Leave unset. In job 2622023 the watchdog walking frames without the GIL caused SIGSEGV in every rank (Python 3.12.3, torch dynamo eval-frame shim)\\
+\code{FFNO_POPULATION_MODEL_ORDER=H,CA}&Order of species requests\\\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{FFNOInversion.jl: structure}
+
+\subsection{Dependencies}
+Julia 1.12 (manifest resolved with 1.12.3). \code{Project.toml} pins by Git revision:
+HSEMHS \code{29f2310} (\code{harshmathur1990/1DHSE3dMHS}, subdirectory \code{HSEMHS}) and Muspel \code{01ec68d} (\code{harshmathur1990/Muspel.jl}). Muspel is a weak dependency, loaded through the extension \code{ext/FFNOInversionMuspelExt.jl}. The local Muspel checkout must match on Olivia.
+
+\subsection{Source files}
+\begin{longtable}{L{4cm}L{12.5cm}}
+\toprule File&Contents\\\midrule\endhead
+\code{Types.jl}&\code{VerticalAxis}, \code{ViewGeometry}, \code{Grid3D}, \code{Atmosphere3D}, \code{MagneticField3D}, \code{SpectralCube}\\
+\code{ViewAngle.jl}&\code{los_velocity}, \code{path_factor}, \code{ShearPlan}, \code{shear_levels!} and transpose, view attributes and checks\\
+\code{Parallel.jl}&\code{ParallelContext}, \code{Tile2D}, scatter and gather, \code{exchange_halos}, \code{RootGPUCoordinator}\\
+\code{Diagnostics.jl}&GPU-control resource logs and failure records\\
+\code{Nodes.jl}&\code{NodeField}, \code{expand_nodes}\\
+\code{EOS.jl}&\code{WittmannEOS} adapter, \code{IdealGasEOS} test fixture\\
+\code{ContinuumOpacity.jl}&Wittmann continuum; used for the test comparison and \code{KuruczLTEModel(include_continuum=true)}\\
+\code{PopulationModels.jl}&Interface, \code{population_features}, recorded and mock models\\
+\code{PopulationMesh.jl}&\code{MeshPopulationModel}, corona, deep extension, VJP, JVP\\
+\code{LinePhysics.jl}, \code{Barklem.jl}&Line models, Kurucz parser, damping recipes; ABO tables in \code{data/barklem}\\
+\code{Synthesis.jl}&\code{build_synthesis_setup}, formal solver, unit conversion\\
+\code{Observations.jl}&\code{GaussianPSFObservation}, weights\\
+\code{Regularization.jl}&Seven-slot vertical and horizontal penalties\\
+\code{DistributedForward.jl}&\code{HybridForwardModel}, \code{forward!}, footprint state, distributed $\chi^2$\\
+\code{Equilibrium.jl}&\code{prepare_equilibrium}, \code{reconstruct_equilibrium!}, given-atmosphere backend\\
+\code{FSDPService.jl}&Service client and launcher\\
+\code{Solvers.jl}&Control maps, \code{DistributedInversionProblem}, \code{evaluate_objective!}, pattern-search prototype\\
+\code{Gradients.jl}&Finite-difference oracle, Taylor and dot-product checks\\
+\code{ProductionGradients.jl}&\code{HybridAdjointObjectiveGradient} and all VJPs\\
+\code{ScalableSolvers.jl}&\code{lbfgs_invert!}\\
+\code{IO.jl}&TOML parsing, \code{load_config}, dry-run summary, checkpoints\\
+\code{Execution.jl}&HDF5 input and output, \code{run_inversion!}, \code{run_inversion_files!}\\\bottomrule
+\end{longtable}
+
+\subsection{Run flow}
+\begin{lstlisting}
+scripts/invert.jl CONFIG.toml MODEL_FACTORY.jl
+  run_inversion_files!(config_path, factory)
+    load_config                      # validates everything it can
+    initialize_parallel              # MPI THREAD_FUNNELED, BLAS and FFTW to 1 thread
+    read_inversion_inputs on root    # axes reversed once to top first
+    distribute_atmosphere            # x slabs under HSEMHS
+    factory.build(config, distributed, workspace, context)
+      WittmannEOS -> prepare_equilibrium -> launch_fsdp_population_models
+      reconstruct_equilibrium! -> predict populations -> footprint_state!
+      build_synthesis_setup -> HybridForwardModel
+    forward: forward!(...) once          inversion: lbfgs_invert!(...)
+    gather on root, write_inversion_outputs
+    close_model_resources!
+\end{lstlisting}
+
+\code{forward!} runs on every rank in this order: equilibrium; populations; footprint state when needed; synthesis; observation; each stage printing \code{FORWARD stage=...}. The first objective evaluation reuses the equilibrium and populations prepared by the factory (\code{reuse_prepared}).
+
+\subsection{The factory}
+A file defining \code{FFNO_INVERSION_FACTORY::InversionModelFactory}, or returning one when included, keeps deployment details out of the science inputs. \code{examples/inversion_run/model_factory.jl} is the template. On error it calls \code{abort_on_rank_failure}, since otherwise collective cleanup would block on the ranks that failed. It also returns asset lists for the preflight. It loads H and Ca even when only one is used.
+
+\section{Run contract and configuration}
+
+\subsection{Inputs}
+\begin{table}[H]\centering\small
+\begin{tabularx}{\linewidth}{lllY}
+\toprule
+Dataset&Shape&Units&Notes\\\midrule
+\code{logtau_500}, or \code{log10m}, or \code{z_m}&\code{(z)}&dex; dex; m&Native axis. \code{log10m}: kg\,m$^{-2}$, or g\,cm$^{-2}$ with attribute \code{units}\\
+\code{x_m}, \code{y_m}&\code{(x)}, \code{(y)}&m&Required on $z$, uniform\\
+\code{temperature}&\code{(time,z,y,x)} or \code{(z,y,x)}&K&\\
+\code{vx}, \code{vy}, \code{vz}&as $T$&m\,s$^{-1}$&\code{[atmosphere] vz_positive}\\
+\code{vturb}&as $T$&m\,s$^{-1}$&Optional\\
+\code{Bx}, \code{By}, \code{Bz}&as $T$&T&Optional, all or none\\
+\code{ne}&as $T$&m$^{-3}$&Forward only\\
+\code{hydrogen_populations}&\code{(level,z,y,x)}, optional time&m$^{-3}$&Forward only, with \code{ne}; last level is protons\\\bottomrule
+\end{tabularx}
+\caption{Initial atmosphere. Names are mapped in \code{[atmosphere.datasets]}. \code{storage_order="python"} reverses row-major dimensions.}
+\end{table}
+
+Observations: \code{intensity} and \code{sigma} as \code{(time,Stokes,wavelength,y,x)}, \code{wavelength_weights} as \code{(wavelength,Stokes)}, \code{spatial_weights} as \code{(y,x)}. They are in \code{[outputs] intensity_units} divided by the region \code{normalization}. There is no interpolation: the grids must match.
+
+\subsection{Outputs}
+Synthesis: \code{intensity}, \code{normalization}, \code{wavelength_m}, objective terms when inverting, and attributes \code{execution_mode}, \code{axis_order}, \code{wavelength_frame}, \code{provenance_toml}, \code{view_*}. Atmosphere: the native axis, \code{x_m}, \code{y_m}, all fields with a leading time axis, \code{populations/<species>} as \code{(level,z,y,x)}, and attributes \code{vertical_coordinate}, \code{vertical_unit}, \code{vertical_order}, \code{native_axis_dataset}, \code{solver_termination}. Files are overwritten.
+
+\subsection{Configuration reference}
+\begin{longtable}{L{5.3cm}L{11.2cm}}
+\toprule Key&Meaning and default\\\midrule\endhead
+\code{mode}&\code{inversion} (default) or \code{forward}. \code{solver.max_iterations = 0} also selects forward\\
+\code{[inputs]}&\code{initial_atmosphere_file}, \code{observation_file}, \code{time_index} (1-based)\\
+\code{[outputs]}&\code{synthesis_file}, \code{atmosphere_file}; \code{intensity_units = si | cgs} (si); \code{wavelength_frame = air | vacuum} (air), a label only\\
+\code{[atmosphere]}&\code{vertical_coordinate = log10tau500 | log10m | z}; \code{storage_order}; \code{vz_positive = up | down}; \code{[atmosphere.datasets]}\\
+\code{[equilibrium]}&\code{backend = HSEMHS}; \code{model = column_hse} (\code{mhs} rejected); \code{gravity_m_s2} (274); \code{eos_table_file}; \code{on_nonconvergence}. Optional when \code{ne} and \code{hydrogen_populations} are given\\
+\code{[equilibrium.column_ltau]}, \code{[equilibrium.column_logm]}&\code{align = ptot | none}\\
+\code{[equilibrium.column_z]}&\code{anchor = bottom | top | height}, \code{P_ref_pa} (required), \code{z_ref_m}, \code{tau_top = exp_tail | half_cell | zero}, \code{n_sub}, \code{adapt}, \code{rk_tol}, \code{n_sub_max}, \code{H_max_m}, \code{mu}\\
+\code{[grid]}&\code{dx_m}, \code{dy_m}\\
+\code{[[regions]]}&\code{start_angstrom}, \code{step_angstrom}, \code{count} (always air), \code{normalization}, \code{psf_type = none | fpi | file}, \code{psf_file}\\
+\code{[[regions.sources]]}&\code{mode = ffno} with \code{species = H | CA}, \code{line = halpha | ca_ii_8542}; or \code{mode = kurucz_lte} with \code{linelist_file}\\
+\code{[population.mesh]}&\code{enabled} (true except on $z$), \code{bottom_m} ($-10^6$), \code{top_m} ($1.4\times10^7$), \code{spacing_m} ($2\times10^4$), \code{uniform_top_m} ($4.5\times10^6$), \code{stretch} (1.01), \code{max_spacing_m} ($10^5$), \code{nabla} (0.13), \code{corona_temperature_k} ($10^6$ from a config), \code{corona_transition_m} ($2.4\times10^5$)\\
+\code{[view]}&\code{mu} (1), \code{azimuth_deg} (0), \code{geometry = plane_parallel | inclined}\\
+\code{[physics]}&\code{redistribution = non_prd}; \code{line_center = reference | atom}; \code{continuum_populations} only \code{eos}\\
+\code{[observation]}&\code{stokes = ["I"]}; \code{[observation.datasets]}; \code{[observation.gaussian_psf]} \code{spatial_fwhm_x_m}, \code{spatial_fwhm_y_m}, \code{spectral_fwhm_nm}. It applies to forward runs too\\
+\code{[regularization]}&\code{horizontal_order}; \code{[regularization.vertical]} \code{types}, \code{regularize}, \code{weights}, \code{length_scale_dex}, \code{length_scale_m}; \code{[regularization.horizontal]}; \code{[regularization.scales]}\\
+\code{[[inversion.controls]]}&\code{variable}, \code{log_tau_nodes} / \code{log_m_nodes} / \code{z_nodes_m}, \code{control_nx}, \code{control_ny}, \code{lower}, \code{upper}, \code{scale}\\
+\code{[solver]}&\code{method = lbfgs}: \code{max_iterations} (50), \code{history_length} (10), \code{gradient_tolerance} ($10^{-6}$), \code{step_tolerance} ($10^{-10}$), \code{objective_tolerance} ($10^{-12}$), \code{initial_step} (1), \code{backtracking_factor} (0.5), \code{armijo_coefficient} ($10^{-4}$), \code{maximum_line_search_trials} (20), \code{maximum_forward_evaluations}, \code{curvature_tolerance} ($10^{-10}$), \code{checkpoint_every} (1), \code{checkpoint_path}. \code{method = prototype_pattern_search} for validation\\
+\code{[parallel]}&\code{enabled}, \code{decomposition = x_slabs | cartesian_2d}, \code{threads_per_rank}, \code{min_columns_per_rank}, \code{gpu_launcher_rank}, \code{gpu_connect_timeout_seconds}, \code{gpu_status_timeout_seconds}, \code{gpu_diagnostic_interval_seconds}, \code{gpu_diagnostics_directory}\\\bottomrule
+\end{longtable}
+Unknown keys in \code{[equilibrium]} and \code{[population]} are errors. \code{scripts/dry_run.jl} prints the parsed configuration.
+
+\section{Equilibrium adapter}
+\code{Equilibrium.jl} holds the only route to $P$, $\rho$, $\nel$ and the derived coordinate. HSEMHS is called in process through its embedding API.
+\begin{itemize}
+\item \textbf{Mode} is derived, not configured: \code{column_hse_z}, \code{column_hse_ltau}, \code{column_hse_logm}. Sections for another axis are rejected.
+\item \textbf{Prepare.} \code{prepare_equilibrium} is collective. Local failures (missing table, wrong grid, provenance mismatch) are agreed before any HSEMHS collective, through \code{HSEMHS.agree}. It rejects a table built with other partition functions or abundances than the synthesis Wittmann library.
+\item \textbf{Solve.} \code{reconstruct_equilibrium!} calls \code{HSEMHS.solve_embedded!}, fills fields, and leaves $T$, $\mathbf B$, $\mathbf v$, $\vturb$ untouched. It returns a rank-identical \code{EquilibriumOutcome} instead of throwing for physics failures.
+\item \textbf{Layout.} Arrays convert between Julia \code{(z,x,y)} and HSEMHS \code{(z,y,x)}. HSEMHS solves on $x$ slabs; \code{decomposition = x_slabs} is required, and the backend checks that its slab equals the rank's tile.
+\item \textbf{Given $\nel$} on log $m$ uses \code{_given_ne_column_mass!}: $P$ from \code{HSEMHS.lnP_from_lnne}, then \code{given_geometry!}. On other axes, \code{solve_embedded!(...; lnne)}.
+\item \textbf{Given atmosphere.} \code{set_given_state!} runs on reading; \code{GivenAtmosphereBackend} then only builds geometry, with no table and no MPI. Abundance constants: total 1.0950187898409673, mass per H $2.3396723599405787\times10^{-27}$\,kg, from \code{scripts/witt_eos_cpp.cpp}.
+\end{itemize}
+The HSEMHS Wittmann table and the FFNO Wittmann library are separate builds from the same source. \code{scripts/validate_eos_consistency.jl} compares them.
+
+\section{Population mesh}
+\code{MeshPopulationModel} wraps any population model. Default mesh: 452 levels.
+\begin{itemize}
+\item \textbf{Forward.} \code{_mesh_features} per column, threaded. \code{_mesh_locate} classifies each mesh height as inside, above or below. \code{_mesh_corona!} and \code{_mesh_deep!} integrate $\ln P$ by RK4 with at most 20\,km steps, with $\rho,\nel$ from \code{HSEMHS.state}. \code{_mesh_lnP} is a Newton solve for $\ln P$ from $\ln\rho$ on the table. Above the table's low-pressure end the last state is held. Below, leaving the table is an error.
+\item \textbf{Inner call.} \code{_mesh_atmosphere} builds an \code{Atmosphere3D} on the mesh and calls the service.
+\item \textbf{Back.} Log-linear in $z$ per point, with \code{_mesh_bracket} clamping at mesh ends.
+\item \textbf{Caching.} The last features and populations are cached; the VJP reuses them when features are unchanged.
+\item \textbf{VJP.} Back-map transpose, including a term in $\bar z$ from the height dependence, inner VJP, then column transpose. Finite differences cover the three top and bottom values of the extensions.
+\item \textbf{Inclined.} \code{_rays_to_cartesian_features} and \code{_cartesian_to_ray_populations} shift by $\mp\mathbf t z$, with $\ln T$ and $\ln n$ as interpolated variables. Adjoints use the exact transpose \code{_shear_log_transpose}, not the inverse shift.
+\end{itemize}
+Requires \code{eos_table_file}. The struct's own default \code{corona_temperature_k} is 0, but \code{load_config} sets $10^6$ unless told otherwise.
+
+\section{Synthesis}
+
+\subsection{Setup}
+\code{build_synthesis_setup} performs all file I/O once and returns one \code{RegionSynthesisSetup} per region, holding the air grid, the vacuum grid and a \code{MixedIntensitySynthesizer}. Contributors are in this order: one \code{MuspelContinuumModel}, then each source. A Kurucz selection keeps lines within a margin of $20\times2.5$\,km\,s$^{-1}$ of the window. \code{_without_ffno_transitions} drops a line of the FFNO transition's own ion within 0.1\,nm. Levels and aliases:
+\begin{lstlisting}
+:halpha     => (:H,  line 5, lower 2, upper 3, 656.28 nm air)
+:ca_ii_8542 => (:CA, line 5, lower 3, upper 5, 854.209 nm air)
+\end{lstlisting}
+
+\subsection{Opacity kernels}
+Interface: \code{add_opacity_emissivity!(chi, eta, model, wavelength, atmosphere, x, y, populations)}, which adds into \code{(nz,nlambda)} arrays. \code{chi} is in m$^{-1}$; \code{eta} is in kW\,m$^{-3}$\,sr$^{-1}$\,nm$^{-1}$ in every model (\code{source_planck}), so intensities come out in kW\,m$^{-2}$\,sr$^{-1}$\,nm$^{-1}$.
+
+\textbf{Muspel line} (extension): Float32 kinematics, Voigt from \code{Muspel.create_voigt_itp} with $a\in[10^{-4},10]$ on 20\,000 points and $v\in[0,500]$ on 2\,500 points; \code{BoundedVoigt} uses the exact $\mathrm{erfcx}$ outside the table, since Muspel's linear extrapolation goes negative. $v$ uses \code{model.center_nm} for the centre and \code{line.lambda0} for the Doppler scale.
+
+\textbf{Continuum} (\code{MuspelContinuumModel}): Muspel's NLTE continuum interpolant at the region's central vacuum wavelength on $\log_{10}T\in[3.2,7.5]$ (216 points) and $\log_{10}\nel\in[8,24]$ (161 points), fixed so that it does not depend on the slab or trial temperatures. Atoms: Al, C, Ca, Fe, H\_6, He, K\,\textsc{i}, Mg, N, Na, Ni\,\textsc{i}, O, S, Si, read once. Neutral H and protons from \code{eos_neutral_hydrogen!} and \code{eos_protons}.
+
+\textbf{Kurucz}: C++ \code{witt_kurucz_populations} for the lower level and neutral H, Armstrong Voigt, $\gamma=\gamma_{\rm rad}+\gamma_{\rm Stark}\nel+\gamma_{\rm vdW}n_{\rm H\,I}$. Zero K94 damping means ``not given'': $\gamma_{\rm rad}=A_{ul}$ and no Stark, as in RH. Van der Waals recipe in \code{KuruczLine.vdw_recipe}: \code{abo_explicit}, \code{abo_table}, \code{list}, \code{unsold}, or \code{none}.
+
+\subsection{Formal solver}
+\code{formal_solve!} (\code{ScalarFormalSolver}) goes from point \code{nz}, $I=\eta/\chi$, to point 1. Weights for a step $\Delta$:
+\begin{lstlisting}
+if dt > 40:      w1 = 0;  w2 = 1/dt;  w3 = 1 - w2
+elif dt > 0.01:  w1 = exp(-dt);  u0 = (1-w1)/dt;  w2 = u0 - w1;  w3 = 1 - u0
+else:            w1 = 1 - dt + dt^2/2;  w2 = (1/2 - dt/3)*dt;  w3 = (1/2 - dt/6)*dt
+I = w1*I + w2*S_lower + w3*S_upper
+\end{lstlisting}
+Substeps: $m=\min(\lceil j\rceil,256)$ where $j=\max(|\Delta\ln\chi|,|\Delta\ln\eta|)>1$, with log-linear interpolation, when all values are positive.
+
+\code{formal_column!} chooses the coordinate. On log $\tau$ (\code{_tau_integration}): $s=-\ln\tau_{500}$, with $\chi,\eta$ scaled in place by $\tau_{500}/\chi_{500}$. On log $m$ (\code{_mass_integration}): $s=-\ln m$, scaled by $m/\rho$. Otherwise the path is $z/\mu$. Columns are threaded with \code{:static} scheduling and per-thread workspaces.
+
+\subsection{Output units}
+\code{output_intensity_scale} converts: $I_\nu=I_\lambda\lambda^2/c$ with vacuum $\lambda$, then to SI or cgs, then divides by \code{normalization}.
+
+\subsection{Wavelengths}
+\code{_air_to_vacuum_nm} is Edl\'en's form, identical to RH's \code{air_to_vacuum}, with no change below 200\,nm. \code{cube.wavelength_m} is always air. \code{_output_wavelength} converts only on writing. RH's \code{vacuum_to_air} is a different formula, not the inverse: 3.1\,m\AA{} different at \Halpha, 5.4\,m\AA{} at 854.2\,nm, 12.8\,m\AA{} at 1565\,nm. Comparisons at that level belong on vacuum axes.
+
+\section{Observation model and objective}
+
+\subsection{PSF}
+\code{GaussianPSFObservation}: separable kernels with radius $\lceil4\sigma\rceil$, re-normalized where truncated at grid edges, so boundaries are \emph{not} periodic. The spectral part needs a uniform grid across the concatenated axis. Spatial convolution across tiles uses \code{exchange_halos}, and \code{_distributed_spatial_vjp} is its exact transpose. On slanted views FWHMs are stretched by $1/\mu$ along the tilt; only $\phi=0,90,180,270^\circ$ are accepted with a spatial PSF.
+
+\subsection{Objective}
+\begin{equation}
+J=\frac{1}{N_{\rm active}}\sum\Big(w_{\lambda,s,x,y}\frac{I_{\rm syn}-I_{\rm obs}}{\sigma}\Big)^2+R,\qquad w=w_{\lambda s}\,w_{xy}.
+\end{equation}
+Weights multiply the residual, so a weight enters squared. $N_{\rm active}$ counts non-zero weights.
+
+\subsection{Regularization}
+Vertical slots, in order: \code{temperature, vlos, vturb, B, inc, azi, pgas_boundary}. Types: 0 none; 1 first derivative; 2 deviation from depth mean; 3 deviation from zero; 4 second derivative. Temperature types 2 and 3 are forced to 0. Derivatives are with respect to native coordinate over \code{length_scale_dex} (default 1) or \code{length_scale_m} (no default on $z$; required for types 1 and 4). Term $=\texttt{regularize}\cdot w_i\cdot\langle(\cdot/\text{scale})^2\rangle$. Horizontal: forward differences per metre, order 1 or 2, over uniquely owned differences (non-periodic). Note that with $\Delta x$ in metres these terms are numerically small, so choose strengths accordingly. The total is rank-count independent.
+
+\subsection{Controls}
+\code{ControlMapSpec}: \code{(nnode, control_nx, control_ny)} values, with node positions in the grid's native kind (a mismatch throws), bounds, and scale. \code{expand_nodes} is trilinear on normalized horizontal coordinates and clamps beyond the end nodes. Each trial: restore immutable rank-owned reference (\code{_restore_trial_reference!}), then $A=A_{\rm ref}+\mathcal I(\mathbf p-\mathbf p_{\rm initial})$. \code{vlos} at $\mu<1$ moves $\mathbf v$ along $\mathbf n$ only and can't be combined with Cartesian velocity controls. \code{_physical_controls_valid} checks the full-grid bounds and gives $J=\infty$ if violated. \code{refine_control_maps} starts a new stage, with fresh optimizer history.
+
+\section{Gradient}
+\code{HybridAdjointObjectiveGradient}, one reverse pass:
+\begin{enumerate}
+\item $\bar I_{\rm out}=2w^2(I_{\rm syn}-I_{\rm obs})/(N\sigma^2)$.
+\item \code{observation_vjp!}: PSF transpose with reverse halo exchange.
+\item \code{synthesis_vjp!}: per region and column, recompute $\chi,\eta$; \code{_formal_solve_vjp!} is the exact transpose including substeps; axis weights contribute to $\bar\chi_{500}$ or $\bar\rho$; each contributor's \code{add_opacity_emissivity_vjp!}.
+\item \code{footprint_vjp!} when an inclined $z$ view was used.
+\item \code{predict_distributed_populations_vjp!}: mesh transpose and service VJP; features map back to $\bar T$, $\bar{\mathbf v}$, $\bar{\nel}$, $\bar\rho$, $\bar z$.
+\item \code{accumulate_control_vjp!}: transpose of node expansion for directly controlled fields.
+\item \code{_force_regularization_vjp!}: for each scaled coordinate, centred finite difference of $\langle\text{bar},\text{derived fields}\rangle+R$, second-order on unequal steps and one-sided at bounds. This costs \textbf{two equilibrium solves per control coordinate per gradient}, the main remaining cost. \code{force_balance_step} defaults to $10^{-4}$.
+\end{enumerate}
+
+Opacity pullbacks: Muspel by a centred difference in eight quantities ($T,\nel,\vlos,n_{\rm H\,I},n_{\rm p},n_u,n_l,\vturb$) at each cell against the cotangents, in \code{_cell_pairing}; continuum by local relative differences, including EOS hydrogen derivatives in $T$ and $P$; Wittmann by \code{_local_wittmann_vjp!}, perturbing one level at a time, since the kernels are opaque C++.
+
+A given atmosphere has no adjoint: the continuum VJP throws. Checks: \code{FiniteDifferenceObjectiveGradient}, \code{gradient_taylor_validation}, \code{dot_product_validation}. Measured at $\mu=0.8$: $4.4\times10^{-10}$ on log $\tau$, $2.6\times10^{-9}$ on $z$.
+
+\subsection{Column response}
+\code{scripts/column_response.jl} gives $R_v(\lambda,k;x,y)=\partial I/\partial v(k)$ with populations and hydrostatic structure fixed, one adjoint per wavelength. \code{scripts/ffno_population_tangents.jl} obtains $\dot n(k,x,y;k_0)=\sum_{x',y'}\partial n(k,x,y)/\partial T(k_0,x',y')$ by one JVP per depth seeded in every column; this is 55\,GB for H on $504^2$. With \code{--population-tangents}, \code{column_response.jl} adds the population response.
+
+\section{Optimizer}
+\code{lbfgs_invert!}, in scaled coordinates. Rank 0 forms directions and decides; all ranks evaluate.
+\begin{enumerate}
+\item Projected gradient: components pushing outward at an active bound are zeroed. Stop if its $\infty$-norm $\le$ \code{gradient_tolerance}.
+\item Two-loop recursion on the projected gradient, with $\gamma=s^{\mathsf T}y/y^{\mathsf T}y$ scaling. Fall back to projected steepest descent if not a descent direction. \code{_feasible_direction!} zeroes components that leave at active bounds.
+\item Backtracking: \code{candidate = clamp(x + step*direction)}; accept on the Armijo condition with the actual projected displacement. Up to \code{maximum_line_search_trials}, halving.
+\item Update: the pair is stored only if $s^{\mathsf T}y>\text{tol}\,\|s\|\|y\|$. History length 10.
+\item Terminations: \code{gradient_tolerance}, \code{step_tolerance}, \code{objective_tolerance}, \code{maximum_forward_evaluations}, line-search failure, iteration limit.
+\end{enumerate}
+A rejected trial leaves mutable workspaces at that trial, so they are re-established before continuing. \code{write_lbfgs_diagnostics} writes the iteration record.
+
+\subsection{Checkpoints}
+\code{checkpoint!} serializes atomically. A file is bound to the capability manifest, layout signature, control mapping (configuration, baseline atmosphere checksum, node initialization, correction representation), and history length. An incompatible one is refused. Restart works across MPI and thread layouts, because only replicated controls and history are stored.
+
+\section{Viewing angle implementation}
+\code{ViewGeometry(mu, azimuth_deg, geometry, footprint)} lives on \code{Grid3D}. At $\mu=1$, or with no \code{[view]}, every function is the identity and results are bitwise unchanged.
+
+\code{ShearPlan(z, dx, dy, t, s)} holds per-level integer offsets and bilinear weights with $f=s\,t(z_k-z_{\rm ref})/\Delta$, $z_{\rm ref}=0$, periodic. \code{shear_levels!} is threaded by $y$; \code{shear_levels_transpose!} is threaded by level, so writes do not collide. The opposite shift is not the inverse.
+
+\code{needs_footprint}: inclined on $z$. Then \code{footprint_state!} gathers to root, shifts $T$, velocities, $\vturb$ (log for positive fields) and populations, and re-scatters: one gather and one scatter per forward and per gradient. Native $\tau$ and $m$ inputs need attributes \code{view_mu}, \code{view_azimuth_deg}, \code{view_geometry} (\code{check_input_view}). \code{warn_view_travel} warns when rays travel more than a box. \code{response_run/view_check/build_slanted_input.jl} builds slanted inputs from a cube.
+
+\section{Parallel runtime}
+\begin{itemize}
+\item \textbf{MPI.} \code{THREAD_FUNNELED}: MPI calls only on the initializing thread (\code{_assert_mpi_thread}). Finalizes only what it initialized. \code{enabled=false} under a multi-rank launch is rejected.
+\item \textbf{Tiles.} \code{Tile2D}, \code{process_grid}. Numeric payloads move without Julia serialization. Halos are corner-complete.
+\item \textbf{Threads.} Julia threads over columns; BLAS and FFTW forced to 1. Set \code{OMP_NUM_THREADS=1}.
+\item \textbf{GPU control.} \code{RootGPUCoordinator}: a TCP status channel between ranks is set up \emph{before} the GPU launch, so ranks don't sit in an MPI collective while Slurm and NCCL start the step. Non-root ranks have timeouts; \code{abort_on_rank_failure} aborts rather than deadlocks.
+\item \textbf{Species.} \code{CompositeDistributedPopulationModel}: gather features to root, one request per species, scatter results. Only root talks to the service.
+\end{itemize}
+
+\begin{table}[H]\centering\small
+\begin{tabular}{ll}
+\toprule
+Environment variable&Effect\\\midrule
+\code{FFNO_GPU_CONNECT_TIMEOUT}, \code{FFNO_GPU_STATUS_TIMEOUT}&Override config timeouts\\
+\code{FFNO_GPU_DIAGNOSTIC_INTERVAL}, \code{FFNO_GPU_DIAGNOSTICS_DIR}&Periodic resource logs\\
+\code{FFNO_GPU_CONTROL_HOST}&Address advertised to ranks and service\\
+\code{FFNO_FSDP_LAUNCHER}, \code{FFNO_FSDP_PYTHON}, \code{FFNO_FSDP_NPROC}&Local service launch\\
+\code{FFNO_FSDP_SERVICE_PORT}, \code{FFNO_FSDP_SHUTDOWN_TIMEOUT}&Port and shutdown\\
+\code{FFNO_FSDP_GPUS_PER_NODE}, \code{FFNO_FSDP_CPUS_PER_NODE}&Slurm service layout\\
+\code{FFNO_THREADS_PER_RANK}&Threads per rank\\
+\code{FFNO_INVERSION_CONFIG}, \code{FFNO_INVERSION_FACTORY}&Olivia submission\\
+\code{FFNO_ATOM_DIR}&Atom directory in tests\\
+\code{FFNOML_RUN_DIR}, \code{FFNOML_ACTIVE_ATOMS}, \code{FFNOML_NUM_EPOCHS}, \code{FFNOML_TRAIN_ONLY}&Python settings\\
+\code{OLIVIA_JULIA_DEPOT}, \code{FFNO_PREFLIGHT_JULIA_DEPOT}&Julia depots\\\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Running}
+
+\subsection{Python}
+\begin{lstlisting}
+python pipeline.py --build                       # training and validation HDF5 in IO/
+torchrun ... pipeline.py --train                 # or sbatch train_gpu.sh
+python pipeline.py --buildforpredict --predname en024048_hion_385
+python pipeline.py --predict --predname ...       # tiled
+torchrun ... pipeline.py --fsdppredict --predname ...
+\end{lstlisting}
+Output: \code{output_3D_sim_s5_<NAME>_<MODEL>_<ATOMS>.hdf5}, with \code{nlte_populations} in m$^{-3}$, consumed by \code{Forward.jl}.
+
+\subsection{Olivia}
+Production uses Slurm partition \code{accel}, NVIDIA GPUs and the account \code{nn2834k}. By default: 8 nodes $\times$ 4 GPUs with 2 Julia ranks per node, 128 CPUs per task, \code{--network=job_vni}, \code{mem-per-gpu=40G}.
+\begin{lstlisting}
+repo=/cluster/projects/nn2834k/harshm/FFNOML
+run=/cluster/work/projects/nn2834k/harshm/ffnoml_forward_001
+mkdir -p "$run"; cp -R "$repo/examples/inversion_run/." "$run/"
+# link inputs, atoms, partition functions, EOS table, checkpoints
+FFNOML_RUN_DIR="$run" FFNO_INVERSION_CONFIG="$run/forward.toml" \
+  bash "$repo/FFNOInversion.jl/scripts/submit_olivia_inversion.sh"
+\end{lstlisting}
+\textbf{Login and accelerator nodes differ in architecture (x86 and ARM neoverse\_v2).} Julia, Python and C++ differ between them; nothing built on one may run on the other, and \code{olivia_runtime_environment.sh} must never be sourced on a login node. The submission helper runs a CPU preflight (depot \code{julia-depot-login}) that checks files, datasets, shapes, factory assets and topology, and calls \code{sbatch} only after \code{Sanity check OK}. The job then recreates a disposable Julia project (depot \code{julia-depot-prod}), writes MPI preferences, builds \code{libwitt_ffno.so} natively and prints \code{FFNO_OLIVIA_JULIA_ENVIRONMENT_READY}. Home has no storage, so depots live under the project.
+
+\subsection{eagle7}
+Six NVIDIA T4s without Slurm. Source \code{~/loadnvidia.sh}, use \code{~/nvidiaenv/bin/python}, and set \code{FFNO_FSDP_LAUNCHER=.../scripts/ffno_fsdp_service_local.sh}, \code{FFNO_GPU_CONTROL_HOST=127.0.0.1}. Full fine-tuning runs out of memory on T4s. A $5\times5$ grid fits at most 2--3 GPUs, because of the rFFT bin constraint. See \code{response_run/falc/run_falc_eagle7.sh}.
+
+\subsection{hyades}
+CPU only. Source \code{~/loadgcc.sh}. Use node-local Julia at \code{/tmp/julia-1.12.3} where present, since Julia on stornext intermittently fails with ``failed to map segment''. System OpenMPI needs \code{libhcoll.so.1}, which is on hyades2, hyades3 and eagle8 only; \code{CXX=g++} builds the Wittmann test library. Use one CPU type per MPI job, and pin the MPICH interface.
+
+\subsection{Reproducing the FAL-C comparison}
+\begin{lstlisting}
+python response_run/falc/build_falc_cmp.py     # inputs and RH run directories
+bash response_run/falc/run_cmp_rh.sh           # hyades2
+bash response_run/falc/run_cmp_ffno.sh         # eagle7
+python figures/falc/plot_falc_cmp.py
+\end{lstlisting}
+
+\section{Tests and validation}
+\begin{table}[H]\centering\small
+\begin{tabularx}{\linewidth}{lY}
+\toprule
+Entry&Coverage\\\midrule
+\code{julia --project=. -e 'using Pkg; Pkg.test()'}&\code{test/runtests.jl}: types, nodes, parallel runtime, I/O, Wittmann and continuum, population backends, mesh, synthesis, Muspel integration, HSEMHS equilibrium, solvers and gradients, FSDP protocol, correction mapping, Olivia scripts, viewing angle, log $m$ and given atmospheres, Muspel continuum. No GPU, using mock populations\\
+\code{test/mpi_*_worker.jl}&Multi-rank workers, driven by validation scripts\\
+\code{scripts/validate_phase4_topology.jl}, \code{validate_phase5_mpi.jl}, \code{validate_phase6_mpi.jl}&One rank against four; restart across layouts\\
+\code{scripts/validate_eos_consistency.jl}&HSEMHS table against Wittmann library\\
+\code{scripts/validate_muspel_reference.jl}&Synthesis against a Muspel reference\\
+\code{scripts/compare_service_with_ffnonet.py}&Service against a direct prediction; should match to float32 round-off\\
+\code{scripts/run_olivia_runtime_tests.sbatch}&Regression chain on Olivia, including GPU probes, deliberate stalls and recovery\\
+\code{tests/}&Python: loss, spacing, checkpoints, launcher, Wittmann, Olivia outcomes\\
+\code{FFNOInversion.jl/test/ffno_jvp_cpu_check.py}&Distributed JVP against finite differences on CPU\\\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{UQ tooling}
+\begin{table}[H]\centering\small
+\begin{tabularx}{\linewidth}{lY}
+\toprule
+Script&Purpose\\\midrule
+\code{scripts/uq_predict.py}&Full-domain or tiled prediction with MC dropout, \code{--route}, \code{--z-range} crops\\
+\code{scripts/uq_error_atlas.py}&Error by regime and height against truth\\
+\code{scripts/uq_support_distance.py}&Distance of each voxel to training data, self-matches excluded\\
+\code{scripts/uq_missing_regimes.py}&Regression tree of error on input descriptors\\
+\code{scripts/uq_cross_snapshot.py}&Per-level error tables\\
+\code{scripts/uq_verify_alignment.py}&Orientation, grid, unit and level-order checks\\
+\code{scripts/uq_retrain_setup.py}, \code{uq/retrain_run.sh}, \code{uq/olivia_finetune.sbatch}&A/B/C retraining experiment\\
+\code{scripts/uq_synth.jl}, \code{uq_spectral_errors.py}&Spectra from predicted populations\\\bottomrule
+\end{tabularx}
+\end{table}
+Report: \code{docs/ffno3d-uq-report.md}. Its controlled fine-tuning section is still marked pending.
+
+\section{Known issues found while writing this document}\label{sec:issues}
+These come from reading the source. Unless a measurement is mentioned, they have not been checked by experiment, and none has been changed.
+
+\begin{longtable}{L{4.2cm}L{12.3cm}}
+\toprule Issue&Detail\\\midrule\endhead
+\textbf{Non-periodic padding in \code{fuse}}&\code{models/ffno_model.py}: the depthwise $3\times3\times3$ convolution uses zero padding, and \code{_HaloExchangeH} fills the outer halos with zeros, though the simulations are periodic. Measured with one real column repeated on a square grid (\code{response_run/diagnostics_edge_test.py}, H model): outputs differ from the centre by up to 0.49\,dex at the edge, 0.10\,dex one pixel in, 0.017\,dex at 4 pixels and 0.001\,dex at 9, on $21\times21$. On $5\times5$ the first ring differs by 0.14\,dex. Likely source of the 4\% spread in FAL-C spectra. A circular padding adds no weights, but the trained weights assumed zero padding, so it would call for retraining or fine-tuning. The package README still says this cause is uninvestigated.\\
+\textbf{Scale weights have no effect}&\code{train_utils.compute_loss}: \code{(loss*weight).sum()/(weight.sum()+1e-12)} with scalar \code{loss} from \code{WeightedMSE_L1} returns \code{loss}. So \code{weights} in the dataset, and the reweighting in \code{TRAINSELECT}, do not change the optimization. Coarse scales are therefore weighted by their patch counts (121 at $s=1$, 1 at $s=6$).\\
+\textbf{$H$/$W$ spacing swap}&\code{SpectralConv2dFull}: \code{ky} is built from axis $H$ with \code{d=dy} and \code{kx} from $W$ with \code{d=dx}, but $H=n_x$ and $W=n_y$ in the data and in the service. Harmless when $\Delta x=\Delta y$, as in all training data. Anisotropic grids, such as deprojected footprints at $\mu<1$ on log $\tau$, get swapped spacings in the frequency features.\\
+\textbf{\code{reject_trial} is not implemented in the objective}&\code{Solvers.evaluate_objective!} throws on an invalid equilibrium, with the comment ``the reject-trial policy arrives in Phase 4'', although the README says the solver rejects that trial.\\
+\textbf{Stale documents}&\code{docs/paper_draft_ffno_nlte.md} says the target is $\log_{10}b_i$; the code predicts $\log_{10}n_i$. \code{docs/ffno_full_forward.*} shows checkpointing conditioned on training; it is conditioned on gradient mode. The \code{logb} variable names in the loss are historical.\\
+\textbf{Inert loss cost}&Source term computed each step with weight 0 (\code{lam_S=0}).\\
+\textbf{Unused table in the line model}&\code{build_muspel_line_model} still builds a continuum table from FFNO hydrogen when \code{include_continuum=false}. It is not read, so this only costs setup time. Its default remains \code{include_continuum=true} for direct callers.\\
+\textbf{Region PSF}&\code{psf_type}, \code{psf_file} are validated but no per-region PSF is applied.\\
+\textbf{Composition differs}&Wittmann mass per H is 1.398\,$m_{\rm H}$; UQ measured $\rho/(n_{\rm H}m_{\rm H})=1.357$ in the MULTI3D data.\\\bottomrule
+\end{longtable}
+
+\section{Limits}
+Stokes $I$ and non-PRD only. \code{model = "mhs"} rejected until HSEMHS-integration Phase 4. Equilibrium derivatives by finite differences. FFNO lines limited to \Halpha{} and Ca\,\textsc{ii} 854.2\,nm. The service needs NVIDIA GPUs and at least two GPU ranks. One viewing angle per run. No calibrated uncertainty. Every labelled snapshot has been used in development, so there is no pristine test set.
+\end{document}
