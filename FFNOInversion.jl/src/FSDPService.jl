@@ -175,9 +175,10 @@ function _connect_fsdp_service(host,port,token,process,timeout_seconds)
             length(fields)==5 && fields[1]=="READY" || error(
                 "invalid FSDP service handshake: $(join(fields,' '))")
             parse(Int,fields[2])==2 || error("unsupported FSDP service protocol")
-            world=parse(Int,fields[3]); world>=2 || error(
+            # BATCHED_FORWARD (ffno_batched_service.py) answers PREDICT only, from host RAM, on one GPU or more
+            world=parse(Int,fields[3]); fields[5]=="BATCHED_FORWARD" || world>=2 || error(
                 "FSDP service started with fewer than two GPU processes")
-            fields[5]=="FULL_SHARD_H_SLAB" || error(
+            fields[5] in ("FULL_SHARD_H_SLAB","BATCHED_FORWARD") || error(
                 "FSDP service did not advertise the required FULL_SHARD H-slab backend")
             return socket,world
         catch exception

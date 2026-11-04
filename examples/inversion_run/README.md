@@ -83,7 +83,8 @@ H and Ca assets even when only one species contributes to the configured lines.
 ## How the atmosphere is treated
 
 - **P, ρ, nₑ:** from HSEMHS, by hydrostatic balance and the EOS. In a forward run only, `ne = "ne"` in `[atmosphere.datasets]` makes nₑ the truth, and P and ρ follow from (T, nₑ) through the EOS with no hydrostatic balance. An inversion refuses it.
-- **A given atmosphere:** in a forward run only, `ne` and `hydrogen_populations` together give the atmosphere on any axis, as in RH, and HSEMHS is not used. `[equilibrium]` is then optional. The mesh still needs `eos_table_file`, or `[population.mesh] enabled = false`.
+- **A given density:** in a forward run only, `rho = "rho"` alone makes ρ the truth, and P and nₑ follow from (T, ρ) through the EOS, as with `ne` alone.
+- **A given atmosphere:** in a forward run only, `ne` with either `rho` or `hydrogen_populations` gives the atmosphere on any axis, and HSEMHS is not used. `[equilibrium]` is then optional. The mesh still needs `eos_table_file`, or `[population.mesh] enabled = false`.
 - **Population mesh:** the FFNO predicts on a fixed height mesh, on by default for log tau and log m, and with `[population.mesh] enabled = true` on z.
 - **Above a column's top:** where the mesh goes higher, a corona: T rises to `corona_temperature_k` (1 MK) over `corona_transition_m` (240 km), hydrostatic from the top, ρ and nₑ from the EOS, velocities held. `corona_temperature_k = 0` holds the top values.
 - **Below a column's bottom:** a hydrostatic extension with d ln T / d ln P = `nabla` (0.13), ρ and nₑ from the EOS, velocities held.
@@ -92,6 +93,14 @@ H and Ca assets even when only one species contributes to the configured lines.
 - **Wavelengths:** `start_angstrom` is always air and synthesis always runs on the vacuum grid. `[outputs] wavelength_frame` (`"air"`, the default, or `"vacuum"`) only chooses the written `wavelength_m`; the file attribute `wavelength_frame` records it.
 
 See [the package README](../../FFNOInversion.jl/README.md#population-mesh) for the details.
+
+The modes are listed in `forward.toml`, `forward_z.toml` and `forward_logm.toml`.
+
+## Small GPUs (forward only)
+
+For a cube whose activations don't fit on the GPUs, such as 504 × 504 on eagle7, use the
+[batched service](../../FFNOInversion.jl/README.md#batched-forward-service-small-gpus). It is full-domain prediction from host RAM, not tiling,
+and needs about 90 GB of RAM at that size. It answers forward runs only.
 
 ## Viewing angle (off disk centre)
 

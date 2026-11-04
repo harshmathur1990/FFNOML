@@ -16,8 +16,8 @@ The repository has two halves:
    The networks predict on a fixed height mesh: above a column's top the atmosphere is extended
    with a hydrostatic corona, below its bottom hydrostatically with a fixed gradient, and the
    continuum is Muspel's with its hydrogen from the EOS. A forward run may supply the electron density
-   itself, in which case P and ρ follow from it through the EOS, or the electron density and hydrogen
-   populations together, in which case HSEMHS is not used; inversions always use the EOS.
+   or the density itself, in which case the rest follows through the EOS, or the electron density together with the
+   density or hydrogen populations, in which case HSEMHS is not used; inversions always use the EOS.
    [Details](FFNOInversion.jl/README.md#population-mesh).
 
 ```text
@@ -62,6 +62,7 @@ log τ/log m/z atmosphere ─► FFNOInversion.jl ── HSEMHS ── FFNO serv
 | `train_utils.py`, `normalize_utils.py` | checkpoints, resume, model expansion, normalization |
 | `distributed_inference.py` | H-slab distributed FFTs and collectives for full-volume inference |
 | `ffno_fsdp_service.py`, `ffno_fsdp_runtime.py`, `ffno_fsdp_diagnostics.py` | persistent multi-GPU prediction/VJP service used by the inversion |
+| `ffno_batched_service.py`, `ffno_batched_backend.py` | forward-only service for small GPUs: whole-cube prediction from host RAM, in batches |
 | `Forward.jl` | standalone Julia synthesis from predicted (or MULTI3D) populations |
 | `FFNOInversion.jl/` | Julia forward-synthesis and inversion package ([README](FFNOInversion.jl/README.md)) |
 | `examples/` | run-directory templates for Python jobs, inversions and Olivia runtime tests |
@@ -731,6 +732,12 @@ feeds log10 T and velocities in km/s, the same as training.
 `scripts/run_olivia_service_vs_ffnonet.sbatch`) checks that the service and a direct
 `FFNONet.py` prediction agree to float32 round-off on the same atmosphere.
 
+For forward runs on GPUs too small for a cube's activations, such as eagle7's T4s at 504 × 504,
+`ffno_batched_service.py` speaks the same protocol from one process, keeps hidden states in host RAM and
+sends batches through the GPUs. It is not tiled prediction: it reproduces the full-domain operator, to float32
+rounding against FSDP on the same machine, and cannot compute gradients. See the
+[package README](FFNOInversion.jl/README.md#batched-forward-service-small-gpus).
+
 ## 3D Forward Synthesis And Inversion
 
 [`FFNOInversion.jl`](FFNOInversion.jl/README.md) is the Julia package for
@@ -745,8 +752,8 @@ In brief:
   log10 column mass (`forward_logm.toml`) or native height z (`forward_z.toml`, `inversion_z.toml`).
 - **Equilibrium.** HSEMHS column hydrostatic equilibrium reconstructs gas pressure,
   density, electron density, heights (or log tau) and the 500 nm opacity. It sets the
-  pressure boundary. A forward run given both nₑ and hydrogen populations does not use it,
-  and builds the geometry as RH does.
+  pressure boundary. A forward run may give nₑ or ρ alone, with the rest from the EOS through HSEMHS. Given nₑ with ρ
+  or with hydrogen populations, it does not use HSEMHS and builds the geometry as RH does.
 - **Populations.** FFNO3D through the persistent service above. For log-tau and log-m
   atmospheres each column is first mapped onto a training-like height mesh
   (`[population.mesh]`), because the networks were trained on simulation height grids.

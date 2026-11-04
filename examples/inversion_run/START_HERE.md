@@ -107,7 +107,8 @@ Before submission, set:
 How the run treats the atmosphere (details in the [package README](../../FFNOInversion.jl/README.md#physics-and-numerics)):
 
 - **Pressure, density and electron density** come from HSEMHS: hydrostatic balance plus the EOS. A forward run may instead add `ne = "ne"` to `[atmosphere.datasets]`: nₑ is then the truth, and P and ρ come from (T, nₑ) through the EOS at every level, with no hydrostatic balance. An inversion refuses this and always takes nₑ from the EOS. On log tau, a given nₑ needs a τ axis that fits it: take it from a z run with the same `ne`.
-- **A whole given atmosphere (forward only):** add `ne` and `hydrogen_populations` (m⁻³, file axes `(level,z,y,x)`, last level the protons) and HSEMHS is not used, on any axis: the geometry follows as in RH. `[equilibrium]` is then optional, but the population mesh still needs `eos_table_file`, or `[population.mesh] enabled = false`. FFNO still predicts the line populations.
+- **A given density (forward only):** `rho = "rho"` (kg m⁻³) alone is the truth: P and nₑ come from (T, ρ) through the EOS, with no hydrostatic balance, as with `ne` alone.
+- **A whole given atmosphere (forward only):** add `ne` with either `rho` (kg m⁻³; hydrogen then comes from the EOS at (T, P)) or `hydrogen_populations` (m⁻³, file axes `(level,z,y,x)`, last level the protons). HSEMHS is not used, on any axis: the geometry follows as in RH. `[equilibrium]` is then optional, but the population mesh still needs `eos_table_file`, or `[population.mesh] enabled = false`. FFNO still predicts the line populations.
 - **FFNO populations** are predicted on a fixed height mesh and interpolated back. This is on by default for log tau and log m; on z add `[population.mesh] enabled = true`, which you want for anything unlike a simulation grid, such as a 1-D model.
 - **Above a column's top**, if the mesh goes higher, a corona is built: T rises to `corona_temperature_k` (1 MK) over `corona_transition_m` (240 km), hydrostatic from the top, with ρ and nₑ from the EOS and velocities held. `corona_temperature_k = 0` holds the top values instead.
 - **Below a column's bottom**, the column is extended hydrostatically with d ln T / d ln P = `nabla` (0.13), with ρ and nₑ from the EOS and velocities held.
@@ -177,6 +178,12 @@ for fitting options.
 To synthesize or invert at a viewing angle μ < 1, uncomment `[view]` in the configuration. A log-tau or log-m input must then
 already be lines of sight along that angle, tagged with `view_*` attributes; a height-grid input is used as it is.
 See [README.md](README.md#viewing-angle-off-disk-centre).
+
+## GPUs too small for your cube (forward only)
+
+On machines like eagle7, a cube such as 504 × 504 doesn't fit in GPU memory through the default service. The [batched service](../../FFNOInversion.jl/README.md#batched-forward-service-small-gpus) runs the same full-domain prediction from host RAM, more slowly, and can't be used for inversions. Set `FFNO_BATCHED_VERTICAL_NORM_SLABS` to the GPU count of an FSDP run you want to match exactly.
+
+The template `model_factory.jl` always uses the Slurm service, so a run outside Olivia needs a factory that passes `FFNO_FSDP_LAUNCHER` to the launch call. `response_run/falc/model_factory.jl` and `run_falc_eagle7.sh` show this for eagle7.
 
 ## If the GPU service crashes
 

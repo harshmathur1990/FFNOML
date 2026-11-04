@@ -17,6 +17,7 @@ struct AtmosphereInputConfig{T<:AbstractFloat}
     vturb_dataset::Union{Nothing,String}
     ne_dataset::Union{Nothing,String}      # given electron density: the truth, HSEMHS derives P and rho from it
     hydrogen_populations_dataset::Union{Nothing,String}  # with ne: the atmosphere is given, no HSEMHS (GivenAtmosphereBackend)
+    rho_dataset::Union{Nothing,String}     # alone: P and ne from the EOS through HSEMHS; with ne: the atmosphere is given, no HSEMHS
 end
 
 struct ObservedDataConfig
@@ -448,7 +449,9 @@ function load_config(path::AbstractString)
     end
     haskey(datasets,"ne") || !haskey(datasets,"hydrogen_populations") || throw(ArgumentError(
         "atmosphere.datasets.hydrogen_populations needs atmosphere.datasets.ne: the two together give the atmosphere"))
-    given=haskey(datasets,"ne") && haskey(datasets,"hydrogen_populations")
+    haskey(datasets,"rho") && haskey(datasets,"hydrogen_populations") && throw(ArgumentError(
+        "give atmosphere.datasets.rho or atmosphere.datasets.hydrogen_populations, not both: each sets the density"))
+    given=haskey(datasets,"ne") && (haskey(datasets,"hydrogen_populations") || haskey(datasets,"rho"))
     given || haskey(cfg,"equilibrium") || throw(ArgumentError("missing required configuration section [equilibrium] (backend = \"HSEMHS\", model, eos_table_file, ...)"))
     equilibrium = given ? _given_equilibrium_config(get(cfg,"equilibrium",Dict{String,Any}()),vertical_coordinate,dirname(abspath(path))) :
         _equilibrium_config(cfg["equilibrium"],vertical_coordinate,dirname(abspath(path)))
@@ -458,12 +461,15 @@ function load_config(path::AbstractString)
         String(_required(datasets,"vz")),magnetic,
         haskey(datasets,"vturb") ? String(datasets["vturb"]) : nothing,
         haskey(datasets,"ne") ? String(datasets["ne"]) : nothing,
-        given ? String(datasets["hydrogen_populations"]) : nothing)
+        haskey(datasets,"hydrogen_populations") ? String(datasets["hydrogen_populations"]) : nothing,
+        haskey(datasets,"rho") ? String(datasets["rho"]) : nothing)
 
     forward_only || !haskey(datasets,"ne") || throw(ArgumentError(
         "atmosphere.datasets.ne is for forward synthesis only: an inversion always takes the electron density from the EOS"))
+    forward_only || !haskey(datasets,"rho") || throw(ArgumentError(
+        "atmosphere.datasets.rho is for forward synthesis only: an inversion always takes the density from the EOS"))
     forward_only || !given || throw(ArgumentError(
-        "atmosphere.datasets.hydrogen_populations is for forward synthesis only: an inversion always takes the density from the EOS"))
+        "atmosphere.datasets.$(haskey(datasets,"rho") ? "rho" : "hydrogen_populations") is for forward synthesis only: an inversion always takes the density from the EOS"))
     observed=nothing; weights=nothing
     if !forward_only
         data = _required(obs,"datasets")

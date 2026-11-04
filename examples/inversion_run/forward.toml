@@ -13,7 +13,7 @@ synthesis_file = "outputs/synthesis.h5"
 atmosphere_file = "outputs/forward_atmosphere.h5"
 
 [atmosphere]
-# native vertical coordinate of the input: "log10tau500" (this file) or "z" (see forward_z.toml)
+# native vertical coordinate of the input: "log10tau500" (this file), "z" (see forward_z.toml) or "log10m" (see forward_logm.toml)
 vertical_coordinate = "log10tau500"
 storage_order = "python"
 
@@ -23,6 +23,26 @@ storage_order = "python"
 
 [atmosphere.datasets]
 logtau500 = "logtau_500"
+# How pressure, density, electron density and the geometry are obtained (forward only, except the first):
+#
+#   Mode      Add to this section        P, rho                         Neutral H, protons       HSEMHS
+#   hse       nothing                    tau-hydrostatic; rho from EOS  EOS at (T, P)            yes
+#   ne-eos    ne                         EOS at (T, ne)                 EOS at (T, P)            yes
+#   rho-eos   rho                        rho given; P, ne from the EOS  EOS at (T, P)            yes
+#   ne-rho    ne, rho                    rho given; P from n_H, ne      EOS at (T, P)            no
+#   ne-hpops  ne, hydrogen_populations   both from n_H, ne              given                    no
+#
+# ne [m^-3]; rho [kg m^-3]; hydrogen_populations [m^-3], file axes (level,z,y,x), the last level the protons. rho and
+# hydrogen_populations cannot be combined. ne-eos and rho-eos take the other quantities from the LTE EOS, which can be far
+# from the model's where it is not LTE. ne-rho passes a simulation's own T, v, ne and rho to the FFNO unchanged.
+# In the modes with ne or rho, heights follow from the tau axis and chi500, so the axis must fit the atmosphere as given:
+# take it from a run on z with the same input, otherwise the heights are wrong.
+# For ne-rho and ne-hpops, also remove [equilibrium.column_ltau] below: it is refused there. The rest of [equilibrium] is then
+# optional, but the population mesh, on by default here, still needs eos_table_file (or set
+# [population.mesh] enabled = false). Details: FFNOInversion.jl/README.md.
+# ne = "ne"
+# rho = "rho"
+# hydrogen_populations = "hydrogen_populations"
 temperature = "temperature"
 # vturb = "vturb" # optional; defaults to zero if not configured
 vx = "vx"

@@ -45,7 +45,7 @@ export ViewGeometry, is_vertical, is_slanted, view_direction, slant, los_velocit
 export ShearPlan, shear_levels!, shear_levels_transpose!
 export VerticalAxis, VERTICAL_KINDS, vertical_unit, vertical_coordinate, native_depth, nlevels
 export log_tau500_axis, z_axis, log10m_axis, check_coordinate_consistency
-export GivenAtmosphereBackend, set_given_state!, given_geometry!, MuspelContinuumModel, build_muspel_continuum_model
+export GivenAtmosphereBackend, set_given_state!, set_given_density!, given_geometry!, MuspelContinuumModel, build_muspel_continuum_model
 export ParallelOptions, ParallelContext, Tile2D, DistributedField
 export serial_context, initialize_parallel, finalize_parallel!, isroot, barrier, mpi_broadcast
 export allreduce_sum, allreduce_max, process_grid, tile_for_rank, local_tile, local_atmosphere
