@@ -113,6 +113,8 @@ struct RunConfig{T<:AbstractFloat}
     vz_positive::Symbol
     continuum_populations::Symbol
     line_center::Symbol
+    ffno_population_limit::Float64
+    ffno_no_inversion::Bool
 end
 
 """
@@ -134,6 +136,14 @@ atmosphere's own); FFNO populations never enter it, so `"ffno"` is refused."""
 function _continuum_populations(physics)
     value=Symbol(lowercase(String(get(physics,"continuum_populations","eos"))))
     value===:eos || throw(ArgumentError("physics.continuum_populations must be \"eos\", got \"$value\": FFNO populations never enter the continuum"))
+    value
+end
+
+"""`[physics] ffno_population_limit`: the largest total of a species' FFNO levels, as a multiple of what ρ holds at the mass per H and abundance of the
+EOS and atom. Above it all the levels are scaled down, for synthesis only. It applies at every temperature. MULTI3D reaches 1.086 in 23 of 25 H outputs. 0 turns it off."""
+function _ffno_population_limit(physics)
+    value=Float64(get(physics,"ffno_population_limit",1.09))
+    isfinite(value) && value>=0 || throw(ArgumentError("physics.ffno_population_limit must be finite and not negative"))
     value
 end
 
@@ -561,7 +571,8 @@ function load_config(path::AbstractString)
         "the HSEMHS equilibrium solves on x slabs: set parallel.decomposition = \"x_slabs\" (got $(parallel.decomposition))"))
     RunConfig(atmosphere,mode,observed,weights,outputs,SynthesisGridConfig(wavelength_m,dx_m,dy_m),regions,
         observation_model,stokes,redistribution,regularization,parallel,controls,solver,time_index,equilibrium,
-        _population_mesh(get(cfg,"population",Dict{String,Any}()),vertical_coordinate,!isempty(equilibrium.eos_table_file)),view,vz_positive,_continuum_populations(physics),_line_center(physics))
+        _population_mesh(get(cfg,"population",Dict{String,Any}()),vertical_coordinate,!isempty(equilibrium.eos_table_file)),view,vz_positive,_continuum_populations(physics),_line_center(physics),
+        _ffno_population_limit(physics),Bool(get(physics,"ffno_no_inversion",true)))
 end
 
 const _POPULATION_MESH_KEYS=("enabled","bottom_m","top_m","spacing_m","uniform_top_m","stretch","max_spacing_m","nabla","corona_temperature_k","corona_transition_m")

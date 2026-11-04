@@ -231,6 +231,8 @@ function write_inversion_outputs(config::RunConfig,result::InversionRunResult)
         attributes(file)["provenance_toml"]=sprint(io->TOML.print(io,result.provenance;sorted=true))
         attributes(file)["axis_order"]="time,stokes,wavelength,y,x"
         attributes(file)["wavelength_frame"]=string(config.outputs.wavelength_frame)
+        attributes(file)["ffno_population_limit"]=config.ffno_population_limit
+        attributes(file)["ffno_no_inversion"]=Int(config.ffno_no_inversion)
         # the synthesis is on the footprint grid (rays) whenever the view is off the vertical
         for (key,value) in _output_view_attributes(config,result.atmosphere.grid.view,"rays"); attributes(file)[key]=value; end
     end

@@ -104,7 +104,8 @@ end
 function FFNOInversion.build_muspel_line_model(atmosphere,hydrogen_populations,atom_file::AbstractString,line_index::Integer,
                                                 lower_level::Integer,upper_level::Integer;
                                                 voigt=(a_min=1f-4,a_max=1f1,a_n=20000,v_min=0f0,v_max=5f2,v_n=2500),
-                                                include_continuum=true,neutral_hydrogen=nothing,center_nm=nothing)
+                                                include_continuum=true,neutral_hydrogen=nothing,center_nm=nothing,
+                                                population_limit=0.0,no_inversion=false)
     atom=Muspel.read_atom(FFNOInversion.resolve_abo_broadening(atom_file)); line=atom.lines[line_index]
     matmos=_muspel_atmosphere(atmosphere,hydrogen_populations)
     names=("Al.yaml","C.yaml","Ca.yaml","Fe.yaml","H_6.yaml","He.yaml","KI.yaml","Mg.yaml","N.yaml","Na.yaml","NiI.yaml","O.yaml","S.yaml","Si.yaml")
@@ -114,7 +115,24 @@ function FFNOInversion.build_muspel_line_model(atmosphere,hydrogen_populations,a
                                    LinRange(Float32(voigt.v_min),Float32(voigt.v_max),voigt.v_n))
     vitp=BoundedVoigt(table,Float32(voigt.a_min),Float32(voigt.a_max),Float32(voigt.v_max))
     MuspelLineOpacityModel(line,continuum,vitp,hydrogen_populations,Int(lower_level),Int(upper_level),include_continuum,neutral_hydrogen,
-        center_nm===nothing ? Float64(line.λ0) : Float64(center_nm))
+        center_nm===nothing ? Float64(line.λ0) : Float64(center_nm),
+        Float64(population_limit)*exp10(Float64(atom.abundance)-12)/FFNOInversion._GIVEN_MASS_PER_H_KG,Bool(no_inversion))
+end
+
+"""What synthesis reads of an FFNO line at one level: nₗ and nᵤ, all the species' levels scaled down when their total exceeds what ρ holds,
+and nᵤ capped where the line opacity would turn negative. Also the scale and whether the cap acted, for the VJP. An atmosphere without ρ has no
+total to compare with."""
+@inline function _limited_levels(model,populations,atmosphere,k,x,y)
+    nl=populations[k,x,y,model.lower_level]; nu=populations[k,x,y,model.upper_level]; scale=one(nl); capped=false
+    if model.total_per_rho>0 && atmosphere.rho!==nothing
+        total=sum(@view populations[k,x,y,:]); limit=model.total_per_rho*atmosphere.rho[k,x,y]
+        total>limit && (scale=oftype(nl,limit/total); nl*=scale; nu*=scale)
+    end
+    if model.no_inversion
+        cap=nl*oftype(nl,model.line.Blu/model.line.Bul)
+        nu>cap && (nu=cap; capped=true)
+    end
+    nl,nu,scale,capped
 end
 
 function FFNOInversion.add_opacity_emissivity!(chi,eta,model::MuspelLineOpacityModel,wavelength,atmosphere,x,y,populations)
@@ -131,7 +149,7 @@ function FFNOInversion.add_opacity_emissivity!(chi,eta,model::MuspelLineOpacityM
         gamma=Muspel.calc_broadening(line.γ,temp,ne,hi)
         # thermal and microturbulent widths in quadrature; vturb = 0 is exactly the thermal width
         dwidth=hypot(Muspel.doppler_width(line.λ0,line.mass,temp),Float32(line.λ0*atmosphere.vturb[k,x,y]/299792458.0))
-        nu=populations[k,x,y,model.upper_level]; nl=populations[k,x,y,model.lower_level]
+        nl,nu,_,_=_limited_levels(model,populations,atmosphere,k,x,y)
         gamma_energy=6.62607015e-34*299792458.0/(4pi*line.λ0*1e-9)
         for l in eachindex(wavelength)
             lambda_nm=wavelength[l]*1e9
@@ -168,6 +186,26 @@ function _cell_pairing(model,wavelength,chi_bar,eta_bar,temp,ne,vz,hi,proton,nu,
     result
 end
 
+"""The pairing's coefficients of the line's levels, which it is linear in: nₗ, and nᵤ in opacity and in emissivity. Exact, because at the
+no-inversion cap the opacity terms cancel and differences in Float32 could not resolve what is left."""
+function _level_coefficients(model,wavelength,chi_bar,eta_bar,temp,ne,vz,hi,vturb)
+    line=model.line
+    gamma=Muspel.calc_broadening(line.γ,temp,ne,hi)
+    dwidth=hypot(Muspel.doppler_width(line.λ0,line.mass,temp),line.λ0*vturb/299792458.0)
+    gamma_energy=6.62607015e-34*299792458.0/(4pi*line.λ0*1e-9)
+    lower=0.0; upper_opacity=0.0; upper_emissivity=0.0
+    for l in eachindex(wavelength)
+        lambda_nm=wavelength[l]*1e9
+        a=Muspel.damping(gamma,lambda_nm,dwidth)
+        v=(lambda_nm-model.center_nm+line.λ0*vz/299792458.0)/dwidth
+        factor=Float64(gamma_energy*real(model.voigt(a,abs(v)))/(sqrt(pi)*dwidth))
+        lower+=chi_bar[l]*factor*line.Blu*1e9
+        upper_opacity-=chi_bar[l]*factor*line.Bul*1e9
+        upper_emissivity+=eta_bar[l]*factor*line.Aul*1e-3
+    end
+    lower,upper_opacity,upper_emissivity
+end
+
 """Cell-local numerical VJP for Muspel's cached opacity primitives.
 
 Only the scalar opacity/emissivity preparation is perturbed. The formal solve,
@@ -185,13 +223,15 @@ function FFNOInversion.add_opacity_emissivity_vjp!(atmosphere_bar,population_bar
         temp=Float32(atmosphere.temperature[k,x,y]); ne=Float32(atmosphere.ne[k,x,y])
         vz=Float32(FFNOInversion.los_velocity(atmosphere,k,x,y))
         hi=neutral===nothing ? Float32(sum(@view hydrogen[k,x,y,1:5])) : Float32(neutral[k])
-        proton=Float32(hydrogen[k,x,y,6]); nu=Float32(populations[k,x,y,model.upper_level])
-        nl=Float32(populations[k,x,y,model.lower_level])
+        proton=Float32(hydrogen[k,x,y,6])
+        limited_l,limited_u,level_scale,capped=_limited_levels(model,populations,atmosphere,k,x,y)
+        nu=Float32(limited_u); nl=Float32(limited_l)
         cb=@view chi_bar[k,:]; eb=@view eta_bar[k,:]
         vturb=Float32(atmosphere.vturb[k,x,y])
         values=Float32[temp,ne,vz,hi,proton,nu,nl,vturb]
         derivatives=zeros(Float64,length(values))
         for q in eachindex(values)
+            q in (6,7) && continue          # the levels: _level_coefficients
             center=values[q]
             scale=q in (3,8) ? max(abs(center),1f3) : max(abs(center),1f0)    # velocities
             h=1f-3*scale
@@ -214,8 +254,21 @@ function FFNOInversion.add_opacity_emissivity_vjp!(atmosphere_bar,population_bar
             atmosphere_bar.pgas[k,x,y]+=derivatives[4]*(eos_at(column_T[k],column_P[k]+dP)-eos_at(column_T[k],column_P[k]-dP))/(2dP)
         end
         hydrogen_bar[k,x,y,6]+=derivatives[5]
-        population_bar[k,x,y,model.upper_level]+=derivatives[6]
-        population_bar[k,x,y,model.lower_level]+=derivatives[7]
+        # through _limited_levels: nₗ' = s nₗ, nᵤ' = s nᵤ or, capped, s r nₗ, where the opacity cancels; s = limit/total, when the total is over
+        lower,upper_opacity,upper_emissivity=_level_coefficients(model,wavelength,cb,eb,temp,ne,vz,hi,vturb)
+        raw_l=populations[k,x,y,model.lower_level]; raw_u=populations[k,x,y,model.upper_level]; ratio=model.line.Blu/model.line.Bul
+        if capped
+            population_bar[k,x,y,model.lower_level]+=level_scale*ratio*upper_emissivity
+            through_scale=ratio*upper_emissivity*raw_l
+        else
+            population_bar[k,x,y,model.lower_level]+=level_scale*lower
+            population_bar[k,x,y,model.upper_level]+=level_scale*(upper_opacity+upper_emissivity)
+            through_scale=lower*raw_l+(upper_opacity+upper_emissivity)*raw_u
+        end
+        if level_scale<1
+            @views population_bar[k,x,y,:].-=through_scale*level_scale/sum(populations[k,x,y,:])
+            atmosphere_bar.rho[k,x,y]+=through_scale*level_scale/atmosphere.rho[k,x,y]
+        end
         atmosphere_bar.vturb[k,x,y]+=derivatives[8]
     end
     nothing

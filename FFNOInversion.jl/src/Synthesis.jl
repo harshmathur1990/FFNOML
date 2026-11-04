@@ -71,6 +71,8 @@ function build_synthesis_setup(config,atmosphere::Atmosphere3D,populations::Abst
     setups=RegionSynthesisSetup[]
     given=atmosphere.h_neutral!==nothing
     line_center=hasproperty(config,:line_center) ? config.line_center : :reference
+    population_limit=hasproperty(config,:ffno_population_limit) ? config.ffno_population_limit : 0.0
+    no_inversion=hasproperty(config,:ffno_no_inversion) ? config.ffno_no_inversion : false
     # species, line index, levels, air wavelength [nm] of the line core: the atom files' level energies put Hα 0.16 Å and Ca II 0.03 Å off
     aliases=Dict(:halpha=>(:H,5,2,3,656.28),:h_alpha=>(:H,5,2,3,656.28),:ca_ii_8542=>(:CA,5,3,5,854.209))
     for region in config.regions
@@ -90,7 +92,8 @@ function build_synthesis_setup(config,atmosphere::Atmosphere3D,populations::Abst
                 haskey(atom_files,species) || throw(ArgumentError("missing $species atom_file"))
                 model=build_muspel_line_model(atmosphere,populations[:H],atom_files[species],index,lower,upper;
                     include_continuum=false,neutral_hydrogen=given ? nothing : WittmannKuruczState(eos),
-                    center_nm=line_center===:reference ? _air_to_vacuum_nm(center_air_nm) : nothing)
+                    center_nm=line_center===:reference ? _air_to_vacuum_nm(center_air_nm) : nothing,
+                    population_limit=population_limit,no_inversion=no_inversion)
                 push!(contributors,OpacityContributor(model,populations[species]))
             elseif source.mode==:kurucz_lte
                 cache=load_kurucz_linelist(source.linelist_file)

@@ -382,6 +382,8 @@ vertical one. Design, decisions and validation: [`docs/viewing-angle/README.md`]
 | --- | --- |
 | `[physics] redistribution` | `"non_prd"` |
 | `[physics] line_center` | where FFNO line profiles are centred. `"reference"` (default): H alpha at 656.28 nm and Ca II at 854.209 nm (air). `"atom"`: the atom file's level energies, as RH with unmodified atoms. Kurucz lines keep their list's wavelengths |
+| `[physics] ffno_population_limit` | largest total of a species' FFNO levels synthesis reads, as a multiple of what ρ holds (default `1.09`; `0` turns it off). See [FFNO population limits](#ffno-population-limits) |
+| `[physics] ffno_no_inversion` | cap the upper level where the line opacity would turn negative (default `true`) |
 | `[physics] continuum_populations` | only `"eos"` (default): one Muspel continuum per region, hydrogen from the EOS. `"ffno"` is refused. |
 | `[observation] stokes` | `["I"]` |
 | `[observation.datasets]` | names of `intensity`, `sigma`, `wavelength_weights`, `spatial_weights` |
@@ -657,6 +659,17 @@ Every region has one continuum, whatever its sources: Muspel's at the region's c
 from the EOS at (T, P), forward and inversion alike. FFNO populations never enter it, and `[physics] continuum_populations = "ffno"` is
 refused. The only FFNO populations synthesis reads are the line's own two levels: neutral H in van der Waals broadening comes from the EOS too.
 In a given atmosphere both come from the input instead. Lower-level populations of Kurucz LTE lines stay Wittmann's.
+
+### FFNO population limits
+
+The FFNO can predict impossible populations in gas far from its training data: in `ar098192` at about 1 MK and high density, H totals up to 22,000 times the hydrogen present, and inverted Hα levels. Thin gas absorbs almost nothing but still emits, so these cells gave Hα up to 44 times the continuum, and near-zero opacity gave negative intensities. Before each FFNO line's opacity and emissivity, for Hα and Ca II, at every temperature:
+
+- If the total of the species' levels exceeds `ffno_population_limit` × ρ/(mass per H) × abundance, all its levels are scaled down to that total. The mass per H is the Wittmann EOS's and the abundance the atom file's.
+- With `ffno_no_inversion`, nᵤ is capped at nₗ Blu/Bul, where the line opacity is zero.
+
+The inversion gradients follow both limits. They apply only to what synthesis reads: the FFNO's own populations are what the atmosphere file holds. `synthesis.h5` records both settings as attributes.
+
+The default comes from the 49 MULTI3D outputs in `bifrost_data`. The H total reaches at most 1.086 of ρ/(mass per H) in 23 of the 25 H outputs. The other two, `en024031_by100_helium/109` and `qs006003_sap/689`, exceed it only in cool gas, up to 2.6e5 and 88 times, which looks like a problem in those runs and has not been traced. Ca is 1.031 everywhere. Hα is inverted in one cell of all 25, and Ca II 8542 in none.
 
 FFNO line profiles are centred by `[physics] line_center`. By default that is the reference wavelength, H alpha 656.28 nm and Ca II
 854.209 nm (air); only the profile's detuning moves, and the Doppler width and the transition's strength stay the atom's. With `"atom"` it is the atom
