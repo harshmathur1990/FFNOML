@@ -4,6 +4,7 @@ initial_atmosphere_file = "inputs/initial_atmosphere_z.h5"
 time_index = 1
 
 [outputs]
+# wavelength_frame = "air"    # frame of the written wavelength_m, "air" or "vacuum"; a label only, synthesis is on the vacuum grid
 # per-frequency unit of the written spectra and of an observation file: "si" (J s^-1 m^-2 Hz^-1 sr^-1) or "cgs"
 # (erg s^-1 cm^-2 Hz^-1 sr^-1); each region's normalization then divides them (below: cgs disk-centre continua)
 intensity_units = "cgs"
@@ -105,7 +106,8 @@ linelist_file = "inputs/kurucz_6302.list"
 
 [physics]
 redistribution = "non_prd"
-# continuum_populations = "eos"   # "eos": continuum hydrogen from the EOS; "ffno": from the FFNO populations
+# line_center = "reference"   # FFNO lines at 656.28 and 854.209 nm (air); "atom": the atom file's level energies
+# The continuum is Muspel's with hydrogen from the EOS; FFNO populations never enter it.
 
 [observation]
 stokes = ["I"]

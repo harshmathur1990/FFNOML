@@ -15,6 +15,77 @@ function _muspel_atmosphere(atmosphere,hydrogen_populations)
         p(atmosphere.temperature),p(atmosphere.vx),p(atmosphere.vy),p(atmosphere.vz),p(atmosphere.ne),p(hi),p(hp))
 end
 
+const _CONTINUUM_ATOMS=("Al.yaml","C.yaml","Ca.yaml","Fe.yaml","H_6.yaml","He.yaml","KI.yaml","Mg.yaml","N.yaml","Na.yaml","NiI.yaml","O.yaml","S.yaml","Si.yaml")
+const _CONTINUUM_TABLES=Ref{Any}(nothing)
+
+"""Muspel's continuum interpolator at `λ_nm` on one fixed (T, nₑ) range, so that it does not depend on the rank's slab or on an inversion's
+trial temperatures. The atoms are read once."""
+function _continuum_itp(λ_nm)
+    if _CONTINUUM_TABLES[]===nothing
+        atoms=Vector{Muspel.AtomicModel}(undef,length(_CONTINUUM_ATOMS))
+        for (i,name) in enumerate(_CONTINUUM_ATOMS); atoms[i]=Muspel.read_atom(joinpath(Muspel.AtomicData.get_atom_dir(),name)); end
+        _CONTINUUM_TABLES[]=(atoms,Muspel.get_atoms_bf_interpolant(atoms))
+    end
+    atoms,interpolants=_CONTINUUM_TABLES[]
+    Muspel.create_σ_itp_NLTE(Float64(λ_nm),LinRange(3.2,7.5,216),LinRange(8.0,24.0,161),atoms,interpolants)
+end
+
+FFNOInversion.build_muspel_continuum_model(λ_nm;eos=nothing)=FFNOInversion.MuspelContinuumModel(_continuum_itp(λ_nm),eos)
+
+"""Neutral H and protons of column (x, y): the atmosphere's when given, otherwise the EOS's at (T, P)."""
+function _continuum_hydrogen(model,atmosphere,x,y)
+    atmosphere.h_neutral!==nothing && return @view(atmosphere.h_neutral[:,x,y]),@view(atmosphere.h_proton[:,x,y])
+    model.eos===nothing && throw(ArgumentError("the Muspel continuum needs the EOS, or an atmosphere with given hydrogen"))
+    temp=Float64.(atmosphere.temperature[:,x,y]); pgas=Float64.(atmosphere.pgas[:,x,y])
+    FFNOInversion.eos_neutral_hydrogen!(zeros(length(temp)),model.eos,temp,pgas),FFNOInversion.eos_protons(model.eos,temp,pgas)
+end
+
+function FFNOInversion.add_opacity_emissivity!(chi,eta,model::FFNOInversion.MuspelContinuumModel,wavelength,atmosphere,x,y,populations)
+    neutral,protons=_continuum_hydrogen(model,atmosphere,x,y)
+    @inbounds for k in axes(chi,1)
+        temp=Float64(atmosphere.temperature[k,x,y])
+        alpha=Muspel.α_cont(model.continuum,temp,Float64(atmosphere.ne[k,x,y]),Float64(neutral[k]),Float64(protons[k]))
+        for l in eachindex(wavelength)
+            chi[k,l]+=alpha; eta[k,l]+=alpha*FFNOInversion.source_planck(wavelength[l],temp)
+        end
+    end
+end
+
+"""Adjoint of the continuum, local in depth: α(T, nₑ, n_H, n_p) with n_H, n_p from the EOS at (T, P), and the Planck function in T. Forward only for given hydrogen."""
+function FFNOInversion.add_opacity_emissivity_vjp!(atmosphere_bar,population_bar,population_lookup,chi_bar,eta_bar,
+        model::FFNOInversion.MuspelContinuumModel,wavelength,atmosphere,x,y,populations)
+    atmosphere.h_neutral===nothing || throw(ArgumentError("a given atmosphere is forward only: its continuum has no adjoint"))
+    temp=Float64.(atmosphere.temperature[:,x,y]); pgas=Float64.(atmosphere.pgas[:,x,y]); state=model.eos
+    hydrogen(t,p)=(FFNOInversion.eos_neutral_hydrogen!(zeros(length(t)),state,t,p),FFNOInversion.eos_protons(state,t,p))
+    neutral,protons=hydrogen(temp,pgas)
+    dT=1e-3 .* temp; dP=1e-3 .* pgas
+    hTp,pTp=hydrogen(temp.+dT,pgas); hTm,pTm=hydrogen(temp.-dT,pgas); hPp,pPp=hydrogen(temp,pgas.+dP); hPm,pPm=hydrogen(temp,pgas.-dP)
+    α(args...)=Muspel.α_cont(model.continuum,args...)
+    @inbounds for k in axes(chi_bar,1)
+        t=temp[k]; ne=Float64(atmosphere.ne[k,x,y]); hi=neutral[k]; hp=protons[k]; alpha=α(t,ne,hi,hp)
+        planck(λ,value)=FFNOInversion.source_planck(λ,value)
+        weight=sum(@view chi_bar[k,:]); dsource=0.0
+        for l in eachindex(wavelength)
+            weight+=eta_bar[k,l]*planck(wavelength[l],t)
+            dsource+=eta_bar[k,l]*(planck(wavelength[l],t+dT[k])-planck(wavelength[l],t-dT[k]))/(2dT[k])
+        end
+        relative(f,value)=(h=1e-3*max(abs(value),floatmin(Float64)); (f(value+h)-f(value-h))/(2h))
+        dt=relative(v->α(v,ne,hi,hp),t); dn=relative(v->α(t,v,hi,hp),ne)
+        dh=relative(v->α(t,ne,v,hp),hi); dp=relative(v->α(t,ne,hi,v),hp)
+        atmosphere_bar.temperature[k,x,y]+=weight*(dt+dh*(hTp[k]-hTm[k])/(2dT[k])+dp*(pTp[k]-pTm[k])/(2dT[k]))+alpha*dsource
+        atmosphere_bar.ne[k,x,y]+=weight*dn
+        atmosphere_bar.pgas[k,x,y]+=weight*(dh*(hPp[k]-hPm[k])/(2dP[k])+dp*(pPp[k]-pPm[k])/(2dP[k]))
+    end
+    atmosphere_bar
+end
+
+"""χ₅₀₀ of a given atmosphere: Muspel's continuum at 500 nm from T, nₑ, neutral H and protons."""
+function FFNOInversion.given_chi500(temperature,ne,neutral,protons)
+    nz,nx,ny=size(temperature); continuum=_continuum_itp(500)
+    [Muspel.α_cont(continuum,Float64(temperature[k,x,y]),Float64(ne[k,x,y]),Float64(neutral[k,x,y]),Float64(protons[k,x,y]))
+        for k in 1:nz,x in 1:nx,y in 1:ny]
+end
+
 """Muspel's Voigt table, with the exact value Re/Im erfcx(a - iv) outside its (a, v) range.
 
 `Muspel.create_voigt_itp` extrapolates linearly (`Line()`), which goes negative for damping above the table
@@ -33,7 +104,7 @@ end
 function FFNOInversion.build_muspel_line_model(atmosphere,hydrogen_populations,atom_file::AbstractString,line_index::Integer,
                                                 lower_level::Integer,upper_level::Integer;
                                                 voigt=(a_min=1f-4,a_max=1f1,a_n=20000,v_min=0f0,v_max=5f2,v_n=2500),
-                                                include_continuum=true,neutral_hydrogen=nothing)
+                                                include_continuum=true,neutral_hydrogen=nothing,center_nm=nothing)
     atom=Muspel.read_atom(FFNOInversion.resolve_abo_broadening(atom_file)); line=atom.lines[line_index]
     matmos=_muspel_atmosphere(atmosphere,hydrogen_populations)
     names=("Al.yaml","C.yaml","Ca.yaml","Fe.yaml","H_6.yaml","He.yaml","KI.yaml","Mg.yaml","N.yaml","Na.yaml","NiI.yaml","O.yaml","S.yaml","Si.yaml")
@@ -42,18 +113,19 @@ function FFNOInversion.build_muspel_line_model(atmosphere,hydrogen_populations,a
     table=Muspel.create_voigt_itp(LinRange(Float32(voigt.a_min),Float32(voigt.a_max),voigt.a_n),
                                    LinRange(Float32(voigt.v_min),Float32(voigt.v_max),voigt.v_n))
     vitp=BoundedVoigt(table,Float32(voigt.a_min),Float32(voigt.a_max),Float32(voigt.v_max))
-    MuspelLineOpacityModel(line,continuum,vitp,hydrogen_populations,Int(lower_level),Int(upper_level),include_continuum,neutral_hydrogen)
+    MuspelLineOpacityModel(line,continuum,vitp,hydrogen_populations,Int(lower_level),Int(upper_level),include_continuum,neutral_hydrogen,
+        center_nm===nothing ? Float64(line.λ0) : Float64(center_nm))
 end
 
 function FFNOInversion.add_opacity_emissivity!(chi,eta,model::MuspelLineOpacityModel,wavelength,atmosphere,x,y,populations)
     populations===nothing && throw(ArgumentError("Muspel FFNO line populations are required"))
-    hp=model.hydrogen_populations; line=model.line
-    neutral=model.neutral_hydrogen===nothing ? nothing :
+    hp=model.hydrogen_populations; line=model.line; given=atmosphere.h_neutral!==nothing
+    neutral=given ? @view(atmosphere.h_neutral[:,x,y]) : model.neutral_hydrogen===nothing ? nothing :
         FFNOInversion.eos_neutral_hydrogen!(zeros(Float64,size(chi,1)),model.neutral_hydrogen,
             Float64.(atmosphere.temperature[:,x,y]),Float64.(atmosphere.pgas[:,x,y]))
     @inbounds for k in axes(chi,1)
         temp=Float32(atmosphere.temperature[k,x,y]); ne=Float32(atmosphere.ne[k,x,y])
-        hi=neutral===nothing ? Float32(sum(@view hp[k,x,y,1:5])) : Float32(neutral[k]); proton=Float32(hp[k,x,y,6])
+        hi=neutral===nothing ? Float32(sum(@view hp[k,x,y,1:5])) : Float32(neutral[k]); proton=Float32(given ? atmosphere.h_proton[k,x,y] : hp[k,x,y,6])
         alpha_c=model.include_continuum ? Muspel.α_cont(model.continuum,temp,ne,hi,proton) : zero(temp)
         j_c=model.include_continuum ? alpha_c*Muspel.blackbody_λ(line.λ0,temp) : zero(temp)
         gamma=Muspel.calc_broadening(line.γ,temp,ne,hi)
@@ -64,7 +136,7 @@ function FFNOInversion.add_opacity_emissivity!(chi,eta,model::MuspelLineOpacityM
         for l in eachindex(wavelength)
             lambda_nm=wavelength[l]*1e9
             a=Muspel.damping(gamma,lambda_nm,dwidth)
-            v=(lambda_nm-line.λ0+line.λ0*FFNOInversion.los_velocity(atmosphere,k,x,y)/299792458.0)/dwidth
+            v=(lambda_nm-model.center_nm+line.λ0*FFNOInversion.los_velocity(atmosphere,k,x,y)/299792458.0)/dwidth
             profile=real(model.voigt(a,abs(v)))/(sqrt(pi)*dwidth)
             factor=gamma_energy*profile
             alpha=factor*(nl*line.Blu-nu*line.Bul)*1e9+(model.include_continuum ? alpha_c : 0)
@@ -85,7 +157,7 @@ function _cell_pairing(model,wavelength,chi_bar,eta_bar,temp,ne,vz,hi,proton,nu,
     for l in eachindex(wavelength)
         lambda_nm=wavelength[l]*1e9
         a=Muspel.damping(gamma,lambda_nm,dwidth)
-        v=(lambda_nm-line.λ0+line.λ0*vz/299792458.0)/dwidth
+        v=(lambda_nm-model.center_nm+line.λ0*vz/299792458.0)/dwidth
         profile=real(model.voigt(a,abs(v)))/(sqrt(pi)*dwidth)
         factor=gamma_energy*profile
         alpha=factor*(nl*line.Blu-nu*line.Bul)*1e9+

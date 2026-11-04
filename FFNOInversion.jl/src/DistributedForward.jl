@@ -13,7 +13,8 @@ function distribute_atmosphere(::Type{T},root_atmosphere,context::ParallelContex
         (grid=root_atmosphere.grid,shape=size(root_atmosphere.temperature),
          magnetic=root_atmosphere.magnetic_field!==nothing,pgas=root_atmosphere.pgas!==nothing,
          rho=root_atmosphere.rho!==nothing,ne=root_atmosphere.ne!==nothing,z=root_atmosphere.z!==nothing,
-         logtau500=root_atmosphere.logtau500!==nothing,chi500=root_atmosphere.chi500!==nothing)
+         logtau500=root_atmosphere.logtau500!==nothing,chi500=root_atmosphere.chi500!==nothing,
+         h_neutral=root_atmosphere.h_neutral!==nothing,h_proton=root_atmosphere.h_proton!==nothing)
     else nothing end,context)
     shape=metadata.shape; tile=local_tile(context,shape[2],shape[3])
     getroot(name)=isroot(context) ? getfield(root_atmosphere,name) : nothing
@@ -26,6 +27,7 @@ function distribute_atmosphere(::Type{T},root_atmosphere,context::ParallelContex
     pgas=optional(:pgas,metadata.pgas,306); rho=optional(:rho,metadata.rho,307)
     ne=optional(:ne,metadata.ne,308); z=optional(:z,metadata.z,309)
     logtau500=optional(:logtau500,metadata.logtau500,313); chi500=optional(:chi500,metadata.chi500,314)
+    h_neutral=optional(:h_neutral,metadata.h_neutral,315); h_proton=optional(:h_proton,metadata.h_proton,316)
     B=if metadata.magnetic
         rootB=isroot(context) ? root_atmosphere.magnetic_field : nothing
         bx=distribute_field(T,isroot(context) ? rootB.Bx : nothing,shape,context;tag=310).values
@@ -36,7 +38,7 @@ function distribute_atmosphere(::Type{T},root_atmosphere,context::ParallelContex
     local_grid=Grid3D(metadata.grid.vertical,copy(metadata.grid.x[tile.xrange]),copy(metadata.grid.y[tile.yrange]),
         metadata.grid.view)
     local_atmos=Atmosphere3D(local_grid,temperature,vx,vy,vz,vturb;magnetic_field=B,pgas=pgas,rho=rho,ne=ne,z=z,
-        logtau500=logtau500,chi500=chi500)
+        logtau500=logtau500,chi500=chi500,h_neutral=h_neutral,h_proton=h_proton)
     DistributedAtmosphere(local_atmos,metadata.grid,tile)
 end
 
@@ -53,6 +55,8 @@ function gather_atmosphere(distributed::DistributedAtmosphere,context::ParallelC
     z=a.z===nothing ? nothing : gather(a.z,329)
     logtau500=a.logtau500===nothing ? nothing : gather(a.logtau500,333)
     chi500=a.chi500===nothing ? nothing : gather(a.chi500,334)
+    h_neutral=a.h_neutral===nothing ? nothing : gather(a.h_neutral,335)
+    h_proton=a.h_proton===nothing ? nothing : gather(a.h_proton,336)
     B=if a.magnetic_field===nothing
         nothing
     else
@@ -60,7 +64,7 @@ function gather_atmosphere(distributed::DistributedAtmosphere,context::ParallelC
         isroot(context) ? MagneticField3D(bx,by,bz) : nothing
     end
     isroot(context) ? Atmosphere3D(g,temperature,vx,vy,vz,vturb;magnetic_field=B,pgas=pgas,rho=rho,ne=ne,z=z,
-        logtau500=logtau500,chi500=chi500) : nothing
+        logtau500=logtau500,chi500=chi500,h_neutral=h_neutral,h_proton=h_proton) : nothing
 end
 
 abstract type AbstractDistributedPopulationModel end
@@ -159,7 +163,8 @@ function _footprint_state(distributed::DistributedAtmosphere,populations)
     grid=Grid3D(g.vertical,g.x,g.y,footprint_view(g.view))
     f()=fill!(similar(a.temperature),one(eltype(a.temperature)))   # filled by footprint_state! before every synthesis
     atmosphere=Atmosphere3D(grid,copy(a.temperature),copy(a.vx),copy(a.vy),copy(a.vz),copy(a.vturb);
-        pgas=f(),rho=f(),ne=f(),z=copy(a.z))
+        pgas=f(),rho=f(),ne=f(),z=copy(a.z),
+        h_neutral=a.h_neutral===nothing ? nothing : copy(a.h_neutral),h_proton=a.h_proton===nothing ? nothing : copy(a.h_proton))
     FootprintState(atmosphere,deepcopy(populations))
 end
 
@@ -244,6 +249,12 @@ function footprint_state!(workspace::HybridForwardWorkspace,distributed::Distrib
         destination=getfield(fp.atmosphere,name)
         root_values=isroot(context) ? _footprint_shift(getfield(global_atmosphere,name),plan,name in _FOOTPRINT_LOG_FIELDS) : nothing
         destination.=distribute_field(eltype(destination),root_values,shape,context;tag=920+i).values
+    end
+    # a given atmosphere's hydrogen, which only the footprint's continuum and broadening read
+    for (i,name) in enumerate((:h_neutral,:h_proton))
+        destination=getfield(fp.atmosphere,name); destination===nothing && continue
+        root_values=isroot(context) ? _footprint_shift(getfield(global_atmosphere,name),plan,false) : nothing
+        destination.=distribute_field(eltype(destination),root_values,shape,context;tag=930+i).values
     end
     shifted=isroot(context) ? Dict(species=>begin
             out=similar(value)
@@ -340,7 +351,7 @@ function forward!(workspace::HybridForwardWorkspace,model::HybridForwardModel,
         _forward_stage(context,"footprint begin")
         footprint_state!(workspace,distributed,context)
     end
-    _forward_stage(context,"synthesis begin integration=$(_tau_integration(distributed.local_atmosphere) ? "log10tau500" : "z")")
+    _forward_stage(context,"synthesis begin integration=$(_axis_integration(distributed.local_atmosphere) ? vertical_coordinate(distributed.local_atmosphere.grid) : "z")")
     Base.ScopedValues.with(SYNTHESIS_PROGRESS=>isroot(context)) do
         synthesize!(workspace.intrinsic,model.synthesizer,model.redistribution,synthesis_atmosphere(workspace,distributed),
             workspace.populations,workspace.synthesis_cache)

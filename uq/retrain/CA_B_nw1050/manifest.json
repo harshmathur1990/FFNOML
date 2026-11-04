@@ -1,0 +1,52 @@
+{
+  "branch": "B_nw1050",
+  "atoms": "CA",
+  "added": [
+    "nw012023/1050"
+  ],
+  "train_split": {
+    "en024048_hion": [
+      "465"
+    ],
+    "nw012023": [
+      "915"
+    ],
+    "ch012012_hion": [
+      "910"
+    ],
+    "ch012006": [
+      "836"
+    ],
+    "qs006003_sap": [
+      "689"
+    ]
+  },
+  "val_split": {
+    "en024048_hion": [
+      "700"
+    ],
+    "nw012023": [
+      "940"
+    ],
+    "ch012012_hion": [
+      "984"
+    ],
+    "ch012006": [
+      "849"
+    ],
+    "qs006003_sap": [
+      "900"
+    ]
+  },
+  "n_train_patches": 966,
+  "production_train_file": "/mn/stornext/d9/data/harshm/FFNOML/IO/3D_sim_train_ch012006_836__ch012012_hion_910__en024048_hion_465__nw012023_915__qs006003_sap_689_atomsCA_target-lognlte_patch40_stride20.hdf5",
+  "production_checkpoint": "/mn/stornext/d9/data/harshm/FFNOML/training_FFNO3D_zscale_expand_lognlte/3D_sim_train_CA.pt",
+  "checkpoint_sha256": "7a9365d26543dcb9b94da29dc574ae1e18b879f0818909e9d579a7aa4af9b760",
+  "extra_files": {
+    "nw012023/1050": {
+      "path": "/mn/stornext/d9/data/harshm/FFNOML/uq/retrain/data/nw012023_1050_CA.hdf5",
+      "sha256": "1ec15c5c42e21e4e10f876b37e489611a185e9c860fd22ced96bbc8e9682b844"
+    }
+  },
+  "notes": "targeted: nw012023 temporal transfer"
+}

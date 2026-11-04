@@ -83,16 +83,19 @@ H and Ca assets even when only one species contributes to the configured lines.
 ## How the atmosphere is treated
 
 - **P, ρ, nₑ:** from HSEMHS, by hydrostatic balance and the EOS. In a forward run only, `ne = "ne"` in `[atmosphere.datasets]` makes nₑ the truth, and P and ρ follow from (T, nₑ) through the EOS with no hydrostatic balance. An inversion refuses it.
-- **Population mesh:** the FFNO predicts on a fixed height mesh, on by default for log tau and with `[population.mesh] enabled = true` on z.
+- **A given atmosphere:** in a forward run only, `ne` and `hydrogen_populations` together give the atmosphere on any axis, as in RH, and HSEMHS is not used. `[equilibrium]` is then optional. The mesh still needs `eos_table_file`, or `[population.mesh] enabled = false`.
+- **Population mesh:** the FFNO predicts on a fixed height mesh, on by default for log tau and log m, and with `[population.mesh] enabled = true` on z.
 - **Above a column's top:** where the mesh goes higher, a corona: T rises to `corona_temperature_k` (1 MK) over `corona_transition_m` (240 km), hydrostatic from the top, ρ and nₑ from the EOS, velocities held. `corona_temperature_k = 0` holds the top values.
 - **Below a column's bottom:** a hydrostatic extension with d ln T / d ln P = `nabla` (0.13), ρ and nₑ from the EOS, velocities held.
-- **Continuum:** hydrogen from the EOS, no FFNO populations, unless `[physics] continuum_populations = "ffno"`.
+- **Continuum:** Muspel's, with hydrogen from the EOS (a given atmosphere's own, when given). FFNO populations never enter it.
+- **Line centres:** FFNO lines are centred on H alpha 656.28 nm and Ca II 854.209 nm (air) by default. `[physics] line_center = "atom"` uses the atom file's level energies instead, which puts them about +0.16 and -0.03 Å away. Kurucz lines keep their list's wavelengths.
+- **Wavelengths:** `start_angstrom` is always air and synthesis always runs on the vacuum grid. `[outputs] wavelength_frame` (`"air"`, the default, or `"vacuum"`) only chooses the written `wavelength_m`; the file attribute `wavelength_frame` records it.
 
 See [the package README](../../FFNOInversion.jl/README.md#population-mesh) for the details.
 
 ## Viewing angle (off disk centre)
 
-Add a `[view]` section (commented templates in all four configurations) to synthesize or invert at μ = cos θ < 1;
+Add a `[view]` section (commented templates in all five configurations) to synthesize or invert at μ = cos θ < 1;
 without it, or at μ = 1, everything is the vertical run. Design, validation and the comparison with MULTI3D at
 μ = 0.8: [`FFNOInversion.jl/docs/viewing-angle/README.md`](../../FFNOInversion.jl/docs/viewing-angle/README.md).
 
@@ -101,6 +104,7 @@ without it, or at μ = 1, everything is the vertical run. Design, validation and
   file attributes `view_mu`, `view_azimuth_deg` and `view_geometry` equal to the configuration (a file without them is
   accepted only at μ = 1). Set `[grid] dx_m`, `dy_m` to the footprint spacings (a sky pixel p becomes p across the
   tilt and p/μ along it). Use `geometry = "inclined"`: the FFNO then sees every ray point at its 3-D position.
+- **Native log m** (`forward_logm.toml`): the same contract as native log tau, with log10 m along the ray.
 - **Native z** (`forward_z.toml`, `inversion_z.toml`): the cube is used as it is; `inclined` synthesizes along the
   slanted rays through it. This is the direct route for an off-centre view of a simulation.
 - **Inversions** at μ < 1 control `vlos` (n·v), not `vz` (see the comment in the inversion configurations).

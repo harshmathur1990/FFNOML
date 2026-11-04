@@ -73,6 +73,22 @@ end
 _syx_to_xys(value)=permutedims(value,(2,1))
 _slyx_to_lsxy(value)=permutedims(value,(2,1,4,3))
 
+"""Dex to add to a log10 column-mass dataset to reach kg m^-2: SI unless its `units` attribute (of m) says g cm^-2
+(1 g cm^-2 = 10 kg m^-2), as HSEMHS `read_log10m`. An unknown unit is an error: a wrong factor would silently scale every pressure."""
+function _log10m_si_offset(dataset)
+    a=HDF5.attributes(dataset)
+    units=haskey(a,"units") ? String(read(a["units"])) : "kg m-2"
+    units in ("kg m-2","kg/m2","kg/m^2","kg m^-2") && return 0.0
+    units in ("g cm-2","g/cm2","g/cm^2","g cm^-2") && return 1.0
+    throw(ArgumentError("log10m: unknown units \"$units\" (kg m-2 or g cm-2)"))
+end
+
+"""Output dataset of a native vertical axis."""
+_native_axis_dataset(kind)=kind===:z_m ? "z_m" : kind===:log10m ? "log10m" : "logtau_500"
+
+"""The written wavelength axis [m] of the air grid `air_m`: a label only, the synthesis is on the vacuum grid in either frame."""
+_output_wavelength(air_m,frame)=frame===:vacuum ? _air_to_vacuum_nm.(air_m.*1e9).*1e-9 : air_m
+
 """Read the configured observation and initial-atmosphere HDF5 files.
 
 Logical file axes follow the user contract: atmosphere `(time,z,y,x)` and
@@ -87,6 +103,7 @@ function read_inversion_inputs(config::RunConfig{T}) where T
             _read_dataset(file,config.atmosphere.vertical_dataset),storage_order)
         vertical=ndims(vertical_raw)==1 ? vec(vertical_raw) :
             vec(_time_slice(vertical_raw,config.time_index,1,string(config.atmosphere.vertical_dataset)))
+        kind===:log10m && (vertical=vertical.+_log10m_si_offset(file[config.atmosphere.vertical_dataset]))
         temperature=_zyx_to_zxy(_time_slice(_from_atmosphere_storage(
             _read_dataset(file,config.atmosphere.temperature_dataset),storage_order),
             config.time_index,3,"temperature"))
@@ -118,6 +135,9 @@ function read_inversion_inputs(config::RunConfig{T}) where T
             _read_dataset(file,config.atmosphere.ne_dataset),storage_order),config.time_index,3,"electron density")))
         ne===nothing || (size(ne)==(nz,nx,ny) && all(>(0),ne)) || throw(ArgumentError(
             "electron density $(config.atmosphere.ne_dataset) must have the atmosphere's shape and be positive"))
+        # (level, z, y, x) in the file, as written to the output's populations
+        hydrogen=config.atmosphere.hydrogen_populations_dataset===nothing ? nothing : T.(permutedims(_time_slice(_from_atmosphere_storage(
+            _read_dataset(file,config.atmosphere.hydrogen_populations_dataset),storage_order),config.time_index,4,"hydrogen populations"),(2,4,3,1)))
         config.vz_positive===:down && (vz=-vz)   # the file's vz sign; nothing else differs
         # canonical order is top first; reverse the axis and every 3-D field together
         bottom_first=kind===:z_m ? vertical[1]<vertical[end] : vertical[1]>vertical[end]
@@ -132,6 +152,7 @@ function read_inversion_inputs(config::RunConfig{T}) where T
         zfield=kind===:z_m ? repeat(reshape(T.(vertical),:,1,1),1,nx,ny) : nothing
         atmosphere=Atmosphere3D(grid,flip(T.(temperature)),flip(T.(vx)),flip(T.(vy)),flip(T.(vz)),flip(vturb);
             magnetic_field=magnetic,z=zfield,ne=ne===nothing ? nothing : flip(ne))
+        hydrogen===nothing || set_given_state!(atmosphere,flip(hydrogen))
         (atmosphere=atmosphere,)
     end
     config.mode===:forward && return InversionInputBundle(atmosphere_data.atmosphere,nothing)
@@ -191,7 +212,7 @@ function write_inversion_outputs(config::RunConfig,result::InversionRunResult)
         attributes(file["intensity"])["units"]=first(INTENSITY_UNITS[config.outputs.intensity_units])
         attributes(file["intensity"])["normalization"]="divided by the region normalization (dataset normalization)"
         file["normalization"]=reduce(vcat,[fill(region.normalization,region.count) for region in config.regions])
-        file["wavelength_m"]=result.synthesis.wavelength_m
+        file["wavelength_m"]=_output_wavelength(result.synthesis.wavelength_m,config.outputs.wavelength_frame)
         if result.objective!==nothing
             file["objective_total"]=result.objective.components.total
             file["objective_data"]=result.objective.components.data
@@ -200,15 +221,16 @@ function write_inversion_outputs(config::RunConfig,result::InversionRunResult)
         attributes(file)["execution_mode"]=string(config.mode)
         attributes(file)["provenance_toml"]=sprint(io->TOML.print(io,result.provenance;sorted=true))
         attributes(file)["axis_order"]="time,stokes,wavelength,y,x"
+        attributes(file)["wavelength_frame"]=string(config.outputs.wavelength_frame)
         # the synthesis is on the footprint grid (rays) whenever the view is off the vertical
         for (key,value) in _output_view_attributes(config,result.atmosphere.grid.view,"rays"); attributes(file)[key]=value; end
     end
     atmosphere=result.atmosphere
     h5open(config.outputs.atmosphere_file,"w") do file
         kind=vertical_coordinate(atmosphere.grid)
-        file[kind===:z_m ? "z_m" : "logtau_500"]=native_depth(atmosphere.grid)
+        file[_native_axis_dataset(kind)]=native_depth(atmosphere.grid)
         file["x_m"]=atmosphere.grid.x; file["y_m"]=atmosphere.grid.y
-        for name in (:temperature,:vx,:vy,:vz,:vturb,:pgas,:rho,:ne,:z,:logtau500,:chi500)
+        for name in (:temperature,:vx,:vy,:vz,:vturb,:pgas,:rho,:ne,:z,:logtau500,:chi500,:h_neutral,:h_proton)
             value=getfield(atmosphere,name)
             value===nothing || (file[string(name)]=_with_time_zyx(name===:vz && config.vz_positive===:down ? -value : value))
         end
@@ -229,7 +251,7 @@ function write_inversion_outputs(config::RunConfig,result::InversionRunResult)
         attributes(file)["vertical_coordinate"]=string(kind)
         attributes(file)["vertical_unit"]=vertical_unit(kind)
         attributes(file)["vertical_order"]="top_first"
-        attributes(file)["native_axis_dataset"]=kind===:z_m ? "z_m" : "logtau_500"
+        attributes(file)["native_axis_dataset"]=_native_axis_dataset(kind)
         for (key,value) in _output_view_attributes(config,atmosphere.grid.view,view_columns(atmosphere.grid))
             attributes(file)[key]=value
         end

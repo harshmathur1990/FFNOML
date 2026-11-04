@@ -22,8 +22,18 @@ struct MuspelLineOpacityModel{L,C,V,H} <: AbstractLineOpacityModel
     upper_level::Int
     include_continuum::Bool
     neutral_hydrogen::Any     # Wittmann backend: neutral H in broadening from the EOS; nothing: from `hydrogen_populations`
+    center_nm::Float64        # vacuum line centre of the profile: a reference wavelength, or the atom's (level energies)
 end
 struct MuspelFormalSolver <: AbstractFormalSolver end
+
+function build_muspel_continuum_model end
+
+"""The continuum of a region: Muspel's at one wavelength from T, nₑ, neutral H and protons. The hydrogen is the atmosphere's when it is given
+(`h_neutral`, `h_proton`, forward only), otherwise the EOS's at (T, P) from `eos`. FFNO populations never enter."""
+struct MuspelContinuumModel{C,S} <: AbstractLineOpacityModel
+    continuum::C
+    eos::S
+end
 
 struct FFNOTransition{T<:AbstractFloat} <: AbstractLineOpacityModel
     species::Symbol; wavelength0_m::T; lower_level::Int; upper_level::Int
@@ -305,6 +315,9 @@ function eos_neutral_hydrogen!(nh,state::WittmannKuruczState,temp,pgas)
     nh
 end
 
+"""Protons [m⁻³] from the EOS at (T, P), one value per element."""
+eos_protons(state::WittmannKuruczState,temp,pgas)=continuum_state(state,temp,pgas;threads=1).partials[2,:].*1e6
+
 """Add the Wittmann continuum and lines of `levels` of column (x, y); row i of `χ` and `η` is `levels[i]`."""
 function _add_wittmann_kurucz!(χ,η,model,wavelength,atmosphere,x,y;levels=axes(atmosphere.temperature,1))
     atmosphere.pgas===nothing && throw(ArgumentError("Wittmann Kurucz synthesis requires gas pressure"))
@@ -315,6 +328,7 @@ function _add_wittmann_kurucz!(χ,η,model,wavelength,atmosphere,x,y;levels=axes
     # Mixed synthesis already distributes independent columns over Julia
     # threads. Keep the short depth-only kernels serial within each column to
     # avoid nesting a C++ and Julia thread team inside every column task.
+    given_neutral=atmosphere.h_neutral===nothing ? nothing : atmosphere.h_neutral[levels,x,y]
     continuum_state_column=model.include_continuum ? continuum_state(state,temp,pgas;threads=1) : nothing
     if model.include_continuum
         @inbounds for l in eachindex(wavelength)
@@ -330,6 +344,7 @@ function _add_wittmann_kurucz!(χ,η,model,wavelength,atmosphere,x,y;levels=axes
             state.backend,temp,pgas,line.atomic_number,line.ion_stage,
             line.lower_energy_j,line.lower_g,lower,nh,nz)
         status==0 || throw(ErrorException("Wittmann Kurucz state calculation failed"))
+        given_neutral===nothing || (nh.=given_neutral)
         λ0=line.wavelength0_m; Aji=6.670e13/(λ0*1e9)^2*10^line.loggf/line.upper_g
         Bji=λ0^3/(2*_H*_C)*Aji; Bij=line.upper_g/line.lower_g*Bji
         @inbounds for i in 1:nz,l in eachindex(wavelength)

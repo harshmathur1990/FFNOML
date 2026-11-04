@@ -1,0 +1,52 @@
+{
+  "branch": "C_random",
+  "atoms": "H",
+  "added": [
+    "qs006003_sap/1297"
+  ],
+  "train_split": {
+    "en024048_hion": [
+      "465"
+    ],
+    "nw012023": [
+      "915"
+    ],
+    "ch012012_hion": [
+      "910"
+    ],
+    "ch012006": [
+      "836"
+    ],
+    "qs006003_sap": [
+      "689"
+    ]
+  },
+  "val_split": {
+    "en024048_hion": [
+      "700"
+    ],
+    "nw012023": [
+      "940"
+    ],
+    "ch012012_hion": [
+      "984"
+    ],
+    "ch012006": [
+      "849"
+    ],
+    "qs006003_sap": [
+      "900"
+    ]
+  },
+  "n_train_patches": 966,
+  "production_train_file": "/mn/stornext/d9/data/harshm/FFNOML/IO/3D_sim_train_ch012006_836__ch012012_hion_910__en024048_hion_465__nw012023_915__qs006003_sap_689_atomsH_target-lognlte_patch40_stride20.hdf5",
+  "production_checkpoint": "/mn/stornext/d9/data/harshm/FFNOML/training_FFNO3D_zscale_expand_lognlte/3D_sim_train_H.pt",
+  "checkpoint_sha256": "901dcd28a6ee651c12a26a60effdd28c7ea211b596a30b87654435e87803c755",
+  "extra_files": {
+    "qs006003_sap/1297": {
+      "path": "/mn/stornext/d9/data/harshm/FFNOML/uq/retrain/data/qs006003_sap_1297_H.hdf5",
+      "sha256": "aebf78d061e9552691f574062bdd925892ac7bb0c44e7f308c0f83d6b757166b"
+    }
+  },
+  "notes": "random control: random.Random(20261029).choice over en024048_hion 385/386, ch012012_hion 759/834, ch012006 795/820, qs006003_sap 1100/1297"
+}

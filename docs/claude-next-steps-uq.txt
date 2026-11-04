@@ -1,0 +1,87 @@
+Claude: next steps for FFNO3D uncertainty and targeted training
+Date: 2026-10-29
+
+Let the Ca queue finish. For H, proceed in this order.
+
+1. Validate and correct the analysis.
+
+   - Use tie-aware Spearman correlations and handle constant inputs.
+   - Exclude self-neighbors and nearby spatial neighbors when evaluating
+     training-support distance on training snapshots.
+   - Make regime masks mutually exclusive or explicitly document overlap.
+   - Rename atlas fields labelled MAE that contain median absolute errors.
+   - Verify prediction/truth coordinates, units and level ordering, beyond
+     checking matching array shapes.
+
+2. Identify the atmospheric configurations responsible for H errors.
+
+   Compare difficult and accurate regions using joint temperature, electron
+   density, mass density, velocity gradients, vertical stratification and
+   horizontal surroundings at fixed physical distances.
+
+   Produce missing_regimes_H.csv containing parameter ranges, training
+   coverage, errors, independent-case counts and representative coordinates.
+   Distinguish snapshot-wide bias from localized failures. Associations are
+   diagnostic and do not establish causal parameter effects.
+
+3. Investigate the systematic offsets in ch024031 and helium.
+
+   Check abundances, units, EOS/ionization treatment, atomic models, boundary
+   conditions and MULTI3D convergence. Treat simulation-physics mismatch as
+   a hypothesis until verified.
+
+4. Freeze a controlled H retraining experiment using existing labels.
+
+   Run three branches with matched initialization, training budget and
+   checkpoint-selection rules:
+
+   A. Existing training data only.
+   B. Existing data plus nw012023/1050.
+   C. Existing data plus a predefined random or diversity-selected eligible
+      snapshot, with a comparable added-data budget.
+
+   Keep nw012023/1120 outside training to evaluate temporal transfer. Check
+   all existing simulation families for regressions. These inspected cases
+   are development benchmarks; reserve an unused simulation/time block for
+   final evaluation. Do not use evaluation labels for fitting, acquisition
+   or early stopping.
+
+5. Evaluate population and spectral improvements.
+
+   Report per-level bias, MAE, p95 and large-error fractions, plus H-alpha
+   profile errors using identical synthesis settings. Compare improvement
+   against added training cost. Keep normalization policy documented and
+   consistent across the experiment.
+
+6. Correct the interpretation of tiled uncertainty.
+
+   Averaging tile variances does not give the variance of the blended
+   prediction. Either label it as a tile-spread diagnostic or compute
+   variance across complete stitched stochastic realizations. Validate
+   large-tile inference on additional atmospheres. Keep inference strategy
+   fixed within each comparison.
+
+7. Repeat the corrected analysis for Ca when its queue finishes.
+
+   Compare H and Ca failures separately, then identify shared difficult
+   regimes and cases where only one species fails. Evaluate appropriate Ca
+   spectral diagnostics using matched synthesis settings.
+
+8. Decide on further uncertainty work from these results.
+
+   If reliable acquisition ranking is still missing, benchmark a
+   three-member independently trained ensemble. Do not assume that
+   increasing MC-dropout samples fixes systematic bias. Validate whether
+   uncertainty identifies actual errors before using it for acquisition.
+
+Deliver a short report answering:
+
+   - Which atmospheric configurations fail?
+   - Are those failures associated with missing training coverage,
+     incompatible physics, or inference context?
+   - Does adding one targeted snapshot improve predictions on other
+     snapshots?
+   - Which specific existing snapshots should enter training next?
+
+Use Hyades/eagle7 for this batch after benchmarking training memory and
+runtime. No new MULTI3D calculations are needed yet.

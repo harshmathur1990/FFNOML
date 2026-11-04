@@ -354,7 +354,7 @@ function local_atmosphere(atmosphere::Atmosphere3D,tile::Tile2D)
     Atmosphere3D(grid,cut(atmosphere.temperature),cut(atmosphere.vx),cut(atmosphere.vy),
         cut(atmosphere.vz),cut(atmosphere.vturb);magnetic_field=local_B,pgas=cut(atmosphere.pgas),
         rho=cut(atmosphere.rho),ne=cut(atmosphere.ne),z=cut(atmosphere.z),logtau500=cut(atmosphere.logtau500),
-        chi500=cut(atmosphere.chi500))
+        chi500=cut(atmosphere.chi500),h_neutral=cut(atmosphere.h_neutral),h_proton=cut(atmosphere.h_proton))
 end
 
 abstract type AbstractGPUCoordinator end

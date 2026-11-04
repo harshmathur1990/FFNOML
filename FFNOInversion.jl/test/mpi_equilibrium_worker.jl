@@ -15,7 +15,7 @@ R=context.size
 
 function atmosphere_for(kind)
     nz,nx,ny=36,11,6
-    axis=kind===:z_m ? collect(range(1.4e6,-3.5e5;length=nz)) : collect(range(-7.0,1.3;length=nz))
+    axis=kind===:z_m ? collect(range(1.4e6,-3.5e5;length=nz)) : kind===:log10m ? collect(range(-3.5,2.8;length=nz)) : collect(range(-7.0,1.3;length=nz))
     grid=Grid3D(VerticalAxis(kind,axis),4.8e4 .* collect(0:nx-1),4.8e4 .* collect(0:ny-1))
     T=[(kind===:z_m ? 5000.0+2500.0*exp(-abs(axis[k])/3e5) : 4600.0+1400.0*exp10(min(axis[k],0.5)/2))+30.0*i+11.0*j
        for k in 1:nz,i in 1:nx,j in 1:ny]
@@ -26,8 +26,8 @@ end
 
 results=Dict{Symbol,Any}()
 ts=@testset "HSEMHS equilibrium n=$R" begin
-    for kind in (:z_m,:log10tau500)
-        mode=kind===:z_m ? :column_hse_z : :column_hse_ltau
+    for kind in (:z_m,:log10tau500,:log10m)
+        mode=kind===:z_m ? :column_hse_z : kind===:log10m ? :column_hse_logm : :column_hse_ltau
         column=kind===:z_m ? H.ColumnZOptions(anchor=:top,P_ref=0.3) : H.ColumnTauOptions(align="ptot")
         config=EquilibriumConfig("HSEMHS",:column_hse,mode,274.0,TABLE,:reject_trial,column,nothing)
         root=isroot(context) ? atmosphere_for(kind) : nothing

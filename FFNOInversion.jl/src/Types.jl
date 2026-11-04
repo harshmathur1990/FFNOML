@@ -1,16 +1,16 @@
 const VALID_STOKES = (:I, :Q, :U, :V)
 
-const VERTICAL_KINDS = (:z_m, :log10tau500)
+const VERTICAL_KINDS = (:z_m, :log10tau500, :log10m)
 
 """Unit of a vertical coordinate kind, for messages and file attributes."""
-vertical_unit(kind::Symbol) = kind === :z_m ? "m" : kind === :log10tau500 ? "dex" :
+vertical_unit(kind::Symbol) = kind === :z_m ? "m" : kind === :log10tau500 ? "dex" : kind === :log10m ? "dex of kg m^-2" :
     throw(ArgumentError("unknown vertical coordinate kind :$kind; expected one of $(VERTICAL_KINDS)"))
 
 """Native vertical coordinate of a grid, stored top first (index 1 is the top).
 
 `:z_m` is geometrical height in metres, positive upward, so its values strictly
-decrease; `:log10tau500` is log10 of the 500 nm optical depth, so its values
-strictly increase. Inputs in the other order are reversed, together with every
+decrease; `:log10tau500` is log10 of the 500 nm optical depth and `:log10m` log10
+of the column mass [kg m^-2], so their values strictly increase. Inputs in the other order are reversed, together with every
 field, by the readers that hold those fields; this type never reorders.
 """
 struct VerticalAxis{T<:AbstractFloat}
@@ -26,7 +26,7 @@ struct VerticalAxis{T<:AbstractFloat}
                 "height axis [m] must strictly decrease (top first); reverse the axis and every field together, or read through read_inversion_inputs, which normalizes"))
         else
             all(>(zero(T)), d) || throw(ArgumentError(
-                "log10tau500 axis [dex] must strictly increase (top first); reverse the axis and every field together, or read through read_inversion_inputs, which normalizes"))
+                "$kind axis [$unit] must strictly increase (top first); reverse the axis and every field together, or read through read_inversion_inputs, which normalizes"))
         end
         new{T}(kind, collect(values))
     end
@@ -36,8 +36,8 @@ end
 Viewing angle of a run (docs/viewing-angle/README.md): `mu` = cos θ, `azimuth_deg` = φ from +x toward +y,
 `geometry` :plane_parallel (vertical columns, path dz/μ) or :inclined (rays x = ξ + t_x (z − z_ref), y = η + t_y (z − z_ref)
 through each footprint (ξ, η), t = tan θ (cos φ, sin φ), z_ref = 0). `footprint` marks an atmosphere whose columns are
-rays (a native-z atmosphere sheared to the footprint grid for the synthesis); a native-log-τ atmosphere's columns are
-rays by contract. The default is the vertical view, which every code path treats exactly as before the view existed.
+rays (a native-z atmosphere sheared to the footprint grid for the synthesis); the columns of a native log-τ or
+log-m atmosphere are rays by contract. The default is the vertical view, which every code path treats exactly as before the view existed.
 """
 struct ViewGeometry
     mu::Float64
@@ -91,7 +91,7 @@ end
 Grid3D(log_tau500::AbstractVector{T}, x::AbstractVector{T}, y::AbstractVector{T}) where {T<:AbstractFloat} =
     Grid3D(VerticalAxis(:log10tau500, log_tau500), x, y)
 
-"""Kind of the grid's native vertical coordinate (`:z_m` or `:log10tau500`)."""
+"""Kind of the grid's native vertical coordinate (`:z_m`, `:log10tau500` or `:log10m`)."""
 vertical_coordinate(grid::Grid3D) = grid.vertical.kind
 """Values of the native vertical coordinate, top first, in its own unit."""
 native_depth(grid::Grid3D) = grid.vertical.values
@@ -108,6 +108,8 @@ end
 log_tau500_axis(grid::Grid3D) = _axis_of_kind(grid, :log10tau500, "log10tau500 axis [dex]")
 """The native height axis [m]; throws on an optical-depth grid."""
 z_axis(grid::Grid3D) = _axis_of_kind(grid, :z_m, "height axis [m]")
+"""The native log10 column-mass axis [dex of kg m^-2]; throws on any other grid."""
+log10m_axis(grid::Grid3D) = _axis_of_kind(grid, :log10m, "log10m axis [dex of kg m^-2]")
 
 struct MagneticField3D{T<:AbstractFloat,A<:AbstractArray{T,3}}
     Bx::A
@@ -124,9 +126,11 @@ end
 
 `z` (m) and `logtau500` are full 3-D coordinate fields. The one matching the
 grid's native axis equals that axis broadcast over columns (see
-`check_coordinate_consistency`); the other is derived and may vary by column.
+`check_coordinate_consistency`); the other is derived and may vary by column. On a native column-mass grid
+both are derived; the axis itself is the only record of m.
 `chi500` (m^-1) is the equilibrium's extinction per length at 5000 A that defines `logtau500`; with a native
-log-tau grid, synthesis integrates the optical depth on that grid with it (`formal_column`).
+log-tau grid, synthesis integrates the optical depth on that grid with it, and on a native column-mass grid
+with `rho` (`formal_column!`).
 """
 mutable struct Atmosphere3D{T<:AbstractFloat,A<:AbstractArray{T,3},BM}
     grid::Grid3D{T}
@@ -142,11 +146,13 @@ mutable struct Atmosphere3D{T<:AbstractFloat,A<:AbstractArray{T,3},BM}
     z::Union{Nothing,A}
     logtau500::Union{Nothing,A}
     chi500::Union{Nothing,A}
+    h_neutral::Union{Nothing,A}   # a given atmosphere's neutral hydrogen and protons (m^-3): the continuum and broadening use them
+    h_proton::Union{Nothing,A}
 end
 
 function Atmosphere3D(grid::Grid3D{T}, temperature::A, vx::A, vy::A, vz::A, vturb::A;
                       magnetic_field=nothing, pgas=nothing, rho=nothing, ne=nothing, z=nothing,
-                      logtau500=nothing, chi500=nothing) where {T<:AbstractFloat,A<:AbstractArray{T,3}}
+                      logtau500=nothing, chi500=nothing, h_neutral=nothing, h_proton=nothing) where {T<:AbstractFloat,A<:AbstractArray{T,3}}
     expected = (nlevels(grid), length(grid.x), length(grid.y))
     for (name, value) in ((:temperature,temperature),(:vx,vx),(:vy,vy),(:vz,vz),(:vturb,vturb))
         size(value) == expected || throw(DimensionMismatch("$name has size $(size(value)); expected $expected"))
@@ -154,19 +160,20 @@ function Atmosphere3D(grid::Grid3D{T}, temperature::A, vx::A, vy::A, vz::A, vtur
     end
     minimum(temperature) > 0 || throw(ArgumentError("temperature must be positive"))
     magnetic_field === nothing || size(magnetic_field.Bx) == expected || throw(DimensionMismatch("magnetic field shape differs from grid"))
-    for (name, value) in ((:pgas,pgas),(:rho,rho),(:ne,ne),(:z,z),(:logtau500,logtau500),(:chi500,chi500))
+    for (name, value) in ((:pgas,pgas),(:rho,rho),(:ne,ne),(:z,z),(:logtau500,logtau500),(:chi500,chi500),(:h_neutral,h_neutral),(:h_proton,h_proton))
         value === nothing && continue
         size(value) == expected || throw(DimensionMismatch("$name shape differs from grid"))
         all(isfinite, value) || throw(ArgumentError("$name must be finite"))
     end
-    Atmosphere3D{T,A,typeof(magnetic_field)}(grid, temperature, vx, vy, vz, vturb, magnetic_field, pgas, rho, ne, z, logtau500, chi500)
+    Atmosphere3D{T,A,typeof(magnetic_field)}(grid, temperature, vx, vy, vz, vturb, magnetic_field, pgas, rho, ne, z, logtau500, chi500, h_neutral, h_proton)
 end
 
 """Throw unless the 3-D coordinate field of the native kind (`z` for a height
 grid, `logtau500` for an optical-depth grid) is absent or equals the native axis
-broadcast over every column."""
+broadcast over every column. A column-mass grid has no such field."""
 function check_coordinate_consistency(atmosphere::Atmosphere3D)
     grid = atmosphere.grid; kind = vertical_coordinate(grid); axis = native_depth(grid)
+    kind === :log10m && return true
     field = kind === :z_m ? atmosphere.z : atmosphere.logtau500
     field === nothing && return true
     for k in axes(field,1)

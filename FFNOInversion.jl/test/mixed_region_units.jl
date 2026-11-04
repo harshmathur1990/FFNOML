@@ -138,6 +138,15 @@ import Muspel
             @test_throws ArgumentError load_config(p)
         end
     end
+    # the wavelength frame defaults to air, accepts vacuum, rejects anything else; line_center is in the summary
+    @test load_config(joinpath(@__DIR__, "..", "configs", "example_intensity_nonprd.toml")).outputs.wavelength_frame === :air
+    p = joinpath(dir, "c_frame.toml")
+    write(p, replace(text, r"\[outputs\]\n" => "[outputs]\nwavelength_frame = \"vacuum\"\n"))
+    @test load_config(p).outputs.wavelength_frame === :vacuum
+    @test occursin("wavelength_frame=vacuum", dry_run_summary(load_config(p)))
+    @test occursin("line_center=reference", dry_run_summary(load_config(p)))
+    write(p, replace(text, r"\[outputs\]\n" => "[outputs]\nwavelength_frame = \"topocentric\"\n"))
+    @test_throws ArgumentError load_config(p)
 end
 
 # The observation file is in the output's unit: si or cgs divided by the region normalization. A written synthesis read
@@ -240,6 +249,15 @@ threads_per_rank = 1
             written=h5read(synthesis_path,"intensity")
             @test written≈FFNOInversion._with_time_slyx(expected) rtol=1e-12
             @test h5open(f->read(attributes(f["intensity"])["units"]),synthesis_path)==first(FFNOInversion.INTENSITY_UNITS[Symbol(units)])
+            # the frame of the written axis is a label: air by default, the same intensities on the vacuum axis
+            @test h5read(synthesis_path,"wavelength_m")==config.synthesis.wavelength_m
+            @test h5open(f->read(attributes(f)["wavelength_frame"]),synthesis_path)=="air"
+            framed=joinpath(directory,"frame_$units.toml")
+            write(framed,replace(read(path,String),r"\[outputs\]\n"=>"[outputs]\nwavelength_frame = \"vacuum\"\n"))
+            write_inversion_outputs(load_config(framed),result)
+            @test h5read(synthesis_path,"wavelength_m")≈vacuum rtol=1e-12
+            @test h5open(f->read(attributes(f)["wavelength_frame"]),synthesis_path)=="vacuum"
+            @test h5read(synthesis_path,"intensity")==written
             # that file is a valid observation: it reads back as the synthesis, with sigma in the same unit
             sigma_file=fill(0.01,size(written))
             h5open(observation_path,"w") do file

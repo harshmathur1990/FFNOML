@@ -1,5 +1,5 @@
 """
-FFNO populations for a native log-tau atmosphere are predicted on a height mesh; a native z atmosphere can ask for it too.
+FFNO populations for a native log-tau or log-m atmosphere are predicted on a height mesh; a native z atmosphere can ask for it too.
 
 The FFNO checkpoints were trained on simulation height grids: one set of heights shared by every column, 12-30 km
 spacing through the photosphere and chromosphere and bottoms 1-2.5 Mm below the surface. Its vertical layers are
@@ -81,7 +81,7 @@ function MeshPopulationModel(inner::AbstractPopulationModel,config::PopulationMe
         Float64(config.corona_temperature_k),Float64(config.corona_transition_m))
 end
 
-_mesh_active(model,atmosphere)=vertical_coordinate(atmosphere.grid)===:log10tau500 || model.native_z
+_mesh_active(model,atmosphere)=vertical_coordinate(atmosphere.grid)!==:z_m || model.native_z
 
 const _LN10=log(10.0)
 
@@ -197,7 +197,7 @@ function _mesh_atmosphere(model,atmosphere,f)
     Atmosphere3D(grid,c(1),c(2),c(3),c(4),zeros(T,nm,nx,ny);rho=T.(exp10.(f[6,:,:,:])),ne=T.(exp10.(f[5,:,:,:])),z=z)
 end
 
-_mesh_slanted(atmosphere)=vertical_coordinate(atmosphere.grid)===:log10tau500 && is_slanted(atmosphere.grid.view)
+_mesh_slanted(atmosphere)=vertical_coordinate(atmosphere.grid)!==:z_m && is_slanted(atmosphere.grid.view)
 
 """Cartesian mesh features from the ray features `f` (6, nmesh, nx, ny): ln T, v, log10 nₑ and log10 ρ shifted by
 −t z_m on every mesh level (T exponentiated back)."""

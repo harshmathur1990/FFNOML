@@ -9,7 +9,7 @@ relative `weights`. Temperature types 2/3 are normalized to 0.
 Derivatives (types 1 and 4) are taken with respect to the native vertical
 coordinate divided by a length scale, so the penalty does not depend on the
 coordinate's unit: `length_scale_dex` (default 1, the historical log-tau
-behaviour) on log10tau500 grids and `length_scale_m` on height grids, which has
+behaviour) on log10tau500 and log10m grids and `length_scale_m` on height grids, which has
 no default because metres and dex are not interchangeable.
 """
 struct VerticalRegularizationSpec{T<:AbstractFloat}
@@ -81,7 +81,7 @@ _mean_square(a) = isempty(a) ? zero(eltype(a)) : sum(abs2,a)/length(a)
 function _vertical_spacing_axis(grid::Grid3D,spec)
     v = spec isa RegularizationSpec ? spec.vertical : spec
     depth = native_depth(grid)
-    vertical_coordinate(grid) === :log10tau500 && return depth ./ v.length_scale_dex
+    vertical_coordinate(grid) !== :z_m && return depth ./ v.length_scale_dex
     v.length_scale_m === nothing && return nothing
     depth ./ v.length_scale_m
 end
