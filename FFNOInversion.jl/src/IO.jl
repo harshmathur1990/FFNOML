@@ -51,11 +51,9 @@ struct SynthesisGridConfig{T<:AbstractFloat}
     dy_m::T
 end
 
-"""One opacity source in a region. `:ffno` names a transition; `:kurucz_lte` names a cached line list."""
+"""One opacity source in a region. `:ffno`: the atoms' lines on the region's grid (`ffno_region_lines`); `:kurucz_lte` names a cached line list."""
 struct SpectralSourceConfig
     mode::Symbol
-    species::Union{Nothing,Symbol}
-    line::Union{Nothing,Symbol}
     linelist_file::Union{Nothing,String}
 end
 
@@ -200,12 +198,11 @@ function _regions(cfg)
         for (j,source) in enumerate(get(raw,"sources",Any[]))
             mode = Symbol(lowercase(String(_required(source,"mode"))))
             mode in (:ffno,:kurucz_lte) || throw(ArgumentError("regions[$i].sources[$j].mode must be ffno or kurucz_lte"))
-            species = haskey(source,"species") ? Symbol(uppercase(String(source["species"]))) : nothing
-            line = haskey(source,"line") ? Symbol(lowercase(String(source["line"]))) : nothing
+            (haskey(source,"species") || haskey(source,"line")) &&
+                @warn "regions.sources: species and line are ignored; FFNO lines follow from the region's wavelengths and the atom files" maxlog=1
             list = haskey(source,"linelist_file") ? String(source["linelist_file"]) : nothing
-            mode == :ffno && (species === nothing || line === nothing) && throw(ArgumentError("FFNO source requires species and line"))
             mode == :kurucz_lte && (list === nothing || isempty(list)) && throw(ArgumentError("Kurucz LTE source requires linelist_file"))
-            push!(sources,SpectralSourceConfig(mode,species,line,list))
+            push!(sources,SpectralSourceConfig(mode,list))
         end
         start > 0 || throw(ArgumentError("regions[$i].start_angstrom must be positive"))
         step > 0 || throw(ArgumentError("regions[$i].step_angstrom must be positive"))

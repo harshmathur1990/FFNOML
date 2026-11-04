@@ -128,9 +128,10 @@ function _batch_resources(batch_script)
     values
 end
 
-function _source_description(source,run_dir)
+function _source_description(source,run_dir,lines,line_center)
     if source.mode===:ffno
-        return "FFNO $(source.species)/$(source.line)"
+        return join((string("FFNO ",describe_ffno_line(line,line_center),line.resonance ? " (resonance line: needs PRD, synthesized without)" : "")
+            for line in lines),"; ")
     end
     line_list=_required_file("Kurucz line list",_run_path(run_dir,source.linelist_file))
     "Kurucz LTE $(line_list)"
@@ -164,6 +165,30 @@ function _generated_factory_assets(run_dir,declared)
         "FFNO generated model assets must be a dictionary"))
     sort!(unique(string(label)=>_run_path(run_dir,string(path))
         for (label,path) in declared);by=first)
+end
+
+"""FFNO lines of each region (empty without an FFNO source), found as production finds them, from the factory's `ATOM_FILES`."""
+function _ffno_lines(config,run_dir,population_levels)
+    regions=[any(source.mode===:ffno for source in region.sources) for region in config.regions]
+    any(regions) || return [FFNOLine[] for _ in regions]
+    Base.invokelatest(isdefined,Main,:ATOM_FILES) || throw(ArgumentError(
+        "the model factory must define ATOM_FILES (species => atom file) for mode = \"ffno\""))
+    atom_files=Base.invokelatest(getglobal,Main,:ATOM_FILES)
+    for (species,path) in atom_files
+        _required_file("$species atom",_run_path(run_dir,string(path)))
+    end
+    atom_lines=ffno_atom_lines(Dict(species=>_run_path(run_dir,string(path)) for (species,path) in atom_files))
+    found=[wanted ? ffno_region_lines(region,atom_lines;line_center=config.line_center) : FFNOLine[]
+           for (region,wanted) in zip(config.regions,regions)]
+    if population_levels isa AbstractDict
+        for line in Iterators.flatten(found)
+            haskey(population_levels,line.species) || throw(ArgumentError(
+                "model factory has no population levels for $(line.species), needed by $(describe_ffno_line(line,config.line_center))"))
+            population_levels[line.species]==line.level_count || throw(ArgumentError(
+                "model factory has $(population_levels[line.species]) $(line.species) levels; its atom has $(line.level_count)"))
+        end
+    end
+    found
 end
 
 function run_submission_preflight(config_path::AbstractString,factory_path::AbstractString,
@@ -203,12 +228,7 @@ function run_submission_preflight(config_path::AbstractString,factory_path::Abst
     declared_generated_assets=included_factory isa NamedTuple &&
         hasproperty(included_factory,:generated_assets) ? included_factory.generated_assets : nothing
     generated_factory_assets=_generated_factory_assets(run_dir,declared_generated_assets)
-    if factory.population_levels isa AbstractDict
-        requested=unique(source.species for region in config.regions for source in region.sources
-            if source.mode===:ffno)
-        missing=setdiff(collect(requested),collect(keys(factory.population_levels)))
-        isempty(missing) || throw(ArgumentError("model factory has no population levels for $(join(missing,','))"))
-    end
+    ffno_lines=_ffno_lines(config,run_dir,factory.population_levels)
 
     for output in (config.outputs.synthesis_file,config.outputs.atmosphere_file)
         mkpath(dirname(_run_path(run_dir,output)))
@@ -237,7 +257,7 @@ function run_submission_preflight(config_path::AbstractString,factory_path::Abst
     println(io,"  Spectral regions:")
     for (index,region) in enumerate(config.regions)
         wavelength=wavelengths(region).*1e10
-        sources=join((_source_description(source,run_dir) for source in region.sources),"; ")
+        sources=join((_source_description(source,run_dir,ffno_lines[index],config.line_center) for source in region.sources),"; ")
         println(io,"    [$index] ",round(first(wavelength),digits=6),"–",round(last(wavelength),digits=6),
             " Å; count=",region.count,"; step=",round(region.step_m*1e10,digits=6)," Å; ",sources)
     end

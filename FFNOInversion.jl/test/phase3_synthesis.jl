@@ -53,7 +53,7 @@ using Libdl
             @test all(isfinite,kcube.data)
             @test all(>(0),kcube.data)
             @test minimum(kcube.data[:,1,1,1]) < maximum(kcube.data[:,1,1,1])
-            source=SpectralSourceConfig(:kurucz_lte,nothing,nothing,k94)
+            source=SpectralSourceConfig(:kurucz_lte,k94)
             region=SpectralRegionConfig(630.12e-9,0.01e-9,20,1.0,:none,nothing,[source])
             setup=build_synthesis_setup((regions=[region],),atmos,Dict{Symbol,Any}(),WittmannEOS(lib,pf);atom_files=Dict())
             @test length(setup)==1 # LTE-only setup neither requires nor invokes FFNO

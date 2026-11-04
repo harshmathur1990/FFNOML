@@ -96,9 +96,7 @@ normalization = 4.323060e-05
 psf_type = "none"
 
 [[regions.sources]]
-mode = "ffno"
-species = "H"
-line = "halpha"
+mode = "ffno"    # every line of the FFNO atoms centred in this region: levels and species come from the atom files
 
 [[regions]]
 start_angstrom = 8540.23102
@@ -109,8 +107,6 @@ psf_type = "none"
 
 [[regions.sources]]
 mode = "ffno"
-species = "CA"
-line = "ca_ii_8542"
 
 [[regions]]
 start_angstrom = 6301.24942
@@ -140,7 +136,7 @@ linelist_file = "inputs/kurucz_6302.list"
 
 [physics]
 redistribution = "non_prd"
-# line_center = "reference"   # FFNO lines at 656.28 and 854.209 nm (air); "atom": the atom file's level energies
+# line_center = "reference"   # FFNO lines at laboratory wavelengths; "atom": the atom file's level energies
 # Physical limits on the FFNO populations that synthesis reads, for Hα and Ca II; the populations written to the atmosphere file stay raw.
 # ffno_population_limit = 1.09  # largest total of a species' levels, as a multiple of what rho holds; 0 turns it off
 # ffno_no_inversion = true      # the upper level is capped where the line opacity would turn negative

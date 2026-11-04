@@ -46,8 +46,6 @@ function output_intensity_scale(regions,units::Symbol)
     scale
 end
 
-"""Kurucz identity of each FFNO transition: atomic number, ion stage (0 = neutral) and vacuum wavelength [m]."""
-const FFNO_KURUCZ_IDENTITY=Dict(:halpha=>(1,0,656.461e-9),:h_alpha=>(1,0,656.461e-9),:ca_ii_8542=>(20,1,854.444e-9))
 """Kurucz lines of an FFNO transition's ion within this distance of its wavelength are that transition."""
 const FFNO_KURUCZ_TOLERANCE_M=0.1e-9
 
@@ -62,7 +60,7 @@ function _without_ffno_transitions(lines,ffno_lines)
 end
 
 """Build and cache all line physics for configured mixed regions. This performs all file I/O. A region may combine
-FFNO and Kurucz LTE sources: their opacities and emissivities (one unit, see `source_planck`) add before a single
+FFNO and Kurucz LTE sources, its FFNO lines being those `ffno_region_lines` finds in `atom_files`: their opacities and emissivities (one unit, see `source_planck`) add before a single
 formal solution. Every region has one continuum, Muspel's at its central wavelength, whatever its sources: FFNO populations never
 enter it. Its hydrogen, and neutral H in line broadening, are the EOS's at (T, P), or a given atmosphere's own. Kurucz lines that are the
 region's FFNO transitions are dropped."""
@@ -73,31 +71,30 @@ function build_synthesis_setup(config,atmosphere::Atmosphere3D,populations::Abst
     line_center=hasproperty(config,:line_center) ? config.line_center : :reference
     population_limit=hasproperty(config,:ffno_population_limit) ? config.ffno_population_limit : 0.0
     no_inversion=hasproperty(config,:ffno_no_inversion) ? config.ffno_no_inversion : false
-    # species, line index, levels, air wavelength [nm] of the line core: the atom files' level energies put Hα 0.16 Å and Ca II 0.03 Å off
-    aliases=Dict(:halpha=>(:H,5,2,3,656.28),:h_alpha=>(:H,5,2,3,656.28),:ca_ii_8542=>(:CA,5,3,5,854.209))
+    atom_lines=any(source.mode==:ffno for region in config.regions for source in region.sources) ? ffno_atom_lines(atom_files) : FFNOLine[]
     for region in config.regions
         air=wavelengths(region); vacuum=eltype(air).(_air_to_vacuum_nm.(air.*1e9).*1e-9)
         isempty(region.sources) && throw(ArgumentError("every region needs at least one opacity source"))
         contributors=OpacityContributor[OpacityContributor(build_muspel_continuum_model(vacuum[(length(vacuum)+1)÷2]*1e9;
             eos=given ? nothing : WittmannKuruczState(eos)))]
-        ffno_lines=[FFNO_KURUCZ_IDENTITY[source.line] for source in region.sources
-                    if source.mode==:ffno && haskey(FFNO_KURUCZ_IDENTITY,source.line)]
+        lines=any(source.mode==:ffno for source in region.sources) ? ffno_region_lines(region,atom_lines;line_center=line_center) : FFNOLine[]
+        ffno_lines=[(line.atomic_number,line.ion_stage,ffno_line_center_nm(line)*1e-9) for line in lines]
+        for line in lines
+            haskey(populations,:H) || throw(ArgumentError("H FFNO populations are required for the Muspel line model"))
+            species=line.species
+            haskey(populations,species) || throw(ArgumentError("missing $species FFNO populations for $(describe_ffno_line(line,line_center))"))
+            size(populations[species],4)==line.level_count || throw(DimensionMismatch(
+                "$species FFNO populations have $(size(populations[species],4)) levels; its atom has $(line.level_count)"))
+            model=build_muspel_line_model(atmosphere,populations[:H],atom_files[species],line.line_index,line.lower_level,line.upper_level;
+                include_continuum=false,neutral_hydrogen=given ? nothing : WittmannKuruczState(eos),
+                center_nm=line_center===:reference ? line.reference_vacuum_nm : nothing,
+                population_limit=population_limit,no_inversion=no_inversion)
+            push!(contributors,OpacityContributor(model,populations[species]))
+        end
         for source in region.sources
-            if source.mode==:ffno
-                haskey(populations,:H) || throw(ArgumentError("H FFNO populations are required for the Muspel line model"))
-                haskey(aliases,source.line) || throw(ArgumentError("unknown FFNO transition $(source.line)"))
-                species,index,lower,upper,center_air_nm=aliases[source.line]
-                species==source.species || throw(ArgumentError("transition $(source.line) belongs to $species"))
-                haskey(populations,species) || throw(ArgumentError("missing $species FFNO populations"))
-                haskey(atom_files,species) || throw(ArgumentError("missing $species atom_file"))
-                model=build_muspel_line_model(atmosphere,populations[:H],atom_files[species],index,lower,upper;
-                    include_continuum=false,neutral_hydrogen=given ? nothing : WittmannKuruczState(eos),
-                    center_nm=line_center===:reference ? _air_to_vacuum_nm(center_air_nm) : nothing,
-                    population_limit=population_limit,no_inversion=no_inversion)
-                push!(contributors,OpacityContributor(model,populations[species]))
-            elseif source.mode==:kurucz_lte
+            if source.mode==:kurucz_lte
                 cache=load_kurucz_linelist(source.linelist_file)
-                selected=select_kurucz_lines(cache,vacuum;margin_m=maximum(vacuum)*20*2.5e3/_C)
+                selected=select_kurucz_lines(cache,vacuum;margin_m=_line_margin_m(vacuum))
                 isempty(selected) && throw(ArgumentError("no Kurucz lines overlap configured region: $(source.linelist_file)"))
                 selected=_without_ffno_transitions(selected,ffno_lines)
                 isempty(selected) && (@warn "every Kurucz line in the region is an FFNO transition; source skipped" source.linelist_file; continue)

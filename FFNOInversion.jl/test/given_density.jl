@@ -50,8 +50,6 @@ import Muspel
             psf_type = "none"
             [[regions.sources]]
             mode = "ffno"
-            species = "H"
-            line = "halpha"
             [physics]
             redistribution = "non_prd"
             [observation]

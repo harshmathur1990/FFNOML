@@ -20,10 +20,10 @@ import Muspel
         end
         fe=joinpath(dir,"fe.list")
         write(fe,"  656.9214 -0.420 26.00   53393.669  4.0 (4F)4d g5F   38175.352  3.0 (4F)4p y3D  8.36 -4.38 -7.70FMW  0 0  0 0.000  0 0.000    0    0           1287 1324\n")
-        ffno=SpectralSourceConfig(:ffno,:H,:halpha,nothing); kurucz=SpectralSourceConfig(:kurucz_lte,nothing,nothing,fe)
+        ffno=SpectralSourceConfig(:ffno,nothing); kurucz=SpectralSourceConfig(:kurucz_lte,fe)
         atom=joinpath(get(ENV,"FFNO_ATOM_DIR","/mn/stornext/u3/harshm/Documents/WorkRepo/multi3d/input/atoms"),"atom.h6_tiago2.yaml")
         function spectrum(sources,H)
-            region=SpectralRegionConfig(656.80e-9,0.01e-9,21,1.0,:none,nothing,sources)
+            region=SpectralRegionConfig(656.38e-9,0.01e-9,63,1.0,:none,nothing,sources)
             pops=Dict(:H=>H)
             setup=build_synthesis_setup((regions=[region],),atmosphere,pops,eos;atom_files=Dict(:H=>atom))
             wave=setup[1].wavelength_air_m

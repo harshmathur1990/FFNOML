@@ -25,6 +25,7 @@ include("PopulationModels.jl")
 include("PopulationMesh.jl")
 include("Barklem.jl")
 include("LinePhysics.jl")
+include("AtomLines.jl")
 include("Synthesis.jl")
 include("Observations.jl")
 include("ForwardModel.jl")
@@ -104,6 +105,7 @@ export LBFGSSolverOptions, LBFGSIterationRecord, LBFGSSolverState, LBFGSInversio
 export lbfgs_invert!, write_lbfgs_diagnostics
 export AtmosphereInputConfig, ObservedDataConfig, WeightInputConfig, OutputConfig, SynthesisGridConfig, SpectralSourceConfig, SpectralRegionConfig, wavelengths, RunConfig
 export ControlMapConfig, build_control_layout
+export FFNOLine, ffno_atom_lines, ffno_region_lines, ffno_line_center_nm, describe_ffno_line
 export load_config, dry_run_summary
 export checkpoint!, restore_checkpoint
 export InversionInputBundle, InversionModelFactory, InversionRunResult
