@@ -142,6 +142,10 @@ function read_inversion_inputs(config::RunConfig{T}) where T
             _read_dataset(file,config.atmosphere.rho_dataset),storage_order),config.time_index,3,"mass density")))
         rho===nothing || (size(rho)==(nz,nx,ny) && all(>(0),rho)) || throw(ArgumentError(
             "mass density $(config.atmosphere.rho_dataset) must have the atmosphere's shape and be positive"))
+        pgas=config.atmosphere.pgas_dataset===nothing ? nothing : T.(_zyx_to_zxy(_time_slice(_from_atmosphere_storage(
+            _read_dataset(file,config.atmosphere.pgas_dataset),storage_order),config.time_index,3,"gas pressure")))
+        pgas===nothing || (size(pgas)==(nz,nx,ny) && all(>(0),pgas)) || throw(ArgumentError(
+            "gas pressure $(config.atmosphere.pgas_dataset) must have the atmosphere's shape and be positive"))
         config.vz_positive===:down && (vz=-vz)   # the file's vz sign; nothing else differs
         # canonical order is top first; reverse the axis and every 3-D field together
         bottom_first=kind===:z_m ? vertical[1]<vertical[end] : vertical[1]>vertical[end]
@@ -156,11 +160,8 @@ function read_inversion_inputs(config::RunConfig{T}) where T
         zfield=kind===:z_m ? repeat(reshape(T.(vertical),:,1,1),1,nx,ny) : nothing
         atmosphere=Atmosphere3D(grid,flip(T.(temperature)),flip(T.(vx)),flip(T.(vy)),flip(T.(vz)),flip(vturb);
             magnetic_field=magnetic,z=zfield,ne=ne===nothing ? nothing : flip(ne))
-        hydrogen===nothing || set_given_state!(atmosphere,flip(hydrogen))
-        if rho!==nothing
-            # alone, ρ is the truth and the equilibrium derives P and nₑ from it through the EOS; with nₑ the atmosphere is given
-            ne===nothing ? (atmosphere.rho=flip(rho)) : set_given_density!(atmosphere,flip(rho))
-        end
+        config.equilibrium.backend=="given" && set_given_inputs!(atmosphere;rho=rho===nothing ? nothing : flip(rho),
+            pgas=pgas===nothing ? nothing : flip(pgas),hydrogen=hydrogen===nothing ? nothing : flip(hydrogen))
         (atmosphere=atmosphere,)
     end
     config.mode===:forward && return InversionInputBundle(atmosphere_data.atmosphere,nothing)
@@ -254,6 +255,10 @@ function write_inversion_outputs(config::RunConfig,result::InversionRunResult)
             end
         elseif result.populations!==nothing
             file["populations"]=permutedims(result.populations,(4,1,3,2))
+        end
+        if config.equilibrium.backend=="given"
+            file["column_mass"]=_with_time_zyx(given_column_mass(atmosphere,config.equilibrium.gravity_m_s2))
+            attributes(file["column_mass"])["units"]="kg m^-2"
         end
         attributes(file)["axis_order"]="time,z,y,x; populations=level,z,y,x"
         attributes(file)["vertical_coordinate"]=string(kind)

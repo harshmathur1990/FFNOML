@@ -25,23 +25,24 @@ storage_order = "python"
 # log10 of the column mass; kg m^-2 unless the dataset's `units` attribute says "g cm-2".
 # ../../scripts/build_input_logm.py builds such a file from a Bifrost snapshot.
 log10m = "log10m"
-# How pressure, density, electron density and the geometry are obtained (forward only, except the first):
+# How pressure, density, electron density and the geometry are obtained. Add any of these four, in any combination
+# (forward only). Whatever is given is used as given, and HSEMHS is used only when none of them is:
 #
-#   Mode      Add to this section        P, rho                         Neutral H, protons       HSEMHS
-#   hse       nothing                    P = g m; rho from the EOS      EOS at (T, P)            yes
-#   ne-eos    ne                         EOS at (T, ne)                 EOS at (T, P)            yes
-#   rho-eos   rho                        rho given; P, ne from the EOS  EOS at (T, P)            yes
-#   ne-rho    ne, rho                    rho given; P from n_H, ne      EOS at (T, P)            no
-#   ne-hpops  ne, hydrogen_populations   both from n_H, ne              given                    no
+#   ne [m^-3]; rho [kg m^-3]; pgas [Pa]; hydrogen_populations [m^-3], file axes (level,z,y,x), the last level the protons
 #
-# ne [m^-3]; rho [kg m^-3]; hydrogen_populations [m^-3], file axes (level,z,y,x), the last level the protons. rho and
-# hydrogen_populations cannot be combined. ne-eos and rho-eos take the other quantities from the LTE EOS, which can be far
-# from the model's where it is not LTE. ne-rho passes a simulation's own T, v, ne and rho to the FFNO unchanged.
-# For ne-rho and ne-hpops, also remove [equilibrium.column_logm] below: it is refused there. The rest of [equilibrium] is then
-# optional, but the population mesh, on by default here, still needs eos_table_file (or set
+#   Missing     Comes from
+#   P           (n_H Sum abundances + ne) k T, if ne and n_H are known; else the Wittmann EOS at (T, ne) or (T, rho)
+#   rho         the populations; else (mass per H) (P/kT - ne)/Sum abundances, if ne and P are given; else the EOS at (T, P)
+#   ne          the Wittmann EOS at (T, P)
+#   hydrogen    the Wittmann EOS at (T, P)
+#
+# The EOS is LTE, so what it supplies can be far from a model's real values where the model is not in LTE: give all you have.
+# ne, rho and pgas together are the most faithful use of a simulation's own thermodynamics. Without HSEMHS, [equilibrium] is
+# optional and its column sections are ignored, but the population mesh, on by default here, still needs eos_table_file (or set
 # [population.mesh] enabled = false). Details: FFNOInversion.jl/README.md.
 # ne = "ne"
 # rho = "rho"
+# pgas = "pgas"
 # hydrogen_populations = "hydrogen_populations"
 temperature = "temperature"
 # vturb = "vturb" # optional; defaults to zero if not configured

@@ -148,7 +148,8 @@ the atmosphere's spatial grid. Nothing is interpolated.
 | --- | --- |
 | `logtau_500` or `z_m`, `x_m`, `y_m` | native axes |
 | `temperature`, `vx`, `vy`, `vz`, `vturb`, `Bx`, `By`, `Bz` | recovered (or input) fields, `(time,z,y,x)` |
-| `pgas`, `rho`, `ne`, `z`, `logtau500`, `chi500` | HSEMHS equilibrium, `(time,z,y,x)` |
+| `pgas`, `rho`, `ne`, `z`, `logtau500`, `chi500` | equilibrium or given atmosphere, `(time,z,y,x)` |
+| `column_mass` | runs with a given atmosphere only, kg m⁻², `(time,z,y,x)` |
 | `populations/<species>` | FFNO populations, `(level,z,y,x)`, m⁻³ |
 | `vertical_coordinate`, `vertical_unit`, `vertical_order = "top_first"` | attributes |
 | `execution_mode`, `solver_termination`, `provenance_toml` | attributes |
@@ -180,54 +181,43 @@ On a log m grid the axis is m along the line of sight, one ray per pixel, as on 
 grid: a file for μ < 1 must hold that axis and carry the view attributes. Both `z` and
 `logtau500` are written as derived fields, and the axis is written as `log10m` [dex of kg m⁻²].
 
-Without `datasets.ne` the axis sets the pressure, P = g m, and ρ comes from the EOS. With a
-given `datasets.ne` (forward only) P, ρ and χ₅₀₀ come from the EOS at (T, nₑ), so P need not
-equal g m, and the geometry follows as below.
+Without any given thermodynamics the axis sets the pressure, P = g m, and ρ comes from the EOS. With them, see below.
 
-### A given atmosphere: nₑ and hydrogen populations, any axis
+### A given atmosphere: nₑ, ρ, P and hydrogen populations, any axis
 
-With both `datasets.ne` and `datasets.hydrogen_populations` (forward only) the atmosphere is
-given and HSEMHS is not used, on any of the three axes, as in RH (`MULTIatmos`,
-`convertScales`). `[equilibrium]` is then optional. The populations are in m⁻³, with file axes
-`(level,z,y,x)` optionally preceded by time, and the last level is the protons.
+In forward synthesis, `datasets.ne` (m⁻³), `datasets.rho` (kg m⁻³), `datasets.pgas` (Pa) and `datasets.hydrogen_populations` (m⁻³, file axes
+`(level,z,y,x)` optionally preceded by time, the last level the protons) are accepted in any combination, on any of the three axes. **If any of them is given,
+HSEMHS is not used.** It solves only when none is given, and always in an inversion. `[equilibrium]` is then optional and its column sections are ignored.
 
-- n_H = Σ n, ρ = (mass per H) n_H, P = (n_H Σ abundances + nₑ) k T, with Wittmann's abundances.
-- χ₅₀₀ is Muspel's continuum at 500 nm from T, nₑ, neutral H and protons.
+A given field is never replaced. What is missing is found in this order, with Wittmann's composition, as in RH (`MULTIatmos`, `convertScales`):
+
+| Missing | Comes from |
+| --- | --- |
+| ρ | the populations, n_H = Σ n, ρ = (mass per H) n_H; else, with nₑ and P, (mass per H)(P/kT − nₑ)/Σ abundances; else the EOS at (T, P) |
+| P | (n_H Σ abundances + nₑ) k T when nₑ and n_H are known, n_H from the populations or ρ; else the P at which the EOS gives the given nₑ or ρ |
+| nₑ | the EOS at (T, P) |
+| neutral H, protons | the EOS at (T, P) |
+| χ₅₀₀ | Muspel's continuum at 500 nm from T, nₑ, neutral H and protons |
+
+nₑ is never derived from P and ρ by subtraction: in the photosphere it is a small difference of large numbers. The EOS here is the Wittmann library used by synthesis,
+and it is LTE, so what it supplies can be far from a model's real values where the model is not in LTE. For a simulation's own thermodynamics, give
+`ne`, `rho` and `pgas` together: the FFNO then receives its T, v, nₑ and ρ unchanged. Fields given together need not agree, and each is used as given; a difference above
+0.3 dex between the given ρ or P and the value the other given fields imply is logged, as it usually means a mistake in the input.
+
+The geometry follows from ρ and χ₅₀₀:
+
 - Log m axis: dz = −2 μ Δm/(ρₖ₋₁+ρₖ), τ₁ = (χ₅₀₀/ρ) m, dτ = χ₅₀₀ |dz|/μ.
-- Log τ axis: dz = −2 μ Δτ/(χ₅₀₀ₖ₋₁+χ₅₀₀ₖ).
+- Log τ axis: dz = −2 μ Δτ/(χ₅₀₀ₖ₋₁+χ₅₀₀ₖ). The axis must fit the atmosphere as given: take it from a z run with the same input, otherwise the heights are wrong.
 - Height axis: the axis itself, τ₁ = χ₅₀₀ |Δz|/(2μ), 0 if that exceeds 1.
-- On the mass and τ axes every column has z(τ = 1) = 0 (RH's rule, column by column, not
-  HSEMHS's mean over the cube). Those columns are therefore not aligned with each other by
-  pressure.
+- On the mass and τ axes every column has z(τ = 1) = 0 (RH's rule, column by column, not HSEMHS's mean over the cube). Those columns are therefore not aligned with
+  each other by pressure.
 
-The continuum and neutral H in the broadening of FFNO and Kurucz lines then use the given
-hydrogen, and Stark broadening the given nₑ.
+These runs also write `column_mass` [kg m⁻²] to the atmosphere output, along the line of sight, as in RH: P₁/(μ g) at the top and dm = (ρₖ₋₁+ρₖ)/2 · |dz|/μ below it. On a
+log m axis it is the axis.
 
-FFNO still predicts the line populations. The lower-level populations of Kurucz LTE lines still
-come from Wittmann at (T, P). The population mesh's corona and deep extension still use the
-HSEMHS EOS table: set `[equilibrium] eos_table_file`, or `[population.mesh] enabled = false`.
-
-### A given atmosphere: nₑ and ρ, any axis
-
-With both `datasets.ne` (m⁻³) and `datasets.rho` (kg m⁻³), forward only, the atmosphere is also given and HSEMHS is not used. This is the
-route for a simulation's own thermodynamics: the FFNO receives the input's T, v, nₑ and ρ unchanged.
-
-- n_H = ρ/(mass per H), P = (n_H Σ abundances + nₑ) k T, with Wittmann's composition.
-- Neutral H and protons come from the EOS at that (T, P), for χ₅₀₀, the continuum and broadening. No hydrogen is given here.
-- The geometry on each axis is as above.
-
-`datasets.rho` and `datasets.hydrogen_populations` cannot be combined, since each sets the density. The forward routes are:
-
-| Datasets | P, ρ, nₑ | Hydrogen | HSEMHS |
-| --- | --- | --- | --- |
-| none | hydrostatic; ρ, nₑ from the EOS | EOS at (T, P) | yes |
-| `ne` | nₑ given; P, ρ from the EOS at (T, nₑ) | EOS at (T, P) | yes |
-| `rho` | ρ given; P, nₑ from the EOS at (T, ρ) | EOS at (T, P) | yes |
-| `ne`, `rho` | both given; P from n_H and nₑ | EOS at (T, P) | no |
-| `ne`, `hydrogen_populations` | nₑ given; ρ, P from n_H and nₑ | given | no |
-
-With `rho` alone, the EOS gives nₑ at (T, ρ) and the run then follows the `ne` route, so the geometry is the same as there, and the FFNO
-receives the input's ρ unchanged. A level no EOS state reaches makes the equilibrium invalid. Both routes through the EOS are LTE.
+The continuum and neutral H in the broadening of FFNO and Kurucz lines use the given hydrogen when there is any, and Stark broadening uses nₑ. FFNO still predicts the line
+populations, and the lower-level populations of Kurucz LTE lines still come from Wittmann at (T, P). The population mesh's corona and deep extension use the HSEMHS EOS
+table: set `[equilibrium] eos_table_file`, or `[population.mesh] enabled = false`.
 
 ## Configuration reference
 
@@ -252,9 +242,9 @@ Unknown keys in `[equilibrium]` and its subsections are errors.
 `vturb`, `Bx`, `By`, `Bz`). There is no top-pressure or top-density option: configs
 that still contain `pressure_top_pa` or `pressure_top_dataset` are rejected.
 
-An optional `ne` (m⁻³) or `rho` (kg m⁻³) dataset in `[atmosphere.datasets]` is taken as the truth, **in forward synthesis only**: an inversion
+Optional `ne` (m⁻³), `rho` (kg m⁻³), `pgas` (Pa) and `hydrogen_populations` datasets in `[atmosphere.datasets]` are taken as the truth, **in forward synthesis only**: an inversion
 always takes them from the EOS, and `load_config` refuses them there. The routes are in the table under
-[A given atmosphere: nₑ and ρ](#a-given-atmosphere-nₑ-and-ρ-any-axis). See also [Equilibrium](#equilibrium).
+[A given atmosphere](#a-given-atmosphere-nₑ-ρ-p-and-hydrogen-populations-any-axis). See also [Equilibrium](#equilibrium).
 
 `vz_positive` says what a positive `vz` means in the input files. `"up"` (default) is the code's own sign, as in the
 Bifrost/MULTI3D files the FFNO was trained on (rising hot granules have positive `vz`). `"down"` negates `vz` on input
@@ -566,13 +556,7 @@ for physics failures (EOS envelope, non-finite or folded columns). Instead
 `outcome.valid` is false. With `on_nonconvergence = "reject_trial"` the solver
 rejects that trial step.
 
-**Given electron density (forward synthesis only).** With an `ne` dataset, HSEMHS does no hydrostatic integration: at every level
-P is the pressure at which the EOS gives that nₑ at that T, and ρ and χ₅₀₀ follow from the EOS (`solve_embedded!(...; lnne)`,
-column modes). On a z grid τ₅₀₀ is integrated on the heights as usual. On a log-τ grid the heights are ∫ μ dτ/χ₅₀₀, gauged to mean
-z(τ = 1) = 0, so the τ axis must fit that nₑ: take it from a z run with the same `ne`, otherwise the heights are wrong. The written
-`ne` is the given one, and the continuum follows it because P does. The EOS is LTE, so where an atmosphere's nₑ is far from LTE (the
-chromosphere of FALC, or of a non-equilibrium simulation) the derived P and ρ differ from the model's: by up to 9× for FALC and 10× or
-more for Bifrost near 1 Mm. An inversion never uses this path.
+In forward synthesis, any of nₑ, ρ, P or the hydrogen populations in the input replaces all of this: see [A given atmosphere](#a-given-atmosphere-nₑ-ρ-p-and-hydrogen-populations-any-axis).
 
 FFNO owns MPI and threading and passes HSEMHS its communicator. HSEMHS solves on
 x slabs, which is why `decomposition = "x_slabs"` is required.

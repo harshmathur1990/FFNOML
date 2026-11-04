@@ -12,10 +12,12 @@ import Muspel
         TT=[5500.0+40.0*k+7.0*i+3.0*j for k in 1:nz,j in 1:ny,i in 1:nx]                     # (z,y,x)
         ne=[1e17*exp(0.5*k)*(1+0.01i) for k in 1:nz,j in 1:ny,i in 1:nx]
         rho=[1e-7*exp(0.8*k)*(1+0.02j) for k in 1:nz,j in 1:ny,i in 1:nx]
+        pressure=[5.0*exp(0.8*k)*(1+0.02j) for k in 1:nz,j in 1:ny,i in 1:nx]
+        populations=[(l==6 ? 0.05 : l==1 ? 0.95 : 1e-6)*rho[k,j,i]/F._GIVEN_MASS_PER_H_KG for l in 1:6,k in 1:nz,j in 1:ny,i in 1:nx]   # (level,z,y,x)
         h5open(file,"w") do f
             f["zm"]=zv; f["lm"]=collect(range(-3.0,0.5;length=nz)); f["lt"]=collect(range(-5.0,0.5;length=nz))
             f["x"]=4.8e4 .* collect(0:nx-1); f["y"]=4.8e4 .* collect(0:ny-1)
-            f["t"]=TT; f["ne"]=ne; f["rho"]=rho; f["h"]=ones(6,nz,ny,nx); for name in ("vx","vy","vz"); f[name]=zero(TT); end
+            f["t"]=TT; f["ne"]=ne; f["rho"]=rho; f["p"]=pressure; f["hp"]=populations; f["h"]=ones(6,nz,ny,nx); for name in ("vx","vy","vz"); f[name]=zero(TT); end
         end
         function config(coordinate,axis;extra="rho = \"rho\"\n",mode="forward",nedata="ne = \"ne\"\n",equilibrium="")
             path=joinpath(dir,"c.toml")
@@ -67,7 +69,7 @@ import Muspel
         lib=joinpath(dir,"libwitt.$(Libdl.dlext)")
         run(`$(Base.julia_cmd()) --project=$(joinpath(@__DIR__,"..")) $(joinpath(@__DIR__,"..","scripts","build_wittmann_backend.jl")) $lib`)
         eos=WittmannEOS(lib,joinpath(@__DIR__,"..","..","scripts","pf_Kurucz.input"))
-        context=serial_context(options=ParallelOptions(threads_per_rank=1))
+        context=serial_context(options=ParallelOptions(threads_per_rank=Threads.nthreads()))
         for (coordinate,axis,mode) in (("z","z_m = \"zm\"",:given_z),("log10m","log10m = \"lm\"",:given_logm),("log10tau500","logtau500 = \"lt\"",:given_ltau))
             cfg=config(coordinate,axis)
             @test cfg.equilibrium.backend=="given" && cfg.equilibrium.mode===mode
@@ -88,42 +90,91 @@ import Muspel
             @test a.rho≈permutedims(rho,(1,3,2)) rtol=1e-12        # untouched
             coordinate=="z" && @test a.z[:,1,1]≈zv rtol=1e-12
         end
+        # ρ and P: no HSEMHS, both kept, nₑ from the EOS at (T, P), or given as well; column mass written
+        for (coordinate,axis,mode) in (("z","z_m = \"zm\"",:given_z),("log10m","log10m = \"lm\"",:given_logm),("log10tau500","logtau500 = \"lt\"",:given_ltau))
+            for withne in (false,true)
+                cfg=config(coordinate,axis;nedata=withne ? "ne = \"ne\"\n" : "",extra="rho = \"rho\"\npgas = \"p\"\n")
+                @test cfg.equilibrium.backend=="given" && cfg.equilibrium.mode===mode
+                root=read_inversion_inputs(cfg).atmosphere
+                distributed=distribute_atmosphere(Float64,root,context)
+                @test_throws ArgumentError prepare_equilibrium(cfg.equilibrium,distributed,context)
+                root=read_inversion_inputs(cfg).atmosphere; distributed=distribute_atmosphere(Float64,root,context)
+                backend=prepare_equilibrium(cfg.equilibrium,distributed,context;synthesis_eos=eos)
+                @test backend.provenance["ne_given"]===withne
+                @test reconstruct_equilibrium!(backend,distributed,context).valid
+                a=distributed.local_atmosphere
+                @test a.rho≈permutedims(rho,(1,3,2)) rtol=1e-12
+                @test a.pgas≈permutedims(pressure,(1,3,2)) rtol=1e-12
+                if withne
+                    @test a.ne≈permutedims(ne,(1,3,2)) rtol=1e-12
+                else
+                    r=zeros(size(a.temperature)); n=zeros(size(a.temperature))
+                    F.thermodynamics!(r,n,eos,Array{Float64,3}(a.temperature),Array{Float64,3}(a.pgas))
+                    @test a.ne≈n rtol=1e-12
+                    @test !(a.ne≈permutedims(ne,(1,3,2)))
+                end
+                @test all(>(0),a.chi500) && all(diff(a.z;dims=1).<0) && all(isfinite,a.logtau500)
+                coordinate=="z" && @test a.z[:,1,1]≈zv rtol=1e-12
+                m=given_column_mass(a,274.0)
+                @test all(diff(m;dims=1).>0)
+                if coordinate=="log10m"
+                    @test log10.(m[:,1,1])≈native_depth(a.grid) rtol=1e-10
+                else
+                    @test m[1,2,1]≈a.pgas[1,2,1]/274.0 rtol=1e-12
+                    @test m[3,2,1]-m[2,2,1]≈(a.rho[2,2,1]+a.rho[3,2,1])/2*(a.z[2,2,1]-a.z[3,2,1]) rtol=1e-12
+                end
+                wave=cfg.synthesis.wavelength_m
+                result=F.InversionRunResult(nothing,SpectralCube(zeros(length(wave),1,nx,ny),wave,StokesSet(:I)),a,nothing,nothing,Dict{String,Any}())
+                write_inversion_outputs(cfg,result)
+                @test h5open(f->read(attributes(f["column_mass"])["units"]),cfg.outputs.atmosphere_file)=="kg m^-2"
+                @test h5read(cfg.outputs.atmosphere_file,"column_mass")≈F._with_time_zyx(m) rtol=1e-12
+            end
+        end
+        refused=try config("z","z_m = \"zm\"";nedata="",extra="rho = \"rho\"\npgas = \"p\"\n",mode="inversion"); "" catch e; sprint(showerror,e) end
+        @test occursin("forward synthesis only",refused)
+
+        # every combination of ne, rho, pgas and hydrogen_populations: no HSEMHS, given fields stay as given; column sections are ignored
+        @test config("z","z_m = \"zm\"";equilibrium="[equilibrium]\nmodel = \"column_hse\"\n[equilibrium.column_z]\nP_ref_pa = 1.0e5\n").equilibrium.backend=="given"
+        @test_throws ArgumentError config("z","z_m = \"zm\"";equilibrium="[equilibrium]\nnot_a_key = 1\n")
+        lines=Dict("ne"=>"ne = \"ne\"\n","rho"=>"rho = \"rho\"\n","pgas"=>"pgas = \"p\"\n","hp"=>"hydrogen_populations = \"hp\"\n")
+        combos=[c for c in (["ne"],["rho"],["pgas"],["ne","rho"],["ne","pgas"],["rho","pgas"],["ne","rho","pgas"],["hp"],["ne","hp"],["rho","hp"],["pgas","hp"],
+            ["ne","rho","hp"],["ne","pgas","hp"],["rho","pgas","hp"],["ne","rho","pgas","hp"])]
+        for (coordinate,axis,mode) in (("z","z_m = \"zm\"",:given_z),("log10m","log10m = \"lm\"",:given_logm),("log10tau500","logtau500 = \"lt\"",:given_ltau)),combo in combos
+            text=join(lines[k] for k in combo if k!="ne")
+            @testset "$coordinate $(join(combo,"+"))" begin
+                cfg=config(coordinate,axis;nedata="ne" in combo ? lines["ne"] : "",extra=text)
+                @test cfg.equilibrium.backend=="given" && cfg.equilibrium.mode===mode
+                distributed=distribute_atmosphere(Float64,read_inversion_inputs(cfg).atmosphere,context)
+                backend=prepare_equilibrium(cfg.equilibrium,distributed,context;synthesis_eos=eos)
+                @test backend isa GivenAtmosphereBackend
+                @test backend.provenance["ne_given"]===("ne" in combo) && backend.provenance["hydrogen_populations_given"]===("hp" in combo)
+                @test reconstruct_equilibrium!(backend,distributed,context).valid
+                a=distributed.local_atmosphere
+                "ne" in combo && @test a.ne≈permutedims(ne,(1,3,2)) rtol=1e-12
+                "rho" in combo && @test a.rho≈permutedims(rho,(1,3,2)) rtol=1e-12
+                "pgas" in combo && @test a.pgas≈permutedims(pressure,(1,3,2)) rtol=1e-12
+                if "hp" in combo
+                    @test a.h_neutral≈dropdims(sum(permutedims(populations,(2,4,3,1))[:,:,:,1:5];dims=4);dims=4) rtol=1e-12
+                    @test a.h_proton≈permutedims(populations,(2,4,3,1))[:,:,:,6] rtol=1e-12
+                else
+                    @test a.h_neutral===nothing
+                end
+                @test all(>(0),a.ne) && all(>(0),a.rho) && all(>(0),a.pgas) && all(>(0),a.chi500)
+                @test all(diff(a.z;dims=1).<0) && all(isfinite,a.logtau500)
+                if "ne" in combo && "pgas" in combo && !("rho" in combo) && !("hp" in combo)     # ρ from P/kT − nₑ, which gives P back
+                    @test (a.rho./F._GIVEN_MASS_PER_H_KG.*F._GIVEN_TOTAL_ABUNDANCE.+a.ne).*F._KB_SI.*a.temperature≈a.pgas rtol=1e-10
+                end
+                @test all(diff(given_column_mass(a,274.0);dims=1).>0)
+                # a field the input leaves out comes from the EOS at (T, P), so it agrees with P there
+                r=zeros(size(a.temperature)); n=zeros(size(a.temperature))
+                F.thermodynamics!(r,n,eos,Array{Float64,3}(a.temperature),Array{Float64,3}(a.pgas))
+                length(combo)==1 && combo[1]!="hp" && @test a.ne≈n rtol=1e-7
+                length(combo)==1 && combo[1]!="hp" && @test a.rho≈r rtol=1e-7
+            end
+        end
         # forward only, needs ne, and one density only
         refused=try config("z","z_m = \"zm\"";mode="inversion"); "" catch e; sprint(showerror,e) end
         @test occursin("forward synthesis only",refused)
-        @test_throws ArgumentError config("z","z_m = \"zm\"";nedata="")   # alone, ρ goes through HSEMHS and needs [equilibrium]
-        @test_throws ArgumentError config("z","z_m = \"zm\"";extra="rho = \"rho\"\nhydrogen_populations = \"h\"\n")
 
-        # ρ alone: nₑ and P from the EOS at (T, ρ), through the given-nₑ route, on every axis
-        table_file=get(ENV,"HSEMHS_EOS_TABLE","/mn/stornext/d9/data/harshm/MHS/HSEMHS/cache/eos_table_fullz.h5")
-        if isfile(table_file)
-            H=F.HSEMHS; table=H.load_table(table_file); mpi=initialize_parallel(options=ParallelOptions(threads_per_rank=1))
-            section(body)="[equilibrium]\nbackend = \"HSEMHS\"\nmodel = \"column_hse\"\neos_table_file = \"$table_file\"\n$body"
-            for (coordinate,axis,body,mode) in (("z","z_m = \"zm\"","[equilibrium.column_z]\nP_ref_pa = 1.0e5\n",:column_hse_z),
-                    ("log10m","log10m = \"lm\"","",:column_hse_logm),("log10tau500","logtau500 = \"lt\"","",:column_hse_ltau))
-                cfg=config(coordinate,axis;nedata="",equilibrium=section(body))
-                @test cfg.equilibrium.backend=="HSEMHS" && cfg.equilibrium.mode===mode
-                root=read_inversion_inputs(cfg).atmosphere
-                @test root.ne===nothing && root.pgas===nothing
-                @test root.rho≈permutedims(rho,(1,3,2)) rtol=1e-12
-                distributed=distribute_atmosphere(Float64,root,mpi)
-                backend=prepare_equilibrium(cfg.equilibrium,distributed,mpi)
-                @test backend.provenance["rho_given"]===true && !haskey(backend.provenance,"ne_given")
-                @test reconstruct_equilibrium!(backend,distributed,mpi).valid
-                a=distributed.local_atmosphere
-                @test a.rho≈permutedims(rho,(1,3,2)) rtol=1e-12                     # the input's ρ reaches the FFNO unchanged
-                for (k,x,y) in ((1,1,1),(4,2,2),(8,3,1))
-                    r,n,_,_=H.state(table,log(a.temperature[k,x,y]),log(a.pgas[k,x,y]))
-                    @test r≈log(a.rho[k,x,y]) atol=1e-7                              # P gives back ρ through the same table
-                    @test n≈log(a.ne[k,x,y]) atol=1e-7
-                end
-                @test all(diff(a.z;dims=1).<0)
-                coordinate=="z" && @test a.z[:,1,1]≈zv rtol=1e-12
-                bad=read_inversion_inputs(cfg).atmosphere; bad.rho[3,1,1]=1e30          # no EOS state: invalid, not a throw
-                d2=distribute_atmosphere(Float64,bad,mpi); b2=prepare_equilibrium(cfg.equilibrium,d2,mpi)
-                @test reconstruct_equilibrium!(b2,d2,mpi).reason===:eos_out_of_envelope
-                close_equilibrium!(b2); close_equilibrium!(backend)
-            end
-        end
     end
 end

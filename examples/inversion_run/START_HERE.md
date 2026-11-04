@@ -89,9 +89,9 @@ for files written with HDF5.jl.
 
 `time_index = 1` selects the first snapshot. Enable the `vturb` mapping to read
 microturbulence; otherwise it is zero. Magnetic mappings are optional (absent means
-B = 0). Pressure, density, electron density and the derived coordinate (height for
+B = 0). Unless you supply them (below), pressure, density, electron density and the derived coordinate (height for
 this log-tau input) are reconstructed by the HSEMHS equilibrium configured in
-`[equilibrium]`, rather than read as input fields.
+`[equilibrium]`.
 
 For other vertical axes start from a different template: `forward_logm.toml` for log10 column mass (dataset `log10m`, in kg m⁻²,
 or g cm⁻² with a `units` attribute) and `forward_z.toml` for height (`z_m`, `x_m`, `y_m` in metres).
@@ -106,9 +106,8 @@ Before submission, set:
 
 How the run treats the atmosphere (details in the [package README](../../FFNOInversion.jl/README.md#physics-and-numerics)):
 
-- **Pressure, density and electron density** come from HSEMHS: hydrostatic balance plus the EOS. A forward run may instead add `ne = "ne"` to `[atmosphere.datasets]`: nₑ is then the truth, and P and ρ come from (T, nₑ) through the EOS at every level, with no hydrostatic balance. An inversion refuses this and always takes nₑ from the EOS. On log tau, a given nₑ needs a τ axis that fits it: take it from a z run with the same `ne`.
-- **A given density (forward only):** `rho = "rho"` (kg m⁻³) alone is the truth: P and nₑ come from (T, ρ) through the EOS, with no hydrostatic balance, as with `ne` alone.
-- **A whole given atmosphere (forward only):** add `ne` with either `rho` (kg m⁻³; hydrogen then comes from the EOS at (T, P)) or `hydrogen_populations` (m⁻³, file axes `(level,z,y,x)`, last level the protons). HSEMHS is not used, on any axis: the geometry follows as in RH. `[equilibrium]` is then optional, but the population mesh still needs `eos_table_file`, or `[population.mesh] enabled = false`. FFNO still predicts the line populations.
+- **Pressure, density and electron density** come from HSEMHS: hydrostatic balance plus the EOS. An inversion always works this way.
+- **A forward run may supply them:** add any of `ne` (m⁻³), `rho` (kg m⁻³), `pgas` (Pa) and `hydrogen_populations` (m⁻³, file axes `(level,z,y,x)`, last level the protons), in any combination, to `[atmosphere.datasets]`. Then HSEMHS isn't used: what you give is used as given, and the Wittmann EOS supplies what's missing. For a simulation, `ne`, `rho` and `pgas` together are the most faithful. `[equilibrium]` is then optional and its column sections are ignored, but the population mesh still needs `eos_table_file`, or `[population.mesh] enabled = false`. On log tau the axis must fit what you give: take it from a z run with the same input.
 - **FFNO populations** are predicted on a fixed height mesh and interpolated back. This is on by default for log tau and log m; on z add `[population.mesh] enabled = true`, which you want for anything unlike a simulation grid, such as a 1-D model.
 - **Above a column's top**, if the mesh goes higher, a corona is built: T rises to `corona_temperature_k` (1 MK) over `corona_transition_m` (240 km), hydrostatic from the top, with ρ and nₑ from the EOS and velocities held. `corona_temperature_k = 0` holds the top values instead.
 - **Below a column's bottom**, the column is extended hydrostatically with d ln T / d ln P = `nabla` (0.13), with ρ and nₑ from the EOS and velocities held.

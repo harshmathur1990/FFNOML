@@ -15,9 +15,10 @@ struct AtmosphereInputConfig{T<:AbstractFloat}
     vz_dataset::String
     magnetic_datasets::Union{Nothing,NTuple{3,String}}
     vturb_dataset::Union{Nothing,String}
-    ne_dataset::Union{Nothing,String}      # given electron density: the truth, HSEMHS derives P and rho from it
-    hydrogen_populations_dataset::Union{Nothing,String}  # with ne: the atmosphere is given, no HSEMHS (GivenAtmosphereBackend)
-    rho_dataset::Union{Nothing,String}     # alone: P and ne from the EOS through HSEMHS; with ne: the atmosphere is given, no HSEMHS
+    ne_dataset::Union{Nothing,String}      # the truth, in a forward run; the atmosphere is then given, no HSEMHS (GivenAtmosphereBackend), as for the next three
+    hydrogen_populations_dataset::Union{Nothing,String}
+    rho_dataset::Union{Nothing,String}
+    pgas_dataset::Union{Nothing,String}
 end
 
 struct ObservedDataConfig
@@ -447,11 +448,10 @@ function load_config(path::AbstractString)
         haskey(atmos,key) && throw(ArgumentError(
             "atmosphere.$key is no longer accepted: the pressure boundary is set by HSEMHS; configure [equilibrium.column_z] anchor/P_ref_pa (native z) or nothing (native log tau, log m)"))
     end
-    haskey(datasets,"ne") || !haskey(datasets,"hydrogen_populations") || throw(ArgumentError(
-        "atmosphere.datasets.hydrogen_populations needs atmosphere.datasets.ne: the two together give the atmosphere"))
-    haskey(datasets,"rho") && haskey(datasets,"hydrogen_populations") && throw(ArgumentError(
-        "give atmosphere.datasets.rho or atmosphere.datasets.hydrogen_populations, not both: each sets the density"))
-    given=haskey(datasets,"ne") && (haskey(datasets,"hydrogen_populations") || haskey(datasets,"rho"))
+    # Forward only: ne, rho, pgas and hydrogen_populations in any combination. Any of them spares HSEMHS: what they don't fix comes from the
+    # synthesis Wittmann EOS (set_given_inputs!, GivenAtmosphereBackend). HSEMHS solves only when none is given, and for every inversion.
+    has_populations=haskey(datasets,"hydrogen_populations")
+    given=any(k->haskey(datasets,k),("ne","rho","pgas","hydrogen_populations"))
     given || haskey(cfg,"equilibrium") || throw(ArgumentError("missing required configuration section [equilibrium] (backend = \"HSEMHS\", model, eos_table_file, ...)"))
     equilibrium = given ? _given_equilibrium_config(get(cfg,"equilibrium",Dict{String,Any}()),vertical_coordinate,dirname(abspath(path))) :
         _equilibrium_config(cfg["equilibrium"],vertical_coordinate,dirname(abspath(path)))
@@ -462,12 +462,17 @@ function load_config(path::AbstractString)
         haskey(datasets,"vturb") ? String(datasets["vturb"]) : nothing,
         haskey(datasets,"ne") ? String(datasets["ne"]) : nothing,
         haskey(datasets,"hydrogen_populations") ? String(datasets["hydrogen_populations"]) : nothing,
-        haskey(datasets,"rho") ? String(datasets["rho"]) : nothing)
+        haskey(datasets,"rho") ? String(datasets["rho"]) : nothing,
+        haskey(datasets,"pgas") ? String(datasets["pgas"]) : nothing)
 
+    forward_only || !has_populations || throw(ArgumentError(
+        "atmosphere.datasets.hydrogen_populations is for forward synthesis only: an inversion always takes the density from the EOS"))
     forward_only || !haskey(datasets,"ne") || throw(ArgumentError(
         "atmosphere.datasets.ne is for forward synthesis only: an inversion always takes the electron density from the EOS"))
     forward_only || !haskey(datasets,"rho") || throw(ArgumentError(
         "atmosphere.datasets.rho is for forward synthesis only: an inversion always takes the density from the EOS"))
+    forward_only || !haskey(datasets,"pgas") || throw(ArgumentError(
+        "atmosphere.datasets.pgas is for forward synthesis only: an inversion always takes the pressure from the equilibrium"))
     forward_only || !given || throw(ArgumentError(
         "atmosphere.datasets.$(haskey(datasets,"rho") ? "rho" : "hydrogen_populations") is for forward synthesis only: an inversion always takes the density from the EOS"))
     observed=nothing; weights=nothing
