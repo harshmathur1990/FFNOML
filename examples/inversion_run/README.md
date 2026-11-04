@@ -84,7 +84,7 @@ H and Ca assets even when only one species contributes to the configured lines.
 
 - **P, ρ, nₑ:** from HSEMHS, by hydrostatic balance and the EOS. An inversion always works this way.
 - **A given atmosphere:** in a forward run only, any of `ne`, `rho`, `pgas` and `hydrogen_populations` in `[atmosphere.datasets]`, in any combination and on any axis, replaces HSEMHS: what is given is used as given, and the Wittmann EOS supplies the rest. `[equilibrium]` is then optional and its column sections are ignored. The mesh still needs `eos_table_file`, or `[population.mesh] enabled = false`.
-- **Population mesh:** the FFNO predicts on a fixed height mesh, on by default for log tau and log m, and with `[population.mesh] enabled = true` on z.
+- **Population mesh:** the FFNO predicts on a fixed height mesh, on every axis and in both modes, unless `[population.mesh] enabled = false`.
 - **Above a column's top:** where the mesh goes higher, a corona: T rises to `corona_temperature_k` (1 MK) over `corona_transition_m` (240 km), hydrostatic from the top, ρ and nₑ from the EOS, velocities held. `corona_temperature_k = 0` holds the top values.
 - **Below a column's bottom:** a hydrostatic extension with d ln T / d ln P = `nabla` (0.13), ρ and nₑ from the EOS, velocities held.
 - **Continuum:** Muspel's, with hydrogen from the EOS (a given atmosphere's own, when given). FFNO populations never enter it.
@@ -99,7 +99,8 @@ The rules are also written out in `forward.toml`, `forward_z.toml` and `forward_
 
 For a cube whose activations don't fit on the GPUs, such as 504 × 504 on eagle7, use the
 [batched service](../../FFNOInversion.jl/README.md#batched-forward-service-small-gpus). It is full-domain prediction from host RAM, not tiling,
-and needs about 90 GB of RAM at that size. It answers forward runs only.
+and needs about 90 GB of RAM at that size. It answers forward runs only. Step-by-step guides: [eagle7](start_here_eagle7.md),
+[any HPC with GPUs](start_here_general_hpc.md) and [a GPU host without a scheduler](start_here_local_cluster_gpu.md).
 
 ## Viewing angle (off disk centre)
 

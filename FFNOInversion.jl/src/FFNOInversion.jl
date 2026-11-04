@@ -38,6 +38,7 @@ include("Gradients.jl")
 include("ProductionGradients.jl")
 include("ScalableSolvers.jl")
 include("IO.jl")
+include("IrisAtmosphere.jl")
 include("Execution.jl")
 
 export Grid3D, MagneticField3D, Atmosphere3D

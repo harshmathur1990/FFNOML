@@ -19,6 +19,7 @@ struct AtmosphereInputConfig{T<:AbstractFloat}
     hydrogen_populations_dataset::Union{Nothing,String}
     rho_dataset::Union{Nothing,String}
     pgas_dataset::Union{Nothing,String}
+    model_format::Symbol                   # :hdf5, or :iris: FITS cubes in the directory `file` (IrisAtmosphere.jl), forward only
 end
 
 struct ObservedDataConfig
@@ -430,12 +431,20 @@ function load_config(path::AbstractString)
     solver=forward_only ? LBFGSSolverOptions(max_iterations=0) : _solver(solver_raw)
     obs = get(cfg,"observation",Dict{String,Any}())
     physics = _required(cfg,"physics")
-    datasets = _required(atmos,"datasets")
+    model_format=Symbol(lowercase(String(get(atmos,"atmos_model_format","hdf5"))))
+    model_format in (:hdf5,:iris) || throw(ArgumentError("atmosphere.atmos_model_format must be \"hdf5\" or \"iris\", got \"$model_format\""))
+    iris=model_format===:iris
+    iris && !forward_only && throw(ArgumentError("atmosphere.atmos_model_format = \"iris\" is for forward synthesis only"))
+    # IRIS cubes hold T, velocities, rho and P on heights, so they are a given atmosphere on a native z grid
+    datasets = iris ? copy(IRIS_DATASETS) : _required(atmos,"datasets")
+    atmosphere_source=iris ? String(_required(atmos,"atmos_directory")) : String(_required(inputs,"initial_atmosphere_file"))
+    iris && (grid=_iris_grid(atmosphere_source,grid))
     storage_order=Symbol(lowercase(String(get(atmos,"storage_order","julia"))))
     storage_order in (:julia,:python) || throw(ArgumentError(
         "atmosphere.storage_order must be julia or python"))
-    vertical_coordinate,vertical_dataset,x_dataset,y_dataset=_vertical_input(atmos,datasets)
-    dx_m,dy_m = _horizontal_spacing(grid,String(_required(inputs,"initial_atmosphere_file")),x_dataset,y_dataset)
+    iris && get(atmos,"vertical_coordinate","z")!="z" && throw(ArgumentError("atmosphere.atmos_model_format = \"iris\" is on heights: vertical_coordinate must be \"z\""))
+    vertical_coordinate,vertical_dataset,x_dataset,y_dataset=iris ? (:z_m,"z-coordinate",nothing,nothing) : _vertical_input(atmos,datasets)
+    dx_m,dy_m = _horizontal_spacing(grid,atmosphere_source,x_dataset,y_dataset)
     regions = _regions(cfg)
     wavelength_m = reduce(vcat,wavelengths.(regions))
     !isempty(wavelength_m) && all(>(0),wavelength_m) || throw(ArgumentError("wavelength grid must be positive and non-empty"))
@@ -455,7 +464,7 @@ function load_config(path::AbstractString)
     given || haskey(cfg,"equilibrium") || throw(ArgumentError("missing required configuration section [equilibrium] (backend = \"HSEMHS\", model, eos_table_file, ...)"))
     equilibrium = given ? _given_equilibrium_config(get(cfg,"equilibrium",Dict{String,Any}()),vertical_coordinate,dirname(abspath(path))) :
         _equilibrium_config(cfg["equilibrium"],vertical_coordinate,dirname(abspath(path)))
-    atmosphere = AtmosphereInputConfig{Float64}(String(_required(inputs,"initial_atmosphere_file")),storage_order,
+    atmosphere = AtmosphereInputConfig{Float64}(atmosphere_source,storage_order,
         vertical_coordinate,vertical_dataset,x_dataset,y_dataset,
         String(_required(datasets,"temperature")),String(_required(datasets,"vx")),String(_required(datasets,"vy")),
         String(_required(datasets,"vz")),magnetic,
@@ -463,7 +472,8 @@ function load_config(path::AbstractString)
         haskey(datasets,"ne") ? String(datasets["ne"]) : nothing,
         haskey(datasets,"hydrogen_populations") ? String(datasets["hydrogen_populations"]) : nothing,
         haskey(datasets,"rho") ? String(datasets["rho"]) : nothing,
-        haskey(datasets,"pgas") ? String(datasets["pgas"]) : nothing)
+        haskey(datasets,"pgas") ? String(datasets["pgas"]) : nothing,
+        model_format)
 
     forward_only || !has_populations || throw(ArgumentError(
         "atmosphere.datasets.hydrogen_populations is for forward synthesis only: an inversion always takes the density from the EOS"))
@@ -552,16 +562,15 @@ end
 
 const _POPULATION_MESH_KEYS=("enabled","bottom_m","top_m","spacing_m","uniform_top_m","stretch","max_spacing_m","nabla","corona_temperature_k","corona_transition_m")
 
-"""`[population.mesh]`: the height mesh FFNO runs on for a native log-tau or log-m atmosphere (on by default there;
-`enabled = false` feeds FFNO the native grid). On a native height grid only when asked for."""
+"""`[population.mesh]`: the height mesh FFNO runs on, on every axis and in both modes, unless `enabled = false` feeds FFNO the native grid."""
 function _population_mesh(raw,vertical_coordinate,has_table=true)
     unknown=setdiff(collect(keys(raw)),["mesh"])
     isempty(unknown) || throw(ArgumentError("unknown key(s) in [population]: $(join(sort(unknown),", "))"))
     mesh=get(raw,"mesh",Dict{String,Any}())
     unknown=setdiff(collect(keys(mesh)),collect(_POPULATION_MESH_KEYS))
     isempty(unknown) || throw(ArgumentError("unknown key(s) in [population.mesh]: $(join(sort(unknown),", "))"))
-    # on by default for log tau and log m; a native z grid uses the mesh only when asked for
-    Bool(get(mesh,"enabled",vertical_coordinate!==:z_m)) || return nothing
+    # always on, whatever the axis and mode, unless the configuration turns it off
+    Bool(get(mesh,"enabled",true)) || return nothing
     has_table || throw(ArgumentError("[population.mesh] extends the columns through the EOS table: set [equilibrium] eos_table_file, or [population.mesh] enabled = false"))
     PopulationMeshConfig(;corona_temperature_k=1.0e6,(Symbol(k)=>Float64(v) for (k,v) in mesh if k!="enabled")...)
 end

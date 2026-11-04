@@ -104,6 +104,21 @@ psf_type = "none"
 mode = "kurucz_lte"
 linelist_file = "inputs/kurucz_6302.list"
 
+# FFNO was trained on simulation height grids: its populations are predicted on this height mesh, on every axis and in both modes (each
+# column interpolated onto it, extended above its top with a corona and below its bottom hydrostatically) and interpolated back. It needs
+# [equilibrium] eos_table_file. The values below are the defaults; uncomment to change them, or set enabled = false to feed FFNO the native grid.
+# [population.mesh]
+# enabled = true
+# bottom_m = -1.0e6            # mesh bottom [m] (training grids: -1 to -2.5 Mm)
+# top_m = 1.4e7                # mesh top [m]
+# spacing_m = 2.0e4            # spacing up to uniform_top_m [m] (training grids: 12-30 km)
+# uniform_top_m = 4.5e6
+# stretch = 1.01               # spacing growth per point above uniform_top_m
+# max_spacing_m = 1.0e5
+# nabla = 0.13                 # d ln T / d ln P of the deep extension (near-adiabatic convection zone)
+# corona_temperature_k = 1.0e6 # above a column's top: a corona in hydrostatic balance; 0 holds the top values
+# corona_transition_m = 2.4e5
+
 [physics]
 redistribution = "non_prd"
 # line_center = "reference"   # FFNO lines at 656.28 and 854.209 nm (air); "atom": the atom file's level energies

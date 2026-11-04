@@ -1,5 +1,5 @@
 """
-FFNO populations for a native log-tau or log-m atmosphere are predicted on a height mesh; a native z atmosphere can ask for it too.
+FFNO populations are predicted on a height mesh, on every axis, unless `[population.mesh] enabled = false`.
 
 The FFNO checkpoints were trained on simulation height grids: one set of heights shared by every column, 12-30 km
 spacing through the photosphere and chromosphere and bottoms 1-2.5 Mm below the surface. Its vertical layers are

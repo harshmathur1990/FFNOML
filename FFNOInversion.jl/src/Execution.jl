@@ -97,7 +97,7 @@ HDF5.jl-visible atmosphere dimensions are reversed before this contract is
 applied. Internal axes are `(z,x,y)` and `(wavelength,Stokes,x,y)`.
 """
 function read_inversion_inputs(config::RunConfig{T}) where T
-    atmosphere_data=h5open(config.atmosphere.file,"r") do file
+    atmosphere_data=config.atmosphere.model_format===:iris ? (atmosphere=read_iris_atmosphere(config),) : h5open(config.atmosphere.file,"r") do file
         storage_order=config.atmosphere.storage_order; kind=config.atmosphere.vertical_coordinate
         vertical_raw=_from_atmosphere_storage(
             _read_dataset(file,config.atmosphere.vertical_dataset),storage_order)

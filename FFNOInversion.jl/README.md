@@ -43,7 +43,7 @@ control maps (inversion only)
    ▼
 equilibrium                 Pgas, rho, ne, z (or log10 tau500) and chi500: HSEMHS from T (and B), or a given atmosphere (forward only)
    ▼
-population mesh             columns mapped onto a training-like height mesh (log tau; z on request), extended above and below
+population mesh             columns mapped onto a training-like height mesh, extended above and below
    ▼
 FFNO3D populations          persistent multi-GPU FSDP service, one model per species
    ▼
@@ -175,9 +175,9 @@ from it:
 | Vertical dataset | `logtau500` | `log10m`: m in kg m⁻², or g cm⁻² with a `units` attribute | `z_m`, plus `x_m` and `y_m` |
 | HSEMHS mode | `column-hse-ltau`: heights derived per column | `column-hse-logm`: heights and log10 tau500 derived per column | `column-hse-z`: log10 tau500 derived per column |
 | Pressure boundary | HSEMHS tau-hydrostatic top closure (`[equilibrium.column_ltau]`) | P = g m, μ g m along the line of sight (`[equilibrium.column_logm]`) | `[equilibrium.column_z] anchor`, `P_ref_pa` |
-| FFNO populations | on the `[population.mesh]` height mesh, then interpolated back | as log tau | directly on the native grid, or on the mesh with `[population.mesh] enabled = true` |
+| FFNO populations | on the `[population.mesh]` height mesh, then interpolated back, unless `enabled = false` | as log tau | as log tau |
 | Formal solution | optical depth integrated on the native log tau500 grid using chi500 | optical depth integrated on the native log m grid using rho, dτ = (χ/ρ) dm | optical depth integrated in geometric height |
-| Above and below the column | on the mesh: corona above, hydrostatic extension below ([Population mesh](#population-mesh)) | as log tau | the same with `[population.mesh] enabled = true`; otherwise not extended |
+| Above and below the column | on the mesh: corona above, hydrostatic extension below ([Population mesh](#population-mesh)) | as log tau | as log tau |
 | Control nodes | `log_tau_nodes` | `log_m_nodes` | `z_nodes_m` |
 | Regularization length | `length_scale_dex` (default 1) | `length_scale_dex` (default 1) | `length_scale_m` (required for derivative types 1 and 4) |
 
@@ -225,6 +225,15 @@ log m axis it is the axis.
 The continuum and neutral H in the broadening of FFNO and Kurucz lines use the given hydrogen when there is any, and Stark broadening uses nₑ. FFNO still predicts the line
 populations, and the lower-level populations of Kurucz LTE lines still come from Wittmann at (T, P). The population mesh's corona and deep extension use the HSEMHS EOS
 table: set `[equilibrium] eos_table_file`, or `[population.mesh] enabled = false`.
+
+### An IRIS/MURaM FITS atmosphere
+
+In forward synthesis, `[atmosphere] atmos_model_format = "iris"` with `atmos_directory = "..."` reads one snapshot's FITS cubes, `<code>_<run>_<quantity>_<snap>.fits`, instead of
+`[inputs] initial_atmosphere_file` and `[atmosphere.datasets]`. The quantities are `lgtg`, `ux`, `uy`, `uz`, `lgr` and `lgp`, with heights in the `z-coordinate` extension and units from the
+headers. It is read as `scripts/convert_iris_sim_fits_to_ffno_hdf5.py` reads it: index 1 is the top, and (x, y) of the file becomes (x, reversed y) with `uy` kept as it is, so results line up with
+that script's predictions. It is a given atmosphere on a native z grid, with ρ and P as given and nₑ from the EOS at (T, P), so HSEMHS isn't used. The horizontal spacing comes
+from the headers, and `[grid]`, if set, must agree. The population mesh needs `[equilibrium] eos_table_file`, and it gives the FFNO only the mesh's heights.
+The script's resampling and temperature floor are not applied: this runs on the cubes' own grid.
 
 ## Configuration reference
 
@@ -337,7 +346,7 @@ for them σ and α must be given or Unsöld is used.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `enabled` | true for log tau, false for z | predict the FFNO populations on the mesh; set it on z for a grid unlike the training grids, such as a 1-D model's uneven levels |
+| `enabled` | true | predict the FFNO populations on the mesh, on every axis and in both modes; `false` feeds the FFNO the native grid |
 | `bottom_m`, `top_m` | −1 Mm, 14 Mm | mesh limits |
 | `spacing_m`, `uniform_top_m` | 20 km, 4.5 Mm | uniform spacing up to this height |
 | `stretch`, `max_spacing_m` | 1.01, 100 km | spacing above it grows by this factor per point, up to this spacing |
@@ -578,7 +587,7 @@ directly, H n2 is about 100× off in the chromosphere. A 1-D model on z has the 
 
 `MeshPopulationModel` (`src/PopulationMesh.jl`) therefore maps each column onto a
 fixed height mesh using its heights, calls the FFNO there, and interpolates
-the populations back. It is on by default for log tau and on request for z (`[population.mesh] enabled = true`).
+the populations back. It is on for every axis and in both modes, unless `[population.mesh] enabled = false`.
 The rule is the same for every species and both axes:
 
 - **inside the column:** ln T, log nₑ and log ρ log-linear in z, velocities linear;
@@ -758,8 +767,10 @@ layers are batched only where the operator allows it: kernel-1 layers anywhere, 
 fusion convolution by depth with a one-cell overlap, and GroupNorm through streaming statistics in two passes. A batch that runs out of GPU memory is
 split and retried. **VJP and JVP requests are refused, so this is for forward runs only.**
 
-Use it by setting `FFNO_FSDP_LAUNCHER` to `scripts/ffno_batched_service_local.sh`, which the factory must pass to the launch call as
-`response_run/falc/model_factory.jl` does, with `CUDA_VISIBLE_DEVICES` choosing the GPUs and `FFNO_FSDP_PYTHON` a Python with CUDA torch.
+Use it by setting `FFNO_FSDP_LAUNCHER` to `scripts/ffno_batched_service_local.sh`, which the template `model_factory.jl` passes to the launch call,
+with `CUDA_VISIBLE_DEVICES` choosing the GPUs, `FFNO_FSDP_PYTHON` a Python with CUDA torch and `[parallel] enabled = false`. Step-by-step guides:
+[eagle7](../examples/inversion_run/start_here_eagle7.md), [any HPC with GPUs](../examples/inversion_run/start_here_general_hpc.md) and
+[a GPU host without a scheduler](../examples/inversion_run/start_here_local_cluster_gpu.md).
 
 | Variable | Default | Effect |
 | --- | --- | --- |
@@ -776,8 +787,9 @@ Measured on H, with `scripts/compare_batched_with_reference.py` (4 November 2026
 | 256 × 256 × 350, 3 slabs | FSDP on 3 GPUs, same machine | 7.6e-6 dex (float32 rounding) |
 | 504 × 504 × 467, 32 slabs | Olivia output, 8 nodes × 4 GPUs assumed | 0.0087 dex (median 0.00065) |
 
-The 504² run took 428 s on 3 T4s, at 11 GB per GPU. `tests/test_batched_backend.py` checks equality with `FFNO3D.forward` for any batch sizes. Ca and a
-complete run through this service and synthesis have not been validated yet.
+The 504² run took 428 s on 3 T4s, at 11 GB per GPU. `tests/test_batched_backend.py` checks equality with `FFNO3D.forward` for any batch sizes. A complete
+run through this service and synthesis has been done on a 64 × 64 crop (spectra finite, line cores where expected). A complete run at 504 × 504, a comparison of the
+final spectra with a reference and any comparison of the Ca predictions have not been done yet.
 
 ## Package layout
 

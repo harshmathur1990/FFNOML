@@ -110,7 +110,7 @@ How the run treats the atmosphere (details in the [package README](../../FFNOInv
 
 - **Pressure, density and electron density** come from HSEMHS: hydrostatic balance plus the EOS. An inversion always works this way.
 - **A forward run may supply them:** add any of `ne` (m⁻³), `rho` (kg m⁻³), `pgas` (Pa) and `hydrogen_populations` (m⁻³, file axes `(level,z,y,x)`, last level the protons), in any combination, to `[atmosphere.datasets]`. Then HSEMHS isn't used: what you give is used as given, and the Wittmann EOS supplies what's missing. For a simulation, `ne`, `rho` and `pgas` together are the most faithful. `[equilibrium]` is then optional and its column sections are ignored, but the population mesh still needs `eos_table_file`, or `[population.mesh] enabled = false`. On log tau the axis must fit what you give: take it from a z run with the same input.
-- **FFNO populations** are predicted on a fixed height mesh and interpolated back. This is on by default for log tau and log m; on z add `[population.mesh] enabled = true`, which you want for anything unlike a simulation grid, such as a 1-D model.
+- **FFNO populations** are predicted on a fixed height mesh and interpolated back. This is on for every axis and in both modes, unless `[population.mesh] enabled = false`, and it needs `eos_table_file`.
 - **Above a column's top**, if the mesh goes higher, a corona is built: T rises to `corona_temperature_k` (1 MK) over `corona_transition_m` (240 km), hydrostatic from the top, with ρ and nₑ from the EOS and velocities held. `corona_temperature_k = 0` holds the top values instead.
 - **Below a column's bottom**, the column is extended hydrostatically with d ln T / d ln P = `nabla` (0.13), with ρ and nₑ from the EOS and velocities held.
 - Both extensions are the same for every species and axis, and feed only the FFNO: synthesis uses your levels.
@@ -180,11 +180,15 @@ To synthesize or invert at a viewing angle μ < 1, uncomment `[view]` in the con
 already be lines of sight along that angle, tagged with `view_*` attributes; a height-grid input is used as it is.
 See [README.md](README.md#viewing-angle-off-disk-centre).
 
+## An IRIS/MURaM FITS atmosphere (forward only)
+
+Set `atmos_model_format = "iris"` and `atmos_directory` in `[atmosphere]`, with `[equilibrium] eos_table_file` for the population mesh. See the [package README](../../FFNOInversion.jl/README.md#an-irismuram-fits-atmosphere).
+
 ## GPUs too small for your cube (forward only)
 
 On machines like eagle7, a cube such as 504 × 504 doesn't fit in GPU memory through the default service. The [batched service](../../FFNOInversion.jl/README.md#batched-forward-service-small-gpus) runs the same full-domain prediction from host RAM, more slowly, and can't be used for inversions. Set `FFNO_BATCHED_VERTICAL_NORM_SLABS` to the GPU count of an FSDP run you want to match exactly.
 
-The template `model_factory.jl` always uses the Slurm service, so a run outside Olivia needs a factory that passes `FFNO_FSDP_LAUNCHER` to the launch call. `response_run/falc/model_factory.jl` and `run_falc_eagle7.sh` show this for eagle7.
+To run it, follow [start_here_eagle7.md](start_here_eagle7.md), [start_here_general_hpc.md](start_here_general_hpc.md) for any HPC with GPUs, or [start_here_local_cluster_gpu.md](start_here_local_cluster_gpu.md) for a GPU host without a scheduler. The template `model_factory.jl` uses the launcher named by `FFNO_FSDP_LAUNCHER`, and the Slurm FSDP service when it is unset.
 
 ## If the GPU service crashes
 
