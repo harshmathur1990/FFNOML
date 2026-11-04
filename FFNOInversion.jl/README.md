@@ -233,7 +233,7 @@ In forward synthesis, `[atmosphere] atmos_model_format = "iris"` with `atmos_dir
 headers. It is read as `scripts/convert_iris_sim_fits_to_ffno_hdf5.py` reads it: index 1 is the top, and (x, y) of the file becomes (x, reversed y) with `uy` kept as it is, so results line up with
 that script's predictions. It is a given atmosphere on a native z grid, with ρ and P as given and nₑ from the EOS at (T, P), so HSEMHS isn't used. The horizontal spacing comes
 from the headers, and `[grid]`, if set, must agree. The population mesh needs `[equilibrium] eos_table_file`, and it gives the FFNO only the mesh's heights.
-The script's resampling and temperature floor are not applied: this runs on the cubes' own grid.
+Cells colder than `[atmosphere] temperature_floor_k` (3250 K by default, as the script; 0 keeps the file's temperatures) are raised to it, and only the temperature changes. `storage_order` and `[atmosphere.datasets]` are ignored. The script's resampling is not applied: this runs on the cubes' own grid.
 
 ## Configuration reference
 

@@ -56,7 +56,7 @@ Then check these settings:
 
 - **`storage_order`:** use `"python"` for files written by NumPy or h5py, and `"julia"` for files written by HDF5.jl.
 - **`[atmosphere.datasets]`:** add `ne`, `rho`, `pgas` or `hydrogen_populations` if you have them. HSEMHS is then not used. For a simulation, `ne`, `rho` and `pgas` together are the most faithful.
-- **IRIS/MURaM FITS:** set `atmos_model_format = "iris"` and `atmos_directory` under `[atmosphere]`.
+- **IRIS/MURaM FITS:** set `atmos_model_format = "iris"` and `atmos_directory` under `[atmosphere]`. Temperatures below `temperature_floor_k` (3250 K by default) are raised to it, and `storage_order` is ignored.
 - **`eos_table_file`:** the template's `inputs/eos_table_fullz.h5` is the link made above. The population mesh is always on and needs it.
 
 To check that the configuration loads and to see what it selected:

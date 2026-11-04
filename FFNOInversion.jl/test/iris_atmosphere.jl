@@ -54,6 +54,18 @@ using FFNOInversion
             @test a.vz[k_i,a_i,b_i]≈value(300.0,a_i,file_y,file_k) rtol=1e-5
         end
         @test a.ne===nothing && a.chi500===nothing                                # the EOS gives these later
+        # the temperature floor: 3250 K unless configured, only the temperature, and storage_order means nothing here
+        @test cfg.atmosphere.temperature_floor_k==3250.0
+        temperature(extra)=read_inversion_inputs(config(;atmosphere="atmos_model_format = \"iris\"\natmos_directory = \"$atmos\"\n$extra")).atmosphere
+        @test temperature("").temperature==a.temperature                          # this cube is warmer than the floor
+        cut=sort(vec(a.temperature))[10]; raised=temperature("temperature_floor_k = $(Float64(cut))\n")
+        @test raised.temperature==max.(a.temperature,cut) && count(<(cut),a.temperature)>0
+        @test raised.rho==a.rho && raised.pgas==a.pgas && raised.vx==a.vx
+        @test temperature("temperature_floor_k = 0.0\n").temperature==a.temperature
+        @test temperature("storage_order = \"python\"\n").temperature==a.temperature
+        @test_throws ArgumentError config(;atmosphere="atmos_model_format = \"iris\"\natmos_directory = \"$atmos\"\ntemperature_floor_k = -1.0\n")
+        refused=try config(;atmosphere="temperature_floor_k = 3250.0\n"); "" catch e; sprint(showerror,e) end
+        @test occursin("temperature_floor_k",refused)                             # not for an HDF5 atmosphere
         # the mesh can be turned off; [grid] must agree; refusals
         @test config("[population.mesh]\nenabled = false\n").population_mesh===nothing
         @test config("[grid]\ndx_m = 192000.0\n").synthesis.dx_m≈192e3

@@ -20,6 +20,7 @@ struct AtmosphereInputConfig{T<:AbstractFloat}
     rho_dataset::Union{Nothing,String}
     pgas_dataset::Union{Nothing,String}
     model_format::Symbol                   # :hdf5, or :iris: FITS cubes in the directory `file` (IrisAtmosphere.jl), forward only
+    temperature_floor_k::T                 # :iris: colder cells are raised to this; 0 keeps the file's temperatures
 end
 
 struct ObservedDataConfig
@@ -435,6 +436,9 @@ function load_config(path::AbstractString)
     model_format in (:hdf5,:iris) || throw(ArgumentError("atmosphere.atmos_model_format must be \"hdf5\" or \"iris\", got \"$model_format\""))
     iris=model_format===:iris
     iris && !forward_only && throw(ArgumentError("atmosphere.atmos_model_format = \"iris\" is for forward synthesis only"))
+    !iris && haskey(atmos,"temperature_floor_k") && throw(ArgumentError("atmosphere.temperature_floor_k is for atmos_model_format = \"iris\""))
+    temperature_floor_k=Float64(get(atmos,"temperature_floor_k",3250.0))
+    isfinite(temperature_floor_k) && temperature_floor_k>=0 || throw(ArgumentError("atmosphere.temperature_floor_k must be finite and not negative"))
     # IRIS cubes hold T, velocities, rho and P on heights, so they are a given atmosphere on a native z grid
     datasets = iris ? copy(IRIS_DATASETS) : _required(atmos,"datasets")
     atmosphere_source=iris ? String(_required(atmos,"atmos_directory")) : String(_required(inputs,"initial_atmosphere_file"))
@@ -473,7 +477,7 @@ function load_config(path::AbstractString)
         haskey(datasets,"hydrogen_populations") ? String(datasets["hydrogen_populations"]) : nothing,
         haskey(datasets,"rho") ? String(datasets["rho"]) : nothing,
         haskey(datasets,"pgas") ? String(datasets["pgas"]) : nothing,
-        model_format)
+        model_format,temperature_floor_k)
 
     forward_only || !has_populations || throw(ArgumentError(
         "atmosphere.datasets.hydrogen_populations is for forward synthesis only: an inversion always takes the density from the EOS"))

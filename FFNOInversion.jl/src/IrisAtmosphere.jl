@@ -2,7 +2,7 @@
 The IRIS/MURaM FITS atmospheres: one cube per quantity in a directory, `<code>_<run>_<quantity>_<snap>.fits`, with the quantities lgtg, ux, uy, uz, lgr
 and lgp, in file order (x, y, z), bottom first, and the heights [Mm] in the `z-coordinate` extension. As scripts/convert_iris_sim_fits_to_ffno_hdf5.py reads them,
 so that results line up with the predictions it prepared: index 1 of a column is the top, and level by level (x, y) of the file becomes (x, reversed y), with uy kept
-as it is. Rho and P are given, so nothing here derives nₑ: `GivenAtmosphereBackend` takes it from the EOS at (T, P). The whole column is read: the population mesh gives the
+as it is, and cells colder than `temperature_floor_k` are raised to it. Rho and P are given, so nothing here derives nₑ: `GivenAtmosphereBackend` takes it from the EOS at (T, P). The whole column is read: the population mesh gives the
 FFNO only the heights it was trained on.
 """
 const IRIS_DATASETS=Dict{String,Any}("temperature"=>"lgtg","vx"=>"ux","vy"=>"uy","vz"=>"uz","rho"=>"lgr","pgas"=>"lgp")
@@ -104,6 +104,9 @@ function read_iris_atmosphere(config::RunConfig{T}) where T
         out,heights[levels]
     end
     temperature,z=field("lgtg",true)
+    floor_k=config.atmosphere.temperature_floor_k; floored=count(<(floor_k),temperature)
+    temperature.=max.(temperature,T(floor_k))
+    floored>0 && @info "Raised $floored of $(length(temperature)) temperature cells to $floor_k K"
     vx,_=field("ux",false); vy,_=field("uy",false); vz,_=field("uz",false)
     config.vz_positive===:down && (vz=-vz)
     rho,_=field("lgr",true); pgas,_=field("lgp",true)
