@@ -2,7 +2,8 @@
 
 `FFNOInversion.jl` is the Julia forward-synthesis and inversion layer of FFNOML.
 It takes a 3D solar atmosphere (temperature, velocities, optional magnetic field),
-reconstructs its hydrostatic structure with HSEMHS, predicts NLTE level populations
+obtains its pressure, density, electron density and geometry (from HSEMHS by hydrostatic balance, or in forward
+synthesis from whichever of those the input supplies), predicts NLTE level populations
 with the trained FFNO3D networks, synthesizes Stokes I spectra for several spectral
 regions at once, and, in inversion mode, fits the atmosphere to observed spectra
 with a spatially coupled, bounded L-BFGS solver.
@@ -40,9 +41,9 @@ runs the same phases in the same order on every MPI rank:
 control maps (inversion only)
    │  A = A_start + interpolate(p − p_initial) on each rank's tile
    ▼
-HSEMHS equilibrium          Pgas, rho, ne, z (or log10 tau500) and chi500 from T (and B)
+equilibrium                 Pgas, rho, ne, z (or log10 tau500) and chi500: HSEMHS from T (and B), or a given atmosphere (forward only)
    ▼
-population mesh             columns mapped onto a training-like height mesh (log tau; z on request), extended above and below
+population mesh             columns mapped onto a training-like height mesh, extended above and below
    ▼
 FFNO3D populations          persistent multi-GPU FSDP service, one model per species
    ▼
@@ -95,12 +96,17 @@ experiment.
 | Dataset | Shape | Units | Notes |
 | --- | --- | --- | --- |
 | `logtau_500` | `(z)` | log10 tau at 500 nm | log-tau runs only; strictly monotonic |
+| `log10m` | `(z)` | log10 kg m⁻², or g cm⁻² with a `units` attribute | log-m runs only; strictly monotonic |
 | `z_m` | `(z)` | m, positive upward | z runs only; either order |
 | `x_m`, `y_m` | `(x)`, `(y)` | m | required for z runs, optional for log tau; uniform and increasing |
 | `temperature` | `(time,z,y,x)` or `(z,y,x)` | K | required |
 | `vx`, `vy`, `vz` | as temperature | m/s | all three required |
 | `vturb` | as temperature | m/s | optional; zero when not mapped |
 | `Bx`, `By`, `Bz` | as temperature | T | optional, all three or none; absent means B = 0 |
+| `ne` | as temperature | m⁻³ | optional, forward only |
+| `rho` | as temperature | kg m⁻³ | optional, forward only |
+| `pgas` | as temperature | Pa | optional, forward only |
+| `hydrogen_populations` | `(level,z,y,x)`, optionally with time first | m⁻³ | optional, forward only; the last level is the protons |
 
 Dataset names are configurable in `[atmosphere.datasets]`. Set
 `[atmosphere] storage_order = "python"` for files written by NumPy/h5py or C, so
@@ -110,9 +116,10 @@ HDF5.jl files. `[inputs] time_index` (1-based) selects the snapshot.
 Inputs may be stored bottom-first or top-first. They are reversed once on read so
 that inside the package index `k = 1` is always the top of the atmosphere.
 
-Pressure, density and electron density are not inputs. They are reconstructed by
-HSEMHS. A starting atmosphere must already satisfy the physical bounds configured
-for the controls.
+In an inversion, and in a forward run given none of the optional thermodynamic fields, pressure, density and electron
+density are reconstructed by HSEMHS. Given any of them, a forward run uses them instead: see
+[A given atmosphere](#a-given-atmosphere-nₑ-ρ-p-and-hydrogen-populations-any-axis). A starting atmosphere must already satisfy
+the physical bounds configured for the controls.
 
 [`../scripts/build_input_ltau.py`](../scripts/build_input_ltau.py) builds a native
 log-tau input from a Bifrost snapshot. It writes `log10tau500`, `temperature`,
@@ -148,7 +155,8 @@ the atmosphere's spatial grid. Nothing is interpolated.
 | --- | --- |
 | `logtau_500` or `z_m`, `x_m`, `y_m` | native axes |
 | `temperature`, `vx`, `vy`, `vz`, `vturb`, `Bx`, `By`, `Bz` | recovered (or input) fields, `(time,z,y,x)` |
-| `pgas`, `rho`, `ne`, `z`, `logtau500`, `chi500` | HSEMHS equilibrium, `(time,z,y,x)` |
+| `pgas`, `rho`, `ne`, `z`, `logtau500`, `chi500` | equilibrium or given atmosphere, `(time,z,y,x)` |
+| `column_mass` | runs with a given atmosphere only, kg m⁻², `(time,z,y,x)` |
 | `populations/<species>` | FFNO populations, `(level,z,y,x)`, m⁻³ |
 | `vertical_coordinate`, `vertical_unit`, `vertical_order = "top_first"` | attributes |
 | `execution_mode`, `solver_termination`, `provenance_toml` | attributes |
@@ -167,9 +175,9 @@ from it:
 | Vertical dataset | `logtau500` | `log10m`: m in kg m⁻², or g cm⁻² with a `units` attribute | `z_m`, plus `x_m` and `y_m` |
 | HSEMHS mode | `column-hse-ltau`: heights derived per column | `column-hse-logm`: heights and log10 tau500 derived per column | `column-hse-z`: log10 tau500 derived per column |
 | Pressure boundary | HSEMHS tau-hydrostatic top closure (`[equilibrium.column_ltau]`) | P = g m, μ g m along the line of sight (`[equilibrium.column_logm]`) | `[equilibrium.column_z] anchor`, `P_ref_pa` |
-| FFNO populations | on the `[population.mesh]` height mesh, then interpolated back | as log tau | directly on the native grid, or on the mesh with `[population.mesh] enabled = true` |
+| FFNO populations | on the `[population.mesh]` height mesh, then interpolated back, unless `enabled = false` | as log tau | as log tau |
 | Formal solution | optical depth integrated on the native log tau500 grid using chi500 | optical depth integrated on the native log m grid using rho, dτ = (χ/ρ) dm | optical depth integrated in geometric height |
-| Above and below the column | on the mesh: corona above, hydrostatic extension below ([Population mesh](#population-mesh)) | as log tau | the same with `[population.mesh] enabled = true`; otherwise not extended |
+| Above and below the column | on the mesh: corona above, hydrostatic extension below ([Population mesh](#population-mesh)) | as log tau | as log tau |
 | Control nodes | `log_tau_nodes` | `log_m_nodes` | `z_nodes_m` |
 | Regularization length | `length_scale_dex` (default 1) | `length_scale_dex` (default 1) | `length_scale_m` (required for derivative types 1 and 4) |
 
@@ -180,60 +188,58 @@ On a log m grid the axis is m along the line of sight, one ray per pixel, as on 
 grid: a file for μ < 1 must hold that axis and carry the view attributes. Both `z` and
 `logtau500` are written as derived fields, and the axis is written as `log10m` [dex of kg m⁻²].
 
-Without `datasets.ne` the axis sets the pressure, P = g m, and ρ comes from the EOS. With a
-given `datasets.ne` (forward only) P, ρ and χ₅₀₀ come from the EOS at (T, nₑ), so P need not
-equal g m, and the geometry follows as below.
+Without any given thermodynamics the axis sets the pressure, P = g m, and ρ comes from the EOS. With them, see below.
 
-### A given atmosphere: nₑ and hydrogen populations, any axis
+### A given atmosphere: nₑ, ρ, P and hydrogen populations, any axis
 
-With both `datasets.ne` and `datasets.hydrogen_populations` (forward only) the atmosphere is
-given and HSEMHS is not used, on any of the three axes, as in RH (`MULTIatmos`,
-`convertScales`). `[equilibrium]` is then optional. The populations are in m⁻³, with file axes
-`(level,z,y,x)` optionally preceded by time, and the last level is the protons.
+In forward synthesis, `datasets.ne` (m⁻³), `datasets.rho` (kg m⁻³), `datasets.pgas` (Pa) and `datasets.hydrogen_populations` (m⁻³, file axes
+`(level,z,y,x)` optionally preceded by time, the last level the protons) are accepted in any combination, on any of the three axes. **If any of them is given,
+HSEMHS is not used.** It solves only when none is given, and always in an inversion. `[equilibrium]` is then optional and its column sections are ignored.
 
-- n_H = Σ n, ρ = (mass per H) n_H, P = (n_H Σ abundances + nₑ) k T, with Wittmann's abundances.
-- χ₅₀₀ is Muspel's continuum at 500 nm from T, nₑ, neutral H and protons.
+A given field is never replaced. What is missing is found in this order, with Wittmann's composition, as in RH (`MULTIatmos`, `convertScales`):
+
+| Missing | Comes from |
+| --- | --- |
+| ρ | the populations, n_H = Σ n, ρ = (mass per H) n_H; else, with nₑ and P, (mass per H)(P/kT − nₑ)/Σ abundances; else the EOS at (T, P) |
+| P | (n_H Σ abundances + nₑ) k T when nₑ and n_H are known, n_H from the populations or ρ; else the P at which the EOS gives the given nₑ or ρ |
+| nₑ | the EOS at (T, P) |
+| neutral H, protons | the EOS at (T, P) |
+| χ₅₀₀ | Muspel's continuum at 500 nm from T, nₑ, neutral H and protons |
+
+nₑ is never derived from P and ρ by subtraction: in the photosphere it is a small difference of large numbers. The EOS here is the Wittmann library used by synthesis,
+and it is LTE, so what it supplies can be far from a model's real values where the model is not in LTE. For a simulation's own thermodynamics, give
+`ne`, `rho` and `pgas` together: the FFNO then receives its T, v, nₑ and ρ unchanged. Fields given together need not agree, and each is used as given; a difference above
+0.3 dex between the given ρ or P and the value the other given fields imply is logged, as it usually means a mistake in the input.
+
+The geometry follows from ρ and χ₅₀₀:
+
 - Log m axis: dz = −2 μ Δm/(ρₖ₋₁+ρₖ), τ₁ = (χ₅₀₀/ρ) m, dτ = χ₅₀₀ |dz|/μ.
-- Log τ axis: dz = −2 μ Δτ/(χ₅₀₀ₖ₋₁+χ₅₀₀ₖ).
+- Log τ axis: dz = −2 μ Δτ/(χ₅₀₀ₖ₋₁+χ₅₀₀ₖ). The axis must fit the atmosphere as given: take it from a z run with the same input, otherwise the heights are wrong.
 - Height axis: the axis itself, τ₁ = χ₅₀₀ |Δz|/(2μ), 0 if that exceeds 1.
-- On the mass and τ axes every column has z(τ = 1) = 0 (RH's rule, column by column, not
-  HSEMHS's mean over the cube). Those columns are therefore not aligned with each other by
-  pressure.
+- On the mass and τ axes every column has z(τ = 1) = 0 (RH's rule, column by column, not HSEMHS's mean over the cube). Those columns are therefore not aligned with
+  each other by pressure.
 
-The continuum and neutral H in the broadening of FFNO and Kurucz lines then use the given
-hydrogen, and Stark broadening the given nₑ.
+These runs also write `column_mass` [kg m⁻²] to the atmosphere output, along the line of sight, as in RH: P₁/(μ g) at the top and dm = (ρₖ₋₁+ρₖ)/2 · |dz|/μ below it. On a
+log m axis it is the axis.
 
-FFNO still predicts the line populations. The lower-level populations of Kurucz LTE lines still
-come from Wittmann at (T, P). The population mesh's corona and deep extension still use the
-HSEMHS EOS table: set `[equilibrium] eos_table_file`, or `[population.mesh] enabled = false`.
+The continuum and neutral H in the broadening of FFNO and Kurucz lines use the given hydrogen when there is any, and Stark broadening uses nₑ. FFNO still predicts the line
+populations, and the lower-level populations of Kurucz LTE lines still come from Wittmann at (T, P). The population mesh's corona and deep extension use the HSEMHS EOS
+table: set `[equilibrium] eos_table_file`, or `[population.mesh] enabled = false`.
 
-### A given atmosphere: nₑ and ρ, any axis
+### An IRIS/MURaM FITS atmosphere
 
-With both `datasets.ne` (m⁻³) and `datasets.rho` (kg m⁻³), forward only, the atmosphere is also given and HSEMHS is not used. This is the
-route for a simulation's own thermodynamics: the FFNO receives the input's T, v, nₑ and ρ unchanged.
-
-- n_H = ρ/(mass per H), P = (n_H Σ abundances + nₑ) k T, with Wittmann's composition.
-- Neutral H and protons come from the EOS at that (T, P), for χ₅₀₀, the continuum and broadening. No hydrogen is given here.
-- The geometry on each axis is as above.
-
-`datasets.rho` and `datasets.hydrogen_populations` cannot be combined, since each sets the density. The forward routes are:
-
-| Datasets | P, ρ, nₑ | Hydrogen | HSEMHS |
-| --- | --- | --- | --- |
-| none | hydrostatic; ρ, nₑ from the EOS | EOS at (T, P) | yes |
-| `ne` | nₑ given; P, ρ from the EOS at (T, nₑ) | EOS at (T, P) | yes |
-| `rho` | ρ given; P, nₑ from the EOS at (T, ρ) | EOS at (T, P) | yes |
-| `ne`, `rho` | both given; P from n_H and nₑ | EOS at (T, P) | no |
-| `ne`, `hydrogen_populations` | nₑ given; ρ, P from n_H and nₑ | given | no |
-
-With `rho` alone, the EOS gives nₑ at (T, ρ) and the run then follows the `ne` route, so the geometry is the same as there, and the FFNO
-receives the input's ρ unchanged. A level no EOS state reaches makes the equilibrium invalid. Both routes through the EOS are LTE.
+In forward synthesis, `[atmosphere] atmos_model_format = "iris"` with `atmos_directory = "..."` reads one snapshot's FITS cubes, `<code>_<run>_<quantity>_<snap>.fits`, instead of
+`[inputs] initial_atmosphere_file` and `[atmosphere.datasets]`. The quantities are `lgtg`, `ux`, `uy`, `uz`, `lgr` and `lgp`, with heights in the `z-coordinate` extension and units from the
+headers. It is read as `scripts/convert_iris_sim_fits_to_ffno_hdf5.py` reads it: index 1 is the top, and (x, y) of the file becomes (x, reversed y) with `uy` kept as it is, so results line up with
+that script's predictions. It is a given atmosphere on a native z grid, with ρ and P as given and nₑ from the EOS at (T, P), so HSEMHS isn't used. The horizontal spacing comes
+from the headers, and `[grid]`, if set, must agree. The population mesh needs `[equilibrium] eos_table_file`, and it gives the FFNO only the mesh's heights.
+Cells colder than `[atmosphere] temperature_floor_k` (3250 K by default, as the script; 0 keeps the file's temperatures) are raised to it, and only the temperature changes. `storage_order` and `[atmosphere.datasets]` are ignored. The script's resampling is not applied: this runs on the cubes' own grid.
 
 ## Configuration reference
 
 The checked-in configs in [`../examples/inversion_run`](../examples/inversion_run)
 are commented and complete. `scripts/dry_run.jl` prints the parsed configuration.
-Unknown keys in `[equilibrium]` and its subsections are errors.
+Unknown keys in `[equilibrium]` and its subsections are errors. With a given atmosphere, `[equilibrium]` is optional and its column sections are ignored.
 
 ### Top level, `[inputs]`, `[outputs]`
 
@@ -252,9 +258,9 @@ Unknown keys in `[equilibrium]` and its subsections are errors.
 `vturb`, `Bx`, `By`, `Bz`). There is no top-pressure or top-density option: configs
 that still contain `pressure_top_pa` or `pressure_top_dataset` are rejected.
 
-An optional `ne` (m⁻³) or `rho` (kg m⁻³) dataset in `[atmosphere.datasets]` is taken as the truth, **in forward synthesis only**: an inversion
+Optional `ne` (m⁻³), `rho` (kg m⁻³), `pgas` (Pa) and `hydrogen_populations` datasets in `[atmosphere.datasets]` are taken as the truth, **in forward synthesis only**: an inversion
 always takes them from the EOS, and `load_config` refuses them there. The routes are in the table under
-[A given atmosphere: nₑ and ρ](#a-given-atmosphere-nₑ-and-ρ-any-axis). See also [Equilibrium](#equilibrium).
+[A given atmosphere](#a-given-atmosphere-nₑ-ρ-p-and-hydrogen-populations-any-axis). See also [Equilibrium](#equilibrium).
 
 `vz_positive` says what a positive `vz` means in the input files. `"up"` (default) is the code's own sign, as in the
 Bifrost/MULTI3D files the FFNO was trained on (rising hot granules have positive `vz`). `"down"` negates `vz` on input
@@ -340,7 +346,7 @@ for them σ and α must be given or Unsöld is used.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `enabled` | true for log tau, false for z | predict the FFNO populations on the mesh; set it on z for a grid unlike the training grids, such as a 1-D model's uneven levels |
+| `enabled` | true | predict the FFNO populations on the mesh, on every axis and in both modes; `false` feeds the FFNO the native grid |
 | `bottom_m`, `top_m` | −1 Mm, 14 Mm | mesh limits |
 | `spacing_m`, `uniform_top_m` | 20 km, 4.5 Mm | uniform spacing up to this height |
 | `stretch`, `max_spacing_m` | 1.01, 100 km | spacing above it grows by this factor per point, up to this spacing |
@@ -376,6 +382,8 @@ vertical one. Design, decisions and validation: [`docs/viewing-angle/README.md`]
 | --- | --- |
 | `[physics] redistribution` | `"non_prd"` |
 | `[physics] line_center` | where FFNO line profiles are centred. `"reference"` (default): H alpha at 656.28 nm and Ca II at 854.209 nm (air). `"atom"`: the atom file's level energies, as RH with unmodified atoms. Kurucz lines keep their list's wavelengths |
+| `[physics] ffno_population_limit` | largest total of a species' FFNO levels synthesis reads, as a multiple of what ρ holds (default `1.09`; `0` turns it off). See [FFNO population limits](#ffno-population-limits) |
+| `[physics] ffno_no_inversion` | cap the upper level where the line opacity would turn negative (default `true`) |
 | `[physics] continuum_populations` | only `"eos"` (default): one Muspel continuum per region, hydrogen from the EOS. `"ffno"` is refused. |
 | `[observation] stokes` | `["I"]` |
 | `[observation.datasets]` | names of `intensity`, `sigma`, `wavelength_weights`, `spatial_weights` |
@@ -557,22 +565,16 @@ All off by default; set them when submitting:
 
 ### Equilibrium
 
-`src/Equilibrium.jl` is the only route to pressure, density, electron density and
-the derived vertical coordinate. `prepare_equilibrium` runs once (collective);
+`src/Equilibrium.jl` holds the routes to pressure, density, electron density and
+the derived vertical coordinate. With HSEMHS, `prepare_equilibrium` runs once (collective);
 `reconstruct_equilibrium!` runs every evaluation and fills `pgas`, `rho`, `ne`, `z`,
 `logtau500` and `chi500` from T (and B) without touching T, B, velocities or vturb.
 It returns an `EquilibriumOutcome` that is identical on every rank and does not throw
 for physics failures (EOS envelope, non-finite or folded columns). Instead
-`outcome.valid` is false. With `on_nonconvergence = "reject_trial"` the solver
-rejects that trial step.
+`outcome.valid` is false. A forward run then stops with an error, and so does an inversion for now: rejecting the
+trial step, which `on_nonconvergence = "reject_trial"` will select, arrives with HSEMHS-integration Phase 4.
 
-**Given electron density (forward synthesis only).** With an `ne` dataset, HSEMHS does no hydrostatic integration: at every level
-P is the pressure at which the EOS gives that nₑ at that T, and ρ and χ₅₀₀ follow from the EOS (`solve_embedded!(...; lnne)`,
-column modes). On a z grid τ₅₀₀ is integrated on the heights as usual. On a log-τ grid the heights are ∫ μ dτ/χ₅₀₀, gauged to mean
-z(τ = 1) = 0, so the τ axis must fit that nₑ: take it from a z run with the same `ne`, otherwise the heights are wrong. The written
-`ne` is the given one, and the continuum follows it because P does. The EOS is LTE, so where an atmosphere's nₑ is far from LTE (the
-chromosphere of FALC, or of a non-equilibrium simulation) the derived P and ρ differ from the model's: by up to 9× for FALC and 10× or
-more for Bifrost near 1 Mm. An inversion never uses this path.
+In forward synthesis, any of nₑ, ρ, P or the hydrogen populations in the input replaces all of this: see [A given atmosphere](#a-given-atmosphere-nₑ-ρ-p-and-hydrogen-populations-any-axis).
 
 FFNO owns MPI and threading and passes HSEMHS its communicator. HSEMHS solves on
 x slabs, which is why `decomposition = "x_slabs"` is required.
@@ -587,7 +589,7 @@ directly, H n2 is about 100× off in the chromosphere. A 1-D model on z has the 
 
 `MeshPopulationModel` (`src/PopulationMesh.jl`) therefore maps each column onto a
 fixed height mesh using its heights, calls the FFNO there, and interpolates
-the populations back. It is on by default for log tau and on request for z (`[population.mesh] enabled = true`).
+the populations back. It is on for every axis and in both modes, unless `[population.mesh] enabled = false`.
 The rule is the same for every species and both axes:
 
 - **inside the column:** ln T, log nₑ and log ρ log-linear in z, velocities linear;
@@ -657,6 +659,17 @@ Every region has one continuum, whatever its sources: Muspel's at the region's c
 from the EOS at (T, P), forward and inversion alike. FFNO populations never enter it, and `[physics] continuum_populations = "ffno"` is
 refused. The only FFNO populations synthesis reads are the line's own two levels: neutral H in van der Waals broadening comes from the EOS too.
 In a given atmosphere both come from the input instead. Lower-level populations of Kurucz LTE lines stay Wittmann's.
+
+### FFNO population limits
+
+The FFNO can predict impossible populations in gas far from its training data: in `ar098192` at about 1 MK and high density, H totals up to 22,000 times the hydrogen present, and inverted Hα levels. Thin gas absorbs almost nothing but still emits, so these cells gave Hα up to 44 times the continuum, and near-zero opacity gave negative intensities. Before each FFNO line's opacity and emissivity, for Hα and Ca II, at every temperature:
+
+- If the total of the species' levels exceeds `ffno_population_limit` × ρ/(mass per H) × abundance, all its levels are scaled down to that total. The mass per H is the Wittmann EOS's and the abundance the atom file's.
+- With `ffno_no_inversion`, nᵤ is capped at nₗ Blu/Bul, where the line opacity is zero.
+
+The inversion gradients follow both limits. They apply only to what synthesis reads: the FFNO's own populations are what the atmosphere file holds. `synthesis.h5` records both settings as attributes.
+
+The default comes from the 49 MULTI3D outputs in `bifrost_data`. The H total reaches at most 1.086 of ρ/(mass per H) in 23 of the 25 H outputs. The other two, `en024031_by100_helium/109` and `qs006003_sap/689`, exceed it only in cool gas, up to 2.6e5 and 88 times, which looks like a problem in those runs and has not been traced. Ca is 1.031 everywhere. Hα is inverted in one cell of all 25, and Ca II 8542 in none.
 
 FFNO line profiles are centred by `[physics] line_center`. By default that is the reference wavelength, H alpha 656.28 nm and Ca II
 854.209 nm (air); only the profile's detuning moves, and the Doppler width and the transition's strength stay the atom's. With `"atom"` it is the atom
@@ -767,8 +780,10 @@ layers are batched only where the operator allows it: kernel-1 layers anywhere, 
 fusion convolution by depth with a one-cell overlap, and GroupNorm through streaming statistics in two passes. A batch that runs out of GPU memory is
 split and retried. **VJP and JVP requests are refused, so this is for forward runs only.**
 
-Use it by setting `FFNO_FSDP_LAUNCHER` to `scripts/ffno_batched_service_local.sh`, which the factory must pass to the launch call as
-`response_run/falc/model_factory.jl` does, with `CUDA_VISIBLE_DEVICES` choosing the GPUs and `FFNO_FSDP_PYTHON` a Python with CUDA torch.
+Use it by setting `FFNO_FSDP_LAUNCHER` to `scripts/ffno_batched_service_local.sh`, which the template `model_factory.jl` passes to the launch call,
+with `CUDA_VISIBLE_DEVICES` choosing the GPUs, `FFNO_FSDP_PYTHON` a Python with CUDA torch and `[parallel] enabled = false`. Step-by-step guides:
+[eagle7](../examples/inversion_run/start_here_eagle7.md), [any HPC with GPUs](../examples/inversion_run/start_here_general_hpc.md) and
+[a GPU host without a scheduler](../examples/inversion_run/start_here_local_cluster_gpu.md).
 
 | Variable | Default | Effect |
 | --- | --- | --- |
@@ -785,8 +800,9 @@ Measured on H, with `scripts/compare_batched_with_reference.py` (4 November 2026
 | 256 × 256 × 350, 3 slabs | FSDP on 3 GPUs, same machine | 7.6e-6 dex (float32 rounding) |
 | 504 × 504 × 467, 32 slabs | Olivia output, 8 nodes × 4 GPUs assumed | 0.0087 dex (median 0.00065) |
 
-The 504² run took 428 s on 3 T4s, at 11 GB per GPU. `tests/test_batched_backend.py` checks equality with `FFNO3D.forward` for any batch sizes. Ca and a
-complete run through this service and synthesis have not been validated yet.
+The 504² run took 428 s on 3 T4s, at 11 GB per GPU. `tests/test_batched_backend.py` checks equality with `FFNO3D.forward` for any batch sizes. A complete
+run through this service and synthesis has been done on a 64 × 64 crop (spectra finite, line cores where expected). A complete run at 504 × 504, a comparison of the
+final spectra with a reference and any comparison of the Ca predictions have not been done yet.
 
 ## Package layout
 

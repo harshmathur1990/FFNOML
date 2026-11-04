@@ -144,6 +144,19 @@ public:
         background_partials(temp, pgas, pe, n);
     }
 
+    void given_state_si(double temp, double pgas_pa, double& rho_kg_m3, double& ne_m3,
+                        double& neutral_m3, double& protons_m3) const {
+        const double pgas = pgas_pa * 10.0;
+        const double pe = pe_from_pg(temp, pgas);
+        rho_kg_m3 = rho_from_pe(temp, pe) * 1.0e3;
+        ne_m3 = pe / (BK * temp) * 1.0e6;
+        double xpa[8]={},u[8]={}; int count=0;
+        ion_partials(0,temp,pgas,pe,xpa,0); partition_f(0,temp,0,u,count);
+        neutral_m3 = xpa[0]*u[0]*1.0e6;
+        const GasResult h=gasc(temp,pe);
+        protons_m3 = h.f2*h.phtot/(temp*BK)*1.0e6;
+    }
+
     double kurucz_lower_population_m3(double temp,double pgas_pa,int atomic_number,
                                       int stage,double energy_j,double statistical_weight) const {
         if(atomic_number<1 || atomic_number>99 || stage<0) throw std::runtime_error("invalid Kurucz species");
@@ -663,6 +676,21 @@ extern "C" int witt_thermodynamics_from_pgas_parallel(
         WittEOS eos(pf_path);
         return parallel_cells(n, threads, [&](std::size_t i) {
             eos.thermodynamics_from_pgas_si(temp[i],pgas_pa[i],rho_kg_m3[i],ne_m3[i]);
+        });
+    } catch (...) {
+        return 1;
+    }
+}
+
+extern "C" int witt_given_state_parallel(
+    const char* pf_path, const double* temp, const double* pgas_pa,
+    double* rho_kg_m3, double* ne_m3, double* neutral_m3, double* protons_m3,
+    std::size_t n, int threads
+) {
+    try {
+        WittEOS eos(pf_path);
+        return parallel_cells(n, threads, [&](std::size_t i) {
+            eos.given_state_si(temp[i],pgas_pa[i],rho_kg_m3[i],ne_m3[i],neutral_m3[i],protons_m3[i]);
         });
     } catch (...) {
         return 1;

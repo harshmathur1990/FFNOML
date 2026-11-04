@@ -23,6 +23,8 @@ struct MuspelLineOpacityModel{L,C,V,H} <: AbstractLineOpacityModel
     include_continuum::Bool
     neutral_hydrogen::Any     # Wittmann backend: neutral H in broadening from the EOS; nothing: from `hydrogen_populations`
     center_nm::Float64        # vacuum line centre of the profile: a reference wavelength, or the atom's (level energies)
+    total_per_rho::Float64    # largest total of the species' levels per unit ρ, [kg⁻¹]; 0: no limit (`[physics] ffno_population_limit`)
+    no_inversion::Bool        # the upper level holds at most what the line opacity allows (`[physics] ffno_no_inversion`)
 end
 struct MuspelFormalSolver <: AbstractFormalSolver end
 

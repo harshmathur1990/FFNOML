@@ -51,7 +51,7 @@ end
     @test maximum(-diff(mesh))<=1e5*1.5 && 300<length(mesh)<500
     @test_throws ArgumentError PopulationMeshConfig(bottom_m=5e6)
     @test FFNOInversion._population_mesh(Dict{String,Any}(),:log10tau500) isa PopulationMeshConfig
-    @test FFNOInversion._population_mesh(Dict{String,Any}(),:z_m)===nothing
+    @test FFNOInversion._population_mesh(Dict{String,Any}(),:z_m) isa PopulationMeshConfig
     @test FFNOInversion._population_mesh(Dict{String,Any}("mesh"=>Dict{String,Any}("enabled"=>false)),:log10tau500)===nothing
     @test FFNOInversion._population_mesh(Dict{String,Any}("mesh"=>Dict{String,Any}("spacing_m"=>1.5e4)),:log10tau500).spacing_m==1.5e4
     @test_throws ArgumentError FFNOInversion._population_mesh(Dict{String,Any}("mesh"=>Dict{String,Any}("dz"=>1)),:log10tau500)

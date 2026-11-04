@@ -33,6 +33,16 @@ function _selected_shape(shape::Tuple,time_index::Int,plain_ndims::Int,label::Ab
 end
 
 function _validate_hdf5_inputs(config,run_dir)
+    if config.atmosphere.model_format===:iris
+        directory=_run_path(run_dir,config.atmosphere.file); snapshot=FFNOInversion._iris_snapshot(directory)
+        shapes=map(values(FFNOInversion.IRIS_DATASETS)) do quantity
+            path=_required_file("IRIS cube",FFNOInversion._iris_path(directory,snapshot,quantity))
+            FFNOInversion._fits_axes(open(stream->FFNOInversion._read_fits_header(stream,path),path,"r"))
+        end
+        allequal(shapes) || throw(DimensionMismatch("IRIS cubes in $directory differ in shape: $shapes"))
+        nx,ny,nz=first(shapes)
+        return directory,nothing,(nz,ny,nx)
+    end
     atmosphere_path=_required_file("initial atmosphere",_run_path(run_dir,config.atmosphere.file))
     atmosphere_shape=h5open(atmosphere_path,"r") do file
         storage_order=config.atmosphere.storage_order

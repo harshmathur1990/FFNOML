@@ -10,14 +10,13 @@ The repository has two halves:
    populations for new atmospheres (single GPU, tiled, or distributed over many GPUs).
 2. **Julia: forward synthesis and 3D inversion.**
    [`FFNOInversion.jl`](FFNOInversion.jl/README.md) takes an atmosphere, reconstructs
-   its hydrostatic structure with HSEMHS, gets populations from the trained networks
+   its hydrostatic structure with HSEMHS unless a forward run supplies its thermodynamics, gets populations from the trained networks
    through a persistent multi-GPU service, synthesizes spectra (H alpha, Ca II 8542 and
    Kurucz LTE lines), and fits the whole 3D volume to observations with bounded L-BFGS.
    The networks predict on a fixed height mesh: above a column's top the atmosphere is extended
    with a hydrostatic corona, below its bottom hydrostatically with a fixed gradient, and the
-   continuum is Muspel's with its hydrogen from the EOS. A forward run may supply the electron density
-   or the density itself, in which case the rest follows through the EOS, or the electron density together with the
-   density or hydrogen populations, in which case HSEMHS is not used; inversions always use the EOS.
+   continuum is Muspel's with its hydrogen from the EOS. A forward run may supply any of the electron density, density,
+   pressure and hydrogen populations, in which case HSEMHS is not used and the EOS fills the rest; inversions always use HSEMHS.
    [Details](FFNOInversion.jl/README.md#population-mesh).
 
 ```text
@@ -752,8 +751,7 @@ In brief:
   log10 column mass (`forward_logm.toml`) or native height z (`forward_z.toml`, `inversion_z.toml`).
 - **Equilibrium.** HSEMHS column hydrostatic equilibrium reconstructs gas pressure,
   density, electron density, heights (or log tau) and the 500 nm opacity. It sets the
-  pressure boundary. A forward run may give nₑ or ρ alone, with the rest from the EOS through HSEMHS. Given nₑ with ρ
-  or with hydrogen populations, it does not use HSEMHS and builds the geometry as RH does.
+  pressure boundary. A forward run given any of nₑ, ρ, P and hydrogen populations does not use it, and builds the geometry as RH does.
 - **Populations.** FFNO3D through the persistent service above. For log-tau and log-m
   atmospheres each column is first mapped onto a training-like height mesh
   (`[population.mesh]`), because the networks were trained on simulation height grids.

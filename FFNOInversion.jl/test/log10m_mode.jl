@@ -69,7 +69,6 @@ end
             bad("logtau500 is not allowed",logm_config_text(file;datasets="log10m = \"lm\"\nlogtau500 = \"lm\""))
             bad("log10m is not allowed",logm_config_text(file;datasets="log10m = \"lm\"\nlogtau500 = \"lm\"",coordinate="log10tau500"))
             bad("z_m is not allowed",logm_config_text(file;datasets="log10m = \"lm\"\nz_m = \"lm\""))
-            bad("needs atmosphere.datasets.ne",logm_config_text(file;datasets="log10m = \"lm\"\nhydrogen_populations = \"t\""))
             bad("must be",logm_config_text(file;coordinate="mass"))
             @test occursin("align",try config(logm_config_text(file;equilibrium="[equilibrium.column_logm]\nalign = \"median\"")); "" catch e; sprint(showerror,e) end)
             @test config(logm_config_text(file;equilibrium="[equilibrium.column_logm]\nalign = \"none\"")).equilibrium.column.align=="none"
@@ -350,8 +349,7 @@ end
         err=try config(text("log10m","log10m","lm";equilibrium="")); "" catch e; sprint(showerror,e) end
         @test occursin("eos_table_file",err)
         with_column=logm_config_text(file;coordinate="log10m",datasets=datasets("log10m","lm"),equilibrium="[equilibrium.column_logm]\nalign = \"none\"",extra="[population.mesh]\nenabled = false")
-        err=try config(with_column); "" catch e; sprint(showerror,e) end
-        @test occursin("without HSEMHS",err)
+        @test config(with_column).equilibrium.backend=="given"   # the column sections configure HSEMHS: ignored here
         inversion=logm_config_text(file;coordinate="log10m",datasets=datasets("log10m","lm"),mode="inversion",extra="[population.mesh]\nenabled = false")
         err=try config(inversion); "" catch e; sprint(showerror,e) end
         @test occursin("forward synthesis only",err)

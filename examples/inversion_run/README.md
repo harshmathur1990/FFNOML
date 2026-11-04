@@ -60,7 +60,7 @@ non-SLURM launches where it defaults to Julia's active thread count.
 
 `model_factory.jl` uses these relative paths through `FFNOML_RUN_DIR`. The
 equilibrium (pressure, density, electron density, heights) comes from HSEMHS as
-configured in `[equilibrium]`; point `eos_table_file` at the HSEMHS EOS table.
+configured in `[equilibrium]`, unless a forward run supplies them; point `eos_table_file` at the HSEMHS EOS table.
 The supplied configurations set `[atmosphere].storage_order = "python"` so
 NumPy/h5py array dimensions are converted before validation and reading.
 
@@ -76,31 +76,32 @@ This needs the atmosphere and model/physics assets listed above, but no
 `inputs/observations.h5`. It returns `outputs/synthesis.h5` and
 `outputs/forward_atmosphere.h5`. Alternatively set `max_iterations = 0` in an
 inversion configuration; nodes and observations will be ignored. This is still
-HSEMHS equilibrium reconstruction followed by FFNO populations and synthesis,
+the equilibrium (HSEMHS, or a given atmosphere) followed by FFNO populations and synthesis,
 with no optimization or gradient work. The example factory currently loads both
 H and Ca assets even when only one species contributes to the configured lines.
 
 ## How the atmosphere is treated
 
-- **P, ρ, nₑ:** from HSEMHS, by hydrostatic balance and the EOS. In a forward run only, `ne = "ne"` in `[atmosphere.datasets]` makes nₑ the truth, and P and ρ follow from (T, nₑ) through the EOS with no hydrostatic balance. An inversion refuses it.
-- **A given density:** in a forward run only, `rho = "rho"` alone makes ρ the truth, and P and nₑ follow from (T, ρ) through the EOS, as with `ne` alone.
-- **A given atmosphere:** in a forward run only, `ne` with either `rho` or `hydrogen_populations` gives the atmosphere on any axis, and HSEMHS is not used. `[equilibrium]` is then optional. The mesh still needs `eos_table_file`, or `[population.mesh] enabled = false`.
-- **Population mesh:** the FFNO predicts on a fixed height mesh, on by default for log tau and log m, and with `[population.mesh] enabled = true` on z.
+- **P, ρ, nₑ:** from HSEMHS, by hydrostatic balance and the EOS. An inversion always works this way.
+- **A given atmosphere:** in a forward run only, any of `ne`, `rho`, `pgas` and `hydrogen_populations` in `[atmosphere.datasets]`, in any combination and on any axis, replaces HSEMHS: what is given is used as given, and the Wittmann EOS supplies the rest. `[equilibrium]` is then optional and its column sections are ignored. The mesh still needs `eos_table_file`, or `[population.mesh] enabled = false`.
+- **Population mesh:** the FFNO predicts on a fixed height mesh, on every axis and in both modes, unless `[population.mesh] enabled = false`.
 - **Above a column's top:** where the mesh goes higher, a corona: T rises to `corona_temperature_k` (1 MK) over `corona_transition_m` (240 km), hydrostatic from the top, ρ and nₑ from the EOS, velocities held. `corona_temperature_k = 0` holds the top values.
 - **Below a column's bottom:** a hydrostatic extension with d ln T / d ln P = `nabla` (0.13), ρ and nₑ from the EOS, velocities held.
 - **Continuum:** Muspel's, with hydrogen from the EOS (a given atmosphere's own, when given). FFNO populations never enter it.
+- **Population limits:** synthesis reads the FFNO populations with each species' total limited to `[physics] ffno_population_limit` (1.09) times what ρ holds, and without inversion (`ffno_no_inversion`), for Hα and Ca II at every temperature. The atmosphere file keeps the raw populations. See the [package README](../../FFNOInversion.jl/README.md#ffno-population-limits).
 - **Line centres:** FFNO lines are centred on H alpha 656.28 nm and Ca II 854.209 nm (air) by default. `[physics] line_center = "atom"` uses the atom file's level energies instead, which puts them about +0.16 and -0.03 Å away. Kurucz lines keep their list's wavelengths.
 - **Wavelengths:** `start_angstrom` is always air and synthesis always runs on the vacuum grid. `[outputs] wavelength_frame` (`"air"`, the default, or `"vacuum"`) only chooses the written `wavelength_m`; the file attribute `wavelength_frame` records it.
 
 See [the package README](../../FFNOInversion.jl/README.md#population-mesh) for the details.
 
-The modes are listed in `forward.toml`, `forward_z.toml` and `forward_logm.toml`.
+The rules are also written out in `forward.toml`, `forward_z.toml` and `forward_logm.toml`.
 
 ## Small GPUs (forward only)
 
 For a cube whose activations don't fit on the GPUs, such as 504 × 504 on eagle7, use the
 [batched service](../../FFNOInversion.jl/README.md#batched-forward-service-small-gpus). It is full-domain prediction from host RAM, not tiling,
-and needs about 90 GB of RAM at that size. It answers forward runs only.
+and needs about 90 GB of RAM at that size. It answers forward runs only. Step-by-step guides: [eagle7](start_here_eagle7.md),
+[any HPC with GPUs](start_here_general_hpc.md) and [a GPU host without a scheduler](start_here_local_cluster_gpu.md).
 
 ## Viewing angle (off disk centre)
 

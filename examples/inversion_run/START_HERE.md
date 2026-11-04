@@ -3,7 +3,7 @@
 Use this guide on **Olivia**, with the updated FFNOML checkout. The entry point
 is `FFNOInversion.jl/scripts/invert.jl` for both forward synthesis and inversion.
 `forward.toml` selects forward mode: the supplied full atmosphere goes through
-the HSEMHS equilibrium, FFNO3D populations, and spectral synthesis. No observations,
+the HSEMHS equilibrium (or uses the thermodynamics you supply), FFNO3D populations, and spectral synthesis. No observations,
 node interpolation, derivatives, or fitting are needed.
 
 ## 1. Make a separate run folder
@@ -86,12 +86,14 @@ for files written with HDF5.jl.
 | `vx`, `vy`, `vz` | same as temperature; all three required | m/s |
 | `vturb` (optional) | same as temperature | m/s |
 | `Bx`, `By`, `Bz` (optional; supply all three) | same as temperature | tesla |
+| `ne`, `rho`, `pgas` (optional, forward only; any of them) | same as temperature | m⁻³, kg m⁻³, Pa |
+| `hydrogen_populations` (optional, forward only) | `(level,z,y,x)` or with time first; last level the protons | m⁻³ |
 
 `time_index = 1` selects the first snapshot. Enable the `vturb` mapping to read
 microturbulence; otherwise it is zero. Magnetic mappings are optional (absent means
-B = 0). Pressure, density, electron density and the derived coordinate (height for
+B = 0). Unless you supply them (below), pressure, density, electron density and the derived coordinate (height for
 this log-tau input) are reconstructed by the HSEMHS equilibrium configured in
-`[equilibrium]`, rather than read as input fields.
+`[equilibrium]`.
 
 For other vertical axes start from a different template: `forward_logm.toml` for log10 column mass (dataset `log10m`, in kg m⁻²,
 or g cm⁻² with a `units` attribute) and `forward_z.toml` for height (`z_m`, `x_m`, `y_m` in metres).
@@ -106,14 +108,14 @@ Before submission, set:
 
 How the run treats the atmosphere (details in the [package README](../../FFNOInversion.jl/README.md#physics-and-numerics)):
 
-- **Pressure, density and electron density** come from HSEMHS: hydrostatic balance plus the EOS. A forward run may instead add `ne = "ne"` to `[atmosphere.datasets]`: nₑ is then the truth, and P and ρ come from (T, nₑ) through the EOS at every level, with no hydrostatic balance. An inversion refuses this and always takes nₑ from the EOS. On log tau, a given nₑ needs a τ axis that fits it: take it from a z run with the same `ne`.
-- **A given density (forward only):** `rho = "rho"` (kg m⁻³) alone is the truth: P and nₑ come from (T, ρ) through the EOS, with no hydrostatic balance, as with `ne` alone.
-- **A whole given atmosphere (forward only):** add `ne` with either `rho` (kg m⁻³; hydrogen then comes from the EOS at (T, P)) or `hydrogen_populations` (m⁻³, file axes `(level,z,y,x)`, last level the protons). HSEMHS is not used, on any axis: the geometry follows as in RH. `[equilibrium]` is then optional, but the population mesh still needs `eos_table_file`, or `[population.mesh] enabled = false`. FFNO still predicts the line populations.
-- **FFNO populations** are predicted on a fixed height mesh and interpolated back. This is on by default for log tau and log m; on z add `[population.mesh] enabled = true`, which you want for anything unlike a simulation grid, such as a 1-D model.
+- **Pressure, density and electron density** come from HSEMHS: hydrostatic balance plus the EOS. An inversion always works this way.
+- **A forward run may supply them:** add any of `ne` (m⁻³), `rho` (kg m⁻³), `pgas` (Pa) and `hydrogen_populations` (m⁻³, file axes `(level,z,y,x)`, last level the protons), in any combination, to `[atmosphere.datasets]`. Then HSEMHS isn't used: what you give is used as given, and the Wittmann EOS supplies what's missing. For a simulation, `ne`, `rho` and `pgas` together are the most faithful. `[equilibrium]` is then optional and its column sections are ignored, but the population mesh still needs `eos_table_file`, or `[population.mesh] enabled = false`. On log tau the axis must fit what you give: take it from a z run with the same input.
+- **FFNO populations** are predicted on a fixed height mesh and interpolated back. This is on for every axis and in both modes, unless `[population.mesh] enabled = false`, and it needs `eos_table_file`.
 - **Above a column's top**, if the mesh goes higher, a corona is built: T rises to `corona_temperature_k` (1 MK) over `corona_transition_m` (240 km), hydrostatic from the top, with ρ and nₑ from the EOS and velocities held. `corona_temperature_k = 0` holds the top values instead.
 - **Below a column's bottom**, the column is extended hydrostatically with d ln T / d ln P = `nabla` (0.13), with ρ and nₑ from the EOS and velocities held.
 - Both extensions are the same for every species and axis, and feed only the FFNO: synthesis uses your levels.
 - **Continuum:** one per region, Muspel's, with hydrogen from the EOS (a given atmosphere's own, when given) and no FFNO populations. `[physics] continuum_populations = "ffno"` is refused. Neutral H in line broadening comes from the same place.
+- **Population limits:** synthesis reads the FFNO populations with each species' total limited to `[physics] ffno_population_limit` (1.09) times what ρ holds, and without inversion (`ffno_no_inversion`), for Hα and Ca II at every temperature. The atmosphere file keeps the raw populations. See the [package README](../../FFNOInversion.jl/README.md#ffno-population-limits).
 - **Line centres:** FFNO lines are centred on H alpha 656.28 nm and Ca II 854.209 nm (air) by default. `[physics] line_center = "atom"` uses the atom file's level energies instead, which puts them about +0.16 and -0.03 Å away. Kurucz lines keep their list's wavelengths.
 - **Wavelengths:** `start_angstrom` is always air and synthesis always runs on the vacuum grid. `[outputs] wavelength_frame` (`"air"`, the default, or `"vacuum"`) only chooses the written `wavelength_m`; the file attribute `wavelength_frame` records it.
 
@@ -157,7 +159,7 @@ For the printed job ID, use `squeue -j JOB_ID` and, after completion,
 A successful forward run writes:
 
 - `outputs/synthesis.h5`: `intensity` with axes `(time,Stokes,wavelength,y,x)`, `wavelength_m` (air unless `[outputs] wavelength_frame = "vacuum"`; attribute `wavelength_frame`), and provenance. Spectra include the `[observation.gaussian_psf]` blur and are in `[outputs] intensity_units` (attribute `units`) divided by the region `normalization` (dataset `normalization`).
-- `outputs/forward_atmosphere.h5`: atmospheric fields including `pgas`, `rho`, `ne`, `z`, and `populations/H` and `populations/CA` (population axes `(level,z,y,x)`). Both files record `execution_mode = "forward"`.
+- `outputs/forward_atmosphere.h5`: atmospheric fields including `pgas`, `rho`, `ne`, `z` (and `column_mass` when you supplied thermodynamics), and `populations/H` and `populations/CA` (population axes `(level,z,y,x)`). Both files record `execution_mode = "forward"`.
 
 For **inversion**, add `inputs/observations.h5`, edit `inversion.toml` to match the
 same atmosphere, wavelength grid and Gaussian PSF, then set controls,
@@ -179,11 +181,15 @@ To synthesize or invert at a viewing angle μ < 1, uncomment `[view]` in the con
 already be lines of sight along that angle, tagged with `view_*` attributes; a height-grid input is used as it is.
 See [README.md](README.md#viewing-angle-off-disk-centre).
 
+## An IRIS/MURaM FITS atmosphere (forward only)
+
+Set `atmos_model_format = "iris"` and `atmos_directory` in `[atmosphere]`, with `[equilibrium] eos_table_file` for the population mesh. See the [package README](../../FFNOInversion.jl/README.md#an-irismuram-fits-atmosphere).
+
 ## GPUs too small for your cube (forward only)
 
 On machines like eagle7, a cube such as 504 × 504 doesn't fit in GPU memory through the default service. The [batched service](../../FFNOInversion.jl/README.md#batched-forward-service-small-gpus) runs the same full-domain prediction from host RAM, more slowly, and can't be used for inversions. Set `FFNO_BATCHED_VERTICAL_NORM_SLABS` to the GPU count of an FSDP run you want to match exactly.
 
-The template `model_factory.jl` always uses the Slurm service, so a run outside Olivia needs a factory that passes `FFNO_FSDP_LAUNCHER` to the launch call. `response_run/falc/model_factory.jl` and `run_falc_eagle7.sh` show this for eagle7.
+To run it, follow [start_here_eagle7.md](start_here_eagle7.md), [start_here_general_hpc.md](start_here_general_hpc.md) for any HPC with GPUs, or [start_here_local_cluster_gpu.md](start_here_local_cluster_gpu.md) for a GPU host without a scheduler. The template `model_factory.jl` uses the launcher named by `FFNO_FSDP_LAUNCHER`, and the Slurm FSDP service when it is unset.
 
 ## If the GPU service crashes
 

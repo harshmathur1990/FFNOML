@@ -59,6 +59,8 @@ function build_production_model(config, distributed, workspace, context)
             population_mesh=population_mesh_options(config),
             timeout_seconds=max(180.0, config.parallel.gpu_connect_timeout_seconds),
             diagnostics_directory=diagnostics,
+            # Without Slurm, or with the batched service: the launcher script (START_HERE_*.md). Unset: the Slurm FSDP service.
+            (haskey(ENV, "FFNO_FSDP_LAUNCHER") ? (;launcher=ENV["FFNO_FSDP_LAUNCHER"]) : (;))...,
         )
     catch exception
         abort_on_rank_failure(exception, catch_backtrace(), context)

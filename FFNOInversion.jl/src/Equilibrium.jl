@@ -128,49 +128,155 @@ const _KB_SI = 1.380649e-23
 function given_chi500 end
 
 """
-Fill `pgas`, `rho` and `chi500` of an atmosphere from its T, its nₑ and the hydrogen populations (nz, nx, ny, level; the last level the
-protons), as RH's `MULTIatmos` and `convertScales`: n_H = Σ n, ρ = (mass per H) n_H, P = (n_H Σ abundances + nₑ) k T. Neutral hydrogen and
-protons are kept for the continuum and broadening (`build_synthesis_setup`).
+Fill what can be derived without an EOS from an atmosphere's given nₑ (already in `a`), ρ, P and hydrogen populations (nz, nx, ny, level; the last level
+the protons). A given field is never replaced. With Wittmann's composition, as RH's `MULTIatmos` and `convertScales`:
+
+    n_H = Σ n, or ρ/(mass per H)      ρ = (mass per H) n_H, or (mass per H) (P/kT − nₑ)/Σ abundances      P = (n_H Σ abundances + nₑ) k T
+
+nₑ itself is not derived from P and ρ here: it is a small difference of large numbers in the photosphere. `GivenAtmosphereBackend` takes a missing nₑ, and the
+P and χ₅₀₀ that need it, from the EOS. Neutral hydrogen and protons are kept for the continuum and broadening when given.
 """
-function set_given_state!(a,hydrogen)
+function set_given_inputs!(a;rho=nothing,pgas=nothing,hydrogen=nothing)
     T=eltype(a.temperature)
-    size(hydrogen)[1:3]==size(a.temperature) && size(hydrogen,4)>=2 || throw(DimensionMismatch(
-        "hydrogen populations have size $(size(hydrogen)); expected $(size(a.temperature)) and at least two levels, the last the protons"))
-    all(isfinite,hydrogen) && all(>=(0),hydrogen) && all(>(0),sum(hydrogen;dims=4)) || throw(ArgumentError(
-        "hydrogen populations must be finite, not negative, and sum to a positive density"))
-    neutral=dropdims(sum(@view(hydrogen[:,:,:,1:end-1]);dims=4);dims=4); protons=hydrogen[:,:,:,end]; nh=neutral.+protons
-    a.rho=nh.*T(_GIVEN_MASS_PER_H_KG)
-    a.pgas=(nh.*T(_GIVEN_TOTAL_ABUNDANCE).+a.ne).*T(_KB_SI).*a.temperature
-    a.chi500=T.(given_chi500(a.temperature,a.ne,neutral,protons))
-    a.h_neutral=neutral; a.h_proton=protons
+    nh=nothing
+    if hydrogen!==nothing
+        size(hydrogen)[1:3]==size(a.temperature) && size(hydrogen,4)>=2 || throw(DimensionMismatch(
+            "hydrogen populations have size $(size(hydrogen)); expected $(size(a.temperature)) and at least two levels, the last the protons"))
+        all(isfinite,hydrogen) && all(>=(0),hydrogen) && all(>(0),sum(hydrogen;dims=4)) || throw(ArgumentError(
+            "hydrogen populations must be finite, not negative, and sum to a positive density"))
+        a.h_neutral=dropdims(sum(@view(hydrogen[:,:,:,1:end-1]);dims=4);dims=4); a.h_proton=hydrogen[:,:,:,end]; nh=a.h_neutral.+a.h_proton
+        rho===nothing || _warn_given_mismatch("rho",rho,nh.*T(_GIVEN_MASS_PER_H_KG))
+    end
+    a.rho=rho!==nothing ? rho : nh===nothing ? nothing : nh.*T(_GIVEN_MASS_PER_H_KG)
+    a.pgas=pgas
+    if a.ne!==nothing && (a.rho!==nothing || a.pgas!==nothing)
+        if a.rho===nothing                  # nₑ and P: n_H is P/kT less the small nₑ, so this is well conditioned
+            heavy=pgas./(T(_KB_SI).*a.temperature).-a.ne
+            all(>(0),heavy) || throw(ArgumentError("the given pgas and ne leave no room for atoms at $(count(<=(0),heavy)) levels: P/kT must exceed ne"))
+            a.rho=heavy./T(_GIVEN_TOTAL_ABUNDANCE).*T(_GIVEN_MASS_PER_H_KG)
+        end
+        _given_pressure!(a,nh)
+        nh===nothing || (a.chi500=T.(given_chi500(a.temperature,a.ne,a.h_neutral,a.h_proton)))
+    end
+    a
+end
+set_given_state!(a,hydrogen)=set_given_inputs!(a;hydrogen=hydrogen)
+set_given_density!(a,rho)=set_given_inputs!(a;rho=rho)
+
+"""P from n_H (the given populations, else ρ) and nₑ, unless given; the given P is compared with it."""
+function _given_pressure!(a,nh)
+    T=eltype(a.temperature); density=nh===nothing ? a.rho./T(_GIVEN_MASS_PER_H_KG) : nh
+    derived=(density.*T(_GIVEN_TOTAL_ABUNDANCE).+a.ne).*T(_KB_SI).*a.temperature
+    a.pgas===nothing ? (a.pgas=derived) : _warn_given_mismatch("pgas",a.pgas,derived)
+    a
+end
+
+"""Fields given together need not agree: each is used as given. A large disagreement is usually a mistake in the input, so say so."""
+function _warn_given_mismatch(name,given,derived)
+    worst=maximum(abs.(log10.(given).-log10.(derived)))
+    worst>0.3 && @warn "the given $name differs from the other given fields' value by up to $(round(worst;digits=2)) dex; it is used as given" maxlog=1
+    nothing
+end
+
+"""Fill the ρ and nₑ of an atmosphere that lacks them from the synthesis EOS at (T, P). A given field stays as given."""
+function _given_eos_state!(a,synthesis_eos)
+    temperature=Array{Float64,3}(a.temperature); pressure=Array{Float64,3}(a.pgas); rho=zeros(size(temperature)); ne=zeros(size(temperature))
+    thermodynamics!(rho,ne,synthesis_eos,temperature,pressure)
+    S=eltype(a.temperature)
+    a.rho===nothing && (a.rho=S.(rho))
+    a.ne===nothing && (a.ne=S.(ne))
     a
 end
 
 """
-Fill `rho` and `pgas` of an atmosphere from its given ρ and nₑ: n_H = ρ/(mass per H), P = (n_H Σ abundances + nₑ) k T. χ₅₀₀ needs hydrogen,
-which here comes from the EOS at (T, P), so `GivenAtmosphereBackend` adds it when the synthesis EOS is known. As hydrogen is not given,
-`h_neutral` and `h_proton` stay empty, and the continuum and broadening take hydrogen from the EOS as in any other run.
+Column mass [kg m⁻²] of every column of a given atmosphere, along the line of sight, as RH's `convertScales`: m₁ = P₁/(μ g) at the top, so that
+P = μ g m there, and dm = (ρₖ₋₁+ρₖ)/2 · |dz|/μ below it. On a native column-mass axis it is the axis itself.
 """
-function set_given_density!(a,rho)
-    T=eltype(a.temperature)
-    a.rho=rho
-    a.pgas=(rho./T(_GIVEN_MASS_PER_H_KG).*T(_GIVEN_TOTAL_ABUNDANCE).+a.ne).*T(_KB_SI).*a.temperature
-    a
+function given_column_mass(a,gravity)
+    T=eltype(a.temperature); nz,nx,ny=size(a.temperature); mu=a.grid.view.mu
+    if vertical_coordinate(a.grid)===:log10m
+        return repeat(reshape(T.(exp10.(native_depth(a.grid))),nz,1,1),1,nx,ny)
+    end
+    m=zeros(T,nz,nx,ny)
+    for y in 1:ny, x in 1:nx
+        m[1,x,y]=a.pgas[1,x,y]/(mu*gravity)
+        for k in 2:nz
+            m[k,x,y]=m[k-1,x,y]+(a.rho[k-1,x,y]+a.rho[k,x,y])/2*abs(a.z[k-1,x,y]-a.z[k,x,y])/mu
+        end
+    end
+    m
 end
 
-"""χ₅₀₀ of an atmosphere with a given ρ and nₑ: Muspel's continuum at 500 nm, with neutral H and protons from the EOS at (T, P)."""
-function _given_density_chi500!(a,synthesis_eos)
-    synthesis_eos===nothing && throw(ArgumentError("a given nₑ and ρ need the synthesis EOS: prepare_equilibrium(...; synthesis_eos)"))
-    state=WittmannKuruczState(synthesis_eos); nz,nx,ny=size(a.temperature)
+"""
+P [Pa] at which the Wittmann EOS gives `target` at T, on every level: ρ or nₑ, whichever `which` names; both grow with P at fixed T. Regula falsi (Illinois) in ln P,
+on the levels still unconverged at each pass, to 1e-10 in ln of the target.
+"""
+function _wittmann_pressure_at(eos,temperature,target,which::Symbol)
+    t=vec(Array{Float64}(temperature)); y=log.(vec(Array{Float64}(target))); n=length(t)
+    function f(indices,lnP)
+        cells=length(indices); r=zeros(cells,1,1); e=zeros(cells,1,1)
+        thermodynamics!(r,e,eos,reshape(t[indices],cells,1,1),reshape(exp.(lnP),cells,1,1))
+        log.(vec(which===:rho ? r : e)).-y[indices]
+    end
+    guess=which===:rho ? y.+log(_GIVEN_TOTAL_ABUNDANCE*_KB_SI/_GIVEN_MASS_PER_H_KG).+log.(t) : y.+log(2*_KB_SI).+log.(t)
+    all_cells=collect(1:n); lo=copy(guess); hi=copy(guess); flo=f(all_cells,lo); fhi=copy(flo); step=0.5
+    for _ in 1:60
+        below=findall(>(0),flo); above=findall(<(0),fhi)
+        isempty(below) && isempty(above) && break
+        isempty(below) || (lo[below].-=step; flo[below]=f(below,lo[below]))
+        isempty(above) || (hi[above].+=step; fhi[above]=f(above,hi[above]))
+        step*=1.3
+    end
+    outside=count(>(0),flo)+count(<(0),fhi)
+    outside>0 && throw(ArgumentError("$outside levels have a given $which no EOS state reaches at their temperature"))
+    x=copy(lo); active=findall(i->flo[i]!=0,all_cells)
+    for _ in 1:200
+        isempty(active) && break
+        c=(lo[active].*fhi[active].-hi[active].*flo[active])./(fhi[active].-flo[active]); fc=f(active,c); x[active]=c
+        below=fc.<0; above=.!below
+        lo[active[below]]=c[below]; flo[active[below]]=fc[below]; fhi[active[below]]./=2
+        hi[active[above]]=c[above]; fhi[active[above]]=fc[above]; flo[active[above]]./=2
+        active=active[abs.(fc).>=1e-10]
+    end
+    isempty(active) || throw(ArgumentError("$(length(active)) levels did not converge to the given $which through the EOS"))
+    reshape(exp.(x),size(temperature))
+end
+
+"""ρ, nₑ, neutral H and protons [SI] from the EOS at (T, P), with one Pₑ solve per cell."""
+function _given_hydrogen_state(synthesis_eos,temperature::Array{Float64,3},pressure::Array{Float64,3})
+    fn=Libdl.dlsym(Libdl.dlopen(synthesis_eos.library),:witt_given_state_parallel;throw_error=false)
+    fn===nothing && return _given_hydrogen_state_separately(synthesis_eos,temperature,pressure)   # a library built before this entry
+    rho=zeros(size(temperature)); ne=zeros(size(temperature)); neutral=zeros(size(temperature)); protons=zeros(size(temperature))
+    status=ccall(fn,Cint,(Cstring,Ptr{Cdouble},Ptr{Cdouble},Ptr{Cdouble},Ptr{Cdouble},Ptr{Cdouble},Ptr{Cdouble},Csize_t,Cint),
+        synthesis_eos.partition_functions,temperature,pressure,rho,ne,neutral,protons,length(rho),Threads.nthreads())
+    status==0 || throw(ErrorException("Wittmann EOS failed for one or more cells"))
+    all(isfinite,rho)&&all(>(0),rho) || throw(ErrorException("Wittmann EOS returned invalid density"))
+    all(isfinite,ne)&&all(>(0),ne) || throw(ErrorException("Wittmann EOS returned invalid electron density"))
+    rho,ne,neutral,protons
+end
+
+function _given_hydrogen_state_separately(synthesis_eos,temperature,pressure)
+    rho=zeros(size(temperature)); ne=zeros(size(temperature)); thermodynamics!(rho,ne,synthesis_eos,temperature,pressure)
+    state=WittmannKuruczState(synthesis_eos); nz,nx,ny=size(temperature)
     neutral=zeros(Float64,nz,nx,ny); protons=zeros(Float64,nz,nx,ny)
     Threads.@threads for y in 1:ny
         for x in 1:nx
-            temperature=Float64.(a.temperature[:,x,y]); pressure=Float64.(a.pgas[:,x,y])
-            neutral[:,x,y].=eos_neutral_hydrogen!(zeros(Float64,nz),state,temperature,pressure)
-            protons[:,x,y].=eos_protons(state,temperature,pressure)
+            column_t=temperature[:,x,y]; column_p=pressure[:,x,y]
+            neutral[:,x,y].=eos_neutral_hydrogen!(zeros(Float64,nz),state,column_t,column_p)
+            protons[:,x,y].=eos_protons(state,column_t,column_p)
         end
     end
-    a.chi500=eltype(a.temperature).(given_chi500(a.temperature,a.ne,neutral,protons))
+    rho,ne,neutral,protons
+end
+
+"""ρ and nₑ, where not given, and χ₅₀₀ of a given atmosphere without hydrogen populations: Muspel's continuum at 500 nm, with neutral H and protons from the EOS at (T, P)."""
+function _given_density_chi500!(a,synthesis_eos)
+    synthesis_eos===nothing && throw(ArgumentError("a given nₑ and ρ need the synthesis EOS: prepare_equilibrium(...; synthesis_eos)"))
+    rho,ne,neutral,protons=_given_hydrogen_state(synthesis_eos,Array{Float64,3}(a.temperature),Array{Float64,3}(a.pgas))
+    S=eltype(a.temperature)
+    a.rho===nothing && (a.rho=S.(rho))
+    a.ne===nothing && (a.ne=S.(ne))
+    a.chi500=S.(given_chi500(a.temperature,a.ne,neutral,protons))
     a
 end
 
@@ -221,19 +327,31 @@ function _given_columns!(a)
 end
 
 """
-The atmosphere is given, by nₑ with either the hydrogen populations (`set_given_state!`) or ρ (`set_given_density!`, χ₅₀₀ here from the
-EOS's hydrogen): `pgas`, `rho` and `chi500` are fixed, and every axis's geometry follows column by column. No HSEMHS, no EOS table and no MPI. Forward only.
+The atmosphere is given by any of nₑ, ρ, P and the hydrogen populations. What these don't fix comes from the synthesis Wittmann EOS at (T, P), with P itself found
+from a given nₑ or ρ when it is missing (`set_given_inputs!`). Without hydrogen populations, χ₅₀₀ uses the EOS's hydrogen. `pgas`, `rho` and `chi500` are fixed, and every axis's geometry follows column by column. No HSEMHS, no EOS table and no MPI. Forward only.
 """
 mutable struct GivenAtmosphereBackend <: AbstractEquilibriumBackend
     config::EquilibriumConfig
     provenance::Dict{String,Any}
     function GivenAtmosphereBackend(eq::EquilibriumConfig,distributed::DistributedAtmosphere;synthesis_eos=nothing)
         a=distributed.local_atmosphere
-        hydrogen_given=a.h_neutral!==nothing
-        hydrogen_given || a.chi500!==nothing || a.rho===nothing || _given_density_chi500!(a,synthesis_eos)
+        hydrogen_given=a.h_neutral!==nothing; ne_input=a.ne!==nothing
+        if a.chi500===nothing
+            synthesis_eos===nothing && throw(ArgumentError("a given atmosphere needs the synthesis EOS for what it doesn't fix: prepare_equilibrium(...; synthesis_eos)"))
+            if a.pgas===nothing
+                a.pgas=eltype(a.temperature).(a.ne===nothing ? _wittmann_pressure_at(synthesis_eos,a.temperature,a.rho,:rho) :
+                    _wittmann_pressure_at(synthesis_eos,a.temperature,a.ne,:ne))
+            end
+            if hydrogen_given
+                _given_eos_state!(a,synthesis_eos)
+                a.chi500=eltype(a.temperature).(given_chi500(a.temperature,a.ne,a.h_neutral,a.h_proton))
+            else
+                _given_density_chi500!(a,synthesis_eos)
+            end
+        end
         all(n->getfield(a,n)!==nothing,(:ne,:rho,:pgas,:chi500)) || throw(ArgumentError(
-            "a given atmosphere needs ne, rho, pgas and chi500 (read_inversion_inputs fills them from ne with the hydrogen populations or rho)"))
-        new(eq,Dict{String,Any}("mode"=>hsemhs_mode_name(eq.mode),"ne_given"=>true,"hydrogen_populations_given"=>hydrogen_given,"rho_given"=>true,
+            "a given atmosphere needs ne, rho, pgas and chi500 (read_inversion_inputs and this constructor fill them from what is given)"))
+        new(eq,Dict{String,Any}("mode"=>hsemhs_mode_name(eq.mode),"ne_given"=>ne_input,"hydrogen_populations_given"=>hydrogen_given,
             "total_abundance"=>_GIVEN_TOTAL_ABUNDANCE,"mass_per_H_kg"=>_GIVEN_MASS_PER_H_KG))
     end
 end
@@ -246,12 +364,12 @@ function reconstruct_equilibrium!(backend::GivenAtmosphereBackend,distributed::D
     EquilibriumOutcome(true,:given,:given,backend.config.mode,0,time()-started,String[],nothing)
 end
 
-"""`[equilibrium]` of a given atmosphere (`ne` with `hydrogen_populations` or `rho` in the datasets): optional, and only `gravity_m_s2` and
+"""`[equilibrium]` of a given atmosphere (any of `ne`, `rho`, `pgas` and `hydrogen_populations` in the datasets): optional, and only `gravity_m_s2` and
 `eos_table_file` have a use, both for the population mesh's extensions of the columns."""
 function _given_equilibrium_config(raw,vertical_coordinate::Symbol,base::AbstractString)
-    unknown=setdiff(collect(keys(raw)),["backend","model","gravity_m_s2","eos_table_file","on_nonconvergence"])
-    isempty(unknown) || throw(ArgumentError(
-        "[equilibrium] $(join(sort(unknown),", ")) do(es) not apply: a given atmosphere builds the geometry without HSEMHS"))
+    # the column sections configure HSEMHS, which this route doesn't use: ignored, so that the datasets alone choose the mode
+    unknown=setdiff(collect(keys(raw)),["backend","model","gravity_m_s2","eos_table_file","on_nonconvergence","column_z","column_ltau","column_logm"])
+    isempty(unknown) || throw(ArgumentError("unknown key(s) in [equilibrium]: $(join(sort(unknown),", "))"))
     g=Float64(get(raw,"gravity_m_s2",274.0)); isfinite(g)&&g>0 || throw(ArgumentError("equilibrium.gravity_m_s2 must be positive"))
     table=String(get(raw,"eos_table_file","")); table=isempty(table)||isabspath(table) ? table : normpath(joinpath(base,table))
     mode=vertical_coordinate===:z_m ? :given_z : vertical_coordinate===:log10m ? :given_logm : :given_ltau
@@ -270,7 +388,6 @@ mutable struct HSEMHSBackend <: AbstractEquilibriumBackend
     provenance::Dict{String,Any}
     closed::Bool
     ne_given::Bool                    # the input supplies nₑ: HSEMHS derives P and rho from it on every reconstruction
-    given_rho::Any                    # the input supplies only ρ (forward only): nₑ from the EOS at (T, ρ), then as a given nₑ; else nothing
 end
 
 function _backend_comm(context::ParallelContext)
@@ -354,12 +471,9 @@ function _prepare_hsemhs(eq,distributed,context,synthesis_eos)
     provenance["mode"]=hsemhs_mode_name(eq.mode); provenance["gravity_m_s2"]=eq.gravity_m_s2
     is_vertical(grid.view) || merge!(provenance,view_attributes(grid.view,view_columns(grid)))
     provenance["eos_table_file"]=abspath(eq.eos_table_file); provenance["hsemhs_version"]=string(pkgversion(HSEMHS))
-    a=distributed.local_atmosphere
-    given_rho=a.ne===nothing && a.rho!==nothing ? copy(a.rho) : nothing
-    ne_given=a.ne!==nothing || given_rho!==nothing
-    a.ne!==nothing && (provenance["ne_given"]=true)
-    given_rho===nothing || (provenance["rho_given"]=true)
-    HSEMHSBackend(eq,ws,provenance,false,ne_given,given_rho)
+    ne_given=distributed.local_atmosphere.ne!==nothing
+    ne_given && (provenance["ne_given"]=true)
+    HSEMHSBackend(eq,ws,provenance,false,ne_given)
 end
 
 _zxy_to_zyx(a)=permutedims(a,(1,3,2))
@@ -368,27 +482,6 @@ function _set_field!(atmosphere,name,value)
     destination=getfield(atmosphere,name)
     destination===nothing ? setfield!(atmosphere,name,copy(value)) : copyto!(destination,value)
     nothing
-end
-
-"""
-nₑ of an atmosphere with only ρ given: the EOS state at (T, ρ) on every level. Fills `a.ne`, which the given-nₑ route then takes, and returns
-(valid, reason, messages), identical on every rank. That route's P reproduces ρ through the same table.
-"""
-function _ne_from_given_rho!(backend,a,context)
-    eos=backend.workspace.eos; T=eltype(a.temperature); nz,nx,ny=size(a.temperature); ne=fill(T(NaN),nz,nx,ny)
-    Threads.@threads for y in 1:ny
-        for x in 1:nx, k in 1:nz
-            lnT=log(Float64(a.temperature[k,x,y])); lnrho=log(Float64(backend.given_rho[k,x,y]))
-            lnP=try _mesh_lnP(eos,lnT,lnrho) catch e; e isa ErrorException || rethrow(); NaN end
-            isfinite(lnP) || continue
-            r,n,_,_=HSEMHS.state(eos,lnT,lnP)
-            isfinite(r) && abs(r-lnrho)<1e-8 && (ne[k,x,y]=T(exp(n)))
-        end
-    end
-    nbad=allreduce_sum(count(!isfinite,ne),context)
-    nbad>0 && return false,:eos_out_of_envelope,["$nbad levels have a given density no EOS state reaches at their temperature"]
-    _set_field!(a,:ne,ne)
-    true,:converged,String[]
 end
 
 """
@@ -419,17 +512,11 @@ function reconstruct_equilibrium!(backend::HSEMHSBackend,distributed::Distribute
     backend.closed && throw(ArgumentError("the equilibrium backend is closed"))
     _assert_mpi_thread(context)
     a=distributed.local_atmosphere
-    if backend.given_rho!==nothing
-        started=time()
-        valid,reason,messages=_ne_from_given_rho!(backend,a,context)
-        valid || return EquilibriumOutcome(false,reason,backend.config.model,backend.config.mode,0,time()-started,messages,nothing)
-    end
     if backend.ne_given && backend.config.mode===:column_hse_logm
         started=time()
         _forward_stage(context,"equilibrium begin mode=$(hsemhs_mode_name(backend.config.mode)) ne_given=true")
         valid,reason,messages=_given_ne_column_mass!(backend,a,context)
         _forward_stage(context,"equilibrium done seconds=$(round(time()-started;digits=1)) valid=$valid reason=$reason")
-        valid && backend.given_rho!==nothing && _set_field!(a,:rho,backend.given_rho)
         return EquilibriumOutcome(valid,reason,backend.config.model,backend.config.mode,0,time()-started,messages,nothing)
     end
     lnT=_zxy_to_zyx(log.(a.temperature))
@@ -451,7 +538,7 @@ function reconstruct_equilibrium!(backend::HSEMHSBackend,distributed::Distribute
     st=res.status
     _forward_stage(context,"equilibrium done seconds=$(round(time()-started;digits=1)) valid=$(st.valid) reason=$(st.reason)")
     if st.valid
-        _set_field!(a,:pgas,_zxy_to_zyx(res.Pgas)); _set_field!(a,:rho,backend.given_rho===nothing ? _zxy_to_zyx(res.rho) : backend.given_rho)
+        _set_field!(a,:pgas,_zxy_to_zyx(res.Pgas)); _set_field!(a,:rho,_zxy_to_zyx(res.rho))
         _set_field!(a,:ne,_zxy_to_zyx(res.ne)); _set_field!(a,:z,_zxy_to_zyx(res.z))
         _set_field!(a,:logtau500,_zxy_to_zyx(res.logtau500)); _set_field!(a,:chi500,_zxy_to_zyx(res.chi500))
         check_coordinate_consistency(a)
