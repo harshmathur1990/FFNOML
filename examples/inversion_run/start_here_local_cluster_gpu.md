@@ -69,6 +69,7 @@ Then check these settings:
 - **`storage_order`:** use `"python"` for files written by NumPy or h5py, and `"julia"` for files written by HDF5.jl.
 - **`[atmosphere.datasets]`:** add `ne`, `rho`, `pgas` or `hydrogen_populations` if you have them. HSEMHS is then not used. For a simulation, `ne`, `rho` and `pgas` together are the most faithful.
 - **IRIS/MURaM FITS:** set `atmos_model_format = "iris"` and `atmos_directory` under `[atmosphere]`. Temperatures below `temperature_floor_k` (3250 K by default) are raised to it, and `storage_order` is ignored.
+- **MULTI3D:** set `atmos_model_format = "multi3d"` and `atmos_directory` (the snapshot directory with `mesh` and `atm3d`) under `[atmosphere]`. nₑ, ρ and any hydrogen populations come from `atm3d`, the file's temperatures are kept, and `storage_order` is ignored.
 
 To check that the configuration loads and to see what it selected:
 

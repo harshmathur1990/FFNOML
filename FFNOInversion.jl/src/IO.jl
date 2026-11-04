@@ -19,8 +19,8 @@ struct AtmosphereInputConfig{T<:AbstractFloat}
     hydrogen_populations_dataset::Union{Nothing,String}
     rho_dataset::Union{Nothing,String}
     pgas_dataset::Union{Nothing,String}
-    model_format::Symbol                   # :hdf5, or :iris: FITS cubes in the directory `file` (IrisAtmosphere.jl), forward only
-    temperature_floor_k::T                 # :iris: colder cells are raised to this; 0 keeps the file's temperatures
+    model_format::Symbol                   # :hdf5; :iris, FITS cubes in the directory `file` (IrisAtmosphere.jl); or :multi3d, mesh and atm3d in the directory `file` (Multi3dAtmosphere.jl); the last two forward only
+    temperature_floor_k::T                 # :iris, :multi3d: colder cells are raised to this; 0 keeps the file's temperatures
 end
 
 struct ObservedDataConfig
@@ -440,21 +440,23 @@ function load_config(path::AbstractString)
     obs = get(cfg,"observation",Dict{String,Any}())
     physics = _required(cfg,"physics")
     model_format=Symbol(lowercase(String(get(atmos,"atmos_model_format","hdf5"))))
-    model_format in (:hdf5,:iris) || throw(ArgumentError("atmosphere.atmos_model_format must be \"hdf5\" or \"iris\", got \"$model_format\""))
-    iris=model_format===:iris
-    iris && !forward_only && throw(ArgumentError("atmosphere.atmos_model_format = \"iris\" is for forward synthesis only"))
-    !iris && haskey(atmos,"temperature_floor_k") && throw(ArgumentError("atmosphere.temperature_floor_k is for atmos_model_format = \"iris\""))
-    temperature_floor_k=Float64(get(atmos,"temperature_floor_k",3250.0))
+    model_format in (:hdf5,:iris,:multi3d) || throw(ArgumentError("atmosphere.atmos_model_format must be \"hdf5\", \"iris\" or \"multi3d\", got \"$model_format\""))
+    iris=model_format===:iris; multi3d=model_format===:multi3d; snapshot=iris || multi3d
+    snapshot && !forward_only && throw(ArgumentError("atmosphere.atmos_model_format = \"$model_format\" is for forward synthesis only"))
+    !snapshot && haskey(atmos,"temperature_floor_k") && throw(ArgumentError("atmosphere.temperature_floor_k is for atmos_model_format = \"iris\" or \"multi3d\""))
+    # MULTI3D ran on the temperatures of its atm3d, so they are kept unless a floor is asked for
+    temperature_floor_k=Float64(get(atmos,"temperature_floor_k",multi3d ? 0.0 : 3250.0))
     isfinite(temperature_floor_k) && temperature_floor_k>=0 || throw(ArgumentError("atmosphere.temperature_floor_k must be finite and not negative"))
-    # IRIS cubes hold T, velocities, rho and P on heights, so they are a given atmosphere on a native z grid
-    datasets = iris ? copy(IRIS_DATASETS) : _required(atmos,"datasets")
-    atmosphere_source=iris ? String(_required(atmos,"atmos_directory")) : String(_required(inputs,"initial_atmosphere_file"))
+    # IRIS cubes (T, velocities, rho, P) and MULTI3D files (nₑ, T, velocities, rho, perhaps hydrogen) are on heights, so they are a given atmosphere on a native z grid
+    atmosphere_source=snapshot ? String(_required(atmos,"atmos_directory")) : String(_required(inputs,"initial_atmosphere_file"))
+    datasets = iris ? copy(IRIS_DATASETS) : multi3d ? _multi3d_datasets(atmosphere_source) : _required(atmos,"datasets")
     iris && (grid=_iris_grid(atmosphere_source,grid))
+    multi3d && (grid=_multi3d_grid(atmosphere_source,grid))
     storage_order=Symbol(lowercase(String(get(atmos,"storage_order","julia"))))
     storage_order in (:julia,:python) || throw(ArgumentError(
         "atmosphere.storage_order must be julia or python"))
-    iris && get(atmos,"vertical_coordinate","z")!="z" && throw(ArgumentError("atmosphere.atmos_model_format = \"iris\" is on heights: vertical_coordinate must be \"z\""))
-    vertical_coordinate,vertical_dataset,x_dataset,y_dataset=iris ? (:z_m,"z-coordinate",nothing,nothing) : _vertical_input(atmos,datasets)
+    snapshot && get(atmos,"vertical_coordinate","z")!="z" && throw(ArgumentError("atmosphere.atmos_model_format = \"$model_format\" is on heights: vertical_coordinate must be \"z\""))
+    vertical_coordinate,vertical_dataset,x_dataset,y_dataset=iris ? (:z_m,"z-coordinate",nothing,nothing) : multi3d ? (:z_m,"mesh",nothing,nothing) : _vertical_input(atmos,datasets)
     dx_m,dy_m = _horizontal_spacing(grid,atmosphere_source,x_dataset,y_dataset)
     regions = _regions(cfg)
     wavelength_m = reduce(vcat,wavelengths.(regions))

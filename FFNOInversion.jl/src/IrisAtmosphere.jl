@@ -86,6 +86,14 @@ function _iris_grid(directory,grid)
     merged
 end
 
+"""Cells colder than `floor_k` raised to it, in place."""
+function _raise_temperature_floor!(temperature,floor_k)
+    floored=count(<(floor_k),temperature)
+    temperature.=max.(temperature,eltype(temperature)(floor_k))
+    floored>0 && @info "Raised $floored of $(length(temperature)) temperature cells to $floor_k K"
+    temperature
+end
+
 """Atmosphere (nz, nx, ny), top first, from the FITS cubes of `config.atmosphere.file`."""
 function read_iris_atmosphere(config::RunConfig{T}) where T
     directory=config.atmosphere.file; snapshot=_iris_snapshot(directory)
@@ -104,9 +112,7 @@ function read_iris_atmosphere(config::RunConfig{T}) where T
         out,heights[levels]
     end
     temperature,z=field("lgtg",true)
-    floor_k=config.atmosphere.temperature_floor_k; floored=count(<(floor_k),temperature)
-    temperature.=max.(temperature,T(floor_k))
-    floored>0 && @info "Raised $floored of $(length(temperature)) temperature cells to $floor_k K"
+    _raise_temperature_floor!(temperature,config.atmosphere.temperature_floor_k)
     vx,_=field("ux",false); vy,_=field("uy",false); vz,_=field("uz",false)
     config.vz_positive===:down && (vz=-vz)
     rho,_=field("lgr",true); pgas,_=field("lgp",true)

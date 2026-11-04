@@ -185,6 +185,10 @@ See [README.md](README.md#viewing-angle-off-disk-centre).
 
 Set `atmos_model_format = "iris"` and `atmos_directory` in `[atmosphere]`, with `[equilibrium] eos_table_file` for the population mesh. See the [package README](../../FFNOInversion.jl/README.md#an-irismuram-fits-atmosphere).
 
+## A MULTI3D atmosphere (forward only)
+
+Set `atmos_model_format = "multi3d"` and `atmos_directory` (the snapshot directory with `mesh` and `atm3d`) in `[atmosphere]`, with `[equilibrium] eos_table_file` for the population mesh. See the [package README](../../FFNOInversion.jl/README.md#a-multi3d-atmosphere).
+
 ## GPUs too small for your cube (forward only)
 
 On machines like eagle7, a cube such as 504 × 504 doesn't fit in GPU memory through the default service. The [batched service](../../FFNOInversion.jl/README.md#batched-forward-service-small-gpus) runs the same full-domain prediction from host RAM, more slowly, and can't be used for inversions. Set `FFNO_BATCHED_VERTICAL_NORM_SLABS` to the GPU count of an FSDP run you want to match exactly.
