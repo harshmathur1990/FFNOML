@@ -207,6 +207,23 @@ FFNO still predicts the line populations. The lower-level populations of Kurucz 
 come from Wittmann at (T, P). The population mesh's corona and deep extension still use the
 HSEMHS EOS table: set `[equilibrium] eos_table_file`, or `[population.mesh] enabled = false`.
 
+### A given atmosphere: nₑ and ρ, any axis
+
+With both `datasets.ne` (m⁻³) and `datasets.rho` (kg m⁻³), forward only, the atmosphere is also given and HSEMHS is not used. This is the
+route for a simulation's own thermodynamics: the FFNO receives the input's T, v, nₑ and ρ unchanged.
+
+- n_H = ρ/(mass per H), P = (n_H Σ abundances + nₑ) k T, with Wittmann's composition.
+- Neutral H and protons come from the EOS at that (T, P), for χ₅₀₀, the continuum and broadening. No hydrogen is given here.
+- The geometry on each axis is as above.
+
+`datasets.rho` and `datasets.hydrogen_populations` cannot be combined, since each sets the density. The three forward routes are:
+
+| Datasets | P, ρ | Hydrogen | HSEMHS |
+| --- | --- | --- | --- |
+| `ne` | EOS at (T, nₑ) | EOS | yes |
+| `ne`, `rho` | ρ given, P from n_H and nₑ | EOS at (T, P) | no |
+| `ne`, `hydrogen_populations` | from n_H and nₑ | given | no |
+
 ## Configuration reference
 
 The checked-in configs in [`../examples/inversion_run`](../examples/inversion_run)

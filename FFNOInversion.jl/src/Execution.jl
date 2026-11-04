@@ -138,6 +138,10 @@ function read_inversion_inputs(config::RunConfig{T}) where T
         # (level, z, y, x) in the file, as written to the output's populations
         hydrogen=config.atmosphere.hydrogen_populations_dataset===nothing ? nothing : T.(permutedims(_time_slice(_from_atmosphere_storage(
             _read_dataset(file,config.atmosphere.hydrogen_populations_dataset),storage_order),config.time_index,4,"hydrogen populations"),(2,4,3,1)))
+        rho=config.atmosphere.rho_dataset===nothing ? nothing : T.(_zyx_to_zxy(_time_slice(_from_atmosphere_storage(
+            _read_dataset(file,config.atmosphere.rho_dataset),storage_order),config.time_index,3,"mass density")))
+        rho===nothing || (size(rho)==(nz,nx,ny) && all(>(0),rho)) || throw(ArgumentError(
+            "mass density $(config.atmosphere.rho_dataset) must have the atmosphere's shape and be positive"))
         config.vz_positive===:down && (vz=-vz)   # the file's vz sign; nothing else differs
         # canonical order is top first; reverse the axis and every 3-D field together
         bottom_first=kind===:z_m ? vertical[1]<vertical[end] : vertical[1]>vertical[end]
@@ -153,6 +157,7 @@ function read_inversion_inputs(config::RunConfig{T}) where T
         atmosphere=Atmosphere3D(grid,flip(T.(temperature)),flip(T.(vx)),flip(T.(vy)),flip(T.(vz)),flip(vturb);
             magnetic_field=magnetic,z=zfield,ne=ne===nothing ? nothing : flip(ne))
         hydrogen===nothing || set_given_state!(atmosphere,flip(hydrogen))
+        rho===nothing || set_given_density!(atmosphere,flip(rho))
         (atmosphere=atmosphere,)
     end
     config.mode===:forward && return InversionInputBundle(atmosphere_data.atmosphere,nothing)

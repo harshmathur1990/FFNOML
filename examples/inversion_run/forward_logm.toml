@@ -28,8 +28,10 @@ log10m = "log10m"
 # Without ne: P = g m, rho from the EOS. With ne (m^-3, forward only): P, rho from (T, ne) through the EOS, heights from rho.
 # With ne and hydrogen_populations (m^-3, file axes (level,z,y,x), last level the protons; forward only): the atmosphere is
 # given and HSEMHS is not used, on any axis (FFNOInversion.jl/README.md).
+# With ne and rho (kg m^-3; forward only): also given, without HSEMHS, hydrogen from the EOS at (T, P).
 # ne = "ne"
 # hydrogen_populations = "hydrogen_populations"
+# rho = "rho"
 temperature = "temperature"
 # vturb = "vturb" # optional; defaults to zero if not configured
 vx = "vx"
