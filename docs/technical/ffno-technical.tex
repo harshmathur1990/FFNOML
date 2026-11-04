@@ -1,6 +1,6 @@
 \input{../preamble.tex}
 \begin{document}
-\doctitle{FFNOML: technical reference}{Implementation of the Python training and inference code, the GPU service and the FFNOInversion.jl synthesis and inversion package. Written from the source at commit \code{3cb9c14} on \code{main}, 4 November 2026. The physics is in \code{docs/physics/ffno-physics.pdf}.}
+\doctitle{ARUN: technical reference}{Implementation of the Python training and inference code, the GPU service and the FFNOInversion.jl synthesis and inversion package. Written from the source at commit \code{3cb9c14} on \code{main}, 4 November 2026. The physics is in \code{docs/physics/ffno-physics.pdf}.}
 
 \tableofcontents
 
@@ -28,21 +28,21 @@ The repository has a Python half and a Julia half, and they meet at a checkpoint
 \subsection{Repository map}
 \begin{longtable}{L{5.2cm}L{11.3cm}}
 \toprule Path&Role\\\midrule\endhead
-\code{config.py}&Every Python setting: simulations, splits, atoms, model and training parameters\\
-\code{pipeline.py}&Python command line: \code{--build}, \code{--train}, \code{--val}, \code{--test}, \code{--predict}, \code{--fsdppredict}, \code{--buildforpredict}, \code{--inspectfreqgate}\\
-\code{FFNONet.py}&Dataset building, training driver, validation test, tiled and distributed prediction\\
-\code{models/ffno_model.py}&The network\\
-\code{model_builder.py}&Construction, FSDP or DDP wrapping, optimizer, scheduler, loss\\
-\code{train_utils.py}&Training loop, checkpoints, resume, expansion\\
-\code{data/dataset.py}, \code{data_builder.py}&Lazy HDF5 datasets and loaders\\
-\code{loss/}&\code{nlte_composite_loss.py}, \code{weighted_mse_loss.py}, \code{gradient_loss.py}\\
-\code{normalize_utils.py}&Channel statistics\\
-\code{distributed_inference.py}&H-slab versions of FFT, GroupNorm and depthwise convolution\\
-\code{ffno_fsdp_service.py}, \code{ffno_fsdp_runtime.py}, \code{ffno_fsdp_diagnostics.py}, \code{ffno_model_factory.py}&Persistent GPU service\\
-\code{Forward.jl}&Older stand-alone synthesis from predicted HDF5 populations\\
-\code{errorplots.py}, \code{make_paper_plots.py}, \code{compare_population_models.py}&Evaluation and figures\\
+\code{ffno/config.py}&Every Python setting: simulations, splits, atoms, model and training parameters\\
+\code{ffno/pipeline.py}&Python command line: \code{--build}, \code{--train}, \code{--val}, \code{--test}, \code{--predict}, \code{--fsdppredict}, \code{--buildforpredict}, \code{--inspectfreqgate}\\
+\code{ffno/FFNONet.py}&Dataset building, training driver, validation test, tiled and distributed prediction\\
+\code{ffno/models/ffno_model.py}&The network\\
+\code{ffno/model_builder.py}&Construction, FSDP or DDP wrapping, optimizer, scheduler, loss\\
+\code{ffno/train_utils.py}&Training loop, checkpoints, resume, expansion\\
+\code{ffno/data/dataset.py}, \code{ffno/data_builder.py}&Lazy HDF5 datasets and loaders\\
+\code{ffno/loss/}&\code{nlte_composite_loss.py}, \code{weighted_mse_loss.py}, \code{gradient_loss.py}\\
+\code{ffno/normalize_utils.py}&Channel statistics\\
+\code{ffno/distributed_inference.py}&H-slab versions of FFT, GroupNorm and depthwise convolution\\
+\code{ffno/ffno_fsdp_service.py}, \code{ffno/ffno_fsdp_runtime.py}, \code{ffno/ffno_fsdp_diagnostics.py}, \code{ffno/ffno_model_factory.py}&Persistent GPU service\\
+\code{forward/Forward.jl}&Older stand-alone synthesis from predicted HDF5 populations\\
+\code{analysis/errorplots.py}, \code{analysis/make_paper_plots.py}, \code{analysis/compare_population_models.py}&Evaluation and figures\\
 \code{scripts/}&Input builders (\code{build_input_ltau.py}, \code{build_input_logm.py}), Wittmann EOS (\code{witt_eos_cpp.cpp}, \code{witt.py}), UQ tools (\code{uq_*})\\
-\code{uq/}&UQ driver scripts; outputs are git-ignored\\
+\code{experiments/uq/}&UQ driver scripts; outputs are git-ignored\\
 \code{FFNOInversion.jl/}&Julia package: \code{src/}, \code{ext/}, \code{scripts/}, \code{test/}, \code{docs/}\\
 \code{examples/}&Run-directory templates: \code{inversion_run}, \code{python_run}, \code{runtime_test_run}\\
 \code{response_run/}, \code{figures/}&Experiments and plotting scripts; data and images are not tracked\\
@@ -582,18 +582,18 @@ Environment variable&Effect\\\midrule
 
 \subsection{Python}
 \begin{lstlisting}
-python pipeline.py --build                       # training and validation HDF5 in IO/
-torchrun ... pipeline.py --train                 # or sbatch train_gpu.sh
-python pipeline.py --buildforpredict --predname en024048_hion_385
-python pipeline.py --predict --predname ...       # tiled
-torchrun ... pipeline.py --fsdppredict --predname ...
+python ffno/pipeline.py --build                       # training and validation HDF5 in IO/
+torchrun ... ffno/pipeline.py --train                 # or sbatch jobs/train_gpu.sh
+python ffno/pipeline.py --buildforpredict --predname en024048_hion_385
+python ffno/pipeline.py --predict --predname ...       # tiled
+torchrun ... ffno/pipeline.py --fsdppredict --predname ...
 \end{lstlisting}
 Output: \code{output_3D_sim_s5_<NAME>_<MODEL>_<ATOMS>.hdf5}, with \code{nlte_populations} in m$^{-3}$, consumed by \code{Forward.jl}.
 
 \subsection{Olivia}
 Production uses Slurm partition \code{accel}, NVIDIA GPUs and the account \code{nn2834k}. By default: 8 nodes $\times$ 4 GPUs with 2 Julia ranks per node, 128 CPUs per task, \code{--network=job_vni}, \code{mem-per-gpu=40G}.
 \begin{lstlisting}
-repo=/cluster/projects/nn2834k/harshm/FFNOML
+repo=/cluster/projects/nn2834k/harshm/ARUN
 run=/cluster/work/projects/nn2834k/harshm/ffnoml_forward_001
 mkdir -p "$run"; cp -R "$repo/examples/inversion_run/." "$run/"
 # link inputs, atoms, partition functions, EOS table, checkpoints
@@ -655,7 +655,7 @@ These come from reading the source. Unless a measurement is mentioned, they have
 
 \begin{longtable}{L{4.2cm}L{12.3cm}}
 \toprule Issue&Detail\\\midrule\endhead
-\textbf{Non-periodic padding in \code{fuse}}&\code{models/ffno_model.py}: the depthwise $3\times3\times3$ convolution uses zero padding, and \code{_HaloExchangeH} fills the outer halos with zeros, though the simulations are periodic. Measured with one real column repeated on a square grid (\code{response_run/diagnostics_edge_test.py}, H model): outputs differ from the centre by up to 0.49\,dex at the edge, 0.10\,dex one pixel in, 0.017\,dex at 4 pixels and 0.001\,dex at 9, on $21\times21$. On $5\times5$ the first ring differs by 0.14\,dex. Likely source of the 4\% spread in FAL-C spectra. A circular padding adds no weights, but the trained weights assumed zero padding, so it would call for retraining or fine-tuning. The package README still says this cause is uninvestigated.\\
+\textbf{Non-periodic padding in \code{fuse}}&\code{ffno/models/ffno_model.py}: the depthwise $3\times3\times3$ convolution uses zero padding, and \code{_HaloExchangeH} fills the outer halos with zeros, though the simulations are periodic. Measured with one real column repeated on a square grid (\code{response_run/diagnostics_edge_test.py}, H model): outputs differ from the centre by up to 0.49\,dex at the edge, 0.10\,dex one pixel in, 0.017\,dex at 4 pixels and 0.001\,dex at 9, on $21\times21$. On $5\times5$ the first ring differs by 0.14\,dex. Likely source of the 4\% spread in FAL-C spectra. A circular padding adds no weights, but the trained weights assumed zero padding, so it would call for retraining or fine-tuning. The package README still says this cause is uninvestigated.\\
 \textbf{Scale weights have no effect}&\code{train_utils.compute_loss}: \code{(loss*weight).sum()/(weight.sum()+1e-12)} with scalar \code{loss} from \code{WeightedMSE_L1} returns \code{loss}. So \code{weights} in the dataset, and the reweighting in \code{TRAINSELECT}, do not change the optimization. Coarse scales are therefore weighted by their patch counts (121 at $s=1$, 1 at $s=6$).\\
 \textbf{$H$/$W$ spacing swap}&\code{SpectralConv2dFull}: \code{ky} is built from axis $H$ with \code{d=dy} and \code{kx} from $W$ with \code{d=dx}, but $H=n_x$ and $W=n_y$ in the data and in the service. Harmless when $\Delta x=\Delta y$, as in all training data. Anisotropic grids, such as deprojected footprints at $\mu<1$ on log $\tau$, get swapped spacings in the frequency features.\\
 \textbf{\code{reject_trial} is not implemented in the objective}&\code{Solvers.evaluate_objective!} throws on an invalid equilibrium, with the comment ``the reject-trial policy arrives in Phase 4'', although the README says the solver rejects that trial.\\

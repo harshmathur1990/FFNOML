@@ -64,7 +64,7 @@ DATA_DIR = EAGLE7_DIR
 # Keep permanent source data and disposable run files independent.  Batch
 # scripts set FFNOML_RUN_DIR to the directory from which the job is submitted.
 # Outside Slurm, the repository remains the default for backwards compatibility.
-PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUN_DIR = os.path.abspath(os.environ.get("FFNOML_RUN_DIR", PROJECT_DIR))
 
 # Backwards-compatible name used by plotting and Julia-side utilities.

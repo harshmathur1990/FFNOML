@@ -1,6 +1,6 @@
 # FFNOInversion.jl
 
-`FFNOInversion.jl` is the Julia forward-synthesis and inversion layer of FFNOML.
+`FFNOInversion.jl` is the Julia forward-synthesis and inversion layer of ARUN.
 It takes a 3D solar atmosphere (temperature, velocities, optional magnetic field),
 obtains its pressure, density, electron density and geometry (from HSEMHS by hydrostatic balance, or in forward
 synthesis from whichever of those the input supplies), predicts NLTE level populations
@@ -240,7 +240,7 @@ Cells colder than `[atmosphere] temperature_floor_k` (3250 K by default, as the 
 In forward synthesis, `[atmosphere] atmos_model_format = "multi3d"` with `atmos_directory = "..."` reads the snapshot directory of a MULTI3D run, with its `mesh` and `atm3d`, instead of
 `[inputs] initial_atmosphere_file` and `[atmosphere.datasets]`. `atm3d` holds nₑ [cm⁻³], T [K], vx, vy, vz [km s⁻¹] and ρ [g cm⁻³], Float32 in Fortran order (x, y, z). When its size shows six more
 fields, those are the hydrogen populations [cm⁻³], the last the protons, and they are used as well. Index 1 is the top, and (x, y) and the velocities stay as they are in the file, so results
-line up with MULTI3D's own outputs for the snapshot and with the predictions of `pipeline.py`, with no y flip, unlike the IRIS route. In most snapshots the mesh's y falls with the index; only the size of its spacing is used, as in `pipeline.py`. It is a given atmosphere on a native z grid, so HSEMHS isn't used: P follows
+line up with MULTI3D's own outputs for the snapshot and with the predictions of `ffno/pipeline.py`, with no y flip, unlike the IRIS route. In most snapshots the mesh's y falls with the index; only the size of its spacing is used, as in `pipeline.py`. It is a given atmosphere on a native z grid, so HSEMHS isn't used: P follows
 from nₑ and ρ or the populations. Heights and the horizontal spacing come from `mesh`, and `[grid]`, if set, must agree. The population mesh needs `[equilibrium] eos_table_file`, and it gives the FFNO only the mesh's heights.
 The file's temperatures are kept unless `[atmosphere] temperature_floor_k` asks for a floor, and only the temperature then changes. `storage_order` and `[atmosphere.datasets]` are ignored.
 Positive `vz` is upward, the default of `vz_positive`.
@@ -528,7 +528,7 @@ Production runs need the FSDP GPU service, so they run on Olivia.
 Keep the code in a permanent checkout and each run in its own directory:
 
 ```bash
-repo=/cluster/projects/nn2834k/harshm/FFNOML
+repo=/cluster/projects/nn2834k/harshm/ARUN
 run=/cluster/work/projects/nn2834k/harshm/ffnoml_forward_001
 mkdir -p "$run"
 cp -R "$repo/examples/inversion_run/." "$run/"
@@ -888,7 +888,7 @@ CUDA/NCCL probes, deliberate CPU and GPU stalls, timeouts and recovery.
 Other checks: `scripts/validate_eos_consistency.jl` (HSEMHS table versus Wittmann
 library), `scripts/validate_muspel_reference.jl` (synthesis against a Muspel
 reference), and `../scripts/compare_service_with_ffnonet.py` (service populations
-versus a direct `FFNONet.py` prediction on the same atmosphere; they should agree to
+versus a direct `ffno/FFNONet.py` prediction on the same atmosphere; they should agree to
 float32 round-off).
 
 Comparison with RH on FALC (`../response_run/falc/build_falc_cmp.py`, `run_cmp_rh.sh`, `run_cmp_ffno.sh`,

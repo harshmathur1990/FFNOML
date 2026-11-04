@@ -2,7 +2,7 @@
 
 A small random-weight FFNO3D in float64 runs distributed over H slabs (gloo) with dual tensors; the gathered
 population-feature tangent is compared with the JVP of the same model on one process and with central finite
-differences. Run from the FFNOML checkout:
+differences. Run from the ARUN checkout:
     python -m torch.distributed.run --nproc_per_node=2 FFNOInversion.jl/test/ffno_jvp_cpu_check.py
 """
 import copy
@@ -13,7 +13,7 @@ import torch
 import torch.autograd.forward_ad as fwAD
 import torch.distributed as dist
 
-sys.path.insert(0, os.getcwd())
+sys.path.insert(0, os.path.join(os.getcwd(), "ffno"))
 from distributed_inference import enable_distributed_inference, partition_range  # noqa: E402
 from models.ffno_model import FFNO3D  # noqa: E402
 

@@ -1,6 +1,6 @@
 # Do identical input columns give identical FFNO outputs, and where do they differ? One real column repeated over the grid.
-import torch, h5py, numpy as np, sys
-sys.path.insert(0, ".")
+import torch, h5py, numpy as np, os, sys
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "ffno"))
 from models.ffno_model import FFNO3D
 from config import MODEL_CONFIG
 torch.set_num_threads(16)

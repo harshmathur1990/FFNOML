@@ -20,7 +20,7 @@ atom_cfgs = [
 
 mesh_file = "/mn/stornext/d9/data/harshm/bifrost_data/$(sim_name)/$(snap)/mesh"
 atmos_file = "/mn/stornext/d9/data/harshm/bifrost_data/$(sim_name)/$(snap)/atm3d"
-pred_h5 = joinpath(@__DIR__, "training", "original_multi3d_dep_$(sim_name)_$(snap).h5")
+pred_h5 = joinpath(@__DIR__, "..", "training", "original_multi3d_dep_$(sim_name)_$(snap).h5")
 pred_key = "departure_coefficients"
 
 

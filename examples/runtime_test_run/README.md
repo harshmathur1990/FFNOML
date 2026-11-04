@@ -3,7 +3,7 @@
 Run the complete workflow from an Olivia login node with one command:
 
 ```bash
-repo=/path/to/permanent/FFNOML
+repo=/path/to/permanent/ARUN
 bash "$repo/FFNOInversion.jl/scripts/bootstrap_olivia_regression.sh" \
   --run-dir /path/to/hot/ffnoml_runtime_tests \
   --model-assets /permanent/training_FFNO3D_zscale_expand_lognlte \

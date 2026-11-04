@@ -8,7 +8,7 @@ The bootstrap helper can be invoked from any working directory on an Olivia
 login node. It performs the filesystem setup and all submissions:
 
 ```sh
-bash /cluster/work/projects/nn2834k/harshm/FFNOML/FFNOInversion.jl/scripts/bootstrap_olivia_regression.sh \
+bash /cluster/work/projects/nn2834k/harshm/ARUN/FFNOInversion.jl/scripts/bootstrap_olivia_regression.sh \
   --run-dir /path/to/hot/ffnoml_runtime_tests \
   --model-assets /permanent/training_FFNO3D_zscale_expand_lognlte \
   --atmosphere-dir /permanent/bifrost_data/en024048_hion/385 \

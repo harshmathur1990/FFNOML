@@ -1,7 +1,7 @@
 # Why the FFNO Ca II 854.2 nm differs from RH on FALC: the same FFNOInversion synthesis on FALC's heights and ne (with vturb) with
 # H and Ca populations from RH or the FFNO (z route with the corona, falc_zext), and with atom.ca2's Unsold broadening or RH's ABO
 # (sigma 291, alpha 0.275). Writes falc_ca_controls.h5; prints against RH.
-# usage (hyades): julia --project=FFNOInversion.jl response_run/falc/falc_ca_controls.jl
+# usage (hyades): julia --project=../FFNOInversion.jl response_run/falc/falc_ca_controls.jl
 using FFNOInversion, HDF5, Libdl, Printf
 import Muspel
 const R = joinpath(@__DIR__); const A = joinpath(R, "..", "inputs")

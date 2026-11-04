@@ -1,11 +1,11 @@
-# FFNOML
+# ARUN — At RoCS, Using Neural operators for 3D non-LTE radiative transfer and inversions
 
-FFNOML predicts NLTE level populations in 3D solar atmospheres with Fourier Neural
+ARUN predicts NLTE level populations in 3D solar atmospheres with Fourier Neural
 Operators, and uses those predictions to synthesize and invert chromospheric spectra.
 
 The repository has two halves:
 
-1. **Python: learning NLTE populations.** `pipeline.py` builds training sets from
+1. **Python: learning NLTE populations.** [`ffno/pipeline.py`](ffno/pipeline.py) builds training sets from
    MULTI3D/Bifrost simulations, trains the FFNO3D network, validates it, and predicts
    populations for new atmospheres (single GPU, tiled, or distributed over many GPUs).
 2. **Julia: forward synthesis and 3D inversion.**
@@ -49,38 +49,51 @@ log τ/log m/z atmosphere ─► FFNOInversion.jl ── HSEMHS ── FFNO serv
 
 ## Repository layout
 
+```text
+ARUN/
+├── ffno/              Python: training, prediction and the GPU services
+├── FFNOInversion.jl/  Julia: forward synthesis and 3D inversion
+├── forward/           Julia: standalone synthesis from populations
+├── analysis/          population error analysis, paper figures, notebooks
+├── jobs/              Slurm scripts for training and prediction
+├── scripts/           input builders, converters, EOS sources, comparisons
+├── examples/          run-directory templates and the starter guides
+├── experiments/       records of validation and UQ runs
+├── tests/             Python unit tests
+└── docs/              physics and technical references, diagrams, reports
+```
+
 | Path | Role |
 | --- | --- |
-| `pipeline.py` | CLI entry point for dataset building, training, validation, prediction |
-| `config.py` | dataset splits, active atoms, model hyperparameters, paths, runtime flags |
-| `FFNONet.py` | dataset builders, HDF5 writers, training loop, validation diagnostics, inference |
-| `models/ffno_model.py` | the FFNO3D architecture |
-| `model_builder.py`, `ffno_model_factory.py` | model/loss/optimizer construction, FSDP wrapping, factory for the service |
-| `data_builder.py`, `data/dataset.py` | patch or cube datasets and dataloaders (lazy HDF5) |
-| `loss/` | composite NLTE loss, weighted MSE, gradient loss |
-| `train_utils.py`, `normalize_utils.py` | checkpoints, resume, model expansion, normalization |
-| `distributed_inference.py` | H-slab distributed FFTs and collectives for full-volume inference |
-| `ffno_fsdp_service.py`, `ffno_fsdp_runtime.py`, `ffno_fsdp_diagnostics.py` | persistent multi-GPU prediction/VJP service used by the inversion |
-| `ffno_batched_service.py`, `ffno_batched_backend.py` | forward-only service for small GPUs: whole-cube prediction from host RAM, in batches |
-| `Forward.jl` | standalone Julia synthesis from predicted (or MULTI3D) populations |
+| `ffno/pipeline.py` | CLI entry point for dataset building, training, validation, prediction |
+| `ffno/config.py` | dataset splits, active atoms, model hyperparameters, paths, runtime flags |
+| `ffno/FFNONet.py` | dataset builders, HDF5 writers, training loop, validation diagnostics, inference |
+| `ffno/models/ffno_model.py` | the FFNO3D architecture |
+| `ffno/model_builder.py`, `ffno/ffno_model_factory.py` | model/loss/optimizer construction, FSDP wrapping, factory for the services |
+| `ffno/data_builder.py`, `ffno/data/dataset.py` | patch or cube datasets and dataloaders (lazy HDF5) |
+| `ffno/loss/` | composite NLTE loss, weighted MSE, gradient loss |
+| `ffno/train_utils.py`, `ffno/normalize_utils.py` | checkpoints, resume, model expansion, normalization |
+| `ffno/distributed_inference.py` | H-slab distributed FFTs and collectives for full-volume inference |
+| `ffno/ffno_fsdp_service.py`, `ffno/ffno_fsdp_runtime.py`, `ffno/ffno_fsdp_diagnostics.py` | persistent multi-GPU prediction service |
+| `ffno/ffno_batched_service.py`, `ffno/ffno_batched_backend.py` | forward-only service for small GPUs: whole-cube prediction from host RAM |
+| `forward/Forward.jl` | standalone Julia synthesis from predicted (or MULTI3D) populations |
 | `FFNOInversion.jl/` | Julia forward-synthesis and inversion package ([README](FFNOInversion.jl/README.md)) |
-| `examples/` | run-directory templates for Python jobs, inversions and Olivia runtime tests |
-| `scripts/` | input builders, converters, EOS sources, comparisons, Slurm helpers |
-| `errorplots.py`, `make_paper_plots.py`, `compare_population_models.py` | analysis and figures |
-| `train_gpu.sh`, `predict_gpu.sh` | Olivia Slurm scripts for training and prediction |
-| `tests/` | Python unit tests |
-| `docs/` | architecture diagrams, paper draft, media |
+| `analysis/` | `errorplots.py`, `make_paper_plots.py`, `compare_population_models.py`, `export_multi3d_depcoeff.py`, notebooks |
+| `jobs/train_gpu.sh`, `jobs/predict_gpu.sh` | Olivia Slurm scripts for training and prediction |
+| `experiments/` | response-function, UQ and viewing-angle runs and their plots ([README](experiments/README.md)) |
+
+Run commands from the repository root. The Python modules in `ffno/` import each other by bare name, so keep them together: `python ffno/pipeline.py` puts that directory on the path.
 
 ## Quick start
 
 Train and predict (Python):
 
 ```bash
-python pipeline.py --build
-python pipeline.py --train
-python pipeline.py --test
-python pipeline.py --buildforpredict
-python pipeline.py --predict
+python ffno/pipeline.py --build
+python ffno/pipeline.py --train
+python ffno/pipeline.py --test
+python ffno/pipeline.py --buildforpredict
+python ffno/pipeline.py --predict
 ```
 
 Synthesize spectra from a 3D atmosphere on Olivia (Julia), after preparing a run
@@ -120,7 +133,7 @@ Prediction outputs are written back in linear space as:
 
 ## Data And Configuration
 
-All project-specific configuration lives in `config.py`.
+All project-specific configuration lives in `ffno/config.py`.
 
 Important sections:
 
@@ -148,18 +161,18 @@ The Slurm scripts set `FFNOML_RUN_DIR` to the submission directory by default an
 locate the Python code from the batch script itself. For example:
 
 ```bash
-repo=/path/to/project/FFNOML
+repo=/path/to/project/ARUN
 run=/path/to/hot/ffnoml_run1
 
 mkdir -p "$run/IO" "$run/training_FFNO3D_zscale_expand_lognlte"
 # Add the required symlinks under "$run/IO" here.
 cd "$run"
-sbatch "$repo/train_gpu.sh"
+sbatch "$repo/jobs/train_gpu.sh"
 ```
 
 This places Slurm logs, the combined `output-<job-id>.txt` log, and model outputs
 under the disposable run directory. To submit from elsewhere, pass an explicit
-run root, for example `sbatch --export=ALL,FFNOML_RUN_DIR="$run" "$repo/train_gpu.sh"`.
+run root, for example `sbatch --export=ALL,FFNOML_RUN_DIR="$run" "$repo/jobs/train_gpu.sh"`.
 Without `FFNOML_RUN_DIR`, non-Slurm Python runs retain the old behavior and use
 the repository directory.
 
@@ -244,7 +257,7 @@ Unit conversions currently applied by the pipeline:
 Run:
 
 ```bash
-python pipeline.py --build
+python ffno/pipeline.py --build
 ```
 
 What it does:
@@ -289,7 +302,7 @@ Root-level metadata includes:
 Run:
 
 ```bash
-python pipeline.py --train
+python ffno/pipeline.py --train
 ```
 
 Train mode requires that `TRAIN_FILE` and `TEST_FILE` already exist. If they do not, run `--build` first.
@@ -339,14 +352,14 @@ Behavior notes:
 Run:
 
 ```bash
-python pipeline.py --test
+python ffno/pipeline.py --test
 ```
 
 With `MULTI_GPU=True`, run test mode through `torchrun` so validation uses the
 same distributed full H-slab inference strategy as `--fsdppredict`:
 
 ```bash
-torchrun --nproc_per_node=4 pipeline.py --test
+torchrun --nproc_per_node=4 ffno/pipeline.py --test
 ```
 
 Test mode requires:
@@ -381,14 +394,14 @@ The JSON summary includes:
 Build the solving set for every entry in `MULTI3D_PRED_DATA`:
 
 ```bash
-python pipeline.py --buildforpredict
+python ffno/pipeline.py --buildforpredict
 ```
 
 To build one atmosphere/snapshot without declaring it in `MULTI3D_PRED_DATA`,
 pass a name in `<atmosphere>_<snap>` form:
 
 ```bash
-python pipeline.py --buildforpredict --predname en024048_hion_386
+python ffno/pipeline.py --buildforpredict --predname en024048_hion_386
 ```
 
 This reads `PRED_DIR/bifrost_data/en024048_hion/386/atm3d` and `mesh`, and
@@ -398,7 +411,7 @@ are reported before loading begins.
 Run:
 
 ```bash
-python pipeline.py --predict
+python ffno/pipeline.py --predict
 ```
 
 Predict mode uses `MULTI3D_PRED_DATA` from `config.py`.
@@ -424,7 +437,7 @@ Important current behavior:
 Run with `torchrun`:
 
 ```bash
-torchrun --nproc_per_node=4 pipeline.py --fsdppredict
+torchrun --nproc_per_node=4 ffno/pipeline.py --fsdppredict
 ```
 
 For multi-node jobs, pass the usual `torchrun` rendezvous arguments, for example:
@@ -529,7 +542,7 @@ disabled in `[validation.continuity_max_log10_step]`.
 To run distributed prediction on only this generated file:
 
 ```bash
-torchrun --nproc_per_node=4 pipeline.py --fsdppredict --predname ar098192_270000
+torchrun --nproc_per_node=4 ffno/pipeline.py --fsdppredict --predname ar098192_270000
 ```
 
 The prediction path will look for
@@ -583,7 +596,7 @@ Implementation notes:
 In practice, multi-GPU training should be launched with `torchrun`, for example:
 
 ```bash
-torchrun --nproc_per_node=4 pipeline.py --train
+torchrun --nproc_per_node=4 ffno/pipeline.py --train
 ```
 
 Single-GPU or CPU execution can still use plain `python`.
@@ -639,40 +652,40 @@ reproducible while each epoch can see a different subset.
 Typical usage is:
 
 ```bash
-python pipeline.py --build
-python pipeline.py --train
-python pipeline.py --test
-python pipeline.py --buildforpredict
-python pipeline.py --predict
+python ffno/pipeline.py --build
+python ffno/pipeline.py --train
+python ffno/pipeline.py --test
+python ffno/pipeline.py --buildforpredict
+python ffno/pipeline.py --predict
 ```
 
 For distributed full-volume prediction, replace the last command with:
 
 ```bash
-torchrun --nproc_per_node=4 pipeline.py --fsdppredict
+torchrun --nproc_per_node=4 ffno/pipeline.py --fsdppredict
 ```
 
 For continuing an interrupted run:
 
 ```bash
-python pipeline.py --train --resume
+python ffno/pipeline.py --train --resume
 ```
 
 For resuming from the best checkpoint while resetting optimizer/scheduler state using the configured fallback epoch/LR:
 
 ```bash
-python pipeline.py --train --resume --bestpath
+python ffno/pipeline.py --train --resume --bestpath
 ```
 
 For initializing a larger model from an earlier checkpoint:
 
 ```bash
-python pipeline.py --train --expand
+python ffno/pipeline.py --train --expand
 ```
 
 ## Plotting And Analysis
 
-`errorplots.py` loads prediction outputs and MULTI3D truth, computes:
+`analysis/errorplots.py` loads prediction outputs and MULTI3D truth, computes:
 
 - relative population error envelopes
 - log-ratio error envelopes
@@ -683,7 +696,7 @@ directly without interpolating to column mass.
 
 ## Forward Synthesis With Forward.jl
 
-`Forward.jl` is the Julia-side consumer for predicted NLTE populations and related atmospheric inputs. Use it for downstream synthesis after Python-side prediction has produced the HDF5 outputs.
+`forward/Forward.jl` is the Julia-side consumer for predicted NLTE populations and related atmospheric inputs. Use it for downstream synthesis after Python-side prediction has produced the HDF5 outputs.
 
 For ML mode, `Forward.jl` reads `output_3D_sim_s5_<NAME>_<MODEL>_<FORWARD_ATOMS>.hdf5` and writes intensity files with the same Forward atom tag.
 
@@ -691,11 +704,11 @@ Set `FORWARD_ATOMS` near the top of `Forward.jl` to choose which atoms to synthe
 
 `Forward.jl` skips atom outputs already present in the intensity HDF5. In Bifrost mode, if a required active-atom population folder or `out_pop` file is missing, it skips that atmosphere and prints the dataset/snapshot that could not run.
 
-Run the synthesis directly with `julia Forward.jl`. To process only one
+Run the synthesis directly with `julia forward/Forward.jl`. To process only one
 atmosphere and snapshot, including one not declared in `MULTI3D_PRED_DATA`, use:
 
 ```bash
-julia Forward.jl --predname en024048_hion_386
+julia forward/Forward.jl --predname en024048_hion_386
 ```
 
 An undeclared name is interpreted as `<atmosphere>_<snap>` and uses the same
@@ -705,7 +718,7 @@ files and reports any that are missing.
 
 When no Julia thread count is configured, the script restarts itself with
 `--threads=auto` and preserves `--predname`. To choose a specific count, use
-`julia --threads=N Forward.jl --predname en024048_hion_386` or set
+`julia --threads=N forward/Forward.jl --predname en024048_hion_386` or set
 `JULIA_NUM_THREADS=N` before starting Julia. The `Threads` line printed at
 startup is the number of CPU threads the synthesis can use.
 
@@ -821,12 +834,12 @@ no conversion: set `[view]` in a `forward_z.toml`-style run.
 | `scripts/convert_iris_sim_fits_to_ffno_hdf5.py` | MURaM FITS to prediction solving set (see above) |
 | `scripts/witt.py`, `scripts/witt_eos_cpp.cpp`, `scripts/pf_Kurucz.input` | Wittmann EOS (Python and C++) and partition functions. The C++ source is also compiled into the inversion's `libwitt_ffno` |
 | `scripts/atmosphere_resampler.cpp` | C++/Boost spatial resampler used by the MURaM converter |
-| `export_multi3d_depcoeff.py` | write MULTI3D departure coefficients in the FFNONet prediction layout |
-| `compute_muspel_lte.jl`, `validate_multi3d_dep_loading.jl` | Muspel LTE populations, check of MULTI3D departure-coefficient loading |
-| `compare_population_models.py` | per-level NRMSE of two prediction directories against MULTI3D |
-| `make_paper_plots.py`, `generate_ffno_schematic_matplotlib.py` | paper figures and the architecture schematic |
+| `analysis/export_multi3d_depcoeff.py` | write MULTI3D departure coefficients in the FFNONet prediction layout |
+| `forward/compute_muspel_lte.jl`, `forward/validate_multi3d_dep_loading.jl` | Muspel LTE populations, check of MULTI3D departure-coefficient loading |
+| `analysis/compare_population_models.py` | per-level NRMSE of two prediction directories against MULTI3D |
+| `analysis/make_paper_plots.py`, `analysis/generate_ffno_schematic_matplotlib.py` | paper figures and the architecture schematic |
 | `scripts/generate_patch_training_animation.py` | animation of multiscale patch extraction (needs Pillow and ffmpeg) |
-| `run_script_regression.sh` | example invocation of the Olivia runtime-test bootstrap |
+| `jobs/run_script_regression.sh` | example invocation of the Olivia runtime-test bootstrap |
 
 ## Tests
 
@@ -855,7 +868,7 @@ The MPI parity checks and the Olivia regression chain are described in the
   architecture (full forward pass, balanced block, spectral convolution, vertical
   stack).
 - `docs/paper_draft_ffno_nlte.md`: paper draft.
-- `output/pdf/`: inversion development plan, implementation report and HSE bootstrap
+- `docs/reports/`: inversion development plan, implementation report and HSE bootstrap
   review.
 - `FFNOInversion.jl/docs/`: architecture decisions, the HSEMHS integration plan,
   the viewing-angle design (`docs/viewing-angle/`) and validation reports.

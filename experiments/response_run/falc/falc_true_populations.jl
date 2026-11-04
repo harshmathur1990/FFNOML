@@ -1,7 +1,7 @@
 # Control for the FALC runs: the same FFNOInversion synthesis (Muspel line + continuum, Wittmann Kurucz blend) with FALC's own
 # NLTE H populations and ne from FALC_82_5x5.hdf5 instead of FFNO's, on the file's heights. H-alpha + Fe I only (the file
 # has no Ca populations). Isolates the FFNO's share of the error; RH's populations, no HSEMHS.
-# usage (hyades, after ~/loadgcc.sh): julia --project=FFNOInversion.jl response_run/falc/falc_true_populations.jl
+# usage (hyades, after ~/loadgcc.sh): julia --project=../FFNOInversion.jl response_run/falc/falc_true_populations.jl
 using FFNOInversion, HDF5, Libdl, Printf
 import Muspel
 const R = "/mn/stornext/d9/data/harshm/FFNOML/response_run"

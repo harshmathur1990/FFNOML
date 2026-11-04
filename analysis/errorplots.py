@@ -9,6 +9,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from helita.sim.multi3d import Multi3dAtmos, Multi3dOut
 
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ffno"))
 from config import ACTIVE_ATOMS, MODEL, MODEL_DIR, MULTI3D_PRED_DATA, PRED_DIR
 from pipeline import compute_dx_dy
 from matplotlib.ticker import (

@@ -33,7 +33,7 @@ def calls_to(node, name):
 
 class ForceExpandValidationBaselineTests(unittest.TestCase):
     def test_config_declares_force_expand_validation_baseline_as_boolean(self):
-        config = parse_module("config.py")
+        config = parse_module("ffno/config.py")
 
         for node in config.body:
             if not isinstance(node, ast.Assign):
@@ -50,7 +50,7 @@ class ForceExpandValidationBaselineTests(unittest.TestCase):
         self.fail("FORCE_EXPAND_VALIDATION_BASELINE is not defined in config.py")
 
     def test_pipeline_passes_force_expand_validation_baseline_to_training(self):
-        pipeline = parse_module("pipeline.py")
+        pipeline = parse_module("ffno/pipeline.py")
         train_model = find_function(pipeline, "train_model")
 
         ffno_train_calls = calls_to(train_model, "ffno_train_model")
@@ -71,7 +71,7 @@ class ForceExpandValidationBaselineTests(unittest.TestCase):
         )
 
     def test_ffno_train_model_supports_forced_expand_validation_baseline(self):
-        ffnonet = parse_module("FFNONet.py")
+        ffnonet = parse_module("ffno/FFNONet.py")
         train_fn = find_function(ffnonet, "ffno_train_model")
 
         arg_names = [arg.arg for arg in train_fn.args.args]

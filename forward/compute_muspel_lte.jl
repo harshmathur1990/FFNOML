@@ -6,7 +6,7 @@ using HDF5
 
 
 function atom_file(atom_name)
-    atom_dir = normpath(joinpath(@__DIR__,"..","multi3d","input","atoms"))
+    atom_dir = normpath(joinpath(@__DIR__,"..","..","multi3d","input","atoms"))
     files = Dict(
         "H" => joinpath(atom_dir,"atom.h6_tiago2.yaml"),
         "CA" => joinpath(atom_dir,"atom.ca2.yaml"),

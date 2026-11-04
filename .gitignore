@@ -228,5 +228,5 @@ training_FFNO3D_zscale_expand_lognlte/
 examples/**/.DS_Store
 
 # UQ outputs (predictions, atlases); keep only the driver scripts
-uq/*
-!uq/*.sh
+experiments/uq/*
+!experiments/uq/*.sh

@@ -4,7 +4,7 @@
 
 : "${FFNOML_RUN_DIR:?FFNOML_RUN_DIR must be set before loading the runtime environment}"
 
-export OLIVIA_REPO_DIR=/cluster/projects/nn2834k/harshm/FFNOML/FFNOInversion.jl
+export OLIVIA_REPO_DIR=/cluster/projects/nn2834k/harshm/ARUN/FFNOInversion.jl
 export OLIVIA_ENV_SCRIPT=/cluster/home/harshm/loadnvidiampi.sh
 export OLIVIA_JULIA=/cluster/software/NRIS/neoverse_v2/software/Julia/1.12.2/bin/julia
 export OLIVIA_PYTHON=/cluster/home/harshm/nvidiaenv/bin/python3

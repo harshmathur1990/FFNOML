@@ -17,7 +17,7 @@ python_executable=${OLIVIA_PYTHON:-python3}
 master_addr=$(scontrol show hostnames "${SLURM_JOB_NODELIST}" | head -n 1)
 master_port=$((26000 + SLURM_JOB_ID % 20000))
 rendezvous_id="${SLURM_JOB_ID}-ffno-fsdp-service"
-service_script=$(realpath "${OLIVIA_REPO_DIR}/../ffno_fsdp_service.py")
+service_script=$(realpath "${OLIVIA_REPO_DIR}/../ffno/ffno_fsdp_service.py")
 manifest=$(realpath "${manifest}")
 
 echo "Launching persistent FFNO FSDP service nodes=${SLURM_NNODES} gpus_per_node=${gpus_per_node}"

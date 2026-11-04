@@ -32,7 +32,7 @@ source "${OLIVIA_ENV_SCRIPT:-/cluster/home/harshm/loadnvidiampi.sh}"
 
 repository=$(cd -- "$(dirname -- "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)
 # sbatch copies the script; prefer the checkout named by the runtime environment.
-[[ -f "${repository}/FFNONet.py" ]] || repository=$(cd -- "${OLIVIA_REPO_DIR}/.." && pwd)
+[[ -f "${repository}/ffno/FFNONet.py" ]] || repository=$(cd -- "${OLIVIA_REPO_DIR}/.." && pwd)
 script="${repository}/scripts/compare_service_with_ffnonet.py"
 atmosphere=${FFNO_COMPARE_ATMOSPHERE:-${FFNOML_RUN_DIR}/outputs/forward_atmosphere.h5}
 checkpoints=${FFNO_COMPARE_CHECKPOINT_DIR:-${FFNOML_RUN_DIR}/training_FFNO3D_zscale_expand_lognlte}

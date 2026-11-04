@@ -7,7 +7,7 @@ import unittest
 import numpy as np
 import torch
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ffno"))
 from ffno_batched_backend import BatchedFFNOBackend
 from models.ffno_model import FFNO3D
 

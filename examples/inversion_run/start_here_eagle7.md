@@ -9,7 +9,7 @@ This guide runs `FFNOInversion.jl/scripts/invert.jl` on **eagle7** (6 × Tesla T
 Use a new folder for each experiment, because output files with the same names are overwritten. Run this on eagle7, in bash:
 
 ```bash
-repo=/mn/stornext/d9/data/harshm/FFNOML
+repo=/mn/stornext/d9/data/harshm/ARUN
 run=/mn/stornext/d9/data/harshm/ffnoml_runs/forward_001
 mkdir -p "$run"
 cp -R "$repo/examples/inversion_run/." "$run/"

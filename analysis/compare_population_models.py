@@ -2,10 +2,12 @@
 
 import csv
 import os
+import sys
 
 import h5py
 import numpy as np
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ffno"))
 from config import ACTIVE_ATOMS, MODEL, MULTI3D_PRED_DATA
 from errorplots import (
     active_atom_names_tag,

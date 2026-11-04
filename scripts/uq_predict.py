@@ -45,7 +45,7 @@ import torch
 import torch.distributed as dist
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, REPO)
+sys.path.insert(0, os.path.join(REPO, "ffno"))
 
 from config import MODEL_CONFIG, MODEL_DIR  # noqa: E402
 from distributed_inference import enable_distributed_inference, partition_range  # noqa: E402

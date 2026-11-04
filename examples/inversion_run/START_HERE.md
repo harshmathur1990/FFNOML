@@ -1,6 +1,6 @@
 # Quick start: atmosphere → FFNO populations → synthetic spectra
 
-Use this guide on **Olivia**, with the updated FFNOML checkout. The entry point
+Use this guide on **Olivia**, with the updated ARUN checkout. The entry point
 is `FFNOInversion.jl/scripts/invert.jl` for both forward synthesis and inversion.
 `forward.toml` selects forward mode: the supplied full atmosphere goes through
 the HSEMHS equilibrium (or uses the thermodynamics you supply), FFNO3D populations, and spectral synthesis. No observations,
@@ -13,7 +13,7 @@ directory lives elsewhere.
 Use a new run folder for each experiment; output files with the same names are overwritten.
 
 ```bash
-repo=/cluster/projects/nn2834k/harshm/FFNOML
+repo=/cluster/projects/nn2834k/harshm/ARUN
 run=/cluster/work/projects/nn2834k/harshm/ffnoml_forward_001
 mkdir -p "$run"
 cp -R "$repo/examples/inversion_run/." "$run/"

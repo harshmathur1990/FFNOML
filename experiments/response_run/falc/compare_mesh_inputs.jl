@@ -1,6 +1,6 @@
 # What the FFNO receives on the population mesh from the z route and the log tau route (FALC): the mesh model wrapped around
 # a recorder, on the atmospheres each run wrote. Writes falc_mesh_inputs.h5 and prints the two side by side by height.
-# usage (hyades, after ~/loadgcc.sh): julia --project=FFNOInversion.jl response_run/falc/compare_mesh_inputs.jl
+# usage (hyades, after ~/loadgcc.sh): julia --project=../FFNOInversion.jl response_run/falc/compare_mesh_inputs.jl
 using FFNOInversion, HDF5, Printf
 import HSEMHS
 const R = joinpath(@__DIR__)

@@ -7,11 +7,11 @@ set -o nounset
 set -o pipefail
 
 manifest=$(realpath "${1:?usage: ffno_fsdp_service_local.sh MANIFEST.toml}")
-repository=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)        # FFNOML: ffno_fsdp_service.py, models/
+repository=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)        # ARUN: ffno_fsdp_service.py, models/
 python=${FFNO_FSDP_PYTHON:-python3}
 nproc=${FFNO_FSDP_NPROC:-$(nvidia-smi --list-gpus | wc -l)}
 port=${FFNO_FSDP_MASTER_PORT:-$((29500 + $$ % 1000))}
 echo "Launching local FFNO FSDP service on $(hostname) with ${nproc} GPUs"
 cd "${repository}"
 exec "${python}" -m torch.distributed.run --standalone --nnodes=1 --nproc_per_node="${nproc}" \
-    --master_port="${port}" "${repository}/ffno_fsdp_service.py" "${manifest}"
+    --master_port="${port}" "${repository}/ffno/ffno_fsdp_service.py" "${manifest}"

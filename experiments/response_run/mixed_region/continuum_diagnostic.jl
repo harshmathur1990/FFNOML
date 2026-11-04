@@ -2,7 +2,7 @@
 # continuum on a stored forward atmosphere: Muspel (the FFNO line with zero level populations, so no line opacity) and
 # Wittmann (a Kurucz line with log gf = -20). Prints, at each region's continuum wavelengths, the emergent intensity and
 # the ratio of extinction and source function by depth, plus the H-alpha wing that case A of check_mixed_region.jl had.
-# usage (hyades, after ~/loadgcc.sh): julia --project=FFNOInversion.jl response_run/mixed_region/continuum_diagnostic.jl [atmosphere.h5] [stride]
+# usage (hyades, after ~/loadgcc.sh): julia --project=../FFNOInversion.jl response_run/mixed_region/continuum_diagnostic.jl [atmosphere.h5] [stride]
 using FFNOInversion, HDF5, Libdl, Printf, Statistics
 import Muspel
 include(joinpath(@__DIR__, "..", "..", "FFNOInversion.jl", "scripts", "forward_atmosphere_io.jl"))

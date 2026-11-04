@@ -7,7 +7,7 @@ using HDF5
 length(ARGS) == 1 || error("usage: validate_muspel_reference.jl FNOML_ROOT")
 root = abspath(ARGS[1])
 # abspath can retain a trailing slash for the batch script's FFNOInversion.jl/..
-# argument. Use an explicit parent component: dirname(root) then names FFNOML itself.
+# argument. Use an explicit parent component: dirname(root) then names ARUN itself.
 atmosphere_dir = abspath(get(ENV,"FFNO_REFERENCE_ATMOSPHERE_DIR",
     joinpath(root,"..","bifrost_data","en024048_hion","385")))
 atmos = read_atmos_multi3d(joinpath(atmosphere_dir,"mesh"),

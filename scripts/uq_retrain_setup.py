@@ -1,6 +1,6 @@
 """Set up one branch of the controlled fine-tuning experiment (claude-next-steps-uq step 4).
 
-A branch is a run directory for `FFNOML_RUN_DIR=<dir> torchrun pipeline.py --train --resume --bestpath`:
+A branch is a run directory for `FFNOML_RUN_DIR=<dir> torchrun ffno/pipeline.py --train --resume --bestpath`:
 
     <dir>/IO/<TRAIN_FILE name>   HDF5 of external links: the production training groups plus one
                                  group per --add snapshot, with the production normalization copied
@@ -25,7 +25,7 @@ import sys
 import h5py
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, REPO)
+sys.path.insert(0, os.path.join(REPO, "ffno"))
 
 import config  # noqa: E402
 

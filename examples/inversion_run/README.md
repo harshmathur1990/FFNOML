@@ -22,7 +22,7 @@ Do not compile or link an x86-64 login-node copy into the run directory.
 Prepare and submit:
 
 ```bash
-repo=/path/to/permanent/FFNOML
+repo=/path/to/permanent/ARUN
 run=/path/to/hot/ffnoml_inversion_run1
 
 mkdir -p "$run"

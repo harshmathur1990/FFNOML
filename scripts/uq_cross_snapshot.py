@@ -13,7 +13,7 @@ import h5py
 import numpy as np
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, REPO)
+sys.path.insert(0, os.path.join(REPO, "ffno"))
 
 from config import TRAIN_SPLIT, VAL_SPLIT  # noqa: E402
 from uq_error_atlas import REGIMES  # noqa: E402

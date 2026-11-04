@@ -31,7 +31,7 @@ import h5py
 import numpy as np
 
 REPOSITORY = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPOSITORY))
+sys.path.insert(0, str(REPOSITORY / "ffno"))
 
 # MULTI3D atmospheres (the training data) store velocities in km/s.
 VELOCITY_M_S_PER_KM_S = 1.0e3

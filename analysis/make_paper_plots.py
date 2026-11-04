@@ -5,6 +5,9 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 
+import os
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ffno"))
 from config import ACTIVE_ATOMS, MODEL, MODEL_DIR, MULTI3D_PRED_DATA, PRED_DIR
 
 PAPER_PLOT_ATOM = "H"

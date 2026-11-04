@@ -1,7 +1,7 @@
 # Offline test of enforcing conservation on FFNO populations: for every species alike, n_i -> n_i * (A n_H) / sum(n_i), with
 # n_H = rho / mass_per_H from the run's own atmosphere and A from the atom file. Same synthesis (H-alpha + Fe I, Ca II + Si I, vturb).
 # Nothing in FFNOInversion changes. Writes falc_<run>_norm_synthesis.h5 (same layout as the runs) for compare_rh.py; populations too.
-# usage (hyades): julia --project=FFNOInversion.jl response_run/falc/falc_mass_norm.jl run...
+# usage (hyades): julia --project=../FFNOInversion.jl response_run/falc/falc_mass_norm.jl run...
 using FFNOInversion, HDF5, Libdl, Printf
 import Muspel, HSEMHS
 const R = joinpath(@__DIR__); const A = joinpath(R, "..", "inputs")

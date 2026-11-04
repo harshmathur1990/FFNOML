@@ -1,5 +1,5 @@
 # Absolute continuum intensity near 4000 Å, FALC_82 given (nₑ, H populations), no FFNO: our synthesis at RH's wavelengths, against RH (falc_rh_air.h5).
-# usage (hyades, from response_run): julia --project=../FFNOInversion.jl falc/falc_4000.jl
+# usage (hyades, from response_run): julia --project=../../FFNOInversion.jl falc/falc_4000.jl
 using FFNOInversion, HDF5, Libdl, Printf
 import Muspel
 const F = FFNOInversion; const R = @__DIR__

@@ -23,9 +23,9 @@ Depth is the population mesh's 452 levels by default, whatever the input grid.
 Load your machine's environment first, if it has one. Then:
 
 ```bash
-repo=/path/to/FFNOML
+repo=/path/to/ARUN
 python=/path/to/python    # with CUDA torch
-git clone https://github.com/harshmathur1990/FFNOML.git "$repo"   # or your own checkout
+git clone https://github.com/harshmathur1990/ARUN.git "$repo"   # or your own checkout
 export JULIA_PKG_USE_CLI_GIT=true                                 # avoids LibGit2 errors on some systems
 julia --project="$repo/FFNOInversion.jl" -e 'using Pkg; Pkg.instantiate(); Pkg.precompile()'
 cd "$repo" && "$python" -c "import torch, ffno_batched_service; print(torch.cuda.device_count(), 'GPUs')"

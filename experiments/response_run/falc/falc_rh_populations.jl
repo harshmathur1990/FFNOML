@@ -1,7 +1,7 @@
 # RH's own H and Ca II populations (pops.H.out, pops.CA.out, in falc_rh.h5) and FALC's ne in FFNOInversion's solver, in place of the
 # FFNO's: H-alpha + Fe I and Ca II + Si I, default EOS continuum, with vturb. What differs from RH's spectrum then is our solver and
 # atoms, not the FFNO. Writes falc_rhpops_synthesis.h5 (same layout as the runs).
-# usage (hyades): julia --project=FFNOInversion.jl response_run/falc/falc_rh_populations.jl
+# usage (hyades): julia --project=../FFNOInversion.jl response_run/falc/falc_rh_populations.jl
 using FFNOInversion, HDF5, Libdl, Printf
 import Muspel
 const R = joinpath(@__DIR__); const A = joinpath(R, "..", "inputs")

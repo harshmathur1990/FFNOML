@@ -10,7 +10,7 @@
 #    arrays the FFNO receives — at the mesh levels nearest z = 0, 300 and 1200 km; also the unshifted ray features and
 #    the Bifrost cube at the same heights (heights in the HSEMHS gauge: Bifrost z − z_ref).
 #
-# usage: julia --project=FFNOInversion.jl -t 32 ffno_input_maps.jl MU AZIMUTH_DEG OUT.h5
+# usage: julia --project=../FFNOInversion.jl -t 32 ffno_input_maps.jl MU AZIMUTH_DEG OUT.h5
 using FFNOInversion, HDF5, Printf
 import HSEMHS
 const F=FFNOInversion

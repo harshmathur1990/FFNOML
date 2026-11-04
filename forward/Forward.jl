@@ -129,7 +129,7 @@ for item in pred_items:
     ]))
 """
 
-    output = cd(@__DIR__) do
+    output = cd(joinpath(@__DIR__,"..","ffno")) do
         command = isnothing(predname) ? `python3 -c $script` : `python3 -c $script $predname`
         read(command, String)
     end
@@ -187,7 +187,7 @@ end
 
 function all_atom_configs(pred)
     snapshot_dir = dirname(pred.mesh_file)
-    atom_dir = normpath(joinpath(@__DIR__,"..","multi3d","input","atoms"))
+    atom_dir = normpath(joinpath(@__DIR__,"..","..","multi3d","input","atoms"))
 
     return [
         (

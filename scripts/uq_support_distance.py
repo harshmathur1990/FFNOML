@@ -24,7 +24,7 @@ import numpy as np
 from sklearn.neighbors import NearestNeighbors
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, REPO)
+sys.path.insert(0, os.path.join(REPO, "ffno"))
 
 from config import SIMULATIONS, TRAIN_SPLIT  # noqa: E402
 from uq_error_atlas import REGIMES as ATLAS_REGIMES, spearman  # noqa: E402

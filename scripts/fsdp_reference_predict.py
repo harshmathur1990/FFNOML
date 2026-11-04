@@ -6,7 +6,7 @@ import sys
 import torch
 import torch.distributed as dist
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ffno"))
 from config import MODEL, MODEL_CONFIG, ATOM_CONFIG
 from FFNONet import ffno_predict_populations_distributed_full
 

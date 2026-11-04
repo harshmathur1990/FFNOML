@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def julia_function_source(name):
-    source = (ROOT / "Forward.jl").read_text()
+    source = (ROOT / "forward/Forward.jl").read_text()
     start = source.index(f"function {name}(")
     next_function = source.find("\nfunction ", start + 1)
     return source[start:] if next_function == -1 else source[start:next_function]
@@ -15,7 +15,7 @@ def julia_function_source(name):
 class AtomicConsistencyCheckpointTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.source = (ROOT / "Forward.jl").read_text()
+        cls.source = (ROOT / "forward/Forward.jl").read_text()
 
     def test_staged_file_is_synced_and_validated_before_atomic_rename(self):
         function = julia_function_source("atomic_consistency_update!")

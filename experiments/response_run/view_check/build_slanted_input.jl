@@ -1,7 +1,7 @@
 # A native log-τ input for an inclined view (docs/viewing-angle/README.md), built from the Bifrost cube as in
 # ffno_input_maps.jl step 1, every STRIDE-th footprint kept, written in the run-input layout (Julia storage order,
 # (z, y, x)) and tagged with view_mu, view_azimuth_deg and view_geometry.
-# usage: julia --project=FFNOInversion.jl -t 32 build_slanted_input.jl MU AZIMUTH_DEG STRIDE OUT.h5
+# usage: julia --project=../FFNOInversion.jl -t 32 build_slanted_input.jl MU AZIMUTH_DEG STRIDE OUT.h5
 # --- the steps below are those of ffno_input_maps.jl:
 #
 # 1. Rays toward an observer at μ, φ through every footprint of the Bifrost cube (x = ξ + t (z − z_ref)): T, vx, vy,
@@ -14,7 +14,7 @@
 #    arrays the FFNO receives — at the mesh levels nearest z = 0, 300 and 1200 km; also the unshifted ray features and
 #    the Bifrost cube at the same heights (heights in the HSEMHS gauge: Bifrost z − z_ref).
 #
-# usage: julia --project=FFNOInversion.jl -t 32 ffno_input_maps.jl MU AZIMUTH_DEG OUT.h5
+# usage: julia --project=../FFNOInversion.jl -t 32 ffno_input_maps.jl MU AZIMUTH_DEG OUT.h5
 using FFNOInversion, HDF5, Printf
 import HSEMHS
 const F=FFNOInversion

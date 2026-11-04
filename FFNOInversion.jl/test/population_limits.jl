@@ -6,7 +6,7 @@ import Muspel
 # [physics] ffno_population_limit and ffno_no_inversion: what synthesis reads of an FFNO line, its gradient, and the configuration.
 @testset "FFNO population limits" begin
     F=FFNOInversion
-    atom=joinpath(@__DIR__,"..","..","response_run","inputs","atoms","atom.h6_tiago2.yaml")
+    atom=joinpath(get(ENV,"FFNO_ATOM_DIR","/mn/stornext/u3/harshm/Documents/WorkRepo/multi3d/input/atoms"),"atom.h6_tiago2.yaml")
     nz=5; nx=1; ny=1
     grid=Grid3D(VerticalAxis(:z_m,collect(range(4e6,0.0;length=nz))),[0.0],[0.0],ViewGeometry())
     temperature=reshape([9000.0,8000.0,7000.0,6000.0,5500.0],nz,1,1)
@@ -43,7 +43,7 @@ import Muspel
     # an atmosphere without rho has no total to compare with
     b=deepcopy(a); b.rho=nothing; @test ext._limited_levels(on,p,b,1,1,1)[3]==1.0
     # the abundance: Ca's limit is smaller by its abundance
-    ca=build_muspel_line_model(a,p,joinpath(@__DIR__,"..","..","response_run","inputs","atoms","atom.ca2.yaml"),5,3,5;include_continuum=false,population_limit=1.09)
+    ca=build_muspel_line_model(a,p,joinpath(get(ENV,"FFNO_ATOM_DIR","/mn/stornext/u3/harshm/Documents/WorkRepo/multi3d/input/atoms"),"atom.ca2.yaml"),5,3,5;include_continuum=false,population_limit=1.09)
     @test ca.total_per_rho≈1.09*exp10(6.34-12)/F._GIVEN_MASS_PER_H_KG
     # the gradient against finite differences, in every level and in rho, on each kind of level
     chi_bar=reshape(collect(1.0:nz*3),nz,3).*1e3; eta_bar=reshape(collect(1.0:nz*3),nz,3).*1e-9

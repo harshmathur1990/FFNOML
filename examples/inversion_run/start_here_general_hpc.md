@@ -25,8 +25,8 @@ Depth is the population mesh's 452 levels by default, whatever the input grid.
 Run this on a node of the same CPU type as the GPU nodes. Login nodes can have a different architecture (Olivia's do), and then the Julia depot and the Wittmann library must be built on the GPU nodes.
 
 ```bash
-repo=/path/to/FFNOML
-git clone https://github.com/harshmathur1990/FFNOML.git "$repo"   # or your own checkout
+repo=/path/to/ARUN
+git clone https://github.com/harshmathur1990/ARUN.git "$repo"   # or your own checkout
 export JULIA_DEPOT_PATH=/path/with/storage/julia-depot            # if the home directory has little storage
 export JULIA_PKG_USE_CLI_GIT=true                                 # avoids LibGit2 errors on some systems
 julia --project="$repo/FFNOInversion.jl" -e 'using Pkg; Pkg.instantiate(); Pkg.precompile()'
@@ -99,7 +99,7 @@ For Slurm, save this as `$run/run_batched.sbatch` and replace the placeholders. 
 #SBATCH --output=slurm-%j.out
 
 set -euo pipefail
-repo=/path/to/FFNOML
+repo=/path/to/ARUN
 run=/path/to/scratch/ffnoml_forward_001
 # load your site's Julia, Python and compiler modules here
 # export JULIA_DEPOT_PATH=/path/with/storage/julia-depot

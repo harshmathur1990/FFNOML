@@ -24,7 +24,7 @@ source /cluster/home/harshm/loadnvidia.sh
 #module load PyTorch/2.10.0
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-FFNOML_REPO_DIR=${FFNOML_REPO_DIR:-${script_dir}}
+FFNOML_REPO_DIR=${FFNOML_REPO_DIR:-${script_dir}/..}
 FFNOML_RUN_DIR=${FFNOML_RUN_DIR:-${SLURM_SUBMIT_DIR}}
 
 FFNOML_REPO_DIR=$(cd -- "${FFNOML_REPO_DIR}" && pwd)
@@ -85,7 +85,7 @@ srun --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 \
     --rdzv_id="${SLURM_JOB_ID}" \
     --rdzv_backend=c10d \
     --rdzv_endpoint="${MASTER_ADDR}:${MASTER_PORT}" \
-    pipeline.py --train \
+    ffno/pipeline.py --train \
   2>&1 | tee "${FFNOML_RUN_DIR}/output-${SLURM_JOB_ID}.txt"
 
 echo "End: $(date)"

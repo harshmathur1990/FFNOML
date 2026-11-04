@@ -2,10 +2,12 @@
 
 import argparse
 import os
+import sys
 
 import h5py
 import numpy as np
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ffno"))
 from config import ATOM_CONFIG, SIMULATIONS
 from pipeline import load_multi3d_blocks
 

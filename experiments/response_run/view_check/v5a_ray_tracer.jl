@@ -7,7 +7,7 @@
 #       of the ray, bilinear in x, y (periodic) between two levels and linear in z, at the grid levels (REFINE = 1) and
 #       at REFINE = 4 points per level interval; one column per ray through the same opacity code.
 # V3: ln n shifted by +t z and back by −t z at full resolution; relative error by height.
-# usage: julia --project=FFNOInversion.jl -t 64 v5a_ray_tracer.jl MU AZIMUTH STRIDE NRAYS OUT.h5
+# usage: julia --project=../FFNOInversion.jl -t 64 v5a_ray_tracer.jl MU AZIMUTH STRIDE NRAYS OUT.h5
 using FFNOInversion, HDF5, Printf, Random
 import Muspel
 const F=FFNOInversion

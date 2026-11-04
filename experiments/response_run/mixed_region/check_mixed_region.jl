@@ -8,7 +8,7 @@
 # (two continuum packages, one unit), C against A at the FFNO line core (an undropped LTE copy would change it), the
 # blend's depth in B and C, and C against D.
 # usage (hyades, after ~/loadgcc.sh):
-#   julia --project=FFNOInversion.jl response_run/mixed_region/check_mixed_region.jl [atmosphere.h5] [stride]
+#   julia --project=../FFNOInversion.jl response_run/mixed_region/check_mixed_region.jl [atmosphere.h5] [stride]
 using FFNOInversion, HDF5, Libdl, Printf
 import Muspel
 include(joinpath(@__DIR__, "..", "..", "FFNOInversion.jl", "scripts", "forward_atmosphere_io.jl"))

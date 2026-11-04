@@ -141,7 +141,7 @@ try:
         import numpy as np
 
         repository = Path(os.environ["OLIVIA_REPO_DIR"])
-        sys.path.insert(0, str(repository.parent))
+        sys.path.insert(0, str(repository.parent / "ffno"))
         from distributed_inference import partition_range
         from ffno_fsdp_runtime import DistributedFSDPBackend
 
