@@ -2,7 +2,8 @@
 
 `FFNOInversion.jl` is the Julia forward-synthesis and inversion layer of FFNOML.
 It takes a 3D solar atmosphere (temperature, velocities, optional magnetic field),
-reconstructs its hydrostatic structure with HSEMHS, predicts NLTE level populations
+obtains its pressure, density, electron density and geometry (from HSEMHS by hydrostatic balance, or in forward
+synthesis from whichever of those the input supplies), predicts NLTE level populations
 with the trained FFNO3D networks, synthesizes Stokes I spectra for several spectral
 regions at once, and, in inversion mode, fits the atmosphere to observed spectra
 with a spatially coupled, bounded L-BFGS solver.
@@ -40,7 +41,7 @@ runs the same phases in the same order on every MPI rank:
 control maps (inversion only)
    │  A = A_start + interpolate(p − p_initial) on each rank's tile
    ▼
-HSEMHS equilibrium          Pgas, rho, ne, z (or log10 tau500) and chi500 from T (and B)
+equilibrium                 Pgas, rho, ne, z (or log10 tau500) and chi500: HSEMHS from T (and B), or a given atmosphere (forward only)
    ▼
 population mesh             columns mapped onto a training-like height mesh (log tau; z on request), extended above and below
    ▼
@@ -95,12 +96,17 @@ experiment.
 | Dataset | Shape | Units | Notes |
 | --- | --- | --- | --- |
 | `logtau_500` | `(z)` | log10 tau at 500 nm | log-tau runs only; strictly monotonic |
+| `log10m` | `(z)` | log10 kg m⁻², or g cm⁻² with a `units` attribute | log-m runs only; strictly monotonic |
 | `z_m` | `(z)` | m, positive upward | z runs only; either order |
 | `x_m`, `y_m` | `(x)`, `(y)` | m | required for z runs, optional for log tau; uniform and increasing |
 | `temperature` | `(time,z,y,x)` or `(z,y,x)` | K | required |
 | `vx`, `vy`, `vz` | as temperature | m/s | all three required |
 | `vturb` | as temperature | m/s | optional; zero when not mapped |
 | `Bx`, `By`, `Bz` | as temperature | T | optional, all three or none; absent means B = 0 |
+| `ne` | as temperature | m⁻³ | optional, forward only |
+| `rho` | as temperature | kg m⁻³ | optional, forward only |
+| `pgas` | as temperature | Pa | optional, forward only |
+| `hydrogen_populations` | `(level,z,y,x)`, optionally with time first | m⁻³ | optional, forward only; the last level is the protons |
 
 Dataset names are configurable in `[atmosphere.datasets]`. Set
 `[atmosphere] storage_order = "python"` for files written by NumPy/h5py or C, so
@@ -110,9 +116,10 @@ HDF5.jl files. `[inputs] time_index` (1-based) selects the snapshot.
 Inputs may be stored bottom-first or top-first. They are reversed once on read so
 that inside the package index `k = 1` is always the top of the atmosphere.
 
-Pressure, density and electron density are not inputs. They are reconstructed by
-HSEMHS. A starting atmosphere must already satisfy the physical bounds configured
-for the controls.
+In an inversion, and in a forward run given none of the optional thermodynamic fields, pressure, density and electron
+density are reconstructed by HSEMHS. Given any of them, a forward run uses them instead: see
+[A given atmosphere](#a-given-atmosphere-nₑ-ρ-p-and-hydrogen-populations-any-axis). A starting atmosphere must already satisfy
+the physical bounds configured for the controls.
 
 [`../scripts/build_input_ltau.py`](../scripts/build_input_ltau.py) builds a native
 log-tau input from a Bifrost snapshot. It writes `log10tau500`, `temperature`,
@@ -223,7 +230,7 @@ table: set `[equilibrium] eos_table_file`, or `[population.mesh] enabled = false
 
 The checked-in configs in [`../examples/inversion_run`](../examples/inversion_run)
 are commented and complete. `scripts/dry_run.jl` prints the parsed configuration.
-Unknown keys in `[equilibrium]` and its subsections are errors.
+Unknown keys in `[equilibrium]` and its subsections are errors. With a given atmosphere, `[equilibrium]` is optional and its column sections are ignored.
 
 ### Top level, `[inputs]`, `[outputs]`
 
@@ -547,14 +554,14 @@ All off by default; set them when submitting:
 
 ### Equilibrium
 
-`src/Equilibrium.jl` is the only route to pressure, density, electron density and
-the derived vertical coordinate. `prepare_equilibrium` runs once (collective);
+`src/Equilibrium.jl` holds the routes to pressure, density, electron density and
+the derived vertical coordinate. With HSEMHS, `prepare_equilibrium` runs once (collective);
 `reconstruct_equilibrium!` runs every evaluation and fills `pgas`, `rho`, `ne`, `z`,
 `logtau500` and `chi500` from T (and B) without touching T, B, velocities or vturb.
 It returns an `EquilibriumOutcome` that is identical on every rank and does not throw
 for physics failures (EOS envelope, non-finite or folded columns). Instead
-`outcome.valid` is false. With `on_nonconvergence = "reject_trial"` the solver
-rejects that trial step.
+`outcome.valid` is false. A forward run then stops with an error, and so does an inversion for now: rejecting the
+trial step, which `on_nonconvergence = "reject_trial"` will select, arrives with HSEMHS-integration Phase 4.
 
 In forward synthesis, any of nₑ, ρ, P or the hydrogen populations in the input replaces all of this: see [A given atmosphere](#a-given-atmosphere-nₑ-ρ-p-and-hydrogen-populations-any-axis).
 

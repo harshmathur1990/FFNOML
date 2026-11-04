@@ -60,7 +60,7 @@ non-SLURM launches where it defaults to Julia's active thread count.
 
 `model_factory.jl` uses these relative paths through `FFNOML_RUN_DIR`. The
 equilibrium (pressure, density, electron density, heights) comes from HSEMHS as
-configured in `[equilibrium]`; point `eos_table_file` at the HSEMHS EOS table.
+configured in `[equilibrium]`, unless a forward run supplies them; point `eos_table_file` at the HSEMHS EOS table.
 The supplied configurations set `[atmosphere].storage_order = "python"` so
 NumPy/h5py array dimensions are converted before validation and reading.
 
@@ -76,7 +76,7 @@ This needs the atmosphere and model/physics assets listed above, but no
 `inputs/observations.h5`. It returns `outputs/synthesis.h5` and
 `outputs/forward_atmosphere.h5`. Alternatively set `max_iterations = 0` in an
 inversion configuration; nodes and observations will be ignored. This is still
-HSEMHS equilibrium reconstruction followed by FFNO populations and synthesis,
+the equilibrium (HSEMHS, or a given atmosphere) followed by FFNO populations and synthesis,
 with no optimization or gradient work. The example factory currently loads both
 H and Ca assets even when only one species contributes to the configured lines.
 

@@ -10,7 +10,7 @@ The repository has two halves:
    populations for new atmospheres (single GPU, tiled, or distributed over many GPUs).
 2. **Julia: forward synthesis and 3D inversion.**
    [`FFNOInversion.jl`](FFNOInversion.jl/README.md) takes an atmosphere, reconstructs
-   its hydrostatic structure with HSEMHS, gets populations from the trained networks
+   its hydrostatic structure with HSEMHS unless a forward run supplies its thermodynamics, gets populations from the trained networks
    through a persistent multi-GPU service, synthesizes spectra (H alpha, Ca II 8542 and
    Kurucz LTE lines), and fits the whole 3D volume to observations with bounded L-BFGS.
    The networks predict on a fixed height mesh: above a column's top the atmosphere is extended

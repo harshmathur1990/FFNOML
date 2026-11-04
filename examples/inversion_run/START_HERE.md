@@ -3,7 +3,7 @@
 Use this guide on **Olivia**, with the updated FFNOML checkout. The entry point
 is `FFNOInversion.jl/scripts/invert.jl` for both forward synthesis and inversion.
 `forward.toml` selects forward mode: the supplied full atmosphere goes through
-the HSEMHS equilibrium, FFNO3D populations, and spectral synthesis. No observations,
+the HSEMHS equilibrium (or uses the thermodynamics you supply), FFNO3D populations, and spectral synthesis. No observations,
 node interpolation, derivatives, or fitting are needed.
 
 ## 1. Make a separate run folder
@@ -86,6 +86,8 @@ for files written with HDF5.jl.
 | `vx`, `vy`, `vz` | same as temperature; all three required | m/s |
 | `vturb` (optional) | same as temperature | m/s |
 | `Bx`, `By`, `Bz` (optional; supply all three) | same as temperature | tesla |
+| `ne`, `rho`, `pgas` (optional, forward only; any of them) | same as temperature | m⁻³, kg m⁻³, Pa |
+| `hydrogen_populations` (optional, forward only) | `(level,z,y,x)` or with time first; last level the protons | m⁻³ |
 
 `time_index = 1` selects the first snapshot. Enable the `vturb` mapping to read
 microturbulence; otherwise it is zero. Magnetic mappings are optional (absent means
@@ -156,7 +158,7 @@ For the printed job ID, use `squeue -j JOB_ID` and, after completion,
 A successful forward run writes:
 
 - `outputs/synthesis.h5`: `intensity` with axes `(time,Stokes,wavelength,y,x)`, `wavelength_m` (air unless `[outputs] wavelength_frame = "vacuum"`; attribute `wavelength_frame`), and provenance. Spectra include the `[observation.gaussian_psf]` blur and are in `[outputs] intensity_units` (attribute `units`) divided by the region `normalization` (dataset `normalization`).
-- `outputs/forward_atmosphere.h5`: atmospheric fields including `pgas`, `rho`, `ne`, `z`, and `populations/H` and `populations/CA` (population axes `(level,z,y,x)`). Both files record `execution_mode = "forward"`.
+- `outputs/forward_atmosphere.h5`: atmospheric fields including `pgas`, `rho`, `ne`, `z` (and `column_mass` when you supplied thermodynamics), and `populations/H` and `populations/CA` (population axes `(level,z,y,x)`). Both files record `execution_mode = "forward"`.
 
 For **inversion**, add `inputs/observations.h5`, edit `inversion.toml` to match the
 same atmosphere, wavelength grid and Gaussian PSF, then set controls,
