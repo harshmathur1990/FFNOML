@@ -17,6 +17,10 @@ atmosphere_file = "outputs/forward_atmosphere_z.h5"
 # atmos_model_format = "iris"
 # atmos_directory = "/path/to/atmos"
 # temperature_floor_k = 3250.0   # colder cells are raised to this; 0 keeps the file's temperatures. storage_order below is ignored.
+# A MULTI3D snapshot, the directory with its mesh and atm3d (forward only; [inputs] initial_atmosphere_file and [atmosphere.datasets] are then not read):
+# atmos_model_format = "multi3d"
+# atmos_directory = "/path/to/snapshot"
+# temperature_floor_k = 0.0      # the default: the file's temperatures, as MULTI3D used them. storage_order below is ignored.
 # native vertical coordinate of the input: "z" (this file), "log10tau500" (see forward.toml) or "log10m" (see forward_logm.toml)
 vertical_coordinate = "z"
 storage_order = "python"

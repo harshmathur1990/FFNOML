@@ -43,6 +43,10 @@ function _validate_hdf5_inputs(config,run_dir)
         nx,ny,nz=first(shapes)
         return directory,nothing,(nz,ny,nx)
     end
+    if config.atmosphere.model_format===:multi3d
+        directory=_run_path(run_dir,config.atmosphere.file); snapshot=FFNOInversion._multi3d_snapshot(directory)
+        return directory,nothing,(length(snapshot.z),length(snapshot.y),length(snapshot.x))
+    end
     atmosphere_path=_required_file("initial atmosphere",_run_path(run_dir,config.atmosphere.file))
     atmosphere_shape=h5open(atmosphere_path,"r") do file
         storage_order=config.atmosphere.storage_order

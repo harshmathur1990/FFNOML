@@ -235,6 +235,16 @@ that script's predictions. It is a given atmosphere on a native z grid, with ρ 
 from the headers, and `[grid]`, if set, must agree. The population mesh needs `[equilibrium] eos_table_file`, and it gives the FFNO only the mesh's heights.
 Cells colder than `[atmosphere] temperature_floor_k` (3250 K by default, as the script; 0 keeps the file's temperatures) are raised to it, and only the temperature changes. `storage_order` and `[atmosphere.datasets]` are ignored. The script's resampling is not applied: this runs on the cubes' own grid.
 
+### A MULTI3D atmosphere
+
+In forward synthesis, `[atmosphere] atmos_model_format = "multi3d"` with `atmos_directory = "..."` reads the snapshot directory of a MULTI3D run, with its `mesh` and `atm3d`, instead of
+`[inputs] initial_atmosphere_file` and `[atmosphere.datasets]`. `atm3d` holds nₑ [cm⁻³], T [K], vx, vy, vz [km s⁻¹] and ρ [g cm⁻³], Float32 in Fortran order (x, y, z). When its size shows six more
+fields, those are the hydrogen populations [cm⁻³], the last the protons, and they are used as well. Index 1 is the top, and (x, y) and the velocities stay as they are in the file, so results
+line up with MULTI3D's own outputs for the snapshot and with the predictions of `pipeline.py`, with no y flip, unlike the IRIS route. In most snapshots the mesh's y falls with the index; only the size of its spacing is used, as in `pipeline.py`. It is a given atmosphere on a native z grid, so HSEMHS isn't used: P follows
+from nₑ and ρ or the populations. Heights and the horizontal spacing come from `mesh`, and `[grid]`, if set, must agree. The population mesh needs `[equilibrium] eos_table_file`, and it gives the FFNO only the mesh's heights.
+The file's temperatures are kept unless `[atmosphere] temperature_floor_k` asks for a floor, and only the temperature then changes. `storage_order` and `[atmosphere.datasets]` are ignored.
+Positive `vz` is upward, the default of `vz_positive`.
+
 ## Configuration reference
 
 The checked-in configs in [`../examples/inversion_run`](../examples/inversion_run)
