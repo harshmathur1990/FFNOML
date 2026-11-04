@@ -17,7 +17,7 @@ struct AtmosphereInputConfig{T<:AbstractFloat}
     vturb_dataset::Union{Nothing,String}
     ne_dataset::Union{Nothing,String}      # given electron density: the truth, HSEMHS derives P and rho from it
     hydrogen_populations_dataset::Union{Nothing,String}  # with ne: the atmosphere is given, no HSEMHS (GivenAtmosphereBackend)
-    rho_dataset::Union{Nothing,String}     # with ne: the atmosphere is given, no HSEMHS; hydrogen from the EOS at (T, P)
+    rho_dataset::Union{Nothing,String}     # alone: P and ne from the EOS through HSEMHS; with ne: the atmosphere is given, no HSEMHS
 end
 
 struct ObservedDataConfig
@@ -449,8 +449,6 @@ function load_config(path::AbstractString)
     end
     haskey(datasets,"ne") || !haskey(datasets,"hydrogen_populations") || throw(ArgumentError(
         "atmosphere.datasets.hydrogen_populations needs atmosphere.datasets.ne: the two together give the atmosphere"))
-    haskey(datasets,"ne") || !haskey(datasets,"rho") || throw(ArgumentError(
-        "atmosphere.datasets.rho needs atmosphere.datasets.ne: the two together give the atmosphere"))
     haskey(datasets,"rho") && haskey(datasets,"hydrogen_populations") && throw(ArgumentError(
         "give atmosphere.datasets.rho or atmosphere.datasets.hydrogen_populations, not both: each sets the density"))
     given=haskey(datasets,"ne") && (haskey(datasets,"hydrogen_populations") || haskey(datasets,"rho"))
@@ -468,6 +466,8 @@ function load_config(path::AbstractString)
 
     forward_only || !haskey(datasets,"ne") || throw(ArgumentError(
         "atmosphere.datasets.ne is for forward synthesis only: an inversion always takes the electron density from the EOS"))
+    forward_only || !haskey(datasets,"rho") || throw(ArgumentError(
+        "atmosphere.datasets.rho is for forward synthesis only: an inversion always takes the density from the EOS"))
     forward_only || !given || throw(ArgumentError(
         "atmosphere.datasets.$(haskey(datasets,"rho") ? "rho" : "hydrogen_populations") is for forward synthesis only: an inversion always takes the density from the EOS"))
     observed=nothing; weights=nothing

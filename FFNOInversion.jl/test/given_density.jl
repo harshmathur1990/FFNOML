@@ -17,7 +17,7 @@ import Muspel
             f["x"]=4.8e4 .* collect(0:nx-1); f["y"]=4.8e4 .* collect(0:ny-1)
             f["t"]=TT; f["ne"]=ne; f["rho"]=rho; f["h"]=ones(6,nz,ny,nx); for name in ("vx","vy","vz"); f[name]=zero(TT); end
         end
-        function config(coordinate,axis;extra="rho = \"rho\"\n",mode="forward",nedata="ne = \"ne\"\n")
+        function config(coordinate,axis;extra="rho = \"rho\"\n",mode="forward",nedata="ne = \"ne\"\n",equilibrium="")
             path=joinpath(dir,"c.toml")
             write(path,"""
             mode = "$mode"
@@ -39,6 +39,7 @@ import Muspel
             vy = "vy"
             vz = "vz"
             $nedata$extra
+            $equilibrium
             [[regions]]
             start_angstrom = 6562.0
             step_angstrom = 0.1
@@ -90,7 +91,39 @@ import Muspel
         # forward only, needs ne, and one density only
         refused=try config("z","z_m = \"zm\"";mode="inversion"); "" catch e; sprint(showerror,e) end
         @test occursin("forward synthesis only",refused)
-        @test_throws ArgumentError config("z","z_m = \"zm\"";nedata="")
+        @test_throws ArgumentError config("z","z_m = \"zm\"";nedata="")   # alone, ρ goes through HSEMHS and needs [equilibrium]
         @test_throws ArgumentError config("z","z_m = \"zm\"";extra="rho = \"rho\"\nhydrogen_populations = \"h\"\n")
+
+        # ρ alone: nₑ and P from the EOS at (T, ρ), through the given-nₑ route, on every axis
+        table_file=get(ENV,"HSEMHS_EOS_TABLE","/mn/stornext/d9/data/harshm/MHS/HSEMHS/cache/eos_table_fullz.h5")
+        if isfile(table_file)
+            H=F.HSEMHS; table=H.load_table(table_file); mpi=initialize_parallel(options=ParallelOptions(threads_per_rank=1))
+            section(body)="[equilibrium]\nbackend = \"HSEMHS\"\nmodel = \"column_hse\"\neos_table_file = \"$table_file\"\n$body"
+            for (coordinate,axis,body,mode) in (("z","z_m = \"zm\"","[equilibrium.column_z]\nP_ref_pa = 1.0e5\n",:column_hse_z),
+                    ("log10m","log10m = \"lm\"","",:column_hse_logm),("log10tau500","logtau500 = \"lt\"","",:column_hse_ltau))
+                cfg=config(coordinate,axis;nedata="",equilibrium=section(body))
+                @test cfg.equilibrium.backend=="HSEMHS" && cfg.equilibrium.mode===mode
+                root=read_inversion_inputs(cfg).atmosphere
+                @test root.ne===nothing && root.pgas===nothing
+                @test root.rho≈permutedims(rho,(1,3,2)) rtol=1e-12
+                distributed=distribute_atmosphere(Float64,root,mpi)
+                backend=prepare_equilibrium(cfg.equilibrium,distributed,mpi)
+                @test backend.provenance["rho_given"]===true && !haskey(backend.provenance,"ne_given")
+                @test reconstruct_equilibrium!(backend,distributed,mpi).valid
+                a=distributed.local_atmosphere
+                @test a.rho≈permutedims(rho,(1,3,2)) rtol=1e-12                     # the input's ρ reaches the FFNO unchanged
+                for (k,x,y) in ((1,1,1),(4,2,2),(8,3,1))
+                    r,n,_,_=H.state(table,log(a.temperature[k,x,y]),log(a.pgas[k,x,y]))
+                    @test r≈log(a.rho[k,x,y]) atol=1e-7                              # P gives back ρ through the same table
+                    @test n≈log(a.ne[k,x,y]) atol=1e-7
+                end
+                @test all(diff(a.z;dims=1).<0)
+                coordinate=="z" && @test a.z[:,1,1]≈zv rtol=1e-12
+                bad=read_inversion_inputs(cfg).atmosphere; bad.rho[3,1,1]=1e30          # no EOS state: invalid, not a throw
+                d2=distribute_atmosphere(Float64,bad,mpi); b2=prepare_equilibrium(cfg.equilibrium,d2,mpi)
+                @test reconstruct_equilibrium!(b2,d2,mpi).reason===:eos_out_of_envelope
+                close_equilibrium!(b2); close_equilibrium!(backend)
+            end
+        end
     end
 end

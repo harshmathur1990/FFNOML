@@ -65,7 +65,7 @@ One-rank development runs and multi-rank production runs use the same
 | Forward synthesis (`mode = "forward"`) | Production. Native log10 tau500, native log10 column mass or native z atmospheres. |
 | Inversion (`mode = "inversion"`) | Implemented: bounded L-BFGS with matrix-free gradients, checkpoints, restart across topologies. |
 | Equilibrium | HSEMHS column HSE (`column-hse-ltau`, `column-hse-logm`, `column-hse-z`). MHS Poisson modes (`model = "mhs"`) are rejected until HSEMHS-integration Phase 4. |
-| Populations | FFNO3D through the persistent FSDP GPU service (H and Ca II, 6 levels each in the example factory). At least two GPU ranks are required. |
+| Populations | FFNO3D through the persistent FSDP GPU service (H and Ca II, 6 levels each in the example factory; at least two GPU ranks), or for forward runs on small GPUs the [batched service](#batched-forward-service-small-gpus). |
 | Spectral lines | FFNO: H alpha (`halpha`), Ca II 8542 (`ca_ii_8542`). LTE: any Kurucz line list. |
 | Viewing angle | `[view]` μ, azimuth, `plane_parallel` or `inclined`, all native coordinates, forward and inversion (ADR-013). Validated against MULTI3D at μ = 0.8. |
 | Stokes / redistribution | Stokes I, non-PRD (Release 1). The type boundaries for PRD and full Stokes exist (ADR-004) but are not implemented. |
@@ -216,13 +216,18 @@ route for a simulation's own thermodynamics: the FFNO receives the input's T, v,
 - Neutral H and protons come from the EOS at that (T, P), for χ₅₀₀, the continuum and broadening. No hydrogen is given here.
 - The geometry on each axis is as above.
 
-`datasets.rho` and `datasets.hydrogen_populations` cannot be combined, since each sets the density. The three forward routes are:
+`datasets.rho` and `datasets.hydrogen_populations` cannot be combined, since each sets the density. The forward routes are:
 
-| Datasets | P, ρ | Hydrogen | HSEMHS |
+| Datasets | P, ρ, nₑ | Hydrogen | HSEMHS |
 | --- | --- | --- | --- |
-| `ne` | EOS at (T, nₑ) | EOS | yes |
-| `ne`, `rho` | ρ given, P from n_H and nₑ | EOS at (T, P) | no |
-| `ne`, `hydrogen_populations` | from n_H and nₑ | given | no |
+| none | hydrostatic; ρ, nₑ from the EOS | EOS at (T, P) | yes |
+| `ne` | nₑ given; P, ρ from the EOS at (T, nₑ) | EOS at (T, P) | yes |
+| `rho` | ρ given; P, nₑ from the EOS at (T, ρ) | EOS at (T, P) | yes |
+| `ne`, `rho` | both given; P from n_H and nₑ | EOS at (T, P) | no |
+| `ne`, `hydrogen_populations` | nₑ given; ρ, P from n_H and nₑ | given | no |
+
+With `rho` alone, the EOS gives nₑ at (T, ρ) and the run then follows the `ne` route, so the geometry is the same as there, and the FFNO
+receives the input's ρ unchanged. A level no EOS state reaches makes the equilibrium invalid. Both routes through the EOS are LTE.
 
 ## Configuration reference
 
@@ -247,8 +252,9 @@ Unknown keys in `[equilibrium]` and its subsections are errors.
 `vturb`, `Bx`, `By`, `Bz`). There is no top-pressure or top-density option: configs
 that still contain `pressure_top_pa` or `pressure_top_dataset` are rejected.
 
-An optional `ne` dataset in `[atmosphere.datasets]` (m⁻³) is taken as the truth, **in forward synthesis only**: an inversion
-always takes nₑ from the EOS, and `load_config` refuses the dataset there. See [Equilibrium](#equilibrium).
+An optional `ne` (m⁻³) or `rho` (kg m⁻³) dataset in `[atmosphere.datasets]` is taken as the truth, **in forward synthesis only**: an inversion
+always takes them from the EOS, and `load_config` refuses them there. The routes are in the table under
+[A given atmosphere: nₑ and ρ](#a-given-atmosphere-nₑ-and-ρ-any-axis). See also [Equilibrium](#equilibrium).
 
 `vz_positive` says what a positive `vz` means in the input files. `"up"` (default) is the code's own sign, as in the
 Bifrost/MULTI3D files the FFNO was trained on (rising hot granules have positive `vz`). `"down"` negates `vz` on input
@@ -752,6 +758,36 @@ refused, so start that run fresh.
 The scheduler chooses the rank count and Julia the threads per rank. For example, a
 256-core allocation can run 16 ranks × 16 threads.
 
+### Batched forward service (small GPUs)
+
+[`../ffno_batched_service.py`](../ffno_batched_service.py) and [`../ffno_batched_backend.py`](../ffno_batched_backend.py) answer `PREDICT` for
+cubes whose activations do not fit on the GPUs, such as 504 × 504 on eagle7's T4s. They speak the FSDP service's protocol from one process with no
+torchrun, and hold the hidden states in host RAM (about 90 GB at 504 × 504 × 467) while the visible GPUs process batches. This is not tiling. The
+layers are batched only where the operator allows it: kernel-1 layers anywhere, the 2D FFT by depth plane, the vertical branch by column, the 3×3×3
+fusion convolution by depth with a one-cell overlap, and GroupNorm through streaming statistics in two passes. A batch that runs out of GPU memory is
+split and retried. **VJP and JVP requests are refused, so this is for forward runs only.**
+
+Use it by setting `FFNO_FSDP_LAUNCHER` to `scripts/ffno_batched_service_local.sh`, which the factory must pass to the launch call as
+`response_run/falc/model_factory.jl` does, with `CUDA_VISIBLE_DEVICES` choosing the GPUs and `FFNO_FSDP_PYTHON` a Python with CUDA torch.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `FFNO_BATCHED_CHUNK_DEPTH`, `FFNO_BATCHED_CHUNK_ROWS`, `FFNO_BATCHED_VERTICAL_CHUNK` | 16, 16, 1024 | batch sizes: memory and speed only |
+| `FFNO_BATCHED_VERTICAL_NORM_SLABS` | 1 | **changes the result**: see below |
+
+The FSDP routes leave the vertical branch's `out_gn` as a plain GroupNorm, so its statistics are per GPU slab and their results depend on the number of
+GPUs. `FFNO_BATCHED_VERTICAL_NORM_SLABS = N` reproduces an FSDP run on N GPUs, and 1 gives the volume statistic of `FFNO3D.forward`, on any number of GPUs.
+
+Measured on H, with `scripts/compare_batched_with_reference.py` (4 November 2026):
+
+| Case | Against | Largest difference |
+|---|---|---|
+| 256 × 256 × 350, 3 slabs | FSDP on 3 GPUs, same machine | 7.6e-6 dex (float32 rounding) |
+| 504 × 504 × 467, 32 slabs | Olivia output, 8 nodes × 4 GPUs assumed | 0.0087 dex (median 0.00065) |
+
+The 504² run took 428 s on 3 T4s, at 11 GB per GPU. `tests/test_batched_backend.py` checks equality with `FFNO3D.forward` for any batch sizes. Ca and a
+complete run through this service and synthesis have not been validated yet.
+
 ## Package layout
 
 | File | Role |
@@ -803,7 +839,7 @@ julia --project=. scripts/validate_phase6_mpi.jl
 and configuration, Wittmann and continuum opacity, population backends and the
 population mesh, synthesis and Muspel integration, the HSEMHS equilibrium, the
 Phase 5 and 6 solvers and gradients, the FSDP protocol, the correction mapping, and
-the Olivia setup and preflight scripts, and the viewing angle (`test/view_angle.jl`: geometry, Doppler, shift and
+the Olivia setup and preflight scripts, the forward routes with a given density (`test/given_density.jl`), and the viewing angle (`test/view_angle.jl`: geometry, Doppler, shift and
 transpose, slanted path, footprint synthesis, inclined population mesh, configuration, gradients at μ = 0.8 and the
 μ = 1 identity), the native column-mass axis and given atmospheres (`test/log10m_mode.jl`), and the Muspel continuum
 (`test/muspel_eos_continuum.jl`). `test/mpi_view_worker.jl` checks an inclined height-grid run on 1, 2 and 3 ranks
@@ -851,7 +887,8 @@ is about 2% at H alpha and 5% at Ca II 8542, with cores about 10% and 6% deeper.
   per control coordinate per gradient.
 - FFNO lines are limited to H alpha and Ca II 8542, with the 6-level H and Ca II
   atoms used in training.
-- The FSDP service needs CUDA (NVIDIA) GPUs and at least two GPU ranks.
+- The FSDP service needs CUDA (NVIDIA) GPUs and at least two GPU ranks. The batched service works on one GPU or more, but is forward only.
+- FSDP results depend on the number of GPUs, by up to about 0.3 dex at isolated points, because `out_gn` in the vertical branch is normalized per slab.
 - Identical input columns do not give identical FFNO spectra: on the 5 × 5 FALC models they spread by about 4% of the maximum
   intensity. The cause has not been investigated.
 - **Viewing angle:** one angle per run. Native log-τ inputs at μ < 1 must already be lines of sight on a deprojected

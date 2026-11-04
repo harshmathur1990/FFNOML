@@ -270,6 +270,7 @@ mutable struct HSEMHSBackend <: AbstractEquilibriumBackend
     provenance::Dict{String,Any}
     closed::Bool
     ne_given::Bool                    # the input supplies nₑ: HSEMHS derives P and rho from it on every reconstruction
+    given_rho::Any                    # the input supplies only ρ (forward only): nₑ from the EOS at (T, ρ), then as a given nₑ; else nothing
 end
 
 function _backend_comm(context::ParallelContext)
@@ -353,9 +354,12 @@ function _prepare_hsemhs(eq,distributed,context,synthesis_eos)
     provenance["mode"]=hsemhs_mode_name(eq.mode); provenance["gravity_m_s2"]=eq.gravity_m_s2
     is_vertical(grid.view) || merge!(provenance,view_attributes(grid.view,view_columns(grid)))
     provenance["eos_table_file"]=abspath(eq.eos_table_file); provenance["hsemhs_version"]=string(pkgversion(HSEMHS))
-    ne_given=distributed.local_atmosphere.ne!==nothing
-    ne_given && (provenance["ne_given"]=true)
-    HSEMHSBackend(eq,ws,provenance,false,ne_given)
+    a=distributed.local_atmosphere
+    given_rho=a.ne===nothing && a.rho!==nothing ? copy(a.rho) : nothing
+    ne_given=a.ne!==nothing || given_rho!==nothing
+    a.ne!==nothing && (provenance["ne_given"]=true)
+    given_rho===nothing || (provenance["rho_given"]=true)
+    HSEMHSBackend(eq,ws,provenance,false,ne_given,given_rho)
 end
 
 _zxy_to_zyx(a)=permutedims(a,(1,3,2))
@@ -364,6 +368,27 @@ function _set_field!(atmosphere,name,value)
     destination=getfield(atmosphere,name)
     destination===nothing ? setfield!(atmosphere,name,copy(value)) : copyto!(destination,value)
     nothing
+end
+
+"""
+nₑ of an atmosphere with only ρ given: the EOS state at (T, ρ) on every level. Fills `a.ne`, which the given-nₑ route then takes, and returns
+(valid, reason, messages), identical on every rank. That route's P reproduces ρ through the same table.
+"""
+function _ne_from_given_rho!(backend,a,context)
+    eos=backend.workspace.eos; T=eltype(a.temperature); nz,nx,ny=size(a.temperature); ne=fill(T(NaN),nz,nx,ny)
+    Threads.@threads for y in 1:ny
+        for x in 1:nx, k in 1:nz
+            lnT=log(Float64(a.temperature[k,x,y])); lnrho=log(Float64(backend.given_rho[k,x,y]))
+            lnP=try _mesh_lnP(eos,lnT,lnrho) catch e; e isa ErrorException || rethrow(); NaN end
+            isfinite(lnP) || continue
+            r,n,_,_=HSEMHS.state(eos,lnT,lnP)
+            isfinite(r) && abs(r-lnrho)<1e-8 && (ne[k,x,y]=T(exp(n)))
+        end
+    end
+    nbad=allreduce_sum(count(!isfinite,ne),context)
+    nbad>0 && return false,:eos_out_of_envelope,["$nbad levels have a given density no EOS state reaches at their temperature"]
+    _set_field!(a,:ne,ne)
+    true,:converged,String[]
 end
 
 """
@@ -394,11 +419,17 @@ function reconstruct_equilibrium!(backend::HSEMHSBackend,distributed::Distribute
     backend.closed && throw(ArgumentError("the equilibrium backend is closed"))
     _assert_mpi_thread(context)
     a=distributed.local_atmosphere
+    if backend.given_rho!==nothing
+        started=time()
+        valid,reason,messages=_ne_from_given_rho!(backend,a,context)
+        valid || return EquilibriumOutcome(false,reason,backend.config.model,backend.config.mode,0,time()-started,messages,nothing)
+    end
     if backend.ne_given && backend.config.mode===:column_hse_logm
         started=time()
         _forward_stage(context,"equilibrium begin mode=$(hsemhs_mode_name(backend.config.mode)) ne_given=true")
         valid,reason,messages=_given_ne_column_mass!(backend,a,context)
         _forward_stage(context,"equilibrium done seconds=$(round(time()-started;digits=1)) valid=$valid reason=$reason")
+        valid && backend.given_rho!==nothing && _set_field!(a,:rho,backend.given_rho)
         return EquilibriumOutcome(valid,reason,backend.config.model,backend.config.mode,0,time()-started,messages,nothing)
     end
     lnT=_zxy_to_zyx(log.(a.temperature))
@@ -420,7 +451,7 @@ function reconstruct_equilibrium!(backend::HSEMHSBackend,distributed::Distribute
     st=res.status
     _forward_stage(context,"equilibrium done seconds=$(round(time()-started;digits=1)) valid=$(st.valid) reason=$(st.reason)")
     if st.valid
-        _set_field!(a,:pgas,_zxy_to_zyx(res.Pgas)); _set_field!(a,:rho,_zxy_to_zyx(res.rho))
+        _set_field!(a,:pgas,_zxy_to_zyx(res.Pgas)); _set_field!(a,:rho,backend.given_rho===nothing ? _zxy_to_zyx(res.rho) : backend.given_rho)
         _set_field!(a,:ne,_zxy_to_zyx(res.ne)); _set_field!(a,:z,_zxy_to_zyx(res.z))
         _set_field!(a,:logtau500,_zxy_to_zyx(res.logtau500)); _set_field!(a,:chi500,_zxy_to_zyx(res.chi500))
         check_coordinate_consistency(a)

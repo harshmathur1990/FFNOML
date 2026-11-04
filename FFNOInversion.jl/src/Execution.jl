@@ -157,7 +157,10 @@ function read_inversion_inputs(config::RunConfig{T}) where T
         atmosphere=Atmosphere3D(grid,flip(T.(temperature)),flip(T.(vx)),flip(T.(vy)),flip(T.(vz)),flip(vturb);
             magnetic_field=magnetic,z=zfield,ne=ne===nothing ? nothing : flip(ne))
         hydrogen===nothing || set_given_state!(atmosphere,flip(hydrogen))
-        rho===nothing || set_given_density!(atmosphere,flip(rho))
+        if rho!==nothing
+            # alone, ρ is the truth and the equilibrium derives P and nₑ from it through the EOS; with nₑ the atmosphere is given
+            ne===nothing ? (atmosphere.rho=flip(rho)) : set_given_density!(atmosphere,flip(rho))
+        end
         (atmosphere=atmosphere,)
     end
     config.mode===:forward && return InversionInputBundle(atmosphere_data.atmosphere,nothing)
