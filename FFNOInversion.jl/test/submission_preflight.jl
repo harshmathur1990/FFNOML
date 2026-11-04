@@ -31,15 +31,13 @@ include(joinpath(@__DIR__,"..","scripts","preflight_olivia_inversion.jl"))
         dx_m = 1.0
         dy_m = 1.0
         [[regions]]
-        start_angstrom = 6301.0
+        start_angstrom = 8541.9
         step_angstrom = 0.1
         count = 3
         normalization = 1.0
         psf_type = "none"
         [[regions.sources]]
         mode = "ffno"
-        species = "CA"
-        line = "ca_ii_8542"
         [[regions.sources]]
         mode = "kurucz_lte"
         linelist_file = "lines.list"
@@ -53,9 +51,23 @@ include(joinpath(@__DIR__,"..","scripts","preflight_olivia_inversion.jl"))
         FFNO_INVERSION_ASSETS = Dict("fixture line list"=>joinpath(ENV["FFNOML_RUN_DIR"],"lines.list"))
         FFNO_INVERSION_GENERATED_ASSETS = Dict(
             "generated fixture"=>joinpath(ENV["FFNOML_RUN_DIR"],"generated","missing.so"))
+        ATOM_FILES = Dict(:CA=>joinpath(ENV["FFNOML_RUN_DIR"],"ca.yaml"))
         FFNO_INVERSION_FACTORY = InversionModelFactory(Dict(:CA=>6), (args...)->nothing)
         (;factory=FFNO_INVERSION_FACTORY,assets=FFNO_INVERSION_ASSETS,
           generated_assets=FFNO_INVERSION_GENERATED_ASSETS)
+        """)
+        write(joinpath(run_dir,"ca.yaml"),"""
+        element: {symbol: Ca}
+        atomic_levels:
+          lev1: {energy: {value: 0.0, unit: cm^-1}, g: 2, stage: 2, label: a}
+          lev2: {energy: {value: 13650.248, unit: cm^-1}, g: 4, stage: 2, label: b}
+          lev3: {energy: {value: 13710.9, unit: cm^-1}, g: 6, stage: 2, label: c}
+          lev4: {energy: {value: 25191.535, unit: cm^-1}, g: 2, stage: 2, label: d}
+          lev5: {energy: {value: 25414.465, unit: cm^-1}, g: 4, stage: 2, label: e}
+          ion: {energy: {value: 95751.87, unit: cm^-1}, g: 1, stage: 3, label: f}
+        radiative_bound_bound:
+          - {transition: [lev5, lev1], f_value: 0.6}
+          - {transition: [lev5, lev3], f_value: 0.06}
         """)
         write(line_list_path,"test line list\n")
         write(joinpath(run_dir,"eos_table.h5"),"placeholder HSEMHS table (preflight checks existence only)\n")
@@ -79,7 +91,7 @@ include(joinpath(@__DIR__,"..","scripts","preflight_olivia_inversion.jl"))
         @test occursin("Atmosphere storage order: PYTHON",report)
         @test occursin("shape=(2, 3, 4) (z,y,x)",report)
         @test occursin("Mode:           FORWARD",report)
-        @test occursin("FFNO CA/ca_ii_8542",report)
+        @test occursin("FFNO CA levels 3-5 8542.09 Å",report)
         @test occursin("Kurucz LTE",report)
         @test occursin("fixture line list",report)
         @test occursin("Generated inside allocated job:",report)

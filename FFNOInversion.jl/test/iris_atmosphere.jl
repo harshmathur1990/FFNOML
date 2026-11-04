@@ -30,7 +30,7 @@ using FFNOInversion
         function config(extra="";atmosphere="atmos_model_format = \"iris\"\natmos_directory = \"$atmos\"\n",mode="forward",eq="[equilibrium]\neos_table_file = \"t.h5\"\n")
             p=joinpath(dir,"c.toml")
             write(p,"""mode = "$mode"\n[inputs]\ntime_index = 1\n[outputs]\nsynthesis_file = "s.h5"\natmosphere_file = "o.h5"\n[atmosphere]\n$atmosphere$eq$extra
-            [[regions]]\nstart_angstrom = 6562.0\nstep_angstrom = 0.1\ncount = 5\nnormalization = 1.0\npsf_type = "none"\n[[regions.sources]]\nmode = "ffno"\nspecies = "H"\nline = "halpha"
+            [[regions]]\nstart_angstrom = 6562.0\nstep_angstrom = 0.1\ncount = 5\nnormalization = 1.0\npsf_type = "none"\n[[regions.sources]]\nmode = "ffno"
             [physics]\nredistribution = "non_prd"\n[observation]\nstokes = ["I"]\n[solver]\nmax_iterations = $(mode=="forward" ? 0 : 1)\n[parallel]\nenabled = false\nthreads_per_rank = 1\n""")
             load_config(p)
         end

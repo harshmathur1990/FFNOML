@@ -10,7 +10,7 @@ pgas = (dropdims(sum(H; dims=4); dims=4) .* 1.1 .+ ne) .* 1.380649e-23 .* temper
 atmosphere = FFNOInversion.Atmosphere3D(Grid3D(VerticalAxis(:z_m, z), 48e3 .* (0.0:4.0), 48e3 .* (0.0:4.0)), temperature, copy(zero3), copy(zero3), copy(zero3), vturb;
     pgas=pgas, rho=pgas .* 0, ne=ne, z=repeat(reshape(z, :, 1, 1), 1, nx, ny))
 eos = WittmannEOS(joinpath(A, "wittmann", "libwitt_ffno.$(Libdl.dlext)"), joinpath(A, "pf_Kurucz.input"))
-region = SpectralRegionConfig(655.8e-9, 0.002e-9, 701, 1.0, :none, nothing, [SpectralSourceConfig(:ffno, :H, :halpha, nothing), SpectralSourceConfig(:kurucz_lte, nothing, nothing, joinpath(R, "kurucz_halpha_blend.list"))])
+region = SpectralRegionConfig(655.8e-9, 0.002e-9, 701, 1.0, :none, nothing, [SpectralSourceConfig(:ffno, nothing), SpectralSourceConfig(:kurucz_lte, joinpath(R, "kurucz_halpha_blend.list"))])
 pops = Dict(:H => H); setup = build_synthesis_setup((regions=[region],), atmosphere, pops, eos; atom_files=Dict(:H => joinpath(A, "atoms", "atom.h6_tiago2.yaml")))
 wave = setup[1].wavelength_air_m; c = SpectralCube(zeros(length(wave), 1, nx, ny), wave, StokesSet(:I))
 synthesize!(c, setup, NonPRD(), atmosphere, pops, ThreadedSynthesisCache(Float64, nz, length(wave)))

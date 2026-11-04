@@ -67,7 +67,7 @@ One-rank development runs and multi-rank production runs use the same
 | Inversion (`mode = "inversion"`) | Implemented: bounded L-BFGS with matrix-free gradients, checkpoints, restart across topologies. |
 | Equilibrium | HSEMHS column HSE (`column-hse-ltau`, `column-hse-logm`, `column-hse-z`). MHS Poisson modes (`model = "mhs"`) are rejected until HSEMHS-integration Phase 4. |
 | Populations | FFNO3D through the persistent FSDP GPU service (H and Ca II, 6 levels each in the example factory; at least two GPU ranks), or for forward runs on small GPUs the [batched service](#batched-forward-service-small-gpus). |
-| Spectral lines | FFNO: H alpha (`halpha`), Ca II 8542 (`ca_ii_8542`). LTE: any Kurucz line list. |
+| Spectral lines | FFNO: any line of the H and Ca II atoms, found from the region (Lyman, Balmer, Paschen and Brackett lines up to n = 5; Ca II H, K and the infrared triplet). Validated for H alpha and Ca II 8542 only. LTE: any Kurucz line list. |
 | Viewing angle | `[view]` μ, azimuth, `plane_parallel` or `inclined`, all native coordinates, forward and inversion (ADR-013). Validated against MULTI3D at μ = 0.8. |
 | Stokes / redistribution | Stokes I, non-PRD (Release 1). The type boundaries for PRD and full Stokes exist (ADR-004) but are not implemented. |
 | Clusters | Olivia (Slurm `accel` partition, NVIDIA GPUs) for production; any MPI machine for CPU tests. |
@@ -306,8 +306,19 @@ Each region has one or more sources:
 
 | `mode` | Keys | Meaning |
 | --- | --- | --- |
-| `"ffno"` | `species` (`"H"`, `"CA"`), `line` (`"halpha"`, `"ca_ii_8542"`) | NLTE line from FFNO populations through Muspel |
+| `"ffno"` | none | NLTE lines from FFNO populations through Muspel: every line of the factory's `ATOM_FILES` centred in the region |
 | `"kurucz_lte"` | `linelist_file` | LTE lines from a Kurucz list, Wittmann EOS |
+
+An FFNO source names no line. `ffno_region_lines` reads the atom files and takes every bound-bound transition whose
+centre lies on the region's grid, within 20 × 2.5 km/s of its ends; its two population levels are the atom's levels
+by increasing energy, which is the FFNO's level order. Preflight and production both choose through it, and preflight prints
+what it found. A region with both Ca II H and K synthesizes both. A region with no line centre, such as a far wing alone,
+is an error that lists the available lines. Below 200 nm the grid is in vacuum, as `_air_to_vacuum_nm` treats it. `species` and `line` keys in
+older configs are ignored with a warning.
+
+Resonance lines (lower level the lowest of the ion: Lyman lines, Ca II H and K) need PRD, which is not implemented,
+so their core and near wings are not trustworthy; preflight marks them. Only H alpha and Ca II 8542 have been compared
+with RH or MULTI3D; the other lines use the same populations without such a comparison.
 
 Sources in one region share a single formal solution, so blends are synthesized
 together: Kurucz lines inside an FFNO line's window (Fe I 656.92 nm next to H alpha,
@@ -381,7 +392,7 @@ vertical one. Design, decisions and validation: [`docs/viewing-angle/README.md`]
 | Key | Meaning |
 | --- | --- |
 | `[physics] redistribution` | `"non_prd"` |
-| `[physics] line_center` | where FFNO line profiles are centred. `"reference"` (default): H alpha at 656.28 nm and Ca II at 854.209 nm (air). `"atom"`: the atom file's level energies, as RH with unmodified atoms. Kurucz lines keep their list's wavelengths |
+| `[physics] line_center` | where FFNO line profiles are centred. `"reference"` (default): the laboratory wavelength in `FFNO_REFERENCE_NM`, H alpha at 656.28 nm and Ca II 8542 at 854.209 nm (air); a line not tabulated there uses the atom's. `"atom"`: the atom file's level energies, as RH with unmodified atoms. Kurucz lines keep their list's wavelengths |
 | `[physics] ffno_population_limit` | largest total of a species' FFNO levels synthesis reads, as a multiple of what ρ holds (default `1.09`; `0` turns it off). See [FFNO population limits](#ffno-population-limits) |
 | `[physics] ffno_no_inversion` | cap the upper level where the line opacity would turn negative (default `true`) |
 | `[physics] continuum_populations` | only `"eos"` (default): one Muspel continuum per region, hydrogen from the EOS. `"ffno"` is refused. |
@@ -671,7 +682,7 @@ The inversion gradients follow both limits. They apply only to what synthesis re
 
 The default comes from the 49 MULTI3D outputs in `bifrost_data`. The H total reaches at most 1.086 of ρ/(mass per H) in 23 of the 25 H outputs. The other two, `en024031_by100_helium/109` and `qs006003_sap/689`, exceed it only in cool gas, up to 2.6e5 and 88 times, which looks like a problem in those runs and has not been traced. Ca is 1.031 everywhere. Hα is inverted in one cell of all 25, and Ca II 8542 in none.
 
-FFNO line profiles are centred by `[physics] line_center`. By default that is the reference wavelength, H alpha 656.28 nm and Ca II
+FFNO line profiles are centred by `[physics] line_center`. By default that is the reference wavelength, such as H alpha 656.28 nm and Ca II
 854.209 nm (air); only the profile's detuning moves, and the Doppler width and the transition's strength stay the atom's. With `"atom"` it is the atom
 file's level energies, about +0.16 Å at H alpha and -0.03 Å at Ca II from those references, so results differ from RH's by the differences between the
 two codes' atom files (+0.08 and -0.03 Å). Air wavelengths convert to vacuum with the same formula as RH's `air_to_vacuum`. RH's `vacuum_to_air`, which

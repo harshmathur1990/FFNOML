@@ -3,6 +3,7 @@ using FFNOInversion
 
 include("olivia_environment_setup.jl")
 include("submission_preflight.jl")
+include("atom_lines.jl")
 include("unit_types.jl")
 include("unit_nodes.jl")
 include("unit_coordinates.jl")

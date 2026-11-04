@@ -17,8 +17,8 @@ pgas = (dropdims(sum(hp; dims=4); dims=4) .* 1.1 .+ ne) .* 1.380649e-23 .* tempe
 atmosphere = FFNOInversion.Atmosphere3D(grid, temperature, copy(zero3), copy(zero3), vz, vturb;
     pgas=pgas, rho=pgas .* 0, ne=ne, z=repeat(reshape(z, :, 1, 1), 1, nx, ny))
 eos = WittmannEOS(joinpath(R, "inputs", "wittmann", "libwitt_ffno.$(Libdl.dlext)"), joinpath(R, "inputs", "pf_Kurucz.input"))
-ffno = SpectralSourceConfig(:ffno, :H, :halpha, nothing)
-fe = SpectralSourceConfig(:kurucz_lte, nothing, nothing, joinpath(R, "falc", "kurucz_halpha_blend.list"))
+ffno = SpectralSourceConfig(:ffno, nothing)
+fe = SpectralSourceConfig(:kurucz_lte, joinpath(R, "falc", "kurucz_halpha_blend.list"))
 region = SpectralRegionConfig(655.8e-9, 0.002e-9, 701, 1.0, :none, nothing, [ffno, fe])
 setup = build_synthesis_setup((regions=[region],), atmosphere, Dict(:H => hp), eos;
     atom_files=Dict(:H => joinpath(R, "inputs", "atoms", "atom.h6_tiago2.yaml")))

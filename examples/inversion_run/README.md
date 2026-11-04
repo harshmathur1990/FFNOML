@@ -89,7 +89,7 @@ H and Ca assets even when only one species contributes to the configured lines.
 - **Below a column's bottom:** a hydrostatic extension with d ln T / d ln P = `nabla` (0.13), ρ and nₑ from the EOS, velocities held.
 - **Continuum:** Muspel's, with hydrogen from the EOS (a given atmosphere's own, when given). FFNO populations never enter it.
 - **Population limits:** synthesis reads the FFNO populations with each species' total limited to `[physics] ffno_population_limit` (1.09) times what ρ holds, and without inversion (`ffno_no_inversion`), for Hα and Ca II at every temperature. The atmosphere file keeps the raw populations. See the [package README](../../FFNOInversion.jl/README.md#ffno-population-limits).
-- **Line centres:** FFNO lines are centred on H alpha 656.28 nm and Ca II 854.209 nm (air) by default. `[physics] line_center = "atom"` uses the atom file's level energies instead, which puts them about +0.16 and -0.03 Å away. Kurucz lines keep their list's wavelengths.
+- **Line centres:** FFNO lines are centred on their laboratory wavelengths by default, such as H alpha 656.28 nm and Ca II 854.209 nm (air). `[physics] line_center = "atom"` uses the atom file's level energies instead, which puts them about +0.16 and -0.03 Å away. Kurucz lines keep their list's wavelengths.
 - **Wavelengths:** `start_angstrom` is always air and synthesis always runs on the vacuum grid. `[outputs] wavelength_frame` (`"air"`, the default, or `"vacuum"`) only chooses the written `wavelength_m`; the file attribute `wavelength_frame` records it.
 
 See [the package README](../../FFNOInversion.jl/README.md#population-mesh) for the details.

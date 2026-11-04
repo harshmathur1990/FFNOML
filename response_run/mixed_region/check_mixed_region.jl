@@ -31,8 +31,8 @@ const K94 = (
     h  = "  656.2797  0.710  1.00   97492.304  1.5 3p 2P        82259.158  0.5 2s 2S       8.79 -4.50 -7.60K94  0 0  0 0.000  0 0.000    0    0              0 2487",
     ca = "  854.2091 -0.463 20.01   25414.400  1.5 4p 2P        13710.880  2.5 3d 2D       8.21 -5.53 -7.66K94  0 0  0 0.000  0 0.000    0    0              0    0")
 regions = (
-    (name="H-alpha", species=:H, line=:halpha, ffno=:h, blend=:fe, start=656.00e-9, count=601, blend_window=(656.88e-9, 656.96e-9)),
-    (name="Ca II 854.2", species=:CA, line=:ca_ii_8542, ffno=:ca, blend=:si, start=853.40e-9, count=601, blend_window=(853.58e-9, 853.66e-9)))
+    (name="H-alpha", line=:halpha, ffno=:h, blend=:fe, start=656.00e-9, count=601, blend_window=(656.88e-9, 656.96e-9)),
+    (name="Ca II 854.2", line=:ca_ii_8542, ffno=:ca, blend=:si, start=853.40e-9, count=601, blend_window=(853.58e-9, 853.66e-9)))
 
 dir = mktempdir()
 rel(a, b) = sqrt(sum(abs2, a ./ b .- 1) / length(a))
@@ -41,8 +41,8 @@ h5open(joinpath(R, "mixed_region", "mixed_region.h5"), "w") do out
 for r in regions
     blend_only = joinpath(dir, "$(r.blend).list"); write(blend_only, K94[r.blend] * "\n")
     with_ffno = joinpath(dir, "$(r.blend)_$(r.ffno).list"); write(with_ffno, K94[r.ffno] * "\n" * K94[r.blend] * "\n")
-    ffno = SpectralSourceConfig(:ffno, r.species, r.line, nothing)
-    kurucz(file) = SpectralSourceConfig(:kurucz_lte, nothing, nothing, file)
+    ffno = SpectralSourceConfig(:ffno, nothing)
+    kurucz(file) = SpectralSourceConfig(:kurucz_lte, file)
     cases = (A=[ffno], B=[kurucz(blend_only)], C=[ffno, kurucz(with_ffno)], D=[kurucz(with_ffno), ffno])
     println("\n== ", r.name)
     I = Dict{Symbol,Array{Float64,3}}(); wave = Float64[]

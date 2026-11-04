@@ -108,7 +108,7 @@ import Muspel
     @test resolve_abo_broadening(no_abo) == no_abo                              # no ABO entry: the file itself
 
     # the region's FFNO transition is dropped from its Kurucz lines, other lines are kept
-    halpha = FFNOInversion.FFNO_KURUCZ_IDENTITY[:halpha]; ca = FFNOInversion.FFNO_KURUCZ_IDENTITY[:ca_ii_8542]
+    halpha = (1, 0, 656.461e-9); ca = (20, 1, 854.444e-9)
     kept = FFNOInversion._without_ffno_transitions(lines, [halpha])
     @test sort([l.atomic_number for l in kept]) == [14, 26, 26, 26]
     @test length(FFNOInversion._without_ffno_transitions(lines, [ca])) == length(lines)

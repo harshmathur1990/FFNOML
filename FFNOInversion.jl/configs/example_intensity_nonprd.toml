@@ -59,9 +59,7 @@ psf_file = "8542.nc"
 
 # Both sources contribute to the same extinction/emissivity before transfer.
 [[regions.sources]]
-mode = "ffno"
-species = "CA"
-line = "ca_ii_8542"
+mode = "ffno"    # every line of the FFNO atoms centred in this region: levels and species come from the atom files
 
 [[regions.sources]]
 mode = "kurucz_lte"

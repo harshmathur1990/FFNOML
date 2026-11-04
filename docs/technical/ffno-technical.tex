@@ -426,7 +426,7 @@ Synthesis: \code{intensity}, \code{normalization}, \code{wavelength_m}, objectiv
 \code{[equilibrium.column_z]}&\code{anchor = bottom | top | height}, \code{P_ref_pa} (required), \code{z_ref_m}, \code{tau_top = exp_tail | half_cell | zero}, \code{n_sub}, \code{adapt}, \code{rk_tol}, \code{n_sub_max}, \code{H_max_m}, \code{mu}\\
 \code{[grid]}&\code{dx_m}, \code{dy_m}\\
 \code{[[regions]]}&\code{start_angstrom}, \code{step_angstrom}, \code{count} (always air), \code{normalization}, \code{psf_type = none | fpi | file}, \code{psf_file}\\
-\code{[[regions.sources]]}&\code{mode = ffno} with \code{species = H | CA}, \code{line = halpha | ca_ii_8542}; or \code{mode = kurucz_lte} with \code{linelist_file}\\
+\code{[[regions.sources]]}&\code{mode = ffno}, the lines following from the region; or \code{mode = kurucz_lte} with \code{linelist_file}\\
 \code{[population.mesh]}&\code{enabled} (true except on $z$), \code{bottom_m} ($-10^6$), \code{top_m} ($1.4\times10^7$), \code{spacing_m} ($2\times10^4$), \code{uniform_top_m} ($4.5\times10^6$), \code{stretch} (1.01), \code{max_spacing_m} ($10^5$), \code{nabla} (0.13), \code{corona_temperature_k} ($10^6$ from a config), \code{corona_transition_m} ($2.4\times10^5$)\\
 \code{[view]}&\code{mu} (1), \code{azimuth_deg} (0), \code{geometry = plane_parallel | inclined}\\
 \code{[physics]}&\code{redistribution = non_prd}; \code{line_center = reference | atom}; \code{continuum_populations} only \code{eos}\\
@@ -465,11 +465,7 @@ Requires \code{eos_table_file}. The struct's own default \code{corona_temperatur
 \section{Synthesis}
 
 \subsection{Setup}
-\code{build_synthesis_setup} performs all file I/O once and returns one \code{RegionSynthesisSetup} per region, holding the air grid, the vacuum grid and a \code{MixedIntensitySynthesizer}. Contributors are in this order: one \code{MuspelContinuumModel}, then each source. A Kurucz selection keeps lines within a margin of $20\times2.5$\,km\,s$^{-1}$ of the window. \code{_without_ffno_transitions} drops a line of the FFNO transition's own ion within 0.1\,nm. Levels and aliases:
-\begin{lstlisting}
-:halpha     => (:H,  line 5, lower 2, upper 3, 656.28 nm air)
-:ca_ii_8542 => (:CA, line 5, lower 3, upper 5, 854.209 nm air)
-\end{lstlisting}
+\code{build_synthesis_setup} performs all file I/O once and returns one \code{RegionSynthesisSetup} per region, holding the air grid, the vacuum grid and a \code{MixedIntensitySynthesizer}. Contributors are in this order: one \code{MuspelContinuumModel}, then each source. A Kurucz selection keeps lines within a margin of $20\times2.5$\,km\,s$^{-1}$ of the window. \code{_without_ffno_transitions} drops a line of the FFNO transition's own ion within 0.1\,nm. An FFNO source names no line: \code{ffno_region_lines} takes every transition of the atom files (\code{ffno_atom_lines}) whose centre lies on the region's grid within the same margin, and is an error when there is none. Preflight calls it too, so it reports what production will use. Population levels are the atom's levels by increasing energy, as Muspel sorts them; the line index is the position in \code{radiative_bound_bound}. So H$\alpha$ is line 5 with levels 2 and 3, and Ca\,\textsc{ii} 854.2 is line 5 with levels 3 and 5. \code{FFNO_REFERENCE_NM} holds laboratory wavelengths matched by nearest wavelength, not by level.
 
 \subsection{Opacity kernels}
 Interface: \code{add_opacity_emissivity!(chi, eta, model, wavelength, atmosphere, x, y, populations)}, which adds into \code{(nz,nlambda)} arrays. \code{chi} is in m$^{-1}$; \code{eta} is in kW\,m$^{-3}$\,sr$^{-1}$\,nm$^{-1}$ in every model (\code{source_planck}), so intensities come out in kW\,m$^{-2}$\,sr$^{-1}$\,nm$^{-1}$.

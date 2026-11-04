@@ -9,8 +9,8 @@ mass_per_H = HSEMHS.load_table("/mn/stornext/d9/data/harshm/hsemhs_env112/work/e
 @printf("mass_per_H = %.4e kg (%.3f amu)\n", mass_per_H, mass_per_H / 1.66053906660e-27)
 abund = Dict(:H => 1.0, :CA => 10^(6.34 - 12))
 eos = WittmannEOS(joinpath(A, "wittmann", "libwitt_ffno.$(Libdl.dlext)"), joinpath(A, "pf_Kurucz.input"))
-sources = ((SpectralRegionConfig(655.8e-9, 0.002e-9, 701, 1.0, :none, nothing, [SpectralSourceConfig(:ffno, :H, :halpha, nothing), SpectralSourceConfig(:kurucz_lte, nothing, nothing, joinpath(R, "kurucz_halpha_blend.list"))])),
-           (SpectralRegionConfig(853.4e-9, 0.002e-9, 601, 1.0, :none, nothing, [SpectralSourceConfig(:ffno, :CA, :ca_ii_8542, nothing), SpectralSourceConfig(:kurucz_lte, nothing, nothing, joinpath(R, "kurucz_8542_blend.list"))])))
+sources = ((SpectralRegionConfig(655.8e-9, 0.002e-9, 701, 1.0, :none, nothing, [SpectralSourceConfig(:ffno, nothing), SpectralSourceConfig(:kurucz_lte, joinpath(R, "kurucz_halpha_blend.list"))])),
+           (SpectralRegionConfig(853.4e-9, 0.002e-9, 601, 1.0, :none, nothing, [SpectralSourceConfig(:ffno, nothing), SpectralSourceConfig(:kurucz_lte, joinpath(R, "kurucz_8542_blend.list"))])))
 scale = output_intensity_scale(collect(sources), :si)
 for run in ARGS
     f = h5open(joinpath(R, "falc_$(run)_atmosphere.h5"))
