@@ -1,7 +1,7 @@
 """Control values on vertical nodes of one native coordinate kind.
 
 `nodes` may be given in either monotonic order and are in the unit of `kind`
-(`:z_m` metres or `:log10tau500` dex). Expanding onto a grid of another kind
+(`:z_m` metres, `:log10tau500` dex or `:log10m` dex of kg m^-2). Expanding onto a grid of another kind
 throws: node positions are never reinterpreted in another coordinate.
 """
 struct NodeField{T<:AbstractFloat,A<:AbstractArray{T,3}}

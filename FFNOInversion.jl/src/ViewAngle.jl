@@ -48,8 +48,8 @@ function view_attributes(v::ViewGeometry, columns::AbstractString)
         "view_columns" => columns)
 end
 
-"""Columns of an atmosphere: rays for native log τ and footprint atmospheres, Cartesian for native z."""
-view_columns(grid) = vertical_coordinate(grid) === :log10tau500 || grid.view.footprint ? "rays" : "cartesian"
+"""Columns of an atmosphere: rays for native log τ, native log m and footprint atmospheres, Cartesian for native z."""
+view_columns(grid) = vertical_coordinate(grid) !== :z_m || grid.view.footprint ? "rays" : "cartesian"
 
 """HSEMHS `ViewOptions` of a view."""
 hsemhs_view(v::ViewGeometry) = HSEMHS.ViewOptions(mu = v.mu, azimuth_deg = v.azimuth_deg, geometry = v.geometry)
@@ -65,7 +65,7 @@ function read_view_attributes(attrs)
 end
 
 """
-Check that a native log-τ input file was built for the configured view (design §8): at μ < 1 the file must carry the
+Check that a native log-τ or log-m input file was built for the configured view (design §8): at μ < 1 the file must carry the
 same μ, azimuth and geometry; a file without view attributes is a disk-centre file and is accepted only at μ = 1.
 Native-z inputs are Cartesian and need no tag.
 """
@@ -73,8 +73,8 @@ function check_input_view(file_view, view::ViewGeometry, kind::Symbol, path)
     kind === :z_m && return nothing
     if file_view === nothing
         is_vertical(view) || throw(ArgumentError(
-            "$path has no view attributes (a disk-centre, vertical-τ file) but [view] mu = $(view.mu): a native log-τ " *
-            "input at μ < 1 must hold τ along the line of sight; build it for this view and tag it with view_mu, " *
+            "$path has no view attributes (a disk-centre, vertical file) but [view] mu = $(view.mu): a native $kind " *
+            "input at μ < 1 must hold its axis along the line of sight; build it for this view and tag it with view_mu, " *
             "view_azimuth_deg and view_geometry"))
         return nothing
     end

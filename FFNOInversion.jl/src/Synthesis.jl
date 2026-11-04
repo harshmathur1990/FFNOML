@@ -63,35 +63,34 @@ end
 
 """Build and cache all line physics for configured mixed regions. This performs all file I/O. A region may combine
 FFNO and Kurucz LTE sources: their opacities and emissivities (one unit, see `source_planck`) add before a single
-formal solution, every region has one continuum whatever the order of the sources (Wittmann's with hydrogen from the EOS, or
-with `continuum_populations = :ffno` the region's first FFNO source's, with FFNO hydrogen; neutral H in line broadening
-follows the same choice), and Kurucz lines that are the region's FFNO transitions
-are dropped."""
+formal solution. Every region has one continuum, Muspel's at its central wavelength, whatever its sources: FFNO populations never
+enter it. Its hydrogen, and neutral H in line broadening, are the EOS's at (T, P), or a given atmosphere's own. Kurucz lines that are the
+region's FFNO transitions are dropped."""
 function build_synthesis_setup(config,atmosphere::Atmosphere3D,populations::AbstractDict,
                                eos::WittmannEOS;atom_files::AbstractDict)
     setups=RegionSynthesisSetup[]
-    mode=hasproperty(config,:continuum_populations) ? config.continuum_populations : :eos
-    aliases=Dict(:halpha=>(:H,5,2,3),:h_alpha=>(:H,5,2,3),:ca_ii_8542=>(:CA,5,3,5))
+    given=atmosphere.h_neutral!==nothing
+    line_center=hasproperty(config,:line_center) ? config.line_center : :reference
+    # species, line index, levels, air wavelength [nm] of the line core: the atom files' level energies put Hα 0.16 Å and Ca II 0.03 Å off
+    aliases=Dict(:halpha=>(:H,5,2,3,656.28),:h_alpha=>(:H,5,2,3,656.28),:ca_ii_8542=>(:CA,5,3,5,854.209))
     for region in config.regions
         air=wavelengths(region); vacuum=eltype(air).(_air_to_vacuum_nm.(air.*1e9).*1e-9)
         isempty(region.sources) && throw(ArgumentError("every region needs at least one opacity source"))
-        ffno_continuum=mode===:ffno ? findfirst(source->source.mode===:ffno,region.sources) : nothing
-        contributors=ffno_continuum===nothing ?
-            OpacityContributor[OpacityContributor(KuruczLTEModel(KuruczLine{Float64}[],eos;include_continuum=true))] :
-            OpacityContributor[]
+        contributors=OpacityContributor[OpacityContributor(build_muspel_continuum_model(vacuum[(length(vacuum)+1)÷2]*1e9;
+            eos=given ? nothing : WittmannKuruczState(eos)))]
         ffno_lines=[FFNO_KURUCZ_IDENTITY[source.line] for source in region.sources
                     if source.mode==:ffno && haskey(FFNO_KURUCZ_IDENTITY,source.line)]
-        for (position,source) in enumerate(region.sources)
+        for source in region.sources
             if source.mode==:ffno
                 haskey(populations,:H) || throw(ArgumentError("H FFNO populations are required for the Muspel line model"))
                 haskey(aliases,source.line) || throw(ArgumentError("unknown FFNO transition $(source.line)"))
-                species,index,lower,upper=aliases[source.line]
+                species,index,lower,upper,center_air_nm=aliases[source.line]
                 species==source.species || throw(ArgumentError("transition $(source.line) belongs to $species"))
                 haskey(populations,species) || throw(ArgumentError("missing $species FFNO populations"))
                 haskey(atom_files,species) || throw(ArgumentError("missing $species atom_file"))
                 model=build_muspel_line_model(atmosphere,populations[:H],atom_files[species],index,lower,upper;
-                    include_continuum=position==ffno_continuum,
-                    neutral_hydrogen=mode===:eos ? WittmannKuruczState(eos) : nothing)
+                    include_continuum=false,neutral_hydrogen=given ? nothing : WittmannKuruczState(eos),
+                    center_nm=line_center===:reference ? _air_to_vacuum_nm(center_air_nm) : nothing)
                 push!(contributors,OpacityContributor(model,populations[species]))
             elseif source.mode==:kurucz_lte
                 cache=load_kurucz_linelist(source.linelist_file)
@@ -168,17 +167,30 @@ emergent intensity takes the coronal source function. The grid's own Δτ500 has
 """
 _tau_integration(atmosphere)=vertical_coordinate(atmosphere.grid)===:log10tau500 && atmosphere.chi500!==nothing
 
+"""True when synthesis integrates the optical depth on the native log10 column-mass grid, dτ = (χ/ρ) dm. That needs
+the equilibrium's `rho`. It avoids the height trapezoid for the reason given at `_tau_integration`, and does not use
+the equilibrium's τ500, which on this axis is itself an output of one trapezoid per level."""
+_mass_integration(atmosphere)=vertical_coordinate(atmosphere.grid)===:log10m && atmosphere.rho!==nothing
+
+"""True when synthesis integrates on the native axis (log10 τ500 or log10 m) rather than in height."""
+_axis_integration(atmosphere)=_tau_integration(atmosphere) || _mass_integration(atmosphere)
+
 """Formal solution of one column. On a native log-tau grid the integration variable is s = -ln τ500
 (decreasing with depth index, like z): `chi` and `eta` are scaled in place by τ500/χ500, so each step's
 optical depth is the trapezoid of (χ/χ500)·τ500 in ln τ500; off the vertical the axis is τ along the line of sight,
-so nothing changes. Otherwise the path is the geometric height `z`, divided by μ off the vertical (ds = dz/μ)."""
+so nothing changes. A native column-mass grid is the same with τ500 -> m and χ500 -> ρ (m along the line of sight off
+the vertical). Otherwise the path is the geometric height `z`, divided by μ off the vertical (ds = dz/μ)."""
 function formal_column!(out,solver,chi,eta,atmosphere,x,y)
-    _tau_integration(atmosphere) || return formal_solve!(out,solver,chi,eta,_geometric_path(atmosphere,x,y))
-    coordinate=_log_tau_coordinate(atmosphere,x,y)
-    weight=_log_tau_weight(atmosphere,x,y)
+    _axis_integration(atmosphere) || return formal_solve!(out,solver,chi,eta,_geometric_path(atmosphere,x,y))
+    coordinate=_axis_coordinate(atmosphere,x,y)
+    weight=_axis_weight(atmosphere,x,y)
     chi.*=weight; eta.*=weight
     formal_solve!(out,solver,chi,eta,coordinate)
 end
+_axis_coordinate(atmosphere,x,y)=_mass_integration(atmosphere) ? _log_mass_coordinate(atmosphere) : _log_tau_coordinate(atmosphere,x,y)
+_axis_weight(atmosphere,x,y)=_mass_integration(atmosphere) ? _log_mass_weight(atmosphere,x,y) : _log_tau_weight(atmosphere,x,y)
+_log_mass_coordinate(atmosphere)=-log(eltype(atmosphere.rho)(10)) .* native_depth(atmosphere.grid)
+_log_mass_weight(atmosphere,x,y)=exp10.(native_depth(atmosphere.grid)) ./ @view(atmosphere.rho[:,x,y])
 _log_tau_coordinate(atmosphere,x,y)=-log(eltype(atmosphere.chi500)(10)) .* @view(atmosphere.logtau500[:,x,y])
 """Geometric path coordinate of column (x, y): z, or z/μ off the vertical."""
 function _geometric_path(atmosphere,x,y)
@@ -197,8 +209,8 @@ end
 """Synthesize every configured region into its slice of `cube`.
 
 The cube's wavelength axis is the regions' air-wavelength grids concatenated in configuration order (`IO.jl`).
-Each region is computed on its vacuum grid, because the Muspel line centres (from level energies) and the
-Kurucz line lists are vacuum wavelengths.
+Each region is computed on its vacuum grid, because the Muspel line centres (`[physics] line_center`) and the
+Kurucz line lists are vacuum wavelengths. `[outputs] wavelength_frame` only labels the written axis.
 """
 function synthesize!(cube::SpectralCube{T},setups::AbstractVector{<:RegionSynthesisSetup},
                      redistribution::AbstractRedistributionModel,atmosphere::Atmosphere3D,
@@ -237,8 +249,8 @@ end
 function _mixed_synthesis_cache(cube::SpectralCube{T},redistribution,atmosphere,cache) where T
     redistribution isa NonPRD || throw(ArgumentError("mixed intensity synthesis currently supports non-PRD only"))
     cube.stokes.components==(:I,) || throw(ArgumentError("mixed synthesizer supports only Stokes I"))
-    _tau_integration(atmosphere) || atmosphere.z!==nothing ||
-        throw(ArgumentError("formal synthesis requires geometrical z or (on a log-tau grid) chi500"))
+    _axis_integration(atmosphere) || atmosphere.z!==nothing ||
+        throw(ArgumentError("formal synthesis requires geometrical z, or chi500 on a log-tau grid, or rho on a log-m grid"))
     _check_synthesis_columns(atmosphere)
     nz,nx,ny=size(atmosphere.temperature); nλ=length(cube.wavelength_m)
     size(cube.data)[3:4]==(nx,ny) || throw(DimensionMismatch("spectral spatial shape mismatch"))

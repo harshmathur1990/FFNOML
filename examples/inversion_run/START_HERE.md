@@ -93,22 +93,28 @@ B = 0). Pressure, density, electron density and the derived coordinate (height f
 this log-tau input) are reconstructed by the HSEMHS equilibrium configured in
 `[equilibrium]`, rather than read as input fields.
 
+For other vertical axes start from a different template: `forward_logm.toml` for log10 column mass (dataset `log10m`, in kg m⁻²,
+or g cm⁻² with a `units` attribute) and `forward_z.toml` for height (`z_m`, `x_m`, `y_m` in metres).
+
 Before submission, set:
 
-- `[equilibrium] eos_table_file` to the HSEMHS EOS table (e.g. a link to `HSEMHS/cache/eos_table_fullz.h5`). The pressure boundary is HSEMHS's: for native log-tau input the τ-hydrostatic top closure sets it (`[equilibrium.column_ltau]`), for native-z input `[equilibrium.column_z] anchor` and `P_ref_pa` do. There is no top-pressure or top-density setting in FFNO.
+- `[equilibrium] eos_table_file` to the HSEMHS EOS table (e.g. a link to `HSEMHS/cache/eos_table_fullz.h5`). The pressure boundary is HSEMHS's: for native log-tau input the τ-hydrostatic top closure sets it (`[equilibrium.column_ltau]`), for native log-m input P = g m does (`[equilibrium.column_logm]`), for native-z input `[equilibrium.column_z] anchor` and `P_ref_pa` do. There is no top-pressure or top-density setting in FFNO.
 - `storage_order = "python"` when the atmosphere file was written by NumPy/h5py or C; the supplied template uses this setting.
 - `[grid] dx_m` and `dy_m` to the actual horizontal spacing in metres.
-- `[[regions]]` wavelengths (Å), counts and line lists. The example synthesizes H alpha and Ca II 8542 through FFNO and an LTE Fe 6302 region; only the last needs a Kurucz line list. Each region's `normalization` divides that region's spectra, written and observed, in the `[outputs] intensity_units` unit (`cgs` in the examples); overlapping regions must state the same value. Its `psf_type`/`psf_file` are checked but no per-region PSF is applied.
+- `[[regions]]` air wavelengths (Å), counts and line lists. The example synthesizes H alpha and Ca II 8542 through FFNO and an LTE Fe 6302 region; only the last needs a Kurucz line list. Each region's `normalization` divides that region's spectra, written and observed, in the `[outputs] intensity_units` unit (`cgs` in the examples); overlapping regions must state the same value. Its `psf_type`/`psf_file` are checked but no per-region PSF is applied.
 - `[observation.gaussian_psf]`: the example applies a **96 km spatial blur**. Set both spatial FWHM values to `0.0` for unblurred spectra. This section controls synthetic output even without observations.
 
 How the run treats the atmosphere (details in the [package README](../../FFNOInversion.jl/README.md#physics-and-numerics)):
 
 - **Pressure, density and electron density** come from HSEMHS: hydrostatic balance plus the EOS. A forward run may instead add `ne = "ne"` to `[atmosphere.datasets]`: nₑ is then the truth, and P and ρ come from (T, nₑ) through the EOS at every level, with no hydrostatic balance. An inversion refuses this and always takes nₑ from the EOS. On log tau, a given nₑ needs a τ axis that fits it: take it from a z run with the same `ne`.
-- **FFNO populations** are predicted on a fixed height mesh and interpolated back. This is on by default for log tau; on z add `[population.mesh] enabled = true`, which you want for anything unlike a simulation grid, such as a 1-D model.
+- **A whole given atmosphere (forward only):** add `ne` and `hydrogen_populations` (m⁻³, file axes `(level,z,y,x)`, last level the protons) and HSEMHS is not used, on any axis: the geometry follows as in RH. `[equilibrium]` is then optional, but the population mesh still needs `eos_table_file`, or `[population.mesh] enabled = false`. FFNO still predicts the line populations.
+- **FFNO populations** are predicted on a fixed height mesh and interpolated back. This is on by default for log tau and log m; on z add `[population.mesh] enabled = true`, which you want for anything unlike a simulation grid, such as a 1-D model.
 - **Above a column's top**, if the mesh goes higher, a corona is built: T rises to `corona_temperature_k` (1 MK) over `corona_transition_m` (240 km), hydrostatic from the top, with ρ and nₑ from the EOS and velocities held. `corona_temperature_k = 0` holds the top values instead.
 - **Below a column's bottom**, the column is extended hydrostatically with d ln T / d ln P = `nabla` (0.13), with ρ and nₑ from the EOS and velocities held.
 - Both extensions are the same for every species and axis, and feed only the FFNO: synthesis uses your levels.
-- **Continuum:** one per region, with hydrogen from the EOS and no FFNO populations (`[physics] continuum_populations = "eos"`, the default; `"ffno"` uses FFNO hydrogen). Neutral H in line broadening follows the same choice.
+- **Continuum:** one per region, Muspel's, with hydrogen from the EOS (a given atmosphere's own, when given) and no FFNO populations. `[physics] continuum_populations = "ffno"` is refused. Neutral H in line broadening comes from the same place.
+- **Line centres:** FFNO lines are centred on H alpha 656.28 nm and Ca II 854.209 nm (air) by default. `[physics] line_center = "atom"` uses the atom file's level energies instead, which puts them about +0.16 and -0.03 Å away. Kurucz lines keep their list's wavelengths.
+- **Wavelengths:** `start_angstrom` is always air and synthesis always runs on the vacuum grid. `[outputs] wavelength_frame` (`"air"`, the default, or `"vacuum"`) only chooses the written `wavelength_m`; the file attribute `wavelength_frame` records it.
 
 Keep `mode = "forward"`, `stokes = ["I"]`, and `redistribution = "non_prd"`
 for this starter run. Do not add nodes or a solver to `forward.toml`.
@@ -149,7 +155,7 @@ For the printed job ID, use `squeue -j JOB_ID` and, after completion,
 `slurm-JOB_ID.err`; GPU details are under `diagnostics/slurm-JOB_ID/`.
 A successful forward run writes:
 
-- `outputs/synthesis.h5`: `intensity` with axes `(time,Stokes,wavelength,y,x)`, `wavelength_m`, and provenance. Spectra include the `[observation.gaussian_psf]` blur and are in `[outputs] intensity_units` (attribute `units`) divided by the region `normalization` (dataset `normalization`).
+- `outputs/synthesis.h5`: `intensity` with axes `(time,Stokes,wavelength,y,x)`, `wavelength_m` (air unless `[outputs] wavelength_frame = "vacuum"`; attribute `wavelength_frame`), and provenance. Spectra include the `[observation.gaussian_psf]` blur and are in `[outputs] intensity_units` (attribute `units`) divided by the region `normalization` (dataset `normalization`).
 - `outputs/forward_atmosphere.h5`: atmospheric fields including `pgas`, `rho`, `ne`, `z`, and `populations/H` and `populations/CA` (population axes `(level,z,y,x)`). Both files record `execution_mode = "forward"`.
 
 For **inversion**, add `inputs/observations.h5`, edit `inversion.toml` to match the
@@ -168,7 +174,7 @@ for fitting options.
 
 ## Off disk centre
 
-To synthesize or invert at a viewing angle μ < 1, uncomment `[view]` in the configuration. A log-tau input must then
+To synthesize or invert at a viewing angle μ < 1, uncomment `[view]` in the configuration. A log-tau or log-m input must then
 already be lines of sight along that angle, tagged with `view_*` attributes; a height-grid input is used as it is.
 See [README.md](README.md#viewing-angle-off-disk-centre).
 

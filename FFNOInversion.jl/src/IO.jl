@@ -16,6 +16,7 @@ struct AtmosphereInputConfig{T<:AbstractFloat}
     magnetic_datasets::Union{Nothing,NTuple{3,String}}
     vturb_dataset::Union{Nothing,String}
     ne_dataset::Union{Nothing,String}      # given electron density: the truth, HSEMHS derives P and rho from it
+    hydrogen_populations_dataset::Union{Nothing,String}  # with ne: the atmosphere is given, no HSEMHS (GivenAtmosphereBackend)
 end
 
 struct ObservedDataConfig
@@ -36,8 +37,9 @@ struct OutputConfig
     synthesis_file::String
     atmosphere_file::String
     intensity_units::Symbol
+    wavelength_frame::Symbol   # :air or :vacuum, the frame of the written wavelength_m; the synthesis itself is always on the vacuum grid
 end
-OutputConfig(synthesis_file,atmosphere_file)=OutputConfig(synthesis_file,atmosphere_file,:si)
+OutputConfig(synthesis_file,atmosphere_file)=OutputConfig(synthesis_file,atmosphere_file,:si,:air)
 
 struct SynthesisGridConfig{T<:AbstractFloat}
     wavelength_m::Vector{T}
@@ -106,6 +108,7 @@ struct RunConfig{T<:AbstractFloat}
     view::ViewGeometry
     vz_positive::Symbol
     continuum_populations::Symbol
+    line_center::Symbol
 end
 
 """
@@ -122,12 +125,19 @@ function _vz_positive(atmos)
     value
 end
 
-"""`[physics] continuum_populations`: whether FFNO populations enter the continuum opacity. `"eos"` (default): one Wittmann
-continuum per region, hydrogen from the EOS, no FFNO populations. `"ffno"`: a region's first FFNO source supplies the continuum
-(Muspel, with FFNO neutral H and protons); a region without an FFNO source keeps the EOS continuum."""
+"""`[physics] continuum_populations`: only `"eos"`, the default. The continuum is Muspel's with hydrogen from the EOS (or a given
+atmosphere's own); FFNO populations never enter it, so `"ffno"` is refused."""
 function _continuum_populations(physics)
     value=Symbol(lowercase(String(get(physics,"continuum_populations","eos"))))
-    value in (:eos,:ffno) || throw(ArgumentError("physics.continuum_populations must be \"eos\" or \"ffno\", got \"$value\""))
+    value===:eos || throw(ArgumentError("physics.continuum_populations must be \"eos\", got \"$value\": FFNO populations never enter the continuum"))
+    value
+end
+
+"""`[physics] line_center`: where the profile of an FFNO line is centred. `"reference"` (default): the line's reference wavelength
+(`build_synthesis_setup`). `"atom"`: the atom file's own, from its level energies, as RH with unmodified atoms. Kurucz lines keep their list's."""
+function _line_center(physics)
+    value=Symbol(lowercase(String(get(physics,"line_center","reference"))))
+    value in (:reference,:atom) || throw(ArgumentError("physics.line_center must be \"reference\" or \"atom\", got \"$value\""))
     value
 end
 
@@ -222,10 +232,10 @@ function _regularization(section)
         horizontal_order=Int(get(section,"horizontal_order",1)))
 end
 
-const _NODE_KEYS = Dict(:z_m=>"z_nodes_m",:log10tau500=>"log_tau_nodes")
+const _NODE_KEYS = Dict(:z_m=>"z_nodes_m",:log10tau500=>"log_tau_nodes",:log10m=>"log_m_nodes")
 
 function _controls(section,vertical_coordinate::Symbol=:log10tau500)
-    key=_NODE_KEYS[vertical_coordinate]; other=_NODE_KEYS[vertical_coordinate===:z_m ? :log10tau500 : :z_m]
+    key=_NODE_KEYS[vertical_coordinate]
     raw_controls=get(section,"controls",Any[])
     isempty(raw_controls) && throw(ArgumentError("at least one [[inversion.controls]] entry is required"))
     controls=ControlMapConfig{Float64}[]
@@ -234,8 +244,10 @@ function _controls(section,vertical_coordinate::Symbol=:log10tau500)
         variable=get(Dict("bx"=>:Bx,"by"=>:By,"bz"=>:Bz),normalized,Symbol(normalized))
         variable in PROTOTYPE_CONTROL_VARIABLES || throw(ArgumentError(
             "inversion.controls[$i].variable=$variable is unsupported"))
-        haskey(raw,other) && throw(ArgumentError(
-            "inversion.controls[$i].$other is not valid for vertical_coordinate=$(vertical_coordinate); use $key [$(vertical_unit(vertical_coordinate))]"))
+        for other in values(_NODE_KEYS)
+            other!=key && haskey(raw,other) && throw(ArgumentError(
+                "inversion.controls[$i].$other is not valid for vertical_coordinate=$(vertical_coordinate); use $key [$(vertical_unit(vertical_coordinate))]"))
+        end
         haskey(raw,key) || throw(ArgumentError(
             "inversion.controls[$i] needs $key [$(vertical_unit(vertical_coordinate))] for vertical_coordinate=$(vertical_coordinate)"))
         nodes=Float64.(raw[key])
@@ -330,31 +342,36 @@ end
 """Native vertical coordinate, its dataset and the explicit x/y datasets.
 
 `vertical_coordinate = "z"` requires `datasets.z_m`, `x_m` and `y_m` and forbids
-`logtau500`; `"log10tau500"` requires `logtau500` and forbids `z_m`. Without the
+`logtau500` and `log10m`; `"log10tau500"` requires `logtau500` and forbids `z_m` and
+`log10m`; `"log10m"` requires `log10m` and forbids `z_m` and `logtau500`. Without the
 key, a `logtau500` dataset and no `z_m` mean the legacy log-tau input."""
 function _vertical_input(atmos,datasets)
     raw=get(atmos,"vertical_coordinate",nothing)
-    has_z=haskey(datasets,"z_m"); has_tau=haskey(datasets,"logtau500")
+    has_z=haskey(datasets,"z_m"); has_tau=haskey(datasets,"logtau500"); has_mass=haskey(datasets,"log10m")
     kind=if raw===nothing
-        has_tau && !has_z || throw(ArgumentError(
+        has_tau && !has_z && !has_mass || throw(ArgumentError(
             "atmosphere.vertical_coordinate is required unless the legacy datasets.logtau500 (and no z_m) is given"))
         :log10tau500
     else
         name=lowercase(String(raw))
-        name in ("z","z_m") ? :z_m : name in ("log10tau500","logtau500") ? :log10tau500 :
-            throw(ArgumentError("atmosphere.vertical_coordinate must be \"z\" or \"log10tau500\", got \"$raw\""))
+        name in ("z","z_m") ? :z_m : name in ("log10tau500","logtau500") ? :log10tau500 : name=="log10m" ? :log10m :
+            throw(ArgumentError("atmosphere.vertical_coordinate must be \"z\", \"log10tau500\" or \"log10m\", got \"$raw\""))
     end
     if kind===:z_m
         has_tau && throw(ArgumentError("datasets.logtau500 is not allowed with vertical_coordinate=z (native height input needs no optical depth)"))
+        has_mass && throw(ArgumentError("datasets.log10m is not allowed with vertical_coordinate=z"))
         has_z || throw(ArgumentError("vertical_coordinate=z requires datasets.z_m [m]"))
         haskey(datasets,"x_m") && haskey(datasets,"y_m") || throw(ArgumentError(
             "vertical_coordinate=z requires explicit datasets.x_m and datasets.y_m [m]"))
     else
-        has_z && throw(ArgumentError("datasets.z_m is not allowed with vertical_coordinate=log10tau500"))
-        has_tau || throw(ArgumentError("vertical_coordinate=log10tau500 requires datasets.logtau500"))
+        has_z && throw(ArgumentError("datasets.z_m is not allowed with vertical_coordinate=$kind"))
+        kind===:log10m && has_tau && throw(ArgumentError("datasets.logtau500 is not allowed with vertical_coordinate=log10m (the equilibrium derives log10 tau500)"))
+        kind===:log10tau500 && has_mass && throw(ArgumentError("datasets.log10m is not allowed with vertical_coordinate=log10tau500"))
+        kind===:log10m && !has_mass && throw(ArgumentError("vertical_coordinate=log10m requires datasets.log10m [log10 of kg m^-2]"))
+        kind===:log10tau500 && !has_tau && throw(ArgumentError("vertical_coordinate=log10tau500 requires datasets.logtau500"))
         haskey(datasets,"x_m") == haskey(datasets,"y_m") || throw(ArgumentError("give both datasets.x_m and datasets.y_m or neither"))
     end
-    vertical=String(datasets[kind===:z_m ? "z_m" : "logtau500"])
+    vertical=String(datasets[kind===:z_m ? "z_m" : kind===:log10m ? "log10m" : "logtau500"])
     x=haskey(datasets,"x_m") ? String(datasets["x_m"]) : nothing
     y=haskey(datasets,"y_m") ? String(datasets["y_m"]) : nothing
     kind,vertical,x,y
@@ -427,19 +444,26 @@ function load_config(path::AbstractString)
     any(haskey(datasets,k) for k in ("Bx","By","Bz")) && magnetic === nothing && throw(ArgumentError("provide all Bx, By and Bz datasets or none"))
     for key in ("pressure_top_pa","pressure_top_dataset")
         haskey(atmos,key) && throw(ArgumentError(
-            "atmosphere.$key is no longer accepted: the pressure boundary is set by HSEMHS; configure [equilibrium.column_z] anchor/P_ref_pa (native z) or nothing (native log tau)"))
+            "atmosphere.$key is no longer accepted: the pressure boundary is set by HSEMHS; configure [equilibrium.column_z] anchor/P_ref_pa (native z) or nothing (native log tau, log m)"))
     end
-    haskey(cfg,"equilibrium") || throw(ArgumentError("missing required configuration section [equilibrium] (backend = \"HSEMHS\", model, eos_table_file, ...)"))
-    equilibrium = _equilibrium_config(cfg["equilibrium"],vertical_coordinate,dirname(abspath(path)))
+    haskey(datasets,"ne") || !haskey(datasets,"hydrogen_populations") || throw(ArgumentError(
+        "atmosphere.datasets.hydrogen_populations needs atmosphere.datasets.ne: the two together give the atmosphere"))
+    given=haskey(datasets,"ne") && haskey(datasets,"hydrogen_populations")
+    given || haskey(cfg,"equilibrium") || throw(ArgumentError("missing required configuration section [equilibrium] (backend = \"HSEMHS\", model, eos_table_file, ...)"))
+    equilibrium = given ? _given_equilibrium_config(get(cfg,"equilibrium",Dict{String,Any}()),vertical_coordinate,dirname(abspath(path))) :
+        _equilibrium_config(cfg["equilibrium"],vertical_coordinate,dirname(abspath(path)))
     atmosphere = AtmosphereInputConfig{Float64}(String(_required(inputs,"initial_atmosphere_file")),storage_order,
         vertical_coordinate,vertical_dataset,x_dataset,y_dataset,
         String(_required(datasets,"temperature")),String(_required(datasets,"vx")),String(_required(datasets,"vy")),
         String(_required(datasets,"vz")),magnetic,
         haskey(datasets,"vturb") ? String(datasets["vturb"]) : nothing,
-        haskey(datasets,"ne") ? String(datasets["ne"]) : nothing)
+        haskey(datasets,"ne") ? String(datasets["ne"]) : nothing,
+        given ? String(datasets["hydrogen_populations"]) : nothing)
 
     forward_only || !haskey(datasets,"ne") || throw(ArgumentError(
         "atmosphere.datasets.ne is for forward synthesis only: an inversion always takes the electron density from the EOS"))
+    forward_only || !given || throw(ArgumentError(
+        "atmosphere.datasets.hydrogen_populations is for forward synthesis only: an inversion always takes the density from the EOS"))
     observed=nothing; weights=nothing
     if !forward_only
         data = _required(obs,"datasets")
@@ -448,8 +472,10 @@ function load_config(path::AbstractString)
     end
     intensity_units = Symbol(get(outputs_raw,"intensity_units","si"))
     haskey(INTENSITY_UNITS,intensity_units) || throw(ArgumentError("outputs.intensity_units must be \"si\" or \"cgs\""))
+    wavelength_frame = Symbol(lowercase(String(get(outputs_raw,"wavelength_frame","air"))))
+    wavelength_frame in (:air,:vacuum) || throw(ArgumentError("outputs.wavelength_frame must be \"air\" or \"vacuum\", got \"$wavelength_frame\""))
     outputs = OutputConfig(String(_required(outputs_raw,"synthesis_file")),String(_required(outputs_raw,"atmosphere_file")),
-                           intensity_units)
+                           intensity_units,wavelength_frame)
     outputs.synthesis_file == outputs.atmosphere_file && throw(ArgumentError("synthesis_file and atmosphere_file must differ"))
 
     stokes = StokesSet(Tuple(Symbol.(get(obs,"stokes",["I"]))))
@@ -510,21 +536,22 @@ function load_config(path::AbstractString)
         "the HSEMHS equilibrium solves on x slabs: set parallel.decomposition = \"x_slabs\" (got $(parallel.decomposition))"))
     RunConfig(atmosphere,mode,observed,weights,outputs,SynthesisGridConfig(wavelength_m,dx_m,dy_m),regions,
         observation_model,stokes,redistribution,regularization,parallel,controls,solver,time_index,equilibrium,
-        _population_mesh(get(cfg,"population",Dict{String,Any}()),vertical_coordinate),view,vz_positive,_continuum_populations(physics))
+        _population_mesh(get(cfg,"population",Dict{String,Any}()),vertical_coordinate,!isempty(equilibrium.eos_table_file)),view,vz_positive,_continuum_populations(physics),_line_center(physics))
 end
 
 const _POPULATION_MESH_KEYS=("enabled","bottom_m","top_m","spacing_m","uniform_top_m","stretch","max_spacing_m","nabla","corona_temperature_k","corona_transition_m")
 
-"""`[population.mesh]`: the height mesh FFNO runs on for a native log-tau atmosphere (on by default there;
-`enabled = false` feeds FFNO the log-tau grid). Not used for a native height grid."""
-function _population_mesh(raw,vertical_coordinate)
+"""`[population.mesh]`: the height mesh FFNO runs on for a native log-tau or log-m atmosphere (on by default there;
+`enabled = false` feeds FFNO the native grid). On a native height grid only when asked for."""
+function _population_mesh(raw,vertical_coordinate,has_table=true)
     unknown=setdiff(collect(keys(raw)),["mesh"])
     isempty(unknown) || throw(ArgumentError("unknown key(s) in [population]: $(join(sort(unknown),", "))"))
     mesh=get(raw,"mesh",Dict{String,Any}())
     unknown=setdiff(collect(keys(mesh)),collect(_POPULATION_MESH_KEYS))
     isempty(unknown) || throw(ArgumentError("unknown key(s) in [population.mesh]: $(join(sort(unknown),", "))"))
-    # on by default for log tau; a native z grid uses the mesh only when asked for
-    Bool(get(mesh,"enabled",vertical_coordinate===:log10tau500)) || return nothing
+    # on by default for log tau and log m; a native z grid uses the mesh only when asked for
+    Bool(get(mesh,"enabled",vertical_coordinate!==:z_m)) || return nothing
+    has_table || throw(ArgumentError("[population.mesh] extends the columns through the EOS table: set [equilibrium] eos_table_file, or [population.mesh] enabled = false"))
     PopulationMeshConfig(;corona_temperature_k=1.0e6,(Symbol(k)=>Float64(v) for (k,v) in mesh if k!="enabled")...)
 end
 
@@ -535,7 +562,7 @@ function dry_run_summary(config::RunConfig)
     nsources=sum(length(r.sources) for r in config.regions)
     controlvars=join(getfield.(config.controls,:variable),',')
     solver_name=config.solver isa LBFGSSolverOptions ? "bounded_lbfgs" : "prototype_pattern_search"
-    "mode=$(config.mode) observation_input=$(config.observed===nothing ? "none" : config.observed.file) atmosphere_input=$(config.atmosphere.file) atmosphere_storage_order=$(config.atmosphere.storage_order) synthesis_output=$(config.outputs.synthesis_file) intensity_units=$(config.outputs.intensity_units) atmosphere_output=$(config.outputs.atmosphere_file) time_index=$(config.time_index) vertical_coordinate=$(config.atmosphere.vertical_coordinate) vertical_dataset=$(config.atmosphere.vertical_dataset) nodes_unit=$(vertical_unit(config.atmosphere.vertical_coordinate)) dx_m=$(config.synthesis.dx_m) dy_m=$(config.synthesis.dy_m) spectral_regions=$(length(config.regions)) spectral_sources=$nsources synthesis_wavelengths=$nlambda full_grid_psf=true zero_weight_exclusion=true stokes=$(join(config.stokes.components,',')) redistribution=$(config.redistribution) continuum_populations=$(config.continuum_populations) equilibrium=HSEMHS:$(hsemhs_mode_name(config.equilibrium.mode)) eos_table=$(config.equilibrium.eos_table_file) controls=$controlvars solver=$solver_name max_iterations=$(config.solver.max_iterations) checkpoint=$(config.solver.checkpoint_path) regularized=$(join(regvars,',')) mpi=$(config.parallel.enabled) decomposition=$(config.parallel.decomposition) threads_per_rank=$(config.parallel.threads_per_rank) gpu_launcher_rank=$(config.parallel.gpu_launcher_rank) gpu_connect_timeout_seconds=$(config.parallel.gpu_connect_timeout_seconds) gpu_status_timeout_seconds=$(config.parallel.gpu_status_timeout_seconds) gpu_diagnostic_interval_seconds=$(config.parallel.gpu_diagnostic_interval_seconds)"*
+    "mode=$(config.mode) observation_input=$(config.observed===nothing ? "none" : config.observed.file) atmosphere_input=$(config.atmosphere.file) atmosphere_storage_order=$(config.atmosphere.storage_order) synthesis_output=$(config.outputs.synthesis_file) intensity_units=$(config.outputs.intensity_units) wavelength_frame=$(config.outputs.wavelength_frame) atmosphere_output=$(config.outputs.atmosphere_file) time_index=$(config.time_index) vertical_coordinate=$(config.atmosphere.vertical_coordinate) vertical_dataset=$(config.atmosphere.vertical_dataset) nodes_unit=$(vertical_unit(config.atmosphere.vertical_coordinate)) dx_m=$(config.synthesis.dx_m) dy_m=$(config.synthesis.dy_m) spectral_regions=$(length(config.regions)) spectral_sources=$nsources synthesis_wavelengths=$nlambda full_grid_psf=true zero_weight_exclusion=true stokes=$(join(config.stokes.components,',')) redistribution=$(config.redistribution) continuum_populations=$(config.continuum_populations) line_center=$(config.line_center) equilibrium=HSEMHS:$(hsemhs_mode_name(config.equilibrium.mode)) eos_table=$(config.equilibrium.eos_table_file) controls=$controlvars solver=$solver_name max_iterations=$(config.solver.max_iterations) checkpoint=$(config.solver.checkpoint_path) regularized=$(join(regvars,',')) mpi=$(config.parallel.enabled) decomposition=$(config.parallel.decomposition) threads_per_rank=$(config.parallel.threads_per_rank) gpu_launcher_rank=$(config.parallel.gpu_launcher_rank) gpu_connect_timeout_seconds=$(config.parallel.gpu_connect_timeout_seconds) gpu_status_timeout_seconds=$(config.parallel.gpu_status_timeout_seconds) gpu_diagnostic_interval_seconds=$(config.parallel.gpu_diagnostic_interval_seconds)"*
         (is_vertical(config.view) ? "" : " view_mu=$(config.view.mu) view_azimuth_deg=$(config.view.azimuth_deg) view_geometry=$(config.view.geometry)")
 end
 

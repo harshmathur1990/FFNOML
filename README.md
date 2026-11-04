@@ -15,8 +15,9 @@ The repository has two halves:
    Kurucz LTE lines), and fits the whole 3D volume to observations with bounded L-BFGS.
    The networks predict on a fixed height mesh: above a column's top the atmosphere is extended
    with a hydrostatic corona, below its bottom hydrostatically with a fixed gradient, and the
-   continuum takes its hydrogen from the EOS. A forward run may supply the electron density
-   itself, in which case P and ρ follow from it through the EOS; inversions always use the EOS.
+   continuum is Muspel's with its hydrogen from the EOS. A forward run may supply the electron density
+   itself, in which case P and ρ follow from it through the EOS, or the electron density and hydrogen
+   populations together, in which case HSEMHS is not used; inversions always use the EOS.
    [Details](FFNOInversion.jl/README.md#population-mesh).
 
 ```text
@@ -24,7 +25,7 @@ MULTI3D / Bifrost ──► pipeline.py --build ──► --train ──► chec
                                                              │
           atmosphere ──► --buildforpredict ──► --predict / --fsdppredict ──► populations (HDF5) ──► Forward.jl
                                                              │
-log-tau or z atmosphere ──► FFNOInversion.jl ── HSEMHS ── FFNO service ── synthesis ──► spectra, atmosphere
+log τ/log m/z atmosphere ─► FFNOInversion.jl ── HSEMHS ── FFNO service ── synthesis ──► spectra, atmosphere
    (any viewing angle μ)
                                   ▲                                             │
                             observations ◄──────── L-BFGS (inversion mode) ◄────┘
@@ -740,20 +741,23 @@ In brief:
   inverting) in, one synthesis HDF5 and one atmosphere HDF5 out. A TOML file
   configures the run, and a model-factory Julia file names the checkpoints and atom
   data.
-- **Vertical grids.** Native log10 tau500 (`forward.toml`, `inversion.toml`) or native
-  height z (`forward_z.toml`, `inversion_z.toml`).
+- **Vertical grids.** Native log10 tau500 (`forward.toml`, `inversion.toml`), native
+  log10 column mass (`forward_logm.toml`) or native height z (`forward_z.toml`, `inversion_z.toml`).
 - **Equilibrium.** HSEMHS column hydrostatic equilibrium reconstructs gas pressure,
   density, electron density, heights (or log tau) and the 500 nm opacity. It sets the
-  pressure boundary.
-- **Populations.** FFNO3D through the persistent service above. For log-tau
+  pressure boundary. A forward run given both nₑ and hydrogen populations does not use it,
+  and builds the geometry as RH does.
+- **Populations.** FFNO3D through the persistent service above. For log-tau and log-m
   atmospheres each column is first mapped onto a training-like height mesh
   (`[population.mesh]`), because the networks were trained on simulation height grids.
 - **Synthesis.** Any number of spectral regions, each combining FFNO lines (H alpha,
   Ca II 8542 through Muspel) and Kurucz LTE lines in one formal solution. On log-tau
-  grids the optical depth is integrated on the native tau grid, with sub-stepping
-  across opacity jumps.
+  and log-m grids the optical depth is integrated on the native grid, with sub-stepping
+  across opacity jumps. It runs on vacuum wavelengths: `[outputs] wavelength_frame` chooses
+  the written axis (air by default), and `[physics] line_center` whether FFNO lines sit at
+  their reference wavelengths (the default) or the atom file's.
 - **Viewing angle.** `[view]` μ, azimuth and `plane_parallel` or `inclined` geometry for
-  off-disk-centre observations, in both vertical coordinates, forward and inversion. Log-tau
+  off-disk-centre observations, in all vertical coordinates, forward and inversion. Log-tau and log-m
   inputs must already be lines of sight at that angle; height-grid cubes are used as they
   are, with the synthesis along slanted rays. Validated against MULTI3D at μ = 0.8. See
   [`FFNOInversion.jl/docs/viewing-angle/`](FFNOInversion.jl/docs/viewing-angle/README.md).
@@ -792,9 +796,12 @@ Map those names in the run's `[atmosphere.datasets]` with
 `storage_order = "python"`, and check the units the inversion reader expects
 (K, m/s, T).
 
+`scripts/build_input_logm.py ATMOSPHERE.nc OUTPUT.nc` does the same for a native
+log10 column-mass input, with `log10m` [m in kg m⁻²] in place of `log10tau500`.
+
 Native-z inputs need `z_m`, `x_m` and `y_m` axes in metres in addition to the fields.
 
-For an off-disk-centre (μ < 1) log-tau run the input must hold τ along the line of sight on
+For an off-disk-centre (μ < 1) log-tau or log-m run the input must hold its axis along the line of sight on
 a deprojected footprint grid, tagged with `view_mu`, `view_azimuth_deg` and
 `view_geometry`. `response_run/view_check/build_slanted_input.jl MU AZIMUTH STRIDE OUT.h5`
 builds one from the en024048 Bifrost cube (rays traced through the cube, written in the
@@ -857,7 +864,7 @@ The MPI parity checks and the Olivia regression chain are described in the
 - config values are the source of truth for splits, active atoms, paths, and model dimensions
 - `FFNOInversion.jl` overwrites its configured output files; use a new run directory per experiment
 - the inversion supports Stokes I, non-PRD synthesis and column HSE only; see the [package limitations](FFNOInversion.jl/README.md#known-limitations)
-- off-disk-centre log-tau inputs must already be lines of sight at the configured μ; a vertical-τ file run at μ < 1 is rejected
+- off-disk-centre log-tau and log-m inputs must already be lines of sight at the configured μ; a vertical-τ file run at μ < 1 is rejected
 
 ## Usage And Citation
 

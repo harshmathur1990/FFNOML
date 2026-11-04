@@ -415,13 +415,17 @@ function _mixed_synthesis_vjp!(atmosphere_bar,population_bar,model::MixedIntensi
             add_opacity_emissivity!(chi,eta,contributor.model,wavelength,atmosphere,x,y,source)
         end
         chi_bar=zeros(T,size(chi)); eta_bar=similar(chi_bar); z_bar=zeros(T,nz)
-        if _tau_integration(atmosphere)
-            # formal_column!: χ' = wχ, η' = wη with w = τ500/χ500, integrated in s = -ln τ500 (native, fixed)
-            weight=_log_tau_weight(atmosphere,x,y)
+        if _axis_integration(atmosphere)
+            # formal_column!: χ' = wχ, η' = wη with w = τ500/χ500 integrated in s = -ln τ500, or w = m/ρ in s = -ln m (native, fixed)
+            weight=_axis_weight(atmosphere,x,y)
             _formal_solve_vjp!(chi_bar,eta_bar,z_bar,model.solver,chi.*weight,eta.*weight,
-                _log_tau_coordinate(atmosphere,x,y),@view(intrinsic_bar[:,1,x,y]))
+                _axis_coordinate(atmosphere,x,y),@view(intrinsic_bar[:,1,x,y]))
             weight_bar=vec(sum(chi_bar.*chi.+eta_bar.*eta;dims=2))
-            @views atmosphere_bar.chi500[:,x,y].-=weight_bar.*weight./atmosphere.chi500[:,x,y]
+            if _mass_integration(atmosphere)
+                @views atmosphere_bar.rho[:,x,y].-=weight_bar.*weight./atmosphere.rho[:,x,y]
+            else
+                @views atmosphere_bar.chi500[:,x,y].-=weight_bar.*weight./atmosphere.chi500[:,x,y]
+            end
             chi_bar.*=weight; eta_bar.*=weight
         else
             _formal_solve_vjp!(chi_bar,eta_bar,z_bar,model.solver,chi,eta,
