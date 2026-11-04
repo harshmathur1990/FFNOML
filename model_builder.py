@@ -106,6 +106,12 @@ class ModelBuilder:
 
     def wrap_model(self, model):
 
+        if self.multi_gpu and os.environ.get("FFNOML_TRAIN_ONLY"):
+            # FSDP makes every wrapped unit's output require grad, so frozen blocks would still be
+            # recomputed and backpropagated; DDP synchronizes only the trainable parameters.
+            from torch.nn.parallel import DistributedDataParallel
+            return DistributedDataParallel(model, device_ids=[torch.cuda.current_device()])
+
         if self.multi_gpu:
 
             auto_wrap_policy = partial(
@@ -124,6 +130,13 @@ class ModelBuilder:
     def build_model(self, wrap_fsdp=True):
 
         model = self.model_cls(**self.model_config)
+
+        # FFNOML_TRAIN_ONLY=proj1,proj2 trains only those top-level submodules (others frozen)
+        train_only = os.environ.get("FFNOML_TRAIN_ONLY")
+        if train_only:
+            keep = set(train_only.split(","))
+            for name, param in model.named_parameters():
+                param.requires_grad = name.split(".")[0] in keep
 
         model = model.to(self.device)
 

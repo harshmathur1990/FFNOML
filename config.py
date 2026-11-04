@@ -179,7 +179,8 @@ ATOM_CONFIG = {
     }
 }
 
-ACTIVE_ATOMS = ["H"]
+# FFNOML_ACTIVE_ATOMS (comma-separated) and FFNOML_NUM_EPOCHS override these for scripted experiments
+ACTIVE_ATOMS = os.environ.get("FFNOML_ACTIVE_ATOMS", "H").split(",")
 MULTI3D_TRAIN_DATA = build_multi3d_entries(TRAIN_SPLIT)
 MULTI3D_VAL_DATA   = build_multi3d_entries(VAL_SPLIT)
 
@@ -296,7 +297,7 @@ TEST_FILE = os.path.join(
 
 
 # Training Params
-NUM_EPOCHS = 400
+NUM_EPOCHS = int(os.environ.get("FFNOML_NUM_EPOCHS", 400))
 BATCH_SIZE = 1
 LEARNING_RATE = 1e-3
 MIN_LEARNING_RATE = 1e-8
