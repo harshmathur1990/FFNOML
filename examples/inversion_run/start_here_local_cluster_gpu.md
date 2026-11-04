@@ -85,7 +85,7 @@ nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv,noheader
 free -g
 ```
 
-Write the run script, then edit the GPU list and thread count:
+Write the run script, then edit the GPU list and set the threads to the cores you can use:
 
 ```bash
 cat > "$run/run_local.sh" <<EOF

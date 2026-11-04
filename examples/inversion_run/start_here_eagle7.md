@@ -102,14 +102,14 @@ export FFNO_GPU_CONTROL_HOST=127.0.0.1
 export CUDA_VISIBLE_DEVICES=3,4,5           # the free GPUs from step 4
 export FFNO_BATCHED_VERTICAL_NORM_SLABS=1   # changes the result: see below
 export OMP_NUM_THREADS=1
-export FFNO_THREADS_PER_RANK=16             # the same as --threads below
+export FFNO_THREADS_PER_RANK=64             # the same as --threads below
 cd $run
-julia --startup-file=no --project=$repo/FFNOInversion.jl --threads=16 \\
+julia --startup-file=no --project=$repo/FFNOInversion.jl --threads=64 \\
   $repo/FFNOInversion.jl/scripts/invert.jl $run/forward.toml $run/model_factory.jl
 EOF
 ```
 
-Edit the GPU list and threads if needed, then start it. `nohup` keeps it running after you log out:
+Edit the GPU list if needed, and lower the threads if others are using the CPUs, then start it. `nohup` keeps it running after you log out:
 
 ```bash
 nohup bash "$run/run_eagle7.sh" > "$run/run.log" 2>&1 &

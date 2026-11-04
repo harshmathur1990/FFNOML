@@ -10,13 +10,13 @@ end
 FFNOInversion.predict_populations!(out,m::RecordingHeights,atmosphere,cache=nothing)=
     (m.nz=size(atmosphere.temperature,1); out.=1e10 .* reshape(atmosphere.temperature./5000,size(atmosphere.temperature)...,1); out)
 
-# [population.mesh] on a native z atmosphere: off by default (FFNO on the native grid), on when asked for. The FFNO then
+# [population.mesh] on a native z atmosphere: on by default, off when asked for (FFNO on the native grid). The FFNO then
 # sees the mesh, and the populations come back on the input's heights; z is the input's, and columns are never sheared.
 @testset "Population mesh on a native z atmosphere" begin
     mktempdir() do dir
         path=joinpath(dir,"z.h5"); write_native_z_file(path)
-        @test load_config(native_z_config(dir,path)).population_mesh===nothing
-        @test population_mesh_options(load_config(native_z_config(dir,path)))===nothing
+        @test load_config(native_z_config(dir,path)).population_mesh isa PopulationMeshConfig
+        @test population_mesh_options(load_config(native_z_config(dir,path))).native_z===true
         on=load_config(native_z_config(dir,path;extra="[population.mesh]\nenabled = true\nspacing_m = 5.0e4"))
         @test on.population_mesh.spacing_m==5.0e4
         options=population_mesh_options(on)

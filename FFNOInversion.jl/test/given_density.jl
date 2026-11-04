@@ -69,6 +69,12 @@ import Muspel
         lib=joinpath(dir,"libwitt.$(Libdl.dlext)")
         run(`$(Base.julia_cmd()) --project=$(joinpath(@__DIR__,"..")) $(joinpath(@__DIR__,"..","scripts","build_wittmann_backend.jl")) $lib`)
         eos=WittmannEOS(lib,joinpath(@__DIR__,"..","..","scripts","pf_Kurucz.input"))
+        # One Pₑ solve per cell gives exactly what the separate EOS calls give, from a cool photosphere to a hot, thin corona.
+        grid_t=[t for t in (1100.0,3250.0,5778.0,9000.0,2.0e4,1.0e5,1.0e6,4.8e7),_ in 1:3,_ in 1:2]
+        grid_p=[p*exp(0.1x+0.2y) for p in (1e4,1e3,1e2,1.0,0.1,0.05,0.02,0.01),x in 1:3,y in 1:2]
+        for (once,separately) in zip(F._given_hydrogen_state(eos,grid_t,grid_p),F._given_hydrogen_state_separately(eos,grid_t,grid_p))
+            @test once==separately
+        end
         context=serial_context(options=ParallelOptions(threads_per_rank=Threads.nthreads()))
         for (coordinate,axis,mode) in (("z","z_m = \"zm\"",:given_z),("log10m","log10m = \"lm\"",:given_logm),("log10tau500","logtau500 = \"lt\"",:given_ltau))
             cfg=config(coordinate,axis)

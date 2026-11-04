@@ -242,19 +242,41 @@ function _wittmann_pressure_at(eos,temperature,target,which::Symbol)
     reshape(exp.(x),size(temperature))
 end
 
-"""χ₅₀₀ of an atmosphere with a given ρ and nₑ: Muspel's continuum at 500 nm, with neutral H and protons from the EOS at (T, P)."""
-function _given_density_chi500!(a,synthesis_eos)
-    synthesis_eos===nothing && throw(ArgumentError("a given nₑ and ρ need the synthesis EOS: prepare_equilibrium(...; synthesis_eos)"))
-    state=WittmannKuruczState(synthesis_eos); nz,nx,ny=size(a.temperature)
+"""ρ, nₑ, neutral H and protons [SI] from the EOS at (T, P), with one Pₑ solve per cell."""
+function _given_hydrogen_state(synthesis_eos,temperature::Array{Float64,3},pressure::Array{Float64,3})
+    fn=Libdl.dlsym(Libdl.dlopen(synthesis_eos.library),:witt_given_state_parallel;throw_error=false)
+    fn===nothing && return _given_hydrogen_state_separately(synthesis_eos,temperature,pressure)   # a library built before this entry
+    rho=zeros(size(temperature)); ne=zeros(size(temperature)); neutral=zeros(size(temperature)); protons=zeros(size(temperature))
+    status=ccall(fn,Cint,(Cstring,Ptr{Cdouble},Ptr{Cdouble},Ptr{Cdouble},Ptr{Cdouble},Ptr{Cdouble},Ptr{Cdouble},Csize_t,Cint),
+        synthesis_eos.partition_functions,temperature,pressure,rho,ne,neutral,protons,length(rho),Threads.nthreads())
+    status==0 || throw(ErrorException("Wittmann EOS failed for one or more cells"))
+    all(isfinite,rho)&&all(>(0),rho) || throw(ErrorException("Wittmann EOS returned invalid density"))
+    all(isfinite,ne)&&all(>(0),ne) || throw(ErrorException("Wittmann EOS returned invalid electron density"))
+    rho,ne,neutral,protons
+end
+
+function _given_hydrogen_state_separately(synthesis_eos,temperature,pressure)
+    rho=zeros(size(temperature)); ne=zeros(size(temperature)); thermodynamics!(rho,ne,synthesis_eos,temperature,pressure)
+    state=WittmannKuruczState(synthesis_eos); nz,nx,ny=size(temperature)
     neutral=zeros(Float64,nz,nx,ny); protons=zeros(Float64,nz,nx,ny)
     Threads.@threads for y in 1:ny
         for x in 1:nx
-            temperature=Float64.(a.temperature[:,x,y]); pressure=Float64.(a.pgas[:,x,y])
-            neutral[:,x,y].=eos_neutral_hydrogen!(zeros(Float64,nz),state,temperature,pressure)
-            protons[:,x,y].=eos_protons(state,temperature,pressure)
+            column_t=temperature[:,x,y]; column_p=pressure[:,x,y]
+            neutral[:,x,y].=eos_neutral_hydrogen!(zeros(Float64,nz),state,column_t,column_p)
+            protons[:,x,y].=eos_protons(state,column_t,column_p)
         end
     end
-    a.chi500=eltype(a.temperature).(given_chi500(a.temperature,a.ne,neutral,protons))
+    rho,ne,neutral,protons
+end
+
+"""ρ and nₑ, where not given, and χ₅₀₀ of a given atmosphere without hydrogen populations: Muspel's continuum at 500 nm, with neutral H and protons from the EOS at (T, P)."""
+function _given_density_chi500!(a,synthesis_eos)
+    synthesis_eos===nothing && throw(ArgumentError("a given nₑ and ρ need the synthesis EOS: prepare_equilibrium(...; synthesis_eos)"))
+    rho,ne,neutral,protons=_given_hydrogen_state(synthesis_eos,Array{Float64,3}(a.temperature),Array{Float64,3}(a.pgas))
+    S=eltype(a.temperature)
+    a.rho===nothing && (a.rho=S.(rho))
+    a.ne===nothing && (a.ne=S.(ne))
+    a.chi500=S.(given_chi500(a.temperature,a.ne,neutral,protons))
     a
 end
 
@@ -320,9 +342,12 @@ mutable struct GivenAtmosphereBackend <: AbstractEquilibriumBackend
                 a.pgas=eltype(a.temperature).(a.ne===nothing ? _wittmann_pressure_at(synthesis_eos,a.temperature,a.rho,:rho) :
                     _wittmann_pressure_at(synthesis_eos,a.temperature,a.ne,:ne))
             end
-            _given_eos_state!(a,synthesis_eos)
-            hydrogen_given ? (a.chi500=eltype(a.temperature).(given_chi500(a.temperature,a.ne,a.h_neutral,a.h_proton))) :
+            if hydrogen_given
+                _given_eos_state!(a,synthesis_eos)
+                a.chi500=eltype(a.temperature).(given_chi500(a.temperature,a.ne,a.h_neutral,a.h_proton))
+            else
                 _given_density_chi500!(a,synthesis_eos)
+            end
         end
         all(n->getfield(a,n)!==nothing,(:ne,:rho,:pgas,:chi500)) || throw(ArgumentError(
             "a given atmosphere needs ne, rho, pgas and chi500 (read_inversion_inputs and this constructor fill them from what is given)"))
