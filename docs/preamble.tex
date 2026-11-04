@@ -1,0 +1,34 @@
+% Shared preamble of the FFNOML documents (docs/physics/ffno-physics.tex, docs/technical/ffno-technical.tex).
+\documentclass[10pt]{extarticle}
+\usepackage[a4paper,margin=2cm]{geometry}
+\usepackage[T1]{fontenc}\usepackage{lmodern}\usepackage{tabularx}
+\usepackage{amsmath,amssymb,bm,enumitem,titlesec,xcolor,booktabs,array,graphicx,longtable,listings,float,caption}
+\usepackage{tikz}\usetikzlibrary{arrows.meta,positioning,calc,fit,shapes.geometric}
+\PassOptionsToPackage{obeyspaces,spaces}{url}
+\usepackage{xurl}
+\usepackage[hidelinks]{hyperref}
+\urlstyle{tt}
+\definecolor{ink}{HTML}{1F3A5F}\definecolor{boxa}{HTML}{E8F0FA}\definecolor{boxb}{HTML}{FCEFE6}\definecolor{boxc}{HTML}{E9F6F0}\definecolor{boxd}{HTML}{F3F1FB}
+\titleformat{\section}{\large\bfseries\color{ink}}{\thesection.}{0.5em}{}
+\titlespacing*{\section}{0pt}{12pt}{4pt}
+\titleformat{\subsection}{\normalsize\bfseries}{\thesubsection}{0.5em}{}
+\titlespacing*{\subsection}{0pt}{8pt}{2pt}
+\titleformat{\subsubsection}{\normalsize\itshape}{\thesubsubsection}{0.5em}{}
+\setlist{nosep,leftmargin=1.4em}
+\setlength{\parindent}{0pt}\setlength{\parskip}{5pt}
+\renewcommand{\arraystretch}{1.15}
+\captionsetup{font=small,labelfont=bf,skip=4pt}
+\newcommand{\code}[1]{\nolinkurl{#1}}
+\newcommand{\dd}{\mathrm{d}}
+\newcommand{\nel}{n_{\rm e}}
+\newcommand{\vlos}{v_{\rm los}}
+\newcommand{\vturb}{v_{\rm turb}}
+\newcommand{\Halpha}{H$\alpha$}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\newcommand{\doctitle}[2]{{\LARGE\bfseries\color{ink} #1}\\[4pt]{\small #2}\par\vspace{4pt}}
+\lstset{basicstyle=\ttfamily\footnotesize,breaklines=true,columns=fullflexible,frame=single,rulecolor=\color{black!25},xleftmargin=2pt,xrightmargin=2pt,upquote=true,keepspaces=true}
+\tikzset{box/.style={draw=ink,rounded corners=2pt,align=center,font=\footnotesize,inner sep=4pt,fill=boxa},
+  arr/.style={-{Latex[length=2mm]},draw=ink,thick}}
+\pagestyle{plain}
+\AtBeginDocument{\sloppy}
