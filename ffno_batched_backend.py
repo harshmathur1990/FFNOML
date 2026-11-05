@@ -26,7 +26,7 @@ import torch
 import torch.nn as nn
 
 from distributed_inference import chunked_fuse_branches, partition_range
-from ffno_fsdp_runtime import Z_METRES_PER_MODEL_UNIT, VELOCITY_M_S_PER_MODEL_UNIT
+from ffno_fsdp_runtime import LOG10_POPULATION_LIMIT, Z_METRES_PER_MODEL_UNIT, VELOCITY_M_S_PER_MODEL_UNIT, linear_populations
 from train_utils import get_checkpoint_io_metadata, get_checkpoint_normalization, load_checkpoint
 
 
@@ -285,7 +285,11 @@ class BatchedFFNOBackend:
         model_units[0] = torch.log10(model_units[0])
         model_units[1:4] /= VELOCITY_M_S_PER_MODEL_UNIT
         z = torch.as_tensor(np.asarray(z_m, dtype=np.float32)) / Z_METRES_PER_MODEL_UNIT
-        populations = torch.pow(10.0, self.predict_log10(model_units, z, dx, dy))
+        log10_populations = self.predict_log10(model_units, z, dx, dy)
+        limited = int((log10_populations.abs() > LOG10_POPULATION_LIMIT).sum())
+        if limited:
+            self.log(f"BATCHED {limited} predicted populations beyond 10^+-{LOG10_POPULATION_LIMIT:g} limited to it")
+        populations = linear_populations(log10_populations)
         if not torch.isfinite(populations).all() or (populations <= 0).any():
             raise RuntimeError("FFNO returned non-positive or non-finite populations")
         return populations.permute(1, 2, 3, 0).numpy()
