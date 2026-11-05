@@ -42,6 +42,7 @@ INPUT_CHANNELS = ("temperature", "vx", "vy", "vz", "log10_ne", "log10_rho")
 # VJP cotangents stay with respect to the SI quantities Julia sent.
 Z_METRES_PER_MODEL_UNIT = 1.0e6
 VELOCITY_M_S_PER_MODEL_UNIT = 1.0e3
+LOG10_POPULATION_LIMIT = 37.0
 
 
 def _model_inputs(x, z):
@@ -70,6 +71,11 @@ def _without_activation_checkpointing(model):
     finally:
         for w, fn in zip(wrappers, saved):
             w.checkpoint_fn = fn
+
+
+def linear_populations(log10_populations):
+    """10^log10 n, within what the service's float32 can hold. Far from its training data the FFNO can predict 10^45; synthesis then scales such a cell's levels to what rho holds."""
+    return torch.pow(10.0, log10_populations.clamp(-LOG10_POPULATION_LIMIT, LOG10_POPULATION_LIMIT))
 
 
 class DistributedFSDPBackend:
@@ -272,7 +278,7 @@ class DistributedFSDPBackend:
             dy_tensor,
         )
         pred_log = pred_normalized * self.std_y + self.mean_y
-        return torch.pow(10.0, pred_log)
+        return linear_populations(pred_log)
 
     @staticmethod
     def _canonical_populations(populations):
