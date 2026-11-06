@@ -285,8 +285,9 @@ _factory_levels(factory::InversionModelFactory,config)=factory.population_levels
     factory.population_levels(config) : factory.population_levels
 
 _is_fsdp_population_backend(model)=false
+# given populations ([population.given], forward only) stand in for the service's species
 _is_fsdp_population_backend(model::RootDistributedPopulationModel)=
-    _unwrap_population_model(model.root_model) isa FSDPFFNOModel
+    _unwrap_population_model(model.root_model) isa Union{FSDPFFNOModel,GivenPopulationModel}
 _is_fsdp_population_backend(model::CompositeDistributedPopulationModel)=
     !isempty(model.models) && all(_is_fsdp_population_backend,values(model.models))
 
@@ -339,16 +340,23 @@ function run_inversion!(config::RunConfig,root_inputs,
     distributed=distribute_atmosphere(Float64,isroot(context) ? root_inputs.atmosphere : nothing,context)
     levels=_factory_levels(factory,config)
     workspace=HybridForwardWorkspace(Float64,distributed,config.synthesis.wavelength_m,config.stokes,levels)
-    model=factory.build_model(config,distributed,workspace,context)
+    given=prepare_given_populations(config,isroot(context) ? root_inputs.atmosphere : nothing,levels,context)
+    model=Base.ScopedValues.with(()->factory.build_model(config,distributed,workspace,context),GIVEN_POPULATIONS=>given)
     model isa HybridForwardModel || throw(ArgumentError("model factory must return HybridForwardModel"))
     try
         _require_production_population_backend(model.populations,context)
+        if given!==nothing
+            used=mpi_broadcast(isroot(context) ? _given_in_use(model.populations,given) : nothing,context)
+            used || throw(ArgumentError("[population.given]: the model factory did not use the given populations of "*
+                "$(join(given.species,", ")); build its populations with launch_fsdp_population_models"))
+        end
         if config.mode===:forward
             result=forward!(workspace,model,distributed,context;reuse_prepared=true)
             result.valid || throw(ArgumentError("equilibrium reconstruction failed: $(result.equilibrium.reason); "*
                 join(result.equilibrium.messages,"; ")))
             provenance=parallel_provenance(context,distributed.tile;capabilities=["intensity","non_prd","forward","fsdp_distributed_h_slab"])
             _equilibrium_provenance!(provenance,model,result.equilibrium)
+            given===nothing || provenance===nothing || (provenance["given_populations"]=given.provenance)
             _forward_stage(context,"gather begin")
             gathered=InversionRunResult(nothing,gather_spectrum(workspace.output,distributed,context),
                 gather_atmosphere(distributed,context),_gather_populations(cartesian_populations(workspace),distributed,context),

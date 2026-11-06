@@ -32,6 +32,7 @@ include("ForwardModel.jl")
 include("Objectives.jl")
 include("Regularization.jl")
 include("DistributedForward.jl")
+include("GivenPopulations.jl")
 include("Equilibrium.jl")
 include("FSDPService.jl")
 include("Solvers.jl")
@@ -67,6 +68,7 @@ export AbstractPopulationModel, predict_populations!, population_vjp!, populatio
 export FFNO_INPUT_CHANNELS, PopulationMetadata, population_features, RecordedPopulationModel
 export PopulationMeshConfig, MeshPopulationModel, population_mesh, population_mesh_options, wrap_population_mesh
 export save_population_record, load_population_record
+export GivenPopulationsConfig, GivenPopulationModel, GIVEN_ORIENTATIONS, preflight_given_populations, read_given_populations
 export AbstractRedistributionModel, NonPRD, MockPRD
 export AbstractLineOpacityModel, AbstractFormalSolver, FFNOTransition, MuspelLineOpacityModel, MuspelFormalSolver, build_muspel_line_model
 export barklem_sigma_alpha, barklem_coefficient, effective_n, kurucz_label_orbital, atom_label_orbital, resolve_abo_broadening
