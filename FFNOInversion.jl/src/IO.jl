@@ -113,6 +113,7 @@ struct RunConfig{T<:AbstractFloat}
     line_center::Symbol
     ffno_population_limit::Float64
     ffno_no_inversion::Bool
+    given_populations::Union{Nothing,GivenPopulationsConfig}   # `[population.given]`, forward only (GivenPopulations.jl)
 end
 
 """
@@ -571,14 +572,15 @@ function load_config(path::AbstractString)
     RunConfig(atmosphere,mode,observed,weights,outputs,SynthesisGridConfig(wavelength_m,dx_m,dy_m),regions,
         observation_model,stokes,redistribution,regularization,parallel,controls,solver,time_index,equilibrium,
         _population_mesh(get(cfg,"population",Dict{String,Any}()),vertical_coordinate,!isempty(equilibrium.eos_table_file)),view,vz_positive,_continuum_populations(physics),_line_center(physics),
-        _ffno_population_limit(physics),Bool(get(physics,"ffno_no_inversion",true)))
+        _ffno_population_limit(physics),Bool(get(physics,"ffno_no_inversion",true)),
+        _given_populations(get(get(cfg,"population",Dict{String,Any}()),"given",nothing),forward_only,dirname(abspath(path))))
 end
 
 const _POPULATION_MESH_KEYS=("enabled","bottom_m","top_m","spacing_m","uniform_top_m","stretch","max_spacing_m","nabla","corona_temperature_k","corona_transition_m")
 
 """`[population.mesh]`: the height mesh FFNO runs on, on every axis and in both modes, unless `enabled = false` feeds FFNO the native grid."""
 function _population_mesh(raw,vertical_coordinate,has_table=true)
-    unknown=setdiff(collect(keys(raw)),["mesh"])
+    unknown=setdiff(collect(keys(raw)),["mesh","given"])
     isempty(unknown) || throw(ArgumentError("unknown key(s) in [population]: $(join(sort(unknown),", "))"))
     mesh=get(raw,"mesh",Dict{String,Any}())
     unknown=setdiff(collect(keys(mesh)),collect(_POPULATION_MESH_KEYS))
@@ -597,7 +599,8 @@ function dry_run_summary(config::RunConfig)
     controlvars=join(getfield.(config.controls,:variable),',')
     solver_name=config.solver isa LBFGSSolverOptions ? "bounded_lbfgs" : "prototype_pattern_search"
     "mode=$(config.mode) observation_input=$(config.observed===nothing ? "none" : config.observed.file) atmosphere_input=$(config.atmosphere.file) atmosphere_storage_order=$(config.atmosphere.storage_order) synthesis_output=$(config.outputs.synthesis_file) intensity_units=$(config.outputs.intensity_units) wavelength_frame=$(config.outputs.wavelength_frame) atmosphere_output=$(config.outputs.atmosphere_file) time_index=$(config.time_index) vertical_coordinate=$(config.atmosphere.vertical_coordinate) vertical_dataset=$(config.atmosphere.vertical_dataset) nodes_unit=$(vertical_unit(config.atmosphere.vertical_coordinate)) dx_m=$(config.synthesis.dx_m) dy_m=$(config.synthesis.dy_m) spectral_regions=$(length(config.regions)) spectral_sources=$nsources synthesis_wavelengths=$nlambda full_grid_psf=true zero_weight_exclusion=true stokes=$(join(config.stokes.components,',')) redistribution=$(config.redistribution) continuum_populations=$(config.continuum_populations) line_center=$(config.line_center) equilibrium=HSEMHS:$(hsemhs_mode_name(config.equilibrium.mode)) eos_table=$(config.equilibrium.eos_table_file) controls=$controlvars solver=$solver_name max_iterations=$(config.solver.max_iterations) checkpoint=$(config.solver.checkpoint_path) regularized=$(join(regvars,',')) mpi=$(config.parallel.enabled) decomposition=$(config.parallel.decomposition) threads_per_rank=$(config.parallel.threads_per_rank) gpu_launcher_rank=$(config.parallel.gpu_launcher_rank) gpu_connect_timeout_seconds=$(config.parallel.gpu_connect_timeout_seconds) gpu_status_timeout_seconds=$(config.parallel.gpu_status_timeout_seconds) gpu_diagnostic_interval_seconds=$(config.parallel.gpu_diagnostic_interval_seconds)"*
-        (is_vertical(config.view) ? "" : " view_mu=$(config.view.mu) view_azimuth_deg=$(config.view.azimuth_deg) view_geometry=$(config.view.geometry)")
+        (is_vertical(config.view) ? "" : " view_mu=$(config.view.mu) view_azimuth_deg=$(config.view.azimuth_deg) view_geometry=$(config.view.geometry)")*
+        (config.given_populations===nothing ? "" : " given_populations=$(join(sort!(string.(collect(keys(config.given_populations.files)))),',')) given_format=$(config.given_populations.format) given_orientation=$(config.given_populations.orientation)")
 end
 
 function checkpoint!(path::AbstractString,state;manifest::CapabilityManifest=CapabilityManifest())
