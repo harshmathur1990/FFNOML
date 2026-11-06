@@ -1,3 +1,4 @@
+import json
 import numpy as np
 import os
 
@@ -60,6 +61,8 @@ EAGLE7_DIR = "/mn/stornext/d9/data/harshm/"
 
 # DATA_DIR = OLIVIA_DIR
 DATA_DIR = EAGLE7_DIR
+# FFNOML_DATA_DIR overrides it for batch jobs (e.g. the learning-curve experiment on Olivia)
+DATA_DIR = os.path.join(os.environ["FFNOML_DATA_DIR"], "") if os.environ.get("FFNOML_DATA_DIR") else DATA_DIR
 
 # Keep permanent source data and disposable run files independent.  Batch
 # scripts set FFNOML_RUN_DIR to the directory from which the job is submitted.
@@ -116,6 +119,12 @@ VAL_SPLIT = {
     "ch012006": ["849"],
     "qs006003_sap": ["900"]
 }
+
+# FFNOML_TRAIN_SPLIT and FFNOML_VAL_SPLIT (JSON, {"sim": ["snap", ...]}) override the splits for scripted experiments
+if os.environ.get("FFNOML_TRAIN_SPLIT"):
+    TRAIN_SPLIT = json.loads(os.environ["FFNOML_TRAIN_SPLIT"])
+if os.environ.get("FFNOML_VAL_SPLIT"):
+    VAL_SPLIT = json.loads(os.environ["FFNOML_VAL_SPLIT"])
 
 # VAL_SPLIT = {
 #     "en024048_hion": ["385"],
