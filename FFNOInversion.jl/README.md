@@ -377,6 +377,43 @@ for them σ and α must be given or Unsöld is used.
 
 The defaults lie inside the range of the training grids. See [Population mesh](#population-mesh).
 
+### `[population.given]` (forward only)
+
+Populations read from files instead of predicted, for testing the synthesis and the rest of the code on populations known to be right, such as
+MULTI3D's. Species not listed still come from the FFNO; when every species is listed, no GPU service starts.
+
+```toml
+[population.given]
+format = "multi3d"          # MULTI3D out_pop; or "hdf5"
+orientation = "auto"        # or identity, flip_x, flip_y, rotate_180, transpose, transpose_flip_x, transpose_flip_y, transpose_rotate_180
+# tau500 = ".../tau500"     # default: MULTI3D's tau500 beside the first file, or in its directory's parent
+# min_correlation = 0.5     # auto: the least correlation the chosen orientation may have
+
+[population.given.files]
+H = "/.../bifrost_data/cbh24/s0957/H/out_pop"
+CA = "/.../bifrost_data/cbh24/s0957/CA/out_pop"
+```
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `format` | `"multi3d"` | `"multi3d"`: `out_pop`, Float32 Fortran (x, y, z, level), top first, the NLTE levels [cm⁻³] first, what follows not read; the grid is `multi3d.input`'s beside the file, else the atmosphere's. `"hdf5"`: `populations/<species>` of a forward run's atmosphere output, (level, z, y, x) [m⁻³], checked with its `logtau500` |
+| `files` | required | one file per species, by the model factory's species names; relative paths are taken from the configuration's directory |
+| `orientation` | `"auto"` | how the file's columns map onto the atmosphere's: `auto` finds it from tau500; a named one is used as given, with a warning if another correlates better |
+| `tau500` | beside the file | MULTI3D's tau500 cube (Float32 or Float64, (x, y, z)) for the orientation check |
+| `min_correlation` | 0.5 | `auto` refuses unless the best orientation reaches this and leads the next by 0.1 |
+
+The populations must be on the atmosphere's own grid: the same levels (a MULTI3D file needs a height axis, and a `mesh` beside it or in its parent
+must have the atmosphere's heights) and the same columns, perhaps rotated or mirrored. Before anything starts, rank 0 checks each file's size
+against its grid and the species' level count, then picks the orientation: at the level where the median tau500 is closest to 1 it correlates
+log10 tau500 with the atmosphere's temperature under every rotation and mirror the grid shape allows (at a fixed height tau500 grows with the
+temperature, through H⁻). A tau500 that falls with the index means the file is bottom first, and its levels are reversed. It then reads the
+populations, refuses any that are not finite or negative, and prints every finding as `GIVEN_POPULATIONS ...` lines, which the outputs'
+`provenance_toml` keeps under `given_populations`. Given populations skip the population mesh and `[physics] ffno_population_limit` and
+`ffno_no_inversion`. The factory must build its populations with `launch_fsdp_population_models`, which hands them over; a run whose factory
+does not is refused.
+
+`scripts/preflight_given_populations.jl CONFIG.toml MODEL_FACTORY.jl` runs the checks alone, with `--read` also reading the populations.
+
 ### `[view]` (viewing angle)
 
 `mu` (cos θ, 0 < μ ≤ 1, default 1), `azimuth_deg` (φ from +x toward +y, default 0) and `geometry`
@@ -838,6 +875,7 @@ final spectra with a reference and any comparison of the Ca predictions have not
 | `src/ContinuumOpacity.jl` | Julia continuum opacity |
 | `src/PopulationModels.jl` | population interface, six-channel FFNO request, recorded/mock models |
 | `src/PopulationMesh.jl` | height mesh with its corona and deep extension, and their VJP and JVP |
+| `src/GivenPopulations.jl` | `[population.given]`: populations from files, their preflight and orientation check (forward only) |
 | `src/LinePhysics.jl` | FFNO transitions, Muspel line model, Kurucz LTE lines |
 | `src/Synthesis.jl` | mixed-source synthesis setup, formal solver, synthesis VJP |
 | `src/Observations.jl` | Gaussian PSF observation model, inversion weights |

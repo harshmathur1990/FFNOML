@@ -43,6 +43,21 @@ class BatchedBackendEqualsForward(unittest.TestCase):
             with self.subTest(**options):
                 self.assertLess((self.predict(**options) - expected).abs().max().item(), 2e-4)
 
+    def test_populations_beyond_float32_are_limited(self):
+        messages = []
+        backend = BatchedFFNOBackend(self.path, lambda Cin, Cout, device: FFNO3D(**CONFIG), devices=["cpu"], log=messages.append)
+        log10 = torch.full((6, 24, 11, 9), 10.0)
+        log10[4, 3, 2, 1], log10[5, 3, 2, 1], log10[0, 4, 2, 1] = 44.9, 41.9, -50.0
+        backend.predict_log10 = lambda *arguments: log10
+        features = self.x.numpy().copy()
+        features[0] = 1e4
+        populations = backend.predict_si(features, self.z.numpy() * 1e6, 48e3, 48e3)
+        self.assertTrue(np.isfinite(populations).all() and (populations > 0).all())
+        self.assertAlmostEqual(np.log10(populations[3, 2, 1, 4]), 37.0, places=4)
+        self.assertAlmostEqual(np.log10(populations[4, 2, 1, 0]), -37.0, places=4)
+        self.assertAlmostEqual(np.log10(populations[0, 0, 0, 0]), 10.0, places=4)
+        self.assertTrue(any("3 predicted populations" in message for message in messages))
+
     def test_slabs_change_only_the_vertical_statistics(self):
         one, four = self.predict(vertical_norm_slabs=1), self.predict(vertical_norm_slabs=4)
         self.assertGreater((one - four).abs().max().item(), 1e-3)

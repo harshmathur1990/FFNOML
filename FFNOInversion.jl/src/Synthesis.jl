@@ -71,6 +71,8 @@ function build_synthesis_setup(config,atmosphere::Atmosphere3D,populations::Abst
     line_center=hasproperty(config,:line_center) ? config.line_center : :reference
     population_limit=hasproperty(config,:ffno_population_limit) ? config.ffno_population_limit : 0.0
     no_inversion=hasproperty(config,:ffno_no_inversion) ? config.ffno_no_inversion : false
+    # given populations ([population.given]) are used as they are: the FFNO limits are not theirs
+    given_species=hasproperty(config,:given_populations) && config.given_populations!==nothing ? keys(config.given_populations.files) : ()
     atom_lines=any(source.mode==:ffno for region in config.regions for source in region.sources) ? ffno_atom_lines(atom_files) : FFNOLine[]
     for region in config.regions
         air=wavelengths(region); vacuum=eltype(air).(_air_to_vacuum_nm.(air.*1e9).*1e-9)
@@ -88,7 +90,7 @@ function build_synthesis_setup(config,atmosphere::Atmosphere3D,populations::Abst
             model=build_muspel_line_model(atmosphere,populations[:H],atom_files[species],line.line_index,line.lower_level,line.upper_level;
                 include_continuum=false,neutral_hydrogen=given ? nothing : WittmannKuruczState(eos),
                 center_nm=line_center===:reference ? line.reference_vacuum_nm : nothing,
-                population_limit=population_limit,no_inversion=no_inversion)
+                population_limit=species in given_species ? 0.0 : population_limit,no_inversion=no_inversion && !(species in given_species))
             push!(contributors,OpacityContributor(model,populations[species]))
         end
         for source in region.sources

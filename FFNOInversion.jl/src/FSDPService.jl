@@ -275,14 +275,27 @@ function close_fsdp_service!(service::FSDPServiceClient;
 end
 
 """Collectively start the rank-0-controlled FSDP service and return population backends. With
-`population_mesh` (from `population_mesh_options(config)`) each model predicts on the height mesh."""
+`population_mesh` (from `population_mesh_options(config)`) each model predicts on the height mesh. Species with given populations
+(`[population.given]`, set by `run_inversion!` in `GIVEN_POPULATIONS`) get those instead, and no service starts when every species has them."""
 function launch_fsdp_population_models(specs::AbstractVector{FSDPModelSpec},context::ParallelContext;
         population_mesh=nothing,kwargs...)
-    client=launch_gpu!(RootGPUCoordinator(() -> launch_fsdp_service(specs;kwargs...);
-        launcher_rank=context.root),context)
-    eos=isroot(context) && population_mesh!==nothing ? HSEMHS.load_table(population_mesh.eos_table_file) : nothing
+    given=GIVEN_POPULATIONS[]
+    given_species=given===nothing ? Symbol[] : given.species
+    predicted=filter(spec->!(spec.name in given_species),specs)
     models=Dict{Symbol,Any}()
     for spec in specs
+        spec.name in given_species || continue
+        root_model=isroot(context) ? given.models[spec.name] : nothing
+        levels=length(spec.metadata.level_names)
+        root_model===nothing || size(root_model.populations,4)==levels || throw(DimensionMismatch(
+            "given $(spec.name) populations have $(size(root_model.populations,4)) levels; the model has $levels"))
+        models[spec.name]=RootDistributedPopulationModel(root_model,levels)
+    end
+    isempty(predicted) && return CompositeDistributedPopulationModel(models)
+    client=launch_gpu!(RootGPUCoordinator(() -> launch_fsdp_service(predicted;kwargs...);
+        launcher_rank=context.root),context)
+    eos=isroot(context) && population_mesh!==nothing ? HSEMHS.load_table(population_mesh.eos_table_file) : nothing
+    for spec in predicted
         root_model=isroot(context) ? wrap_population_mesh(FSDPFFNOModel(client,spec.name,spec.metadata,0),
             population_mesh,eos) : nothing
         models[spec.name]=RootDistributedPopulationModel(root_model,length(spec.metadata.level_names))
