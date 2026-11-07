@@ -17,7 +17,7 @@ the files its jobs read, or for its entry in the packed file's manifest. With no
 by their time limit (their datasets are kept and the build is skipped).
 Afterwards, on eagle7 or anywhere: python scripts/learning_curve_summary.py ROOT
 
-Only the standard library is used, so it runs with the login node's python3.
+Only the standard library of Python 3.6 is used, so it runs with the login node's python3 (3.6.15 on Olivia).
 """
 import argparse
 import configparser
@@ -106,7 +106,8 @@ def missing_files(e):
 
 
 def sbatch(args):
-    return subprocess.run(["sbatch", "--parsable"] + args, check=True, capture_output=True, text=True).stdout.strip().split(";")[0]
+    return subprocess.run(["sbatch", "--parsable"] + args, check=True, stdout=subprocess.PIPE,
+                          universal_newlines=True).stdout.strip().split(";")[0]
 
 
 def main():
