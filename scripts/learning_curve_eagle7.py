@@ -77,6 +77,7 @@ def prepare(experiments):
                 print(f"  solving set {pname}: linked from {os.path.realpath(existing)}", flush=True)
                 continue
             build = os.path.join(stage, "solving_sets_build")
+            os.makedirs(os.path.join(build, MODEL_SUBDIR), exist_ok=True)   # pipeline.py writes there, does not create it
             run_logged([sys.executable, "pipeline.py", "--buildforpredict", "--predname", pname], env_for(e, build),
                        os.path.join(stage, "solving_sets_build.txt"))
             os.replace(os.path.join(build, MODEL_SUBDIR, f"3D_sim_predict_{pname}.hdf5"), target)
