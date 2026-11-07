@@ -19,7 +19,7 @@ set -o nounset
 set -o pipefail
 
 module -q restore
-source /cluster/home/harshm/loadnvidia.sh
+source /cluster/home/harshm/loadnvidiampi.sh   # the accelerator-node environment (nvidiaenv, NCCL and CXI settings)
 
 : "${FFNOML_RUN_DIR:?set by submit_learning_curve.py}"
 source "${FFNOML_RUN_DIR}/experiment.env"
