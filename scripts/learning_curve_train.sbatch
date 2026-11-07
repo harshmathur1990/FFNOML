@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=FNOML_lc_train
 #SBATCH --partition=accel
-#SBATCH --nodes=2
+#SBATCH --nodes=8
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=4
 #SBATCH --mem-per-gpu=40G
