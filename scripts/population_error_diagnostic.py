@@ -15,8 +15,11 @@ function). Predictions are cached, so a rerun only scores.
 RUN gets solving sets under training_FFNO3D_zscale_expand_lognlte/ (those already in --model-dir are linked, not
 rebuilt), predictions under predictions/<label>/ and population_errors_<label>.json with a printed summary.
 With FFNOML_PACKED_DATA set (packed_data.py), the snapshots are read from that file instead of bifrost_data/.
+Predictions made elsewhere with pipeline.py --fsdppredict (output_3D_sim_s5_<name>_<MODEL>_<atom>.hdf5 in --model-dir)
+are taken instead of predicting, so --score-only scores them without a GPU.
 """
 import argparse
+import glob
 import json
 import os
 import subprocess
@@ -115,6 +118,30 @@ def predict(backend, solve_path, out_path):
         f["z_scale"] = np.asarray(z_scale, dtype=np.float32)
     os.replace(out_path + ".tmp", out_path)
     return log10
+
+
+def fsdp_prediction(model_dir, name, atom):
+    """pipeline.py --fsdppredict's output for a snapshot in model_dir (output_3D_sim_s5_<name>_<MODEL>_<atom>.hdf5)."""
+    found = glob.glob(os.path.join(glob.escape(model_dir), f"output_3D_sim_s5_{glob.escape(name)}_*_{atom}.hdf5"))
+    found = [p for p in found if os.path.basename(p)[len(f"output_3D_sim_s5_{name}_"):-len(f"_{atom}.hdf5")].isalnum()]
+    if len(found) > 1:
+        raise ValueError(f"several predictions of {name} {atom} in {model_dir}: {found}")
+    return found[0] if found else None
+
+
+def import_fsdp_prediction(path, out_path):
+    """Cache an --fsdppredict output (nlte_populations (x, y, z, level) [m^-3]) as predict() does: float32 log10, with
+    the populations held to what float32 holds as the batched backend's linear_populations does."""
+    with h5py.File(path, "r") as f:
+        linear, z_scale = f["nlte_populations"][()], f["z_scale"][()]
+    tiny, top = np.finfo(np.float32).tiny, np.finfo(np.float32).max
+    log10 = np.log10(np.clip(np.nan_to_num(linear, nan=tiny, posinf=top), tiny, top)).astype(np.float32)
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with h5py.File(out_path + ".tmp", "w") as f:
+        f["log10_populations"] = log10
+        f["z_scale"] = np.asarray(z_scale, dtype=np.float32)
+        f.attrs["source"] = path
+    os.replace(out_path + ".tmp", out_path)
 
 
 def multi3d_log10(snapshot_dir, atom, shape):
@@ -217,6 +244,8 @@ def main():
                     else os.path.exists(os.path.join(snapshot_dir, atom, "out_pop"))):
                 print(f"skip {name} {atom}: no MULTI3D out_pop", flush=True)
                 continue
+            if not os.path.exists(out_path) and fsdp_prediction(args.model_dir, name, atom):
+                import_fsdp_prediction(fsdp_prediction(args.model_dir, name, atom), out_path)
             if not os.path.exists(out_path):
                 if args.score_only:
                     print(f"skip {name} {atom}: no cached prediction", flush=True)
