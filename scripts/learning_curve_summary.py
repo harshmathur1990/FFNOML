@@ -14,7 +14,7 @@ import os
 import numpy as np
 
 ROLES = ["train", "val", "same_sim", "unseen_sim"]
-ORDER = ["sims1", "sims2", "sims3", "sims4", "same3", "all5"]
+ORDER = ["sims1", "sims2", "sims3", "sims4", "same3", "all5", "sims1_CA", "sims2_CA", "sims3_CA", "sims4_CA", "same3_CA", "all5_CA"]
 
 
 def files(paths):

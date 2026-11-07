@@ -21,9 +21,9 @@ set -o pipefail
 module -q restore
 source /cluster/home/harshm/loadnvidia.sh
 
-: "${FFNOML_RUN_DIR:?set by submit_learning_curve.sh}"
+: "${FFNOML_RUN_DIR:?set by submit_learning_curve.py}"
 source "${FFNOML_RUN_DIR}/experiment.env"
-export FFNOML_REPO_DIR FFNOML_DATA_DIR FFNOML_ACTIVE_ATOMS
+export FFNOML_REPO_DIR FFNOML_DATA_DIR FFNOML_PACKED_DATA FFNOML_ACTIVE_ATOMS
 export OMP_NUM_THREADS=8
 cd "${FFNOML_REPO_DIR}"
 

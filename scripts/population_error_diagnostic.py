@@ -14,6 +14,7 @@ function). Predictions are cached, so a rerun only scores.
 
 RUN gets solving sets under training_FFNO3D_zscale_expand_lognlte/ (those already in --model-dir are linked, not
 rebuilt), predictions under predictions/<label>/ and population_errors_<label>.json with a printed summary.
+With FFNOML_PACKED_DATA set (packed_data.py), the snapshots are read from that file instead of bifrost_data/.
 """
 import argparse
 import json
@@ -30,6 +31,16 @@ sys.path.insert(0, REPO)
 
 from ffno_batched_backend import BatchedFFNOBackend, linear_populations  # noqa: E402
 from ffno_model_factory import create_ffno3d  # noqa: E402
+import packed_data  # noqa: E402
+
+# a packed_data.py file holding the snapshots, read instead of bifrost_data/ (as by pipeline.py --buildforpredict)
+PACKED_DATA = os.environ.get("FFNOML_PACKED_DATA") or None
+
+
+def packed_key(snapshot_dir):
+    """.../bifrost_data/<sim>/<snap> -> (sim, snap)"""
+    return os.path.basename(os.path.dirname(snapshot_dir)), os.path.basename(snapshot_dir)
+
 
 SOLVE_SUBDIR = "training_FFNO3D_zscale_expand_lognlte"
 
@@ -109,6 +120,12 @@ def predict(backend, solve_path, out_path):
 def multi3d_log10(snapshot_dir, atom, shape):
     """MULTI3D's NLTE populations as log10 m^-3, (x, y, z, level): out_pop is Fortran (x, y, z, level), cm^-3, top first."""
     nx, ny, nz, levels = shape
+    if PACKED_DATA:
+        pops = packed_data.populations(PACKED_DATA, *packed_key(snapshot_dir), atom, lte=False)[0][..., :levels]
+        if pops.shape != tuple(shape):
+            raise ValueError(f"{PACKED_DATA} {snapshot_dir} {atom}: populations {pops.shape}, predicted {shape}")
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return np.log10(pops.astype(np.float64)) + 6.0
     raw = np.fromfile(os.path.join(snapshot_dir, atom, "out_pop"), dtype=np.float32, count=nx * ny * nz * levels)
     if raw.size != nx * ny * nz * levels:
         raise ValueError(f"{snapshot_dir}/{atom}/out_pop is shorter than {shape}")
@@ -119,6 +136,9 @@ def multi3d_log10(snapshot_dir, atom, shape):
 
 def log10_tau500(snapshot_dir, atom, shape):
     nx, ny, nz = shape
+    if PACKED_DATA:
+        with np.errstate(divide="ignore"):
+            return np.log10(packed_data.tau500(PACKED_DATA, *packed_key(snapshot_dir), atom).astype(np.float64))
     for path in (os.path.join(snapshot_dir, atom, "tau500"), os.path.join(snapshot_dir, "H", "tau500")):
         if os.path.exists(path):
             count = nx * ny * nz
@@ -193,7 +213,8 @@ def main():
             name = f"{sim}_{snap}"
             snapshot_dir = os.path.join(data_dir, "bifrost_data", sim, snap)
             out_path = os.path.join(args.run_dir, "predictions", label, f"{name}_{atom}.hdf5")
-            if not os.path.exists(os.path.join(snapshot_dir, atom, "out_pop")):
+            if not (packed_data.holds(PACKED_DATA, sim, snap, atom) if PACKED_DATA
+                    else os.path.exists(os.path.join(snapshot_dir, atom, "out_pop"))):
                 print(f"skip {name} {atom}: no MULTI3D out_pop", flush=True)
                 continue
             if not os.path.exists(out_path):

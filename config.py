@@ -39,6 +39,8 @@ def build_multi3d_entries(split_dict):
                 )
 
             entry = {
+                "SIM": sim,
+                "SNAP": snap,
                 "MULTI3D_PATHS": [],
                 "MULTI3D_ATMOS": f"{base}/{snap}/atm3d",
                 "MESH": f"{base}/{snap}/mesh",
@@ -63,6 +65,10 @@ EAGLE7_DIR = "/mn/stornext/d9/data/harshm/"
 DATA_DIR = EAGLE7_DIR
 # FFNOML_DATA_DIR overrides it for batch jobs (e.g. the learning-curve experiment on Olivia)
 DATA_DIR = os.path.join(os.environ["FFNOML_DATA_DIR"], "") if os.environ.get("FFNOML_DATA_DIR") else DATA_DIR
+
+# FFNOML_PACKED_DATA names a packed_data.py file: the build, the solving sets and the population scoring then read the
+# snapshots from it instead of DATA_DIR/bifrost_data
+PACKED_DATA = os.environ.get("FFNOML_PACKED_DATA") or None
 
 # Keep permanent source data and disposable run files independent.  Batch
 # scripts set FFNOML_RUN_DIR to the directory from which the job is submitted.

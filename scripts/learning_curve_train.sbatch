@@ -11,7 +11,7 @@
 #SBATCH --exclude=gpu-1-111
 
 # One learning-curve experiment, from scratch: build its training and validation sets, then train as train_gpu.sh does.
-# Submitted by scripts/submit_learning_curve.sh, which writes ${FFNOML_RUN_DIR}/experiment.env (splits, atoms, repo).
+# Submitted by scripts/submit_learning_curve.py, which writes ${FFNOML_RUN_DIR}/experiment.env (splits, atoms, repo).
 
 set -o errexit
 set -o nounset
@@ -20,9 +20,9 @@ set -o pipefail
 module -q restore
 source /cluster/home/harshm/loadnvidia.sh
 
-: "${FFNOML_RUN_DIR:?set by submit_learning_curve.sh}"
+: "${FFNOML_RUN_DIR:?set by submit_learning_curve.py}"
 source "${FFNOML_RUN_DIR}/experiment.env"
-export FFNOML_REPO_DIR FFNOML_RUN_DIR FFNOML_DATA_DIR FFNOML_TRAIN_SPLIT FFNOML_VAL_SPLIT FFNOML_ACTIVE_ATOMS FFNOML_NUM_EPOCHS
+export FFNOML_REPO_DIR FFNOML_RUN_DIR FFNOML_DATA_DIR FFNOML_PACKED_DATA FFNOML_TRAIN_SPLIT FFNOML_VAL_SPLIT FFNOML_ACTIVE_ATOMS FFNOML_NUM_EPOCHS
 
 mkdir -p "${FFNOML_RUN_DIR}/IO" "${FFNOML_RUN_DIR}/training_FFNO3D_zscale_expand_lognlte"
 cd "${FFNOML_REPO_DIR}"
