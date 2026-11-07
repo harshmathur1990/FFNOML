@@ -128,7 +128,14 @@ def save_checkpoint_fsdp(
         ckpt["normalization_stats"] = normalization_stats
     if io_metadata is not None:
         ckpt["io_metadata"] = io_metadata
-    torch.save(ckpt, save_path)
+    save_atomic(ckpt, save_path)
+
+
+def save_atomic(obj, path):
+    """torch.save through a temporary file, so a job killed mid-write (e.g. at its time limit) keeps the previous file."""
+    tmp = f"{path}.tmp"
+    torch.save(obj, tmp)
+    os.replace(tmp, path)
 
 
 def get_resume_checkpoint_path(save_path):
@@ -173,7 +180,7 @@ def save_resume_checkpoint(
         ckpt["io_metadata"] = io_metadata
     if training_stats is not None:
         ckpt["training_stats"] = training_stats
-    torch.save(ckpt, save_path)
+    save_atomic(ckpt, save_path)
 
 
 def get_checkpoint_normalization(ckpt):
