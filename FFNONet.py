@@ -1118,6 +1118,7 @@ def ffno_train_model(
 
     resume_state = {}
     best_val_init = None
+    best_epoch_init = None
 
     if load_path is not None:
         resume_state = load_checkpoint(load_path, map_location="cpu")
@@ -1143,12 +1144,15 @@ def ffno_train_model(
             if not isinstance(best_state, dict):
                 raise RuntimeError(f"Invalid best checkpoint: {save_path}")
             best_val_init = best_state.get("val_loss")
+            if load_path == resume_path:   # early stopping counts on from the best epoch, not from the resume
+                best_epoch_init = best_state.get("epoch")
 
         if best_val_init is None:
             best_val_init = resume_state.get("val_loss")
 
     if load_earlier_val is False:
         best_val_init = None
+        best_epoch_init = None
 
     builder = ModelBuilder(
         model=model,
@@ -1244,6 +1248,7 @@ def ffno_train_model(
     effective_resume_state = {} if expand_from_checkpoint is not None else resume_state
     effective_resume_path = None if expand_from_checkpoint is not None else resume_path
     effective_best_val_init = None if expand_from_checkpoint is not None else best_val_init
+    effective_best_epoch_init = None if expand_from_checkpoint is not None else best_epoch_init
 
     if validate_only and val_loader is None:
         raise RuntimeError("Validation loader is unavailable.")
@@ -1303,6 +1308,7 @@ def ffno_train_model(
         resume_state=effective_resume_state,
         resume_path=effective_resume_path,
         best_val_init=effective_best_val_init,
+        best_epoch_init=effective_best_epoch_init,
         normalization_stats=normalization_stats,
         io_metadata=io_metadata,
         early_stopping=dict(

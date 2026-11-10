@@ -961,6 +961,7 @@ def train(
     resume_state=None,
     resume_path=None,
     best_val_init=None,
+    best_epoch_init=None,
     normalization_stats=None,
     io_metadata=None,
 ):
@@ -995,7 +996,10 @@ def train(
         patience = 0
         min_delta = 0.0
 
+    # epochs since the best checkpoint, so a resumed run stops when an uninterrupted one would
     epochs_no_improve = 0
+    if best_epoch_init is not None:
+        epochs_no_improve = max(0, int(completed_epochs) - int(best_epoch_init))
 
     if str(device).startswith("cuda"):
         torch.cuda.empty_cache()
