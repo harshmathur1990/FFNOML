@@ -10,6 +10,7 @@ import numpy as np
 import h5py
 import json
 from helita.sim.multi3d import Multi3dAtmos, Multi3dOut
+import packed_data
 import matplotlib.pyplot as plt
 from config import *
 from FFNONet import (
@@ -376,12 +377,15 @@ def build_prediction_solving_sets(prediction_name=None):
             print(f"Prediction solving set already exists, skipping: {PREDICT_FILE}")
             continue
 
-        ensure_prediction_source_files(PRED_ATMOS)
+        if PACKED_DATA:
+            rho, z_scale, temp, vx, vy, vz, ne, dx, dy = load_packed_pred_data(*PRED_ATMOS["NAME"].rsplit("_", 1))
+        else:
+            ensure_prediction_source_files(PRED_ATMOS)
 
-        rho, z_scale, temp, vx, vy, vz, ne, dx, dy = load_pred_data(
-            mesh_file=PRED_ATMOS['MESH'],
-            atmos_file=PRED_ATMOS['MULTI3D_ATMOS']
-        )
+            rho, z_scale, temp, vx, vy, vz, ne, dx, dy = load_pred_data(
+                mesh_file=PRED_ATMOS['MESH'],
+                atmos_file=PRED_ATMOS['MULTI3D_ATMOS']
+            )
 
         build_solving_set_ffno(
             rho=rho,
@@ -575,7 +579,23 @@ def load_multi3d_blocks(dataset_entries):
         atmos_path = dataset["MULTI3D_ATMOS"]
         mesh_path = dataset["MESH"]
 
-        for mpath in dataset["MULTI3D_PATHS"]:
+        if PACKED_DATA:
+            fields, _, _, _, dx, dy = packed_data.atmosphere(PACKED_DATA, dataset["SIM"], dataset["SNAP"])
+            blocks = [packed_data.populations(PACKED_DATA, dataset["SIM"], dataset["SNAP"], atom) for atom in ACTIVE_ATOMS]
+            lte_block = np.concatenate([nstar * 1e6 for _, nstar, _ in blocks], axis=-1)
+            nlte_block = np.concatenate([n * 1e6 for n, _, _ in blocks], axis=-1)
+            atmos = fields
+            rho = fields["rho"] * 1e3
+            temp = fields["temp"]
+            vx = fields["vx"]
+            vy = fields["vy"]
+            vz = fields["vz"]
+            ne = fields["ne"] * 1e6
+            z_scale = blocks[0][2] * 1e-2
+            dx = np.abs(dx)
+            dy = np.abs(dy)
+
+        for mpath in ([] if PACKED_DATA else dataset["MULTI3D_PATHS"]):
 
             m3d = Multi3dOut(directory=mpath)
             m3d.readall()
@@ -686,6 +706,15 @@ def load_pred_data(mesh_file, atmos_file):
     print("rho shape:", rho.shape)
 
     return rho, z_scale, temp, vx, vy, vz, ne, dx, dy
+
+
+def load_packed_pred_data(sim, snap):
+    """load_pred_data from a packed_data.py file (FFNOML_PACKED_DATA): the same arrays, without bifrost_data/."""
+
+    print(f"\n=== LOADING PREDICTION ATMOSPHERE {sim}/{snap} FROM {PACKED_DATA} ===")
+    fields, x, y, z, dx, dy = packed_data.atmosphere(PACKED_DATA, sim, snap)
+    return (fields["rho"] * 1e3, z * 1e-2, fields["temp"], fields["vx"], fields["vy"], fields["vz"], fields["ne"] * 1e6,
+            np.abs(dx), np.abs(dy))
 
 
 if __name__ == "__main__":

@@ -128,7 +128,14 @@ def save_checkpoint_fsdp(
         ckpt["normalization_stats"] = normalization_stats
     if io_metadata is not None:
         ckpt["io_metadata"] = io_metadata
-    torch.save(ckpt, save_path)
+    save_atomic(ckpt, save_path)
+
+
+def save_atomic(obj, path):
+    """torch.save through a temporary file, so a job killed mid-write (e.g. at its time limit) keeps the previous file."""
+    tmp = f"{path}.tmp"
+    torch.save(obj, tmp)
+    os.replace(tmp, path)
 
 
 def get_resume_checkpoint_path(save_path):
@@ -173,7 +180,7 @@ def save_resume_checkpoint(
         ckpt["io_metadata"] = io_metadata
     if training_stats is not None:
         ckpt["training_stats"] = training_stats
-    torch.save(ckpt, save_path)
+    save_atomic(ckpt, save_path)
 
 
 def get_checkpoint_normalization(ckpt):
@@ -954,6 +961,7 @@ def train(
     resume_state=None,
     resume_path=None,
     best_val_init=None,
+    best_epoch_init=None,
     normalization_stats=None,
     io_metadata=None,
 ):
@@ -988,7 +996,10 @@ def train(
         patience = 0
         min_delta = 0.0
 
+    # epochs since the best checkpoint, so a resumed run stops when an uninterrupted one would
     epochs_no_improve = 0
+    if best_epoch_init is not None:
+        epochs_no_improve = max(0, int(completed_epochs) - int(best_epoch_init))
 
     if str(device).startswith("cuda"):
         torch.cuda.empty_cache()

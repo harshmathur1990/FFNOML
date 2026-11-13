@@ -197,7 +197,8 @@ or Python process launches occur.
 """
 function launch_fsdp_service(specs::AbstractVector{FSDPModelSpec};
         launcher::AbstractString=joinpath(dirname(@__DIR__),"scripts","ffno_fsdp_service.sh"),
-        host::AbstractString=get(ENV,"FFNO_GPU_CONTROL_HOST",gethostname()),
+        # FFNO_FSDP_SERVICE_HOST: a service on another host than rank 0 (scripts/ffno_batched_service_ssh.sh)
+        host::AbstractString=get(ENV,"FFNO_FSDP_SERVICE_HOST",get(ENV,"FFNO_GPU_CONTROL_HOST",gethostname())),
         port::Int=let raw=get(ENV,"FFNO_FSDP_SERVICE_PORT",""); isempty(raw) ?
             _available_service_port() : parse(Int,raw) end,
         timeout_seconds::Real=180,
