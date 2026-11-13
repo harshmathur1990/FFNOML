@@ -101,8 +101,19 @@ level and one total correction:
 - [x] the total starts at ρ / m; populations stay finite at the bound
 - [x] gradcheck of the head in float64; through the model, d log total / dρ is exact
 - [x] the batched backend equals `forward`; the default `log_population` model and its state dict are unchanged
-- [ ] one FSDP predict plus VJP through the service on eagle7, at a 40 × 40 × 496 patch
-- [ ] 200 training steps on eagle7 lower the loss, with no NaN
+- [x] FSDP predict, VJP and JVP through `DistributedFSDPBackend` on 2 eagle7 GPUs, on a 40 × 40 patch of
+  nw012023/940: populations finite and positive; ⟨c, J t⟩ and ⟨Jᵀc, t⟩ agree to 4.7×10⁻⁷
+- [x] `pipeline.py --train` on eagle7 with a small model (width 16, 2 blocks) on the `sims1` datasets: 2 epochs,
+  162 steps, train loss 1.44 → 0.27, validation 0.45 → 0.144, no NaN, checkpoint saved and reloaded
+
+**Finding from the smoke run** (`ffnoml_runs/level_fraction_smoke`): after 2 epochs the predicted total sits
+0.49 dex below MULTI3D's (median; true s is 0 there). The composition is still poor (level 1 −1.18 dex, minor
+levels +0.3 to +0.8 dex), and lowering s offsets the overshooting minor levels in the log-space loss: the level
+error is 0.556 dex with s, against 0.647 dex for the composition alone. The loss on log populations does not pin the
+total by itself, so s can absorb composition error. Option, for the user to decide: add a loss term on the total,
+λ |log₁₀ Σ n_pred − log₁₀ Σ n_true|, computed from the existing targets, so the total is learned for its own sake.
+A 2-epoch tiny model may simply be undertrained; the Phase 2 run will show whether s converges to the true total
+without the term.
 
 ## cbh24 data
 
