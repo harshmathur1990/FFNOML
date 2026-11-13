@@ -110,10 +110,21 @@ level and one total correction:
 0.49 dex below MULTI3D's (median; true s is 0 there). The composition is still poor (level 1 −1.18 dex, minor
 levels +0.3 to +0.8 dex), and lowering s offsets the overshooting minor levels in the log-space loss: the level
 error is 0.556 dex with s, against 0.647 dex for the composition alone. The loss on log populations does not pin the
-total by itself, so s can absorb composition error. Option, for the user to decide: add a loss term on the total,
-λ |log₁₀ Σ n_pred − log₁₀ Σ n_true|, computed from the existing targets, so the total is learned for its own sake.
-A 2-epoch tiny model may simply be undertrained; the Phase 2 run will show whether s converges to the true total
-without the term.
+total by itself, so s can absorb composition error.
+
+Decided (user approved): a loss term on each species' total, λ |log₁₀ Σ n_pred − log₁₀ Σ n_true| / mean std_Y,
+against MULTI3D's own total (`FFNOML_LAM_TOTAL`, off by default; logged as `Ltot`). Same smoke setup, 2 epochs,
+compared with MULTI3D on a 40 × 40 patch of nw012023/940:
+
+| λ | val L1 (levels) | predicted − true total, median (p5, p95) | median abs level error |
+|---|---|---|---|
+| 0 (first run) | 0.144 | −0.49 dex | 0.556 dex |
+| 0 (repeat) | 0.201 | −0.58 (−2.89, +0.03) dex | 0.713 dex |
+| 0.3 | 0.160 | +0.006 (−0.11, +0.11) dex | 0.620 dex |
+| 1 | 0.396 | −0.013 (−0.26, +0.11) dex | 0.949 dex |
+
+Without the term the total drifts about 0.5 dex low in both runs. λ = 0.3 fixes the total and keeps the level loss
+within the run-to-run spread of λ = 0 (0.144–0.201); λ = 1 also fixes it but costs the levels. Phase 2 uses λ = 0.3.
 
 ## cbh24 data
 
