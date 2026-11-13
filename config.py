@@ -288,6 +288,9 @@ MODEL_CONFIG = dict(
     # FFNOML_OUTPUT_MODE=level_fraction: the head predicts each species' split among its levels (models/ffno_model.py)
     output_mode=os.environ.get("FFNOML_OUTPUT_MODE", "log_population"),
 )
+# FFNOML_MODEL_CONFIG (JSON, {"width": 96, ...}) overrides MODEL_CONFIG entries for scripted experiments
+if os.environ.get("FFNOML_MODEL_CONFIG"):
+    MODEL_CONFIG.update(json.loads(os.environ["FFNOML_MODEL_CONFIG"]))
 if MODEL_CONFIG["output_mode"] == "level_fraction":
     MODEL_CONFIG["species"] = [
         {k: ATOM_CONFIG[a][k] for k in ("levels", "log10_particle_mass")} for a in ACTIVE_ATOMS

@@ -1455,7 +1455,7 @@ def _distributed_full_forward(model, X, z_scale, dx, dy, *, collect_stats=False,
         if torch.cuda.is_available() and X.is_cuda:
             torch.cuda.empty_cache()
 
-    out = model._run_head(x, collect_stats=False)
+    out = model.head_output(model._run_head(x, collect_stats=False), X)
     return out, all_stats
 
 
@@ -2311,7 +2311,7 @@ def ffno_predict_populations_distributed_full(
 
             pbar.set_postfix(step="head", refresh=True)
             debug_progress("full prediction", "head")
-            pred_log = model._run_head(x, collect_stats=False)
+            pred_log = model.head_output(model._run_head(x, collect_stats=False), X)
             debug_progress("full prediction", "forward done")
             pbar.update(1)
         finally:
