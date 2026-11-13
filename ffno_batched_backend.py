@@ -257,6 +257,9 @@ class BatchedFFNOBackend:
 
         x = self._new_hidden(shape)
         self._map_depth(x, normalized, lambda replica: replica.lift[0])
+        # the level-fraction head takes the species totals from the normalised rho channel
+        level_fraction = getattr(next(iter(self.pool.replicas.values())), "output_mode", None) == "level_fraction"
+        inputs = normalized if level_fraction else None
         del normalized
         self._groupnorm(x, lambda replica: replica.lift[1], lambda replica, y: replica.lift[2](y))
         self.log(f"BATCHED lift done {time.time() - started:.0f} s")
@@ -267,7 +270,10 @@ class BatchedFFNOBackend:
         output = torch.empty(self.levels, *shape, dtype=torch.float32)
 
         def head(replica, device, a, b):
-            y = replica.proj2(replica.act(replica.proj1(x[:, a:b].to(device)[None])))[0]
+            y = replica.proj2(replica.act(replica.proj1(x[:, a:b].to(device)[None])))
+            if inputs is not None:
+                y = replica.head_output(y, inputs[:, a:b].to(device)[None])
+            y = y[0]
             output[:, a:b] = (y * self.std_y.to(device) + self.mean_y.to(device)).cpu()
 
         self.pool.run(depth, self.chunk_depth, head)

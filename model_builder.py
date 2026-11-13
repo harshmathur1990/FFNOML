@@ -130,6 +130,9 @@ class ModelBuilder:
     def build_model(self, wrap_fsdp=True):
 
         model = self.model_cls(**self.model_config)
+        # the level-fraction head needs the dataset's normalisation; a loaded checkpoint overwrites it with its own
+        if hasattr(model, "set_normalization"):
+            model.set_normalization(self.mean_X, self.std_X, self.mean_Y, self.std_Y)
 
         # FFNOML_TRAIN_ONLY=proj1,proj2 trains only those top-level submodules (others frozen)
         train_only = os.environ.get("FFNOML_TRAIN_ONLY")

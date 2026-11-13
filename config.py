@@ -107,6 +107,11 @@ SIMULATIONS = {
     "en024031_by100_helium": {
         "base_path": DATA_DIR + "bifrost_data/en024031_by100_helium",
         "snaps": ["109"]
+    },
+    # half-resolution (252 x 252) runs; s0957 is the test snapshot, never trained or validated on
+    "cbh24": {
+        "base_path": DATA_DIR + "bifrost_data/cbh24",
+        "snaps": ["s0910", "s0928", "s0957"]
     }
 }
 
@@ -115,7 +120,8 @@ TRAIN_SPLIT = {
     "nw012023": ["915"],
     "ch012012_hion": ["910"],
     "ch012006": ["836"],
-    "qs006003_sap": ["689"]
+    "qs006003_sap": ["689"],
+    "cbh24": ["s0910"]
 }
 
 VAL_SPLIT = {
@@ -123,7 +129,8 @@ VAL_SPLIT = {
     "nw012023": ["940"],
     "ch012012_hion": ["984"],
     "ch012006": ["849"],
-    "qs006003_sap": ["900"]
+    "qs006003_sap": ["900"],
+    "cbh24": ["s0928"]
 }
 
 # FFNOML_TRAIN_SPLIT and FFNOML_VAL_SPLIT (JSON, {"sim": ["snap", ...]}) override the splits for scripted experiments
