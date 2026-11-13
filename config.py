@@ -318,6 +318,8 @@ FORCE_EXPAND_VALIDATION_BASELINE = True
 
 
 DEBUG_LOSS = False
+# FFNOML_LAM_TOTAL weighs the loss on each species' total, |log10 sum of levels pred - true| (loss/nlte_composite_loss.py)
+LAM_TOTAL = float(os.environ.get("FFNOML_LAM_TOTAL", 0.0))
 DEBUG_DIST_INFERENCE = False
 
 # Dataset Params
