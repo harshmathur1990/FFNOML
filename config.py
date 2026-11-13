@@ -173,7 +173,13 @@ ATOM_CONFIG = {
             2.1802152677122893e-18
         ], dtype=np.float32),
 
-        "levels": 6
+        "levels": 6,
+
+        # level-fraction head (MODEL_CONFIG output_mode "level_fraction"): total H = rho / particle mass. The mass is
+        # the smallest rho / (sum of levels) of the training snapshots, 2.2697e-24 g (2.3805e-24 and 2.3839e-24 g in the
+        # two _hion simulations), and 10-21% of cells hold less H in these levels than that, so H has a remainder slot.
+        "log10_particle_mass": float(np.log10(2.2697e-27)),  # kg
+        "remainder": True
     },
 
     "CA": {
@@ -197,7 +203,11 @@ ATOM_CONFIG = {
             1.902059054757628e-18
         ], dtype=np.float32),
 
-        "levels": 6
+        "levels": 6,
+
+        # total Ca = rho / 1.0375e-18 g in every training snapshot and cbh24, held entirely by these 6 levels
+        "log10_particle_mass": float(np.log10(1.0375e-21)),  # kg
+        "remainder": False
     }
 }
 
@@ -277,7 +287,13 @@ MODEL_CONFIG = dict(
     hidden_spectral=128,
     hidden_vertical=128,
     checkpoint_blocks=True,
+    # FFNOML_OUTPUT_MODE=level_fraction: the head predicts each species' split among its levels (models/ffno_model.py)
+    output_mode=os.environ.get("FFNOML_OUTPUT_MODE", "log_population"),
 )
+if MODEL_CONFIG["output_mode"] == "level_fraction":
+    MODEL_CONFIG["species"] = [
+        {k: ATOM_CONFIG[a][k] for k in ("levels", "log10_particle_mass", "remainder")} for a in ACTIVE_ATOMS
+    ]
 
 atoms_tag = _active_atoms_tag(ACTIVE_ATOMS)
 

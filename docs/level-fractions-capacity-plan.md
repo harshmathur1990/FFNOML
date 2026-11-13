@@ -245,3 +245,34 @@ repeated epochs, so no margin is added. A slower model than estimated is the mai
 - [ ] H remainder slot: decide after the Phase 0 sum check (default: none, if Σ n_i matches ρ/m_ρ to 1%)
 - [ ] The keep threshold of 0.01 dex at log τ < −4, or another rule
 - [ ] The current balance: `cost -p nn2834k` on an Olivia login node, run only with the user's approval
+
+## Phase 0 results (2026-11-13)
+
+Scripts and logs: `/mn/stornext/d9/data/harshm/ffnoml_runs/cbh24_s0910_s0928_checks/`.
+
+- **Links:** `bifrost_data/cbh24/s0910` and `s0928` hold `atm3d`, `mesh` and `H/` as links to the source runs.
+- **out_atm against atm3d:** nₑ, T and ρ are identical; the velocities differ only by the unit factor 10⁵ (cm/s
+  against km/s).
+- **Ca total:** in all 5 training snapshots and cbh24 s0957, the 6 levels hold all of the Ca total (`totn`), and
+  ρ / total Ca is 1.0375×10⁻¹⁸ g in every cell. Ca needs no remainder slot.
+- **H total is not one constant of ρ:**
+  - ρ / Σ levels is 2.2697×10⁻²⁴ g in nw012023, ch012006, qs006003 and cbh24, but 2.3805 and 2.3839×10⁻²⁴ g in
+    en024048_hion and ch012012_hion.
+  - In 10–21% of cells (nw012023, ch012006, cbh24) the levels hold less H than ρ / 2.2697×10⁻²⁴ g, by up to a factor
+    of about 2.6.
+  - qs006003/689 (training, readnh = 0) has the opposite: 3.6% of cells above it by more than 0.1 dex, up to 1.93 dex.
+  - So H gets a remainder slot with m_ρ = 2.2697×10⁻²⁴ g, the smallest value: the levels can then fit every training
+    target except qs006003's excess cells.
+- **cbh24 levels at matched (T, nₑ, ρ):** median offset from the training snapshots, levels 1–6, in dex. The training
+  snapshots agree with each other to within 0.03.
+
+| Snapshot | 1 | 2 | 3 | 4 | 5 | 6 | Cells covered |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| cbh24 s0910 | −0.73 | +0.15 | +0.32 | +0.24 | +0.20 | +0.08 | 96.0% |
+| cbh24 s0928 | −0.81 | +0.15 | +0.35 | +0.26 | +0.21 | +0.09 | 95.7% |
+| cbh24 s0957 (test) | −1.02 | +0.17 | +0.47 | +0.37 | +0.32 | +0.11 | 95.1% |
+
+  The two new cbh24 snapshots have the same signature as the test snapshot, only smaller. Either cbh24's MULTI3D
+  runs are unconverged (Ng off, 465 iterations), or cbh24 is non-local in a way the training data never shows. The
+  Betzy rerun of s0957 H (from the old output, to 900 iterations) can tell the two apart: if its populations moved
+  towards the training values, the old cbh24 runs are unconverged.
