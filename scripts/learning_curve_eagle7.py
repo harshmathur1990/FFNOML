@@ -5,6 +5,7 @@ eagle7, copy them to Olivia, copy the checkpoints and predictions back, and scor
     python3 scripts/learning_curve_eagle7.py upload scripts/learning_curve.ini [EXPERIMENT ...]   # where ssh reaches Olivia
     (on Olivia: python3 scripts/submit_learning_curve.py scripts/learning_curve.ini [EXPERIMENT ...])
     python3 scripts/learning_curve_eagle7.py fetch scripts/learning_curve.ini [EXPERIMENT ...]
+    python scripts/learning_curve_eagle7.py predict scripts/learning_curve.ini [EXPERIMENT ...]   # on eagle7, if the job timed out
     python scripts/learning_curve_eagle7.py score scripts/learning_curve.ini [EXPERIMENT ...]     # on eagle7
 
 prepare builds, for each experiment, its training and validation datasets in STAGE/<section>/IO (pipeline.py --build
@@ -12,7 +13,8 @@ with the experiment's splits, from data_dir/bifrost_data) and records them with 
 scoring snapshot's solving set goes to STAGE/solving_sets, linked from solving_sets_from when it is there and built
 (pipeline.py --buildforpredict) otherwise. upload copies those to ROOT/<section> and ROOT/solving_sets on host, and
 fetch copies back each experiment's checkpoint, --fsdppredict outputs and logs, skipping files already there with the
-same size. score runs scripts/population_error_diagnostic.py --score-only on them, writing
+same size. predict makes, on eagle7's GPUs, the --fsdppredict outputs a job stopped by its time limit did not reach,
+from the fetched best checkpoint. score runs scripts/population_error_diagnostic.py --score-only on them, writing
 STAGE/<section>/eval/population_errors_<section>.json; scripts/learning_curve_summary.py STAGE compares them.
 
 ssh and scp use LC_SSH_OPTS (default: the ControlMaster socket ~/.ssh/olivia.sock when it exists, so one login with
@@ -150,6 +152,37 @@ def fetch(experiments, host):
               f"checkpoint {'there' if checkpoint else 'missing'}", flush=True)
 
 
+def predict(experiments, batched_slabs=None):
+    """--fsdppredict of every scoring snapshot from the experiment's best checkpoint, as the job's last step does, for a
+    job stopped by its time limit before it got there. One torchrun on this host's visible GPUs (CUDA_VISIBLE_DEVICES),
+    or, with batched_slabs, scripts/predict_batched.py for cubes whose activations do not fit in them."""
+    gpus = len([g for g in os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",") if g.strip()])
+    torchrun = os.path.join(os.path.dirname(sys.executable), "torchrun")
+    for name, e in experiments.items():
+        stage = os.path.abspath(e["stage"])
+        run = os.path.join(stage, name)
+        model = os.path.join(run, MODEL_SUBDIR)
+        if not os.path.exists(os.path.join(model, f"3D_sim_train_{e['atoms']}.pt")):
+            raise FileNotFoundError(f"{name}: no checkpoint in {model}; fetch it first")
+        for role, (sim, snap) in e["eval"]:
+            pred = prediction_name(sim, snap)
+            if os.path.exists(os.path.join(model, f"output_3D_sim_s5_{pred}_FFNO3D_{e['atoms']}.hdf5")):
+                print(f"{name}: {pred} ({role}) already predicted", flush=True)
+                continue
+            link = os.path.join(model, f"3D_sim_predict_{pred}.hdf5")
+            if os.path.lexists(link):
+                os.remove(link)
+            os.symlink(os.path.join(stage, "solving_sets", f"3D_sim_predict_{pred}.hdf5"), link)
+            print(f"{name}: predicting {pred} ({role}) on {gpus} GPU(s)", flush=True)
+            if batched_slabs:
+                cmd = [sys.executable, "scripts/predict_batched.py", os.path.join(model, f"3D_sim_train_{e['atoms']}.pt"), link,
+                       os.path.join(model, f"output_3D_sim_s5_{pred}_FFNO3D_{e['atoms']}.hdf5"),
+                       "--vertical-norm-slabs", str(batched_slabs)]
+            else:
+                cmd = [torchrun, "--standalone", f"--nproc_per_node={gpus}", "pipeline.py", "--fsdppredict", "--predname", pred]
+            run_logged(cmd, env_for(e, run), os.path.join(run, "predict_eagle7.log"))
+
+
 def score(experiments):
     for name, e in experiments.items():
         run = os.path.join(os.path.abspath(e["stage"]), name)
@@ -166,10 +199,12 @@ def score(experiments):
 
 def main():
     cli = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    cli.add_argument("step", choices=["prepare", "upload", "fetch", "score"])
+    cli.add_argument("step", choices=["prepare", "upload", "fetch", "predict", "score"])
     cli.add_argument("input")
     cli.add_argument("experiments", nargs="*", help="sections (default: all)")
     cli.add_argument("--host", default="harshm@olivia.sigma2.no", help="where upload and fetch copy to and from")
+    cli.add_argument("--batched", type=int, metavar="SLABS", help="predict: with scripts/predict_batched.py, its vertical "
+                     "norm statistics over SLABS slabs as an FSDP run on SLABS ranks (32 on Olivia's 8 nodes)")
     args = cli.parse_args()
     experiments = read_experiments(args.input, args.experiments)
     if args.step == "prepare":
@@ -178,6 +213,8 @@ def main():
         upload(experiments, args.host)
     elif args.step == "fetch":
         fetch(experiments, args.host)
+    elif args.step == "predict":
+        predict(experiments, args.batched)
     else:
         score(experiments)
 
