@@ -29,12 +29,14 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from submit_learning_curve import MODEL_SUBDIR, REPO, eval_lines, prediction_name, read_experiments, split_json  # noqa: E402
+from submit_learning_curve import (MODEL_SUBDIR, REPO, eval_lines, model_env, prediction_name, read_experiments,  # noqa: E402
+                                   split_json)
 
 
 def env_for(e, run_dir):
     env = dict(os.environ, FFNOML_RUN_DIR=run_dir, FFNOML_TRAIN_SPLIT=split_json(e["train"]),
-               FFNOML_VAL_SPLIT=split_json(e["val"]), FFNOML_ACTIVE_ATOMS=e["atoms"], FFNOML_NUM_EPOCHS=e["epochs"])
+               FFNOML_VAL_SPLIT=split_json(e["val"]), FFNOML_ACTIVE_ATOMS=e["atoms"], FFNOML_NUM_EPOCHS=e["epochs"],
+               **model_env(e))
     env.pop("FFNOML_PACKED_DATA", None)
     if e["data_dir"]:
         env["FFNOML_DATA_DIR"] = e["data_dir"]
@@ -94,8 +96,9 @@ def ssh_opts():
 
 
 def remote_sizes(host, paths):
-    """{path: size} of the files under paths on host (directories are walked; absent paths are left out)."""
-    script = "find " + " ".join(shlex.quote(p) for p in paths) + " -type f -printf '%s %p\\n' 2>/dev/null; true"
+    """{path: size} of the files under paths on host (directories are walked, links followed; absent paths are left
+    out)."""
+    script = "find -L " + " ".join(shlex.quote(p) for p in paths) + " -type f -printf '%s %p\\n' 2>/dev/null; true"
     out = subprocess.run(["ssh"] + ssh_opts() + [host, script], check=True, stdout=subprocess.PIPE,
                          universal_newlines=True).stdout
     return {line.split(" ", 1)[1]: int(line.split(" ", 1)[0]) for line in out.splitlines() if " " in line}
