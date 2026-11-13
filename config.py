@@ -175,11 +175,10 @@ ATOM_CONFIG = {
 
         "levels": 6,
 
-        # level-fraction head (MODEL_CONFIG output_mode "level_fraction"): total H = rho / particle mass. The mass is
-        # the smallest rho / (sum of levels) of the training snapshots, 2.2697e-24 g (2.3805e-24 and 2.3839e-24 g in the
-        # two _hion simulations), and 10-21% of cells hold less H in these levels than that, so H has a remainder slot.
-        "log10_particle_mass": float(np.log10(2.2697e-27)),  # kg
-        "remainder": True
+        # level-fraction head (MODEL_CONFIG output_mode "level_fraction"): the reference total is rho / 2.2697e-24 g,
+        # MULTI3D's H total in most simulations; the head's total correction learns the rest (-0.02 dex in the _hion
+        # simulations, down to -0.5 dex below log T = 3.7, and the readnh = 0 artefacts)
+        "log10_particle_mass": float(np.log10(2.2697e-27))  # kg
     },
 
     "CA": {
@@ -205,9 +204,8 @@ ATOM_CONFIG = {
 
         "levels": 6,
 
-        # total Ca = rho / 1.0375e-18 g in every training snapshot and cbh24, held entirely by these 6 levels
-        "log10_particle_mass": float(np.log10(1.0375e-21)),  # kg
-        "remainder": False
+        # MULTI3D's Ca total is rho / 1.0375e-18 g in every labelled snapshot
+        "log10_particle_mass": float(np.log10(1.0375e-21))  # kg
     }
 }
 
@@ -292,7 +290,7 @@ MODEL_CONFIG = dict(
 )
 if MODEL_CONFIG["output_mode"] == "level_fraction":
     MODEL_CONFIG["species"] = [
-        {k: ATOM_CONFIG[a][k] for k in ("levels", "log10_particle_mass", "remainder")} for a in ACTIVE_ATOMS
+        {k: ATOM_CONFIG[a][k] for k in ("levels", "log10_particle_mass")} for a in ACTIVE_ATOMS
     ]
 
 atoms_tag = _active_atoms_tag(ACTIVE_ATOMS)

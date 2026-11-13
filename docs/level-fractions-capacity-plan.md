@@ -57,7 +57,7 @@ Phases 0, 1 and 6 use no Olivia time. Phase 3's code can be written while the Ph
 | Phase | Delivers | Main files | Exit criterion |
 | --- | --- | --- | --- |
 | 0 Data | `cbh24` in `SIMULATIONS` and the splits; links in `bifrost_data/cbh24`; packed data file on Olivia | `config.py`, `packed_data.py` | Checks in *cbh24 data* pass for `s0910` and `s0928` |
-| 1 Fraction head | `output_mode = "level_fraction"`, per-atom m_ρ, A_Ca and remainder slot | `models/ffno_model.py`, `ffno_model_factory.py`, `FFNONet.py`, `tests/` | The 5 tests in *Level-fraction output* pass |
+| 1 Fraction head | `output_mode = "level_fraction"`: total plus composition, per-atom m | `models/ffno_model.py`, `ffno_model_factory.py`, `FFNONet.py`, `tests/` | The 5 tests in *Level-fraction output* pass |
 | 2 A/B | `sims1` retrained with the fraction head, H, scored on eagle7 | `scripts/learning_curve.ini` (new section) | Unseen error compared with the existing `sims1`, per log τ band |
 | 3 Capacity code | 6 switches in `MODEL_CONFIG`; measured memory and step time per configuration | `models/ffno_model.py`, `uq/analysis/mem_test.py` | Measured costs replace the estimates in *Capacity changes* |
 | 4 Screening | One 100-epoch run per change, cumulative | `scripts/learning_curve.ini` | A kept set within the 2× cost cap |
@@ -66,43 +66,43 @@ Phases 0, 1 and 6 use no Olivia time. Phase 3's code can be written while the Ph
 
 ## Level-fraction output
 
-The head will predict one logit per level. Each level's population is its softmax share of the species' total, and
-the total comes from the input ρ. Conservation then holds exactly, for every simulation, without the forward solver's
-rescaling.
+Decided 2026-11-13, after the Phase 0 checks: **total plus composition.** Per species the head predicts one logit per
+level and one total correction:
 
-    log10 n_i = log10 N_tot(ρ) + log_softmax(z)_i / ln 10,    N_H = ρ / m_ρ,    N_Ca = A_Ca N_H
+    log10 n_i = log10(ρ / m) + s + log10 softmax(z)_i,    s = 6 tanh(u / 6)
 
-Here m_ρ is the mass per H atom, 2.3811×10⁻²⁴ g in cbh24, and A_Ca is the Ca abundance from the MULTI3D abundance
-file.
+- **Composition:** softmax(z) is each level's share of MULTI3D's own total. MULTI3D's 6 levels always sum to its
+  `totn` (to 1.000000 in every labelled snapshot), so this is a true split of the total, with no remainder.
+- **Total:** ρ / m is the reference, with m = 2.2697×10⁻²⁴ g per H atom and 1.0375×10⁻¹⁸ g per Ca atom. s is the
+  log₁₀ ratio of MULTI3D's total to it. It starts at 0, and the network learns the rest: the `_hion` offset
+  (−0.021 dex), the deficit below log T = 3.7 (down to −0.5 dex, probably H₂), and the readnh = 0 artefacts.
+- **Complete:** 7 outputs carry 6 degrees of freedom, the same as the old head. Every positive set of levels whose
+  total lies within 6 dex of ρ / m is reproduced exactly. The measured MULTI3D range over all labelled snapshots is
+  −3.16 to +5.40 dex for H and exactly 0 for Ca, so a perfect network reproduces every target, edge cases included.
+- **Finite:** the 6 dex bound keeps populations about 10⁹ below float32 overflow.
+- **Not a hard conservation law:** the head can predict an excess wherever MULTI3D has one. A remainder-slot
+  version that capped the levels at ρ / m was rejected, because it could not reproduce those cells.
 
 **Design choices**
 
-- **The output stays log₁₀ n, standardised as now.** The model builds log N + log-fraction, then applies
-  `mean_Y`/`std_Y` itself. The composite loss, the FSDP service, the Julia VJP/JVP paths and the scoring scripts stay
-  unchanged.
+- **The output stays log₁₀ n, standardised as now.** The model builds the levels, then applies `mean_Y`/`std_Y`
+  itself. The composite loss, the FSDP service, the Julia VJP/JVP paths and the scoring scripts stay unchanged.
 - **The total uses ρ in physical units.** The model un-normalises its ρ channel with the stored `mean_X`/`std_X`,
   which become buffers in the checkpoint. Gradients with respect to ρ then include the total, which the inversion
   needs.
-- **A remainder slot where the levels don't cover the species.** The Ca model has no Ca I, so it gets a 7th logit for
-  "other stages" that is dropped from the output; sum ≤ N_Ca. For H, whether it needs one is settled by the Phase 0
-  check of Σ n_i against ρ/m_ρ. The setting is per atom, fixed once, and the same for every simulation.
-- **Old checkpoints still load.** A new `MODEL_CONFIG` key `output_mode` takes `"log_population"` (the default,
-  today's head) or `"level_fraction"`.
-- **m_ρ and A_Ca are fixed constants.** They are read from the MULTI3D inputs and stored in the checkpoint, not
-  fitted.
-
-**Files to change:** `models/ffno_model.py` (head), `ffno_model_factory.py`, `config.py`, `FFNONet.py` (pass
-normalisation into the model), `ffno_batched_backend.py` (check only), and tests in `tests/`.
+- **Old checkpoints still load.** `MODEL_CONFIG["output_mode"]` is `"log_population"` by default (today's head) and
+  `"level_fraction"` with `FFNOML_OUTPUT_MODE=level_fraction`.
+- **m is a fixed constant per species,** in `ATOM_CONFIG`, not fitted.
 
 **Tests before any Olivia run**
 
-- [ ] Σ n_i = N_tot to float32 precision on random inputs, or ≤ N_tot with a remainder slot
-- [ ] `log_population` mode gives bit-identical outputs on the production checkpoint
-- [ ] gradcheck of the new head with respect to ρ, in float64
+- [x] every target with totals from −3.16 to +5.40 dex and level ratios over 30 dex is reproduced to 1e-9
+  (`tests/test_level_fraction_head.py`)
+- [x] the total starts at ρ / m; populations stay finite at the bound
+- [x] gradcheck of the head in float64; through the model, d log total / dρ is exact
+- [x] the batched backend equals `forward`; the default `log_population` model and its state dict are unchanged
 - [ ] one FSDP predict plus VJP through the service on eagle7, at a 40 × 40 × 496 patch
 - [ ] 200 training steps on eagle7 lower the loss, with no NaN
-
-The forward solver's rescaling stays in as a check: for H it should then change nothing beyond float32 rounding.
 
 ## cbh24 data
 
@@ -143,11 +143,11 @@ In `bifrost_data/cbh24/s0910/` and `s0928/`: `atm3d` and `mesh` link to the file
 
 **Checks before a snapshot goes in**
 
-- [ ] `out_atm` equals `atm3d`, as it did for `s0957`
-- [ ] Σ H levels against ρ/m_ρ: no cells in excess the way en024031 was. This also sets m_ρ and whether H needs a
-  remainder slot.
-- [ ] Convergence: both logs are missing, so compare these snapshots' populations at matched (T, nₑ, ρ) against the
-  training simulations, as was done for `s0957`
+- [x] `out_atm` equals `atm3d` (velocities differ only by the unit factor 10⁵)
+- [x] Σ H levels against ρ / m: within −0.48 and +0.024 dex, like the training simulations
+- [x] Convergence proxy: populations at matched (T, nₑ, ρ) against the training simulations. **Failed:** level 1 is
+  0.73–0.81 dex low. cbh24 stays out of training until the Betzy rerun of s0957 H shows whether this is
+  non-convergence (see *Phase 0 results*)
 - [ ] Same y orientation as the other snapshots, checked against the loader's flip
 - [ ] A packed data file for Olivia, built on eagle7 and copied to `/cluster/work/projects/nn2834k/harshm/input`
 
@@ -242,7 +242,6 @@ repeated epochs, so no margin is added. A slower model than estimated is the mai
 
 - [ ] Ca: retrain it with the fraction head at today's capacity (about 4,000 GPU-hours), or keep the current Ca
   model and spend everything on H
-- [ ] H remainder slot: decide after the Phase 0 sum check (default: none, if Σ n_i matches ρ/m_ρ to 1%)
 - [ ] The keep threshold of 0.01 dex at log τ < −4, or another rule
 - [ ] The current balance: `cost -p nn2834k` on an Olivia login node, run only with the user's approval
 
@@ -254,15 +253,14 @@ Scripts and logs: `/mn/stornext/d9/data/harshm/ffnoml_runs/cbh24_s0910_s0928_che
 - **out_atm against atm3d:** nₑ, T and ρ are identical; the velocities differ only by the unit factor 10⁵ (cm/s
   against km/s).
 - **Ca total:** in all 5 training snapshots and cbh24 s0957, the 6 levels hold all of the Ca total (`totn`), and
-  ρ / total Ca is 1.0375×10⁻¹⁸ g in every cell. Ca needs no remainder slot.
+  ρ / total Ca is 1.0375×10⁻¹⁸ g in every cell. Ca's total correction is exactly 0.
 - **H total is not one constant of ρ:**
   - ρ / Σ levels is 2.2697×10⁻²⁴ g in nw012023, ch012006, qs006003 and cbh24, but 2.3805 and 2.3839×10⁻²⁴ g in
     en024048_hion and ch012012_hion.
   - In 10–21% of cells (nw012023, ch012006, cbh24) the levels hold less H than ρ / 2.2697×10⁻²⁴ g, by up to a factor
     of about 2.6.
   - qs006003/689 (training, readnh = 0) has the opposite: 3.6% of cells above it by more than 0.1 dex, up to 1.93 dex.
-  - So H gets a remainder slot with m_ρ = 2.2697×10⁻²⁴ g, the smallest value: the levels can then fit every training
-    target except qs006003's excess cells.
+  - So the head predicts the total as well as the split (see *Level-fraction output*).
 - **cbh24 levels at matched (T, nₑ, ρ):** median offset from the training snapshots, levels 1–6, in dex. The training
   snapshots agree with each other to within 0.03.
 

@@ -544,14 +544,17 @@ class FFNO3D(nn.Module):
         output_mode="log_population",
         species=None,
         rho_channel=5,
+        total_bound=6.0,
     ):
         super().__init__()
 
         # output_mode "log_population": the head predicts normalised log10 populations directly.
-        # "level_fraction": the head predicts one logit per level (plus one for a species' stages the atom model
-        # leaves out, when species[i]["remainder"]); each level is its softmax share of the species total
-        # N = rho / particle mass, taken from the input rho channel, so the levels never exceed N. The output stays
-        # normalised log10 populations, so the loss and the inference paths are unchanged.
+        # "level_fraction": per species, the head predicts one logit per level and one total correction u:
+        #     log10 n_i = log10(rho / particle mass) + s + log10 softmax(z)_i,   s = total_bound * tanh(u / total_bound)
+        # The softmax is each level's share of the species total, and s the log10 ratio of that total to rho / mass.
+        # Any set of positive levels whose total lies within total_bound dex of rho / mass is reproduced exactly; the
+        # bound only keeps populations finite in float32. The output stays normalised log10 populations, so the loss
+        # and the inference paths are unchanged.
         if output_mode not in ("log_population", "level_fraction"):
             raise ValueError(f"unknown output_mode {output_mode!r}")
         self.output_mode = output_mode
@@ -560,10 +563,10 @@ class FFNO3D(nn.Module):
             if not species:
                 raise ValueError("output_mode='level_fraction' needs species")
             self.species_levels = [int(s["levels"]) for s in species]
-            self.species_remainder = [bool(s.get("remainder", False)) for s in species]
             if sum(self.species_levels) != out_channels:
                 raise ValueError(f"species levels {self.species_levels} do not add up to out_channels={out_channels}")
-            head_channels = out_channels + sum(self.species_remainder)
+            head_channels = out_channels + len(self.species_levels)
+            self.total_bound = float(total_bound)
             self.rho_channel = int(rho_channel)
             self.register_buffer("log10_particle_mass",
                                  torch.tensor([float(s["log10_particle_mass"]) for s in species], dtype=torch.float32))
@@ -605,6 +608,14 @@ class FFNO3D(nn.Module):
 
         self.proj1 = nn.Conv3d(width, width * 2, 1, bias=False)
         self.proj2 = nn.Conv3d(width * 2, head_channels, 1)
+        if output_mode == "level_fraction":
+            # the total corrections start at s = 0, the total rho / mass
+            with torch.no_grad():
+                c = 0
+                for levels in self.species_levels:
+                    self.proj2.weight[c + levels].zero_()
+                    self.proj2.bias[c + levels].zero_()
+                    c += levels + 1
 
         self.act = nn.GELU()
 
@@ -624,11 +635,11 @@ class FFNO3D(nn.Module):
         log10_rho = x_in[:, rho] * self.std_X[rho] + self.mean_X[rho]
         out = []
         c = 0
-        for i, (levels, remainder) in enumerate(zip(self.species_levels, self.species_remainder)):
-            n = levels + int(remainder)
-            log10_fraction = torch.log_softmax(head[:, c:c + n], dim=1)[:, :levels] / math.log(10.0)
-            out.append((log10_rho - self.log10_particle_mass[i])[:, None] + log10_fraction)
-            c += n
+        for i, levels in enumerate(self.species_levels):
+            log10_fraction = torch.log_softmax(head[:, c:c + levels], dim=1) / math.log(10.0)
+            s = self.total_bound * torch.tanh(head[:, c + levels] / self.total_bound)
+            out.append((log10_rho - self.log10_particle_mass[i] + s)[:, None] + log10_fraction)
+            c += levels + 1
         log10_n = torch.cat(out, dim=1)
         return (log10_n - self.mean_Y[None, :, None, None, None]) / self.std_Y[None, :, None, None, None]
 
