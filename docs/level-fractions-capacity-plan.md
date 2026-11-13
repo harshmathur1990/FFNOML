@@ -124,7 +124,8 @@ compared with MULTI3D on a 40 × 40 patch of nw012023/940:
 | 1 | 0.396 | −0.013 (−0.26, +0.11) dex | 0.949 dex |
 
 Without the term the total drifts about 0.5 dex low in both runs. λ = 0.3 fixes the total and keeps the level loss
-within the run-to-run spread of λ = 0 (0.144–0.201); λ = 1 also fixes it but costs the levels. Phase 2 uses λ = 0.3.
+within the run-to-run spread of λ = 0 (0.144–0.201); λ = 1 also fixes it but costs the levels. Recommended for
+Phase 2: λ = 0.3 (awaiting the user).
 
 ## cbh24 data
 
