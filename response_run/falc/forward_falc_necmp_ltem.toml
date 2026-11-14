@@ -1,0 +1,84 @@
+# nₑ comparison, FALC_82 temperature only: P, ρ, nₑ from HSEMHS column HSE with the LTE EOS (log column mass, P = g m).
+mode = "forward"
+
+[inputs]
+initial_atmosphere_file = "falc/falc_logm.h5"
+time_index = 1
+
+[outputs]
+intensity_units = "si"
+synthesis_file = "falc/falc_necmp_ltem_synthesis.h5"
+atmosphere_file = "falc/falc_necmp_ltem_atmosphere.h5"
+
+[atmosphere]
+vertical_coordinate = "log10m"
+storage_order = "python"
+
+[atmosphere.datasets]
+log10m = "log10m"
+x_m = "x_m"
+y_m = "y_m"
+temperature = "temperature"
+vturb = "vturb"
+vx = "vx"
+vy = "vy"
+vz = "vz"
+
+[equilibrium]
+backend = "HSEMHS"
+model = "column_hse"
+eos_model = "lte"
+gravity_m_s2 = 274.0
+eos_table_file = "/mn/stornext/d9/data/harshm/MHS/HSEMHS/cache/eos_table_fullz.h5"
+on_nonconvergence = "abort"
+
+
+[[regions]]
+start_angstrom = 6558.0
+step_angstrom = 0.02
+count = 701
+normalization = 1.0
+psf_type = "none"
+
+[[regions.sources]]
+mode = "ffno"
+species = "H"
+line = "halpha"
+
+[[regions.sources]]
+mode = "kurucz_lte"
+linelist_file = "falc/kurucz_halpha_blend.list"
+
+[[regions]]
+start_angstrom = 8534.0
+step_angstrom = 0.02
+count = 601
+normalization = 1.0
+psf_type = "none"
+
+[[regions.sources]]
+mode = "ffno"
+species = "CA"
+line = "ca_ii_8542"
+
+[[regions.sources]]
+mode = "kurucz_lte"
+linelist_file = "falc/kurucz_8542_blend.list"
+
+[physics]
+redistribution = "non_prd"
+
+[observation]
+stokes = ["I"]
+
+[parallel]
+enabled = true
+decomposition = "x_slabs"
+gpu_launcher_rank = 0
+gpu_connect_timeout_seconds = 300.0
+gpu_status_timeout_seconds = 600.0
+gpu_diagnostic_interval_seconds = 30.0
+gpu_diagnostics_directory = ""
+
+[population.mesh]
+enabled = true
