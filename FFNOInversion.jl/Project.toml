@@ -23,8 +23,8 @@ WittBifrostEOS = "ae47c4ec-14cd-4845-8eff-b40a9f32171b"
 YAML = "ddb6d928-2868-570f-bddf-ab3f9cf99eb6"
 
 [sources]
-HSEMHS = {path = "/mn/stornext/d9/data/harshm/MHS_eos/HSEMHS"}
-WittBifrostEOS = {path = "/mn/stornext/d9/data/harshm/WittBifrostEOS.jl"}
+HSEMHS = {rev = "7d7dcddb19228cbdbe7bc83a55b0c9e8ddbaac0d", subdir = "HSEMHS", url = "https://github.com/harshmathur1990/1DHSE3dMHS.git"}
+WittBifrostEOS = {rev = "f2575705b81ded04a39cdb2cceb0c6bc8de744e8", url = "https://github.com/harshmathur1990/WittBifrostEOS.git"}
 Muspel = {rev = "01ec68da389be75c9ce31494a910095d3590499a", url = "https://github.com/harshmathur1990/Muspel.jl.git"}
 
 [extensions]

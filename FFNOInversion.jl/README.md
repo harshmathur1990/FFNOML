@@ -537,9 +537,9 @@ julia --project=. -e 'using Pkg; Pkg.instantiate()'
 julia --project=. scripts/build_wittmann_backend.jl
 ```
 
-`Project.toml` takes HSEMHS and WittBifrostEOS (the equation of state both use: Wittmann's C++ EOS with HSEMHS's
-shim, the NLTE hydrogen correction, χ₅₀₀ and the EOS tables; `harshmathur1990/WittBifrostEOS`) from local checkouts
-for now (`[sources]`), and Muspel (`harshmathur1990/Muspel.jl`, commit `01ec68d`) by Git revision.
+`Project.toml` pins HSEMHS (from `harshmathur1990/1DHSE3dMHS`, subdirectory `HSEMHS`), WittBifrostEOS (the equation of
+state both use: Wittmann's C++ EOS with HSEMHS's shim, the NLTE hydrogen correction, χ₅₀₀ and the EOS tables;
+`harshmathur1990/WittBifrostEOS`) and Muspel (`harshmathur1990/Muspel.jl`, commit `01ec68d`) by Git revision.
 `build_wittmann_backend.jl` builds WittBifrostEOS's libwitt (`WittBifrostEOS.build_libwitt`, with `$CXX`, default
 `g++`) into `deps/libwitt_ffno.<ext>`, or into the path given as its argument. Build it on the architecture that will
 load it. `WittmannEOS(library, pf)` uses that file, and WittBifrostEOS's tables and models use it too unless they already
