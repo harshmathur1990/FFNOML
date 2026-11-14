@@ -3,6 +3,7 @@ using FFNOInversion
 using LinearAlgebra
 using HDF5
 import HSEMHS
+import WittBifrostEOS
 import Muspel
 
 # Viewing angle (docs/viewing-angle/README.md): geometry, line-of-sight Doppler shift, slanted path length, the periodic
@@ -196,7 +197,7 @@ end
     if !isfile(VIEW_EOS_TABLE)
         @info "HSEMHS EOS table not found; skipping the inclined population mesh test"
     else
-    eos=HSEMHS.load_table(VIEW_EOS_TABLE)
+    eos=WittBifrostEOS.load_table(VIEW_EOS_TABLE)
     config=PopulationMeshConfig(bottom_m=-1e6,top_m=3e6,spacing_m=2e4,uniform_top_m=2e6,stretch=1.05,max_spacing_m=5e4)
     inner=SmoothMeshTestPopulations([0.8 0.1 -0.2 0.3 1.1 0.9; -0.5 0.2 0.1 -0.4 0.7 1.3],[0.4,-0.6])
     model=MeshPopulationModel(inner,config,eos,274.0)

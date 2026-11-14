@@ -31,11 +31,9 @@ command -v sbatch >/dev/null 2>&1 || {
   exit 2
 }
 package_dir=$(cd -- "$(dirname -- "${script_dir}")" && pwd)
-repository_root=$(dirname -- "${package_dir}")
 for initializer_input in \
     "${script_dir}/build_wittmann_backend.jl" \
-    "${script_dir}/prepare_olivia_environment.jl" \
-    "${repository_root}/scripts/witt_eos_cpp.cpp"; do
+    "${script_dir}/prepare_olivia_environment.jl"; do
   [[ -r "${initializer_input}" ]] || {
     echo "Missing accelerator initializer input: ${initializer_input}" >&2
     exit 2

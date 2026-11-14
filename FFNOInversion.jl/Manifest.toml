@@ -2,7 +2,7 @@
 
 julia_version = "1.12.3"
 manifest_format = "2.0"
-project_hash = "9b0d0cbf49f1667c5638dc936f2a0eda2589894e"
+project_hash = "855bb4684394bf8681b5c667251fbd47a8362275"
 
 [[deps.AbstractFFTs]]
 deps = ["LinearAlgebra"]
@@ -164,7 +164,7 @@ uuid = "f43a241f-c20a-4ad4-852c-f6b1247861c6"
 version = "1.7.0"
 
 [[deps.FFNOInversion]]
-deps = ["AtomicData", "Dates", "FFTW", "HDF5", "HSEMHS", "Libdl", "LinearAlgebra", "MPI", "MPIPreferences", "Muspel", "ProgressMeter", "SHA", "Serialization", "Sockets", "TOML", "YAML"]
+deps = ["AtomicData", "Dates", "FFTW", "HDF5", "HSEMHS", "Libdl", "LinearAlgebra", "MPI", "MPIPreferences", "Muspel", "ProgressMeter", "SHA", "Serialization", "Sockets", "TOML", "WittBifrostEOS", "YAML"]
 path = "."
 uuid = "5f657311-4af4-4e09-9b93-d21004ee51b8"
 version = "0.1.0"
@@ -210,8 +210,8 @@ uuid = "0234f1f7-429e-5d53-9886-15a909be8d59"
 version = "2.1.2+0"
 
 [[deps.HSEMHS]]
-deps = ["Dates", "DelimitedFiles", "FFTW", "HDF5", "Libdl", "LinearAlgebra", "MPI", "MPIPreferences", "OffsetArrays", "Printf", "ProgressMeter", "Random", "SHA", "Statistics", "TOML"]
-git-tree-sha1 = "4e37558453c7a3eb77c1c24e8e16311ec60074a2"
+deps = ["Dates", "DelimitedFiles", "FFTW", "HDF5", "Libdl", "LinearAlgebra", "MPI", "MPIPreferences", "OffsetArrays", "Printf", "ProgressMeter", "Random", "SHA", "Statistics", "TOML", "WittBifrostEOS"]
+path = "/mn/stornext/d9/data/harshm/MHS_eos/HSEMHS"
 repo-rev = "945b914f63c5493b09bddc9703c24188ccd29f96"
 repo-subdir = "HSEMHS"
 repo-url = "https://github.com/harshmathur1990/1DHSE3dMHS.git"
@@ -715,6 +715,12 @@ version = "1.28.0"
     Latexify = "23fbe1c1-3f47-55db-b15f-69d7ec21a316"
     NaNMath = "77ba4419-2d1f-58cd-9bb1-8ffee604a2e3"
     Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+
+[[deps.WittBifrostEOS]]
+deps = ["HDF5", "Libdl", "Printf", "Random", "SHA", "Statistics"]
+path = "/mn/stornext/d9/data/harshm/WittBifrostEOS.jl"
+uuid = "ae47c4ec-14cd-4845-8eff-b40a9f32171b"
+version = "0.1.0"
 
 [[deps.WoodburyMatrices]]
 deps = ["LinearAlgebra", "SparseArrays"]

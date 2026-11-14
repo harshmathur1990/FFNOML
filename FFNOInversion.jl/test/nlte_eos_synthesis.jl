@@ -3,6 +3,7 @@ using FFNOInversion
 using Libdl
 using LinearAlgebra
 import HSEMHS
+import WittBifrostEOS
 import Muspel
 isdefined(Main,:TestHydrostaticEquilibrium) || include(joinpath(@__DIR__,"test_equilibrium.jl"))
 isdefined(Main,:Phase6TwoLevelPopulation) || include(joinpath(@__DIR__,"phase6_production_gradient.jl"))
@@ -18,7 +19,7 @@ if !isfile(NLTE_SYNTHESIS_TABLE)
 else
 @testset "Synthesis with the NLTE EOS" begin
     F=FFNOInversion
-    table=HSEMHS.load_table(NLTE_SYNTHESIS_TABLE;model="nlte"); state=NLTEHydrogenState(table)
+    table=WittBifrostEOS.load_table(NLTE_SYNTHESIS_TABLE;model="nlte"); state=NLTEHydrogenState(table)
     mktempdir() do dir
         lib=joinpath(dir,"libwitt_nlte.$(Libdl.dlext)")
         run(`$(Base.julia_cmd()) --project=$(joinpath(@__DIR__,"..")) $(joinpath(@__DIR__,"..","scripts","build_wittmann_backend.jl")) $lib`)
@@ -34,12 +35,14 @@ else
         @testset "NLTE hydrogen state" begin
             hi=F.eos_neutral_hydrogen!(zeros(nz),state,T,P); hp=F.eos_protons(state,T,P)
             for k in 1:nz
-                x,y,_=HSEMHS.hydrogen(table,log(T[k]),log(P[k]))
+                x,y,_=WittBifrostEOS.hydrogen(table,log(T[k]),log(P[k]))
                 @test hi[k]==exp(x) && hp[k]==exp(y)
             end
             @test hp[1]>hi[1] && hi[end]>hp[end]                  # ionized at 15 kK, neutral in the photosphere
-            @test_throws ErrorException F.eos_neutral_hydrogen!(zeros(1),state,[1e3],[1e3])      # below the table
-            isfile(LTE_SYNTHESIS_TABLE) && @test_throws ArgumentError NLTEHydrogenState(HSEMHS.load_table(LTE_SYNTHESIS_TABLE))
+            # below the table: the model it was built from
+            v,_,ok=WittBifrostEOS.model_fields(WittBifrostEOS.table_model(table),log(1e3),log(1e3)); @test ok
+            @test F.eos_neutral_hydrogen!(zeros(1),state,[1e3],[1e3])[1]==exp(v[4])
+            isfile(LTE_SYNTHESIS_TABLE) && @test_throws ArgumentError NLTEHydrogenState(WittBifrostEOS.load_table(LTE_SYNTHESIS_TABLE))
         end
 
         fe=joinpath(dir,"fe.list")

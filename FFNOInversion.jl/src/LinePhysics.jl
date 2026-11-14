@@ -106,43 +106,19 @@ the continuum's hydrogen and neutral H in line broadening then follow the equili
 functions of (T, P), so the opacity adjoints differentiate them as they do Wittmann's."""
 struct NLTEHydrogenState{E}
     table::E
-    model::Base.RefValue{Any}         # HSEMHS's EOS model of the table, for (T, P) outside it; built on first use
-    lock::ReentrantLock
+    eos::WittBifrostEOS.ExtendedEOS   # the table, and outside it the model it was built from (WittBifrostEOS.table_model)
     function NLTEHydrogenState(table::E) where E
-        HSEMHS.eos_model(table)=="nlte" || throw(ArgumentError(
-            "NLTE hydrogen needs an NLTE EOS table (HSEMHS eos.model = \"nlte\"), got an $(uppercase(HSEMHS.eos_model(table))) table"))
-        new{E}(table,Ref{Any}(nothing),ReentrantLock())
+        WittBifrostEOS.eos_model(table)=="nlte" || throw(ArgumentError(
+            "NLTE hydrogen needs an NLTE EOS table (HSEMHS eos.model = \"nlte\"), got an $(uppercase(WittBifrostEOS.eos_model(table))) table"))
+        new{E}(table,WittBifrostEOS.ExtendedEOS(table))
     end
 end
 
-"""
-The HSEMHS EOS model a table was built from (`build_eos_table`): its partition functions, abundances, tolerances, hot-branch switch and NLTE
-correction, from the table's metadata, with the checksums it records. Outside its envelope HSEMHS's NLTE EOS is this model; above 10^4.6 K the
-correction is 0 and the model is HSEMHS's LTE hot branch. Needs HSEMHS's Wittmann library (`HSEMHS_LIBWITT`, or `deps/witt/build.jl`).
-"""
-function _nlte_model(state::NLTEHydrogenState)
-    state.model[]===nothing || return state.model[]
-    lock(state.lock) do
-        state.model[]===nothing || return state.model[]
-        meta=state.table.meta; get(meta,"nlte_correction","")=="" && throw(ArgumentError("the NLTE EOS table records no NLTE correction"))
-        for (file,key) in ((meta["pf_file"],"pf_sha256"),(meta["nlte_correction"],"nlte_correction_sha256"))
-            HSEMHS.file_sha256(file)==meta[key] || throw(ArgumentError("$file differs from the one the NLTE EOS table was built with ($key)"))
-        end
-        base=HSEMHS.EOSModel(String(meta["pf_file"]);prec=Float64(meta["prec"]),maxit=Int(meta["maxit"]),log_abund=HSEMHS.read_log_abund(String(meta["abundances"])))
-        state.model[]=HSEMHS.with_nlte(HSEMHS.with_switch(base,Float64(meta["T_sw"]),String(meta["hot_branch"])),HSEMHS.load_nlte_correction(String(meta["nlte_correction"])))
-    end
-end
+"""The model of the NLTE table, for (T, P) outside it (above 10^4.6 K the correction is 0: the LTE hot branch); built once."""
+_nlte_model(state::NLTEHydrogenState)=WittBifrostEOS.extended_model(state.eos)
 
-"""(ln ρ, ln nₑ, ln χ₅₀₀, ln n_HI, ln n_p) [SI] of HSEMHS's NLTE EOS at X = ln T, Y = ln P: the table inside it, HSEMHS's model outside; NaNs where both fail."""
-function _nlte_eos(state::NLTEHydrogenState,X::Float64,Y::Float64)
-    lnrho,lnne,lnchi,_=HSEMHS.state(state.table,X,Y)
-    if isfinite(lnrho)
-        lnnhi,lnnp,_=HSEMHS.hydrogen(state.table,X,Y)
-        return lnrho,lnne,lnchi,lnnhi,lnnp
-    end
-    v,_,ok=HSEMHS.model_fields(_nlte_model(state),X,Y)
-    ok ? v : (NaN,NaN,NaN,NaN,NaN)
-end
+"""(ln ρ, ln nₑ, ln χ₅₀₀, ln n_HI, ln n_p) [SI] of the NLTE EOS at X = ln T, Y = ln P: the table inside it, its model outside; NaNs where both fail."""
+_nlte_eos(state::NLTEHydrogenState,X::Float64,Y::Float64)=WittBifrostEOS.extended_fields(state.eos,X,Y)
 
 """ln n_HI and ln n_p [m⁻³] at every (T, P), as `_nlte_eos`; an error where HSEMHS's model fails."""
 function _nlte_hydrogen(state::NLTEHydrogenState,temp,pgas)
@@ -150,7 +126,7 @@ function _nlte_hydrogen(state::NLTEHydrogenState,temp,pgas)
     neutral=zeros(Float64,length(temp)); protons=zeros(Float64,length(temp))
     for i in eachindex(temp)
         _,_,_,a,b=_nlte_eos(state,log(Float64(temp[i])),log(Float64(pgas[i])))
-        isfinite(a)&&isfinite(b) || throw(ErrorException("NLTE hydrogen: HSEMHS's NLTE EOS fails at T = $(temp[i]) K, P = $(pgas[i]) Pa"))
+        isfinite(a)&&isfinite(b) || throw(ErrorException("NLTE hydrogen: the NLTE EOS fails at T = $(temp[i]) K, P = $(pgas[i]) Pa"))
         neutral[i]=a; protons[i]=b
     end
     neutral,protons

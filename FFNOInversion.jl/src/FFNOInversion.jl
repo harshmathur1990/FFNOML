@@ -11,6 +11,7 @@ using Sockets
 using TOML
 import MPI
 import HSEMHS
+import WittBifrostEOS
 import FFTW
 import YAML
 

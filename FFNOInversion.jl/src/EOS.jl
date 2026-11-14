@@ -1,15 +1,24 @@
 abstract type AbstractEOS end
 
-"""Wittmann EOS shared-library adapter. All public inputs and outputs use SI units."""
+"""
+Wittmann EOS shared-library adapter (WittBifrostEOS's libwitt, the library HSEMHS's tables and models use). All public inputs and outputs
+use SI units. `library` is a libwitt built by `scripts/build_wittmann_backend.jl` (`WittBifrostEOS.build_libwitt`), e.g. inside a job
+on the node type that runs it; WittBifrostEOS (tables, the NLTE model) uses the same file unless it already loaded one, every one a
+build of the same source. Without it, WittBifrostEOS's own.
+"""
 struct WittmannEOS <: AbstractEOS
     library::String
     partition_functions::String
     function WittmannEOS(library::AbstractString,partition_functions::AbstractString)
         isfile(library) || throw(ArgumentError("Wittmann library not found: $library"))
         isfile(partition_functions) || throw(ArgumentError("Wittmann partition-function file not found: $partition_functions"))
+        Libdl.dlsym(Libdl.dlopen(library),:witt_ctx_new;throw_error=false)===nothing && throw(ArgumentError(
+            "$library is not WittBifrostEOS's libwitt (an older FFNOInversion build); rebuild it with scripts/build_wittmann_backend.jl"))
+        WittBifrostEOS.use_libwitt!(library;strict=false)
         new(abspath(library),abspath(partition_functions))
     end
 end
+WittmannEOS(partition_functions::AbstractString=WittBifrostEOS.default_pf_file())=WittmannEOS(WittBifrostEOS.default_libwitt_path(),partition_functions)
 
 """Deterministic fixture EOS for manufactured tests; not a production replacement for Wittmann."""
 struct IdealGasEOS{T<:AbstractFloat} <: AbstractEOS
