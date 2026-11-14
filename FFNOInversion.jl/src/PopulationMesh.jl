@@ -89,7 +89,7 @@ const _LN10=log(10.0)
 function _mesh_lnP(eos,lnT,lnrho)
     lnP=lnrho+log(1.380649e-23*exp(lnT)/eos.mass_per_H)
     for _ in 1:50
-        r,d,_=HSEMHS.lnrho_dY(eos,lnT,lnP)
+        r,d,_=WittBifrostEOS.lnrho_dY(eos,lnT,lnP)
         isfinite(r)&&isfinite(d)&&d>0 || error("population mesh: EOS table has no state at T=$(exp(lnT)) K, rho=$(exp(lnrho))")
         step=(lnrho-r)/d; lnP+=step
         abs(step)<1e-12 && return lnP
@@ -101,7 +101,7 @@ end
 Writes (ln T, log10 ne, log10 rho) at the heights `zs` (decreasing, all below z_b) into `out` (3, length(zs))."""
 function _mesh_deep!(out,eos,g,nabla,zb,lnTb,lnrhob,zs)
     lnPb=_mesh_lnP(eos,lnTb,lnrhob); lnP=lnPb; z=zb
-    rate(lp)=(r=HSEMHS.state(eos,lnTb+nabla*(lp-lnPb),lp)[1]; isfinite(r) || error(
+    rate(lp)=(r=WittBifrostEOS.state(eos,lnTb+nabla*(lp-lnPb),lp)[1]; isfinite(r) || error(
         "population mesh: deep extension left the EOS table"); exp(r)*g/exp(lp))   # d ln P / d depth
     for (m,target) in enumerate(zs)
         while z>target
@@ -109,7 +109,7 @@ function _mesh_deep!(out,eos,g,nabla,zb,lnTb,lnrhob,zs)
             k1=rate(lnP); k2=rate(lnP+h/2*k1); k3=rate(lnP+h/2*k2); k4=rate(lnP+h*k3)
             lnP+=h/6*(k1+2k2+2k3+k4); z-=h
         end
-        lnT=lnTb+nabla*(lnP-lnPb); r,n,_,_=HSEMHS.state(eos,lnT,lnP)
+        lnT=lnTb+nabla*(lnP-lnPb); r,n,_,_=WittBifrostEOS.state(eos,lnT,lnP)
         out[1,m]=lnT; out[2,m]=n/_LN10; out[3,m]=r/_LN10
     end
     out
@@ -121,7 +121,7 @@ Above the EOS table's low-pressure end the last state is held."""
 function _mesh_corona!(out,eos,g,zt,lnTt,lnrhot,Tc,transition,zs)
     lnTc=max(log(Tc),lnTt); lnT(z)=lnTt+(lnTc-lnTt)*min((z-zt)/transition,1.0)
     lnP=_mesh_lnP(eos,lnTt,lnrhot); z=zt; held=false
-    rate(zz,lp)=(r=HSEMHS.state(eos,lnT(zz),lp)[1]; exp(r)*g/exp(lp))      # -d ln P / dz
+    rate(zz,lp)=(r=WittBifrostEOS.state(eos,lnT(zz),lp)[1]; exp(r)*g/exp(lp))      # -d ln P / dz
     for m in length(zs):-1:1
         target=zs[m]
         while z<target && !held
@@ -130,7 +130,7 @@ function _mesh_corona!(out,eos,g,zt,lnTt,lnrhot,Tc,transition,zs)
             next=lnP-h/6*(k1+2k2+2k3+k4)
             isfinite(next) ? (lnP=next; z+=h) : (held=true)
         end
-        r,n,_,_=HSEMHS.state(eos,lnT(z),lnP)
+        r,n,_,_=WittBifrostEOS.state(eos,lnT(z),lnP)
         out[1,m]=lnT(z); out[2,m]=n/_LN10; out[3,m]=r/_LN10
     end
     out
@@ -475,14 +475,14 @@ end
 """Population-mesh settings of a run, or `nothing` when FFNO runs on the native grid (the default for native z, or disabled)."""
 function population_mesh_options(config)
     config.population_mesh===nothing && return nothing
-    (config=config.population_mesh,eos_table_file=config.equilibrium.eos_table_file,
+    (config=config.population_mesh,eos_table_file=config.equilibrium.eos_table_file,eos_model=config.equilibrium.eos_model,
      gravity=config.equilibrium.gravity_m_s2,native_z=config.atmosphere.vertical_coordinate===:z_m)
 end
 
 """Wrap `model` for prediction on the population mesh (`options` from `population_mesh_options`; `eos` the loaded
 HSEMHS table, shared between species)."""
 wrap_population_mesh(model,::Nothing,eos=nothing)=model
-wrap_population_mesh(model,options,eos=HSEMHS.load_table(options.eos_table_file))=
+wrap_population_mesh(model,options,eos=WittBifrostEOS.load_table(options.eos_table_file;model=options.eos_model))=
     MeshPopulationModel(model,options.config,eos,options.gravity;native_z=options.native_z)
 
 _unwrap_population_model(model)=model

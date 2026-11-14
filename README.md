@@ -819,7 +819,7 @@ no conversion: set `[view]` in a `forward_z.toml`-style run.
 | Script | Purpose |
 | --- | --- |
 | `scripts/convert_iris_sim_fits_to_ffno_hdf5.py` | MURaM FITS to prediction solving set (see above) |
-| `scripts/witt.py`, `scripts/witt_eos_cpp.cpp`, `scripts/pf_Kurucz.input` | Wittmann EOS (Python and C++) and partition functions. The C++ source is also compiled into the inversion's `libwitt_ffno` |
+| `scripts/witt.py`, `scripts/pf_Kurucz.input` | Wittmann EOS in Python, and partition functions. The C++ EOS is WittBifrostEOS's (`deps/witt/witt_shim.cpp`, found as `WittBifrostEOS.jl` next to this repository or through `WITTBIFROSTEOS_DIR`): the converter compiles it, and it is the inversion's `libwitt_ffno` |
 | `scripts/atmosphere_resampler.cpp` | C++/Boost spatial resampler used by the MURaM converter |
 | `export_multi3d_depcoeff.py` | write MULTI3D departure coefficients in the FFNONet prediction layout |
 | `compute_muspel_lte.jl`, `validate_multi3d_dep_loading.jl` | Muspel LTE populations, check of MULTI3D departure-coefficient loading |

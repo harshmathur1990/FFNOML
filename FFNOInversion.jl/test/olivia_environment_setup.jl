@@ -34,7 +34,7 @@ end
     @test !occursin("OLIVIA_JULIA",submission)
     @test !occursin("OLIVIA_PYTHON",submission)
     @test occursin("\"\${preflight_runner}\"",submission)
-    @test occursin("scripts/witt_eos_cpp.cpp",submission)
+    @test !occursin("witt_eos_cpp.cpp",submission)          # the C++ source is WittBifrostEOS's, built through build_wittmann_backend.jl
     @test occursin("FFNO_SUBMITTED_REPO_DIR=\${package_dir}",submission)
     @test occursin("source \"\${runtime_environment}\"",runtime)
     @test occursin("\"\${initializer}\"",runtime)

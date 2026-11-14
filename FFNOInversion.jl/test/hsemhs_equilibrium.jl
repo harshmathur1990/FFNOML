@@ -1,4 +1,5 @@
 using HDF5
+import WittBifrostEOS
 include("test_equilibrium.jl")
 
 # The HSEMHS equilibrium backend (column modes, HSEMHS integration Phase 3): configuration, the adapter against
@@ -50,6 +51,12 @@ else
         bad("unknown key",raw("column_hse";column_ltau=Dict("cap"=>1.0)),:log10tau500,"/r")
         bad("align",raw("column_hse";column_ltau=Dict("align"=>"median")),:log10tau500,"/r")
         bad("anchor",raw("column_hse";column_z=Dict("P_ref_pa"=>1e5,"anchor"=>"middle")),:z_m,"/r")
+        # the EOS model: LTE unless set, "nlte" HSEMHS's eos.model, anything else rejected; the given route keeps it for the mesh
+        @test FFNOInversion._equilibrium_config(raw("column_hse"),:log10tau500,"/r").eos_model=="lte"
+        @test FFNOInversion._equilibrium_config(raw("column_hse";eos_model="NLTE"),:log10tau500,"/r").eos_model=="nlte"
+        @test equilibrium_config(:log10tau500).eos_model=="lte"
+        bad("eos_model must be",raw("column_hse";eos_model="saha"),:log10tau500,"/r")
+        @test FFNOInversion._given_equilibrium_config(raw("column_hse";eos_model="nlte"),:z_m,"/r").eos_model=="nlte"
         # pressure_top in [atmosphere] and cartesian_2d with MPI are rejected at load_config
         mktempdir() do dir
             path=joinpath(dir,"c.toml")
@@ -161,12 +168,12 @@ logtau500 = "l"\ntemperature = "t"\nvx = "x"\nvy = "y"\nvz = "z"\n[grid]\ndx_m =
         close_equilibrium!(backend)
         # synthesis EOS compatibility: same partition functions accepted, different rejected
         pf=joinpath(@__DIR__,"..","..","scripts","pf_Kurucz.input")
-        ok=prepare_equilibrium(equilibrium_config(:log10tau500),distributed,context;synthesis_eos=WittmannEOS(pf,pf))
+        ok=prepare_equilibrium(equilibrium_config(:log10tau500),distributed,context;synthesis_eos=WittmannEOS(pf))
         @test ok.provenance["synthesis_pf_sha256"]==ok.provenance["pf_sha256"]; close_equilibrium!(ok)
         mktempdir() do dir
             other=joinpath(dir,"pf.input"); write(other,read(pf,String)*"\n# changed\n")
             err=try prepare_equilibrium(equilibrium_config(:log10tau500),distributed,context;
-                synthesis_eos=WittmannEOS(other,other)); "" catch e; sprint(showerror,e) end
+                synthesis_eos=WittmannEOS(other)); "" catch e; sprint(showerror,e) end
             @test occursin("partition functions",err)
         end
         # a missing table and a grid of the wrong kind are rejected before any solver state exists
@@ -174,6 +181,11 @@ logtau500 = "l"\ntemperature = "t"\nvx = "x"\nvy = "y"\nvz = "z"\n[grid]\ndx_m =
             column_options(:log10tau500),nothing)
         @test_throws ArgumentError prepare_equilibrium(missing,distributed,context)
         @test_throws ArgumentError prepare_equilibrium(equilibrium_config(:z_m),distributed,context)
+        # an LTE table where the config asks for the NLTE model is rejected
+        c=equilibrium_config(:log10tau500)
+        nlte=EquilibriumConfig(c.backend,c.model,c.mode,c.gravity_m_s2,c.eos_table_file,c.on_nonconvergence,c.column,c.poisson,"nlte")
+        err=try prepare_equilibrium(nlte,distributed,context); "" catch e; sprint(showerror,e) end
+        @test occursin("LTE table",err) && occursin("nlte",err)
     end
 
     @testset "forward model with the HSEMHS backend" begin
@@ -220,9 +232,9 @@ end
         l=d.local_atmosphere
         @test l.ne≈given rtol=1e-12
         @test maximum(abs.(l.pgas./base.pgas.-1))>0.05                  # the pressure follows nₑ, not hydrostatic balance
-        table=HSEMHS.load_table(equilibrium_config(kind).eos_table_file)
+        table=WittBifrostEOS.load_table(equilibrium_config(kind).eos_table_file)
         for I in CartesianIndices(l.temperature)
-            r,n,_=HSEMHS.state(table,log(l.temperature[I]),log(l.pgas[I]))
+            r,n,_=WittBifrostEOS.state(table,log(l.temperature[I]),log(l.pgas[I]))
             @test n≈log(given[I]) atol=1e-8
             @test log(l.rho[I])≈r atol=1e-8
         end
@@ -233,4 +245,36 @@ end
         @test l.pgas!=p
         close_equilibrium!(b)
     end
+end
+
+# The NLTE EOS (HSEMHS eos.model = "nlte", HSEMHS_NLTE_EOS_TABLE): the table is accepted only as NLTE, the equilibrium is the
+# table's, and its nₑ and ρ are the NLTE state at the solved (T, P).
+const HSEMHS_NLTE_TABLE=get(ENV,"HSEMHS_NLTE_EOS_TABLE","/mn/stornext/d9/data/harshm/MHS_nlte/HSEMHS/cache/eos_table_nlte.h5")
+if !isfile(HSEMHS_NLTE_TABLE) || !isfile(HSEMHS_TABLE)
+    @info "HSEMHS NLTE EOS table not found; skipping the NLTE equilibrium tests" HSEMHS_NLTE_TABLE
+else
+@testset "HSEMHS equilibrium with the NLTE EOS" begin
+    context=serial_context()
+    c=equilibrium_config(:log10tau500)
+    config(table,model)=EquilibriumConfig(c.backend,c.model,c.mode,c.gravity_m_s2,table,c.on_nonconvergence,c.column,c.poisson,model)
+    distributed=distribute_atmosphere(Float64,equilibrium_atmosphere(:log10tau500),context)
+    err=try prepare_equilibrium(config(HSEMHS_NLTE_TABLE,"lte"),distributed,context); "" catch e; sprint(showerror,e) end
+    @test occursin("NLTE table",err)
+    backend=prepare_equilibrium(config(HSEMHS_NLTE_TABLE,"nlte"),distributed,context)
+    @test backend.provenance["eos_model"]=="nlte" && WittBifrostEOS.eos_model(backend.workspace.eos)=="nlte"
+    @test reconstruct_equilibrium!(backend,distributed,context).valid
+    a=distributed.local_atmosphere; table=backend.workspace.eos
+    for I in CartesianIndices(a.temperature)
+        r,n,_=WittBifrostEOS.state(table,log(a.temperature[I]),log(a.pgas[I]))
+        @test log(a.ne[I])≈n atol=1e-8
+        @test log(a.rho[I])≈r atol=1e-8
+    end
+    close_equilibrium!(backend)
+    # the same atmosphere through the LTE table: the cool upper layers, where the correction is large, differ in nₑ
+    lte=distribute_atmosphere(Float64,equilibrium_atmosphere(:log10tau500),context)
+    b=prepare_equilibrium(config(HSEMHS_TABLE,"lte"),lte,context)
+    @test reconstruct_equilibrium!(b,lte,context).valid
+    @test maximum(abs.(log10.(a.ne./lte.local_atmosphere.ne)))>0.1
+    close_equilibrium!(b)
+end
 end

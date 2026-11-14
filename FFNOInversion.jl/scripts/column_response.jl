@@ -28,6 +28,7 @@
 # PATHS.jl defines EOS_LIBRARY, PARTITION_FUNCTIONS and ATOM_FILES; the run's model_factory.jl does. No GPU.
 # Under mpiexec, rank 0 hands out x slabs and writes the file and every other rank computes them with all its threads.
 using FFNOInversion, HDF5, Printf
+import WittBifrostEOS
 import MPI
 using LinearAlgebra: mul!
 import Muspel                  # loads the extension that builds the H and Ca line models (import: both export Atmosphere3D)
@@ -194,7 +195,9 @@ function main(a)
     atmosphere,populations=read_forward_atmosphere(a.atmosphere)
     F._tau_integration(atmosphere) || error("the forward atmosphere is not a native log tau500 grid with chi500")
     eos=WittmannEOS(Main.EOS_LIBRARY,Main.PARTITION_FUNCTIONS)
-    setups=build_synthesis_setup(config,atmosphere,populations,eos;atom_files=Main.ATOM_FILES)
+    # the NLTE EOS's hydrogen (no equilibrium runs here: the table of [equilibrium] itself)
+    nlte=config.equilibrium.eos_model=="nlte" ? NLTEHydrogenState(F.WittBifrostEOS.load_table(config.equilibrium.eos_table_file;model="nlte")) : nothing
+    setups=build_synthesis_setup(config,atmosphere,populations,eos;atom_files=Main.ATOM_FILES,nlte_hydrogen=nlte)
     wavelength_air=collect(config.synthesis.wavelength_m)
     ranges=F._region_ranges(wavelength_air,setups)
     wavelength_vacuum=reduce(vcat,[s.wavelength_vacuum_m for s in setups])

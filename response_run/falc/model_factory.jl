@@ -26,7 +26,7 @@ function build_falc_model(config, distributed, workspace, context)
     predict_distributed_populations!(FFNOInversion.cartesian_populations(workspace), populations, distributed, context)
     FFNOInversion.footprint_state!(workspace, distributed, context)
     synthesizer = build_synthesis_setup(config, FFNOInversion.synthesis_atmosphere(workspace, distributed),
-        workspace.populations, eos; atom_files=ATOM_FILES)
+        workspace.populations, eos; atom_files=ATOM_FILES, nlte_hydrogen=synthesis_hydrogen(equilibrium))
     HybridForwardModel(populations, NonPRD(), synthesizer, config.observation_model, equilibrium, CapabilityManifest(),
         prepared_equilibrium=outcome)
 end

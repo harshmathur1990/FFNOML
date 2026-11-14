@@ -19,6 +19,7 @@
 #       OUTPUT.h5 [--species H,CA] [--depths 1:95] [--stride 4] [--atmosphere-out PATH] [--fd-check STEP_K]
 # --fd-check also compares the first depth's JVP with central differences of two predictions, T ± STEP_K.
 using FFNOInversion, HDF5, Printf
+import WittBifrostEOS
 const HSEMHS = FFNOInversion.HSEMHS        # a dependency of FFNOInversion, not necessarily of the run environment
 const F = FFNOInversion
 
@@ -62,7 +63,7 @@ function main(a)
     service=launch_fsdp_service(specs;(isempty(launcher) ? (;) : (;launcher=launcher))...,
         timeout_seconds=max(600.0,config.parallel.gpu_connect_timeout_seconds),
         diagnostics_directory=get(ENV,"FFNO_GPU_DIAGNOSTICS_DIR",joinpath(dirname(abspath(a.output)),"diagnostics")))
-    eos=HSEMHS.load_table(options.eos_table_file)
+    eos=WittBifrostEOS.load_table(options.eos_table_file)
     try
         mkpath(dirname(abspath(a.output)))
         h5open(a.output,"w") do file

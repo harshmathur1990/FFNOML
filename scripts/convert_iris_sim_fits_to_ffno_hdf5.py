@@ -399,15 +399,24 @@ def _shared_library_suffix() -> str:
     return ".so"
 
 
+def _witt_cpp_source() -> Path:
+    """WittBifrostEOS's generated Wittmann source (deps/witt/witt_shim.cpp): WITTBIFROSTEOS_DIR, else WittBifrostEOS.jl next to this repository."""
+    configured = os.environ.get("WITTBIFROSTEOS_DIR")
+    root = Path(configured).expanduser() if configured else Path(__file__).resolve().parents[2] / "WittBifrostEOS.jl"
+    return root / "deps" / "witt" / "witt_shim.cpp"
+
+
 def _compile_witt_cpp_library(source_path: Path, library_path: Path) -> None:
-    compiler = os.environ.get("CXX", "c++")
+    compiler = os.environ.get("CXX", "g++")
     command = [
         compiler,
-        "-O3",
+        "-O2",
         "-std=c++17",
         "-shared",
         "-fPIC",
         "-pthread",
+        "-fno-fast-math",
+        "-ffp-contract=off",
         os.fspath(source_path),
         "-o",
         os.fspath(library_path),
@@ -532,8 +541,8 @@ def _load_atmosphere_resampler() -> ctypes.CDLL:
 
 
 def _load_witt_cpp_library(args) -> ctypes.CDLL:
-    source_path = Path(__file__).resolve().parent / "witt_eos_cpp.cpp"
-    library_dir = source_path.parent / "__pycache__"
+    source_path = _witt_cpp_source()
+    library_dir = Path(__file__).resolve().parent / "__pycache__"
     library_path = library_dir / f"libwitt_eos_cpp{_shared_library_suffix()}"
     if not source_path.is_file():
         raise FileNotFoundError(source_path)

@@ -2,6 +2,7 @@ using Test
 using FFNOInversion
 using HDF5
 import HSEMHS
+import WittBifrostEOS
 isdefined(Main,:write_native_z_file) || include(joinpath(@__DIR__,"unit_coordinates.jl"))
 
 mutable struct RecordingHeights <: AbstractPopulationModel
@@ -51,7 +52,7 @@ FFNOInversion.predict_populations!(out,m::RecordingColumn,a,cache=nothing)=(m.se
 
 # Where the mesh must extrapolate above a column: a transition region to a coronal temperature, hydrostatic from the column's top.
 @testset "Corona above a column's top on the population mesh" begin
-    table=HSEMHS.load_table(get(ENV,"HSEMHS_TEST_TABLE","/mn/stornext/d9/data/harshm/hsemhs_env112/work/e2e/inputs/eos_table_fullz.h5"))
+    table=WittBifrostEOS.load_table(get(ENV,"HSEMHS_TEST_TABLE","/mn/stornext/d9/data/harshm/hsemhs_env112/work/e2e/inputs/eos_table_fullz.h5"))
     # configuration: on by default wherever the mesh is used; 0 keeps the top values
     @test FFNOInversion._population_mesh(Dict{String,Any}(),:log10tau500).corona_temperature_k==1e6
     @test FFNOInversion._population_mesh(Dict{String,Any}("mesh"=>Dict{String,Any}("enabled"=>true)),:z_m).corona_temperature_k==1e6
@@ -61,7 +62,7 @@ FFNOInversion.predict_populations!(out,m::RecordingColumn,a,cache=nothing)=(m.se
 
     nz,nx,ny=9,2,2; z=collect(range(2.0e6,-0.1e6;length=nz)); field(v)=repeat(reshape(v,nz,1,1),1,nx,ny)
     T=[1.0e5,2.0e4,8000.0,7000.0,6000.0,5000.0,5000.0,6000.0,9000.0]; lnP=log.(0.02 .* exp.(range(0,log(1e6);length=nz)))
-    states=[HSEMHS.state(table,log(T[k]),lnP[k]) for k in 1:nz]; rho=[exp(s[1]) for s in states]; ne=[exp(s[2]) for s in states]
+    states=[WittBifrostEOS.state(table,log(T[k]),lnP[k]) for k in 1:nz]; rho=[exp(s[1]) for s in states]; ne=[exp(s[2]) for s in states]
     grid=Grid3D(VerticalAxis(:z_m,z),[0.0,5e4],[0.0,5e4])
     a=Atmosphere3D(grid,field(T),field(fill(300.0,nz)),field(fill(-200.0,nz)),field(fill(100.0,nz)),zeros(nz,nx,ny);pgas=field(exp.(lnP)),rho=field(rho),ne=field(ne),z=field(z))
     config(Tc)=PopulationMeshConfig(bottom_m=-0.3e6,top_m=6.0e6,spacing_m=5.0e4,uniform_top_m=6.0e6,corona_temperature_k=Tc,corona_transition_m=2.4e5)
@@ -84,7 +85,7 @@ FFNOInversion.predict_populations!(out,m::RecordingColumn,a,cache=nothing)=(m.se
         mesh[above[i+1]]>z[1]+2.4e5 || continue                         # where T is constant: the slope has no kink
         slope=(lnp[i-1]-lnp[i+1])/(mesh[above[i-1]]-mesh[above[i+1]])
         @test slope≈-rm[above[i]]*274.0/exp(lnp[i]) rtol=0.02
-        @test log(nm[above[i]])≈HSEMHS.state(table,log(Tm[above[i]]),lnp[i])[2] atol=1e-6
+        @test log(nm[above[i]])≈WittBifrostEOS.state(table,log(Tm[above[i]]),lnp[i])[2] atol=1e-6
     end
     @test maximum(s.rho[above,1,1])<rho[1]*1.01 && minimum(s.rho[above,1,1])<rho[1]/5  # thin: not a dense layer held to the top
     # the tangent and transpose agree through the corona

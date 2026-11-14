@@ -11,6 +11,7 @@ using Sockets
 using TOML
 import MPI
 import HSEMHS
+import WittBifrostEOS
 import FFTW
 import YAML
 
@@ -73,6 +74,7 @@ export AbstractRedistributionModel, NonPRD, MockPRD
 export AbstractLineOpacityModel, AbstractFormalSolver, FFNOTransition, MuspelLineOpacityModel, MuspelFormalSolver, build_muspel_line_model
 export barklem_sigma_alpha, barklem_coefficient, effective_n, kurucz_label_orbital, atom_label_orbital, resolve_abo_broadening
 export KuruczLine, KuruczLTEModel, WittmannKuruczState, TabulatedOpacityModel
+export NLTEHydrogenState, NLTEKuruczState, synthesis_hydrogen
 export KuruczLineCache, load_kurucz_linelist, select_kurucz_lines, add_opacity_emissivity!, planck_lambda
 export AbstractSynthesizer, synthesize!, formal_solve!, ScalarFormalSolver, OpacityContributor, MixedIntensitySynthesizer, SynthesisCache, ThreadedSynthesisCache
 export RegionSynthesisSetup, build_synthesis_setup, output_intensity_scale

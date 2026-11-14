@@ -83,6 +83,8 @@ function build_production_model(config, distributed, workspace, context)
             workspace.populations,
             eos;
             atom_files=ATOM_FILES,
+            # [equilibrium] eos_model = "nlte": the continuum's hydrogen and the Kurucz metals follow the NLTE EOS
+            nlte_hydrogen=synthesis_hydrogen(equilibrium),
         )
         return HybridForwardModel(
             populations,

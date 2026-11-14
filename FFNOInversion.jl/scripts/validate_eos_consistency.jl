@@ -7,6 +7,7 @@
 # a regular log T × log P grid covering the photosphere–chromosphere, plus — if an FFNO atmosphere output is given —
 # every (T, Pgas) node of it. Differences are reported per region: direct (T < T_sw), blend (T_sw ≤ T < 1.1 T_sw), hot.
 using FFNOInversion, HDF5, Printf
+import WittBifrostEOS
 
 _quantile(v,p)=(s=sort(v); s[clamp(round(Int,p*(length(s)-1))+1,1,length(s))])
 
@@ -14,7 +15,7 @@ function main(args)
     length(args) in (2,3) || error("usage: julia --project=. scripts/validate_eos_consistency.jl LIBWITT TABLE [ATMOSPHERE.h5]")
     library,table_path=args[1],args[2]
     pf=normpath(joinpath(@__DIR__,"..","..","scripts","pf_Kurucz.input"))
-    eos=WittmannEOS(library,pf); table=FFNOInversion.HSEMHS.load_table(table_path)
+    eos=WittmannEOS(library,pf); table=FFNOInversion.WittBifrostEOS.load_table(table_path)
     T=Float64[]; P=Float64[]
     for lt in range(log10(3000.0),log10(3.0e4);length=120), lp in range(-3.0,5.0;length=60)
         push!(T,exp10(lt)); push!(P,exp10(lp))
@@ -37,7 +38,7 @@ function main(args)
     end
     dr=fill(NaN,n); dn=fill(NaN,n); region=Vector{Symbol}(undef,n); table_out=falses(n)
     for i in 1:n
-        lr,ln,_,st=FFNOInversion.HSEMHS.state(table,log(T[i]),log(P[i]))
+        lr,ln,_,st=FFNOInversion.WittBifrostEOS.state(table,log(T[i]),log(P[i]))
         table_out[i]=!isfinite(lr)
         dr[i]=exp(lr)/rho[i]-1; dn[i]=exp(ln)/ne[i]-1
         region[i]=T[i]<table.T_sw ? :direct : T[i]<1.1*table.T_sw ? :blend : :hot

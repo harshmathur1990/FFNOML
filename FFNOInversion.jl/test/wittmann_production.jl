@@ -1,3 +1,4 @@
+import WittBifrostEOS
 include("helpers.jl")
 
 @testset "Wittmann EOS library and the HSEMHS table" begin
@@ -18,9 +19,9 @@ include("helpers.jl")
         # interpolation and tolerance budget at these photospheric points
         table_path=get(ENV,"HSEMHS_EOS_TABLE","/mn/stornext/d9/data/harshm/MHS/HSEMHS/cache/eos_table_fullz.h5")
         if isfile(table_path)
-            table=FFNOInversion.HSEMHS.load_table(table_path)
+            table=FFNOInversion.WittBifrostEOS.load_table(table_path)
             for idx in eachindex(temperature)
-                lr,ln,_,_=FFNOInversion.HSEMHS.state(table,log(temperature[idx]),log(pressure[idx]))
+                lr,ln,_,_=FFNOInversion.WittBifrostEOS.state(table,log(temperature[idx]),log(pressure[idx]))
                 @test abs(exp(lr)/rho[idx]-1)<1e-3
                 @test abs(exp(ln)/ne[idx]-1)<2e-2
             end

@@ -287,6 +287,7 @@ bottom-first storage of the arrays needs no setting and no sign change.
 | `model` | `"column_hse"`; `"mhs"` is reserved for Phase 4 |
 | `gravity_m_s2` | surface gravity (default 274.0) |
 | `eos_table_file` | HSEMHS EOS table, e.g. a link to `HSEMHS/cache/eos_table_fullz.h5` |
+| `eos_model` | `"lte"` (default, Wittmann) or `"nlte"` (HSEMHS's experimental `eos.model`: the hydrogen ionization of the Bifrost hion runs); `eos_table_file` must be a table of that model, e.g. `HSEMHS/cache/eos_table_nlte.h5` for `"nlte"`. It sets the equilibrium's P, ρ, nₑ and χ₅₀₀, so the FFNO inputs and the τ scale, and the population mesh's extensions. In synthesis (`build_synthesis_setup(...; nlte_hydrogen=synthesis_hydrogen(equilibrium))`, which an NLTE config requires) the continuum's hydrogen and neutral H in line broadening come from the table's n_HI and n_p, used with the equilibrium's nₑ, and the Kurucz LTE lines put the metals in LTE at that nₑ (`witt_kurucz_populations_given_ne`; rebuild the Wittmann library). The adjoints differentiate these through (T, P, nₑ) as they do Wittmann's. A given atmosphere (e.g. IRIS/MURaM T, P, ρ) takes what it leaves out, nₑ and the hydrogen, from the same NLTE EOS, kept in `h_neutral`/`h_proton` for the synthesis. Outside the table (e.g. a corona above its top temperature) the EOS is the model the table was built from (`WittBifrostEOS.table_model`, from its metadata with checksums), through the run's Wittmann library. `"lte"` leaves every result bit-for-bit as before |
 | `on_nonconvergence` | `"reject_trial"` (an inversion trial is rejected) or `"abort"` |
 | `[equilibrium.column_ltau] align`, `[equilibrium.column_logm] align` | `"ptot"` (P + B²/2μ₀ equal at one height) or `"none"` |
 | `[equilibrium.column_z]` | `anchor` (`bottom`, `top`, `height`), `P_ref_pa` (required), `z_ref_m`, `tau_top` (`exp_tail`, `half_cell`, `zero`), and the HSEMHS integrator options `n_sub`, `adapt`, `rk_tol`, `n_sub_max`, `H_max_m`, `mu` |
@@ -536,11 +537,13 @@ julia --project=. -e 'using Pkg; Pkg.instantiate()'
 julia --project=. scripts/build_wittmann_backend.jl
 ```
 
-`Project.toml` pins HSEMHS (from `harshmathur1990/1DHSE3dMHS`, subdirectory
-`HSEMHS`) and Muspel (`harshmathur1990/Muspel.jl`, commit `01ec68d`) by Git revision.
-`build_wittmann_backend.jl` compiles `../scripts/witt_eos_cpp.cpp` with `$CXX`
-(default `c++`) into `deps/libwitt_ffno.<ext>`, or into the path given as its
-argument. Build it on the architecture that will load it.
+`Project.toml` pins HSEMHS (from `harshmathur1990/1DHSE3dMHS`, subdirectory `HSEMHS`), WittBifrostEOS (the equation of
+state both use: Wittmann's C++ EOS with HSEMHS's shim, the NLTE hydrogen correction, χ₅₀₀ and the EOS tables;
+`harshmathur1990/WittBifrostEOS`) and Muspel (`harshmathur1990/Muspel.jl`, commit `01ec68d`) by Git revision.
+`build_wittmann_backend.jl` builds WittBifrostEOS's libwitt (`WittBifrostEOS.build_libwitt`, with `$CXX`, default
+`g++`) into `deps/libwitt_ffno.<ext>`, or into the path given as its argument. Build it on the architecture that will
+load it. `WittmannEOS(library, pf)` uses that file, and WittBifrostEOS's tables and models use it too unless they already
+loaded one; `WittmannEOS()` takes WittBifrostEOS's own library and partition functions.
 
 For MPI runs, point MPI.jl at the system MPI with `MPIPreferences.use_system_binary()`.
 The Olivia scripts do this for you.
