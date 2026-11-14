@@ -375,20 +375,30 @@ def _find_pf_path(witt_path: str | None) -> Path:
     )
 
 
-def _import_witt(witt_path: str | None):
-    found_path = _find_witt_path(witt_path)
-    if found_path is not None:
-        sys.path.insert(0, os.fspath(found_path))
+def _witt_bifrost_dir() -> Path:
+    """WittBifrostEOS: WITTBIFROSTEOS_DIR, else WittBifrostEOS.jl next to this repository."""
+    configured = os.environ.get("WITTBIFROSTEOS_DIR")
+    return Path(configured).expanduser() if configured else Path(__file__).resolve().parents[2] / "WittBifrostEOS.jl"
 
-    try:
-        from witt import witt
-    except ImportError as exc:
+
+def _import_witt(witt_path: str | None):
+    """Wittmann's Python EOS with WittBifrostEOS's patches (tolerances, the gasc H2 fix), so that it is the model of the C++
+    backend (witt_bifrost.py); witt.py and pf_Kurucz.input from [eos].witt_path when set, else WittBifrostEOS's."""
+    package = _witt_bifrost_dir() / "python"
+    if not (package / "witt_bifrost.py").is_file():
         raise SystemExit(
-            "Witt EOS mode requires witt.py and pf_Kurucz.input. The converter "
-            "looked next to itself, in ./scripts, and in the current directory. "
-            "Set [eos].witt_path if the files live somewhere else."
-        ) from exc
-    return witt()
+            f"Witt EOS mode needs WittBifrostEOS's python/witt_bifrost.py (looked in {package}); "
+            "set WITTBIFROSTEOS_DIR to the WittBifrostEOS checkout."
+        )
+    sys.path.insert(0, os.fspath(package))
+    import witt_bifrost
+
+    if witt_path:
+        found_path = _find_witt_path(witt_path)
+        if found_path is None:
+            raise SystemExit(f"[eos].witt_path: no witt.py in {witt_path}")
+        return witt_bifrost.witt(pf_file=os.fspath(_find_pf_path(witt_path)), witt_dir=os.fspath(found_path))
+    return witt_bifrost.witt()
 
 
 def _shared_library_suffix() -> str:
@@ -400,10 +410,8 @@ def _shared_library_suffix() -> str:
 
 
 def _witt_cpp_source() -> Path:
-    """WittBifrostEOS's generated Wittmann source (deps/witt/witt_shim.cpp): WITTBIFROSTEOS_DIR, else WittBifrostEOS.jl next to this repository."""
-    configured = os.environ.get("WITTBIFROSTEOS_DIR")
-    root = Path(configured).expanduser() if configured else Path(__file__).resolve().parents[2] / "WittBifrostEOS.jl"
-    return root / "deps" / "witt" / "witt_shim.cpp"
+    """WittBifrostEOS's generated Wittmann source (deps/witt/witt_shim.cpp)."""
+    return _witt_bifrost_dir() / "deps" / "witt" / "witt_shim.cpp"
 
 
 def _compile_witt_cpp_library(source_path: Path, library_path: Path) -> None:
