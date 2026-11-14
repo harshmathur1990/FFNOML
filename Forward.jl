@@ -68,6 +68,7 @@ end
 
 function load_multi3d_pred_data(predname=nothing)
     script = """
+import math
 import os
 import sys
 import types
@@ -77,6 +78,7 @@ sys.modules.setdefault(
     types.SimpleNamespace(
         array=lambda values, dtype=None: values,
         float32=float,
+        log10=math.log10,
     ),
 )
 

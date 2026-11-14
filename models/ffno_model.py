@@ -541,8 +541,41 @@ class FFNO3D(nn.Module):
         checkpoint_blocks=True,
         hidden_spectral=128,
         hidden_vertical=128,
+        output_mode="log_population",
+        species=None,
+        rho_channel=5,
+        total_bound=6.0,
     ):
         super().__init__()
+
+        # output_mode "log_population": the head predicts normalised log10 populations directly.
+        # "level_fraction": per species, the head predicts one logit per level and one total correction u:
+        #     log10 n_i = log10(rho / particle mass) + s + log10 softmax(z)_i,   s = total_bound * tanh(u / total_bound)
+        # The softmax is each level's share of the species total, and s the log10 ratio of that total to rho / mass.
+        # Any set of positive levels whose total lies within total_bound dex of rho / mass is reproduced exactly; the
+        # bound only keeps populations finite in float32. The output stays normalised log10 populations, so the loss
+        # and the inference paths are unchanged.
+        if output_mode not in ("log_population", "level_fraction"):
+            raise ValueError(f"unknown output_mode {output_mode!r}")
+        self.output_mode = output_mode
+        head_channels = out_channels
+        if output_mode == "level_fraction":
+            if not species:
+                raise ValueError("output_mode='level_fraction' needs species")
+            self.species_levels = [int(s["levels"]) for s in species]
+            if sum(self.species_levels) != out_channels:
+                raise ValueError(f"species levels {self.species_levels} do not add up to out_channels={out_channels}")
+            head_channels = out_channels + len(self.species_levels)
+            self.total_bound = float(total_bound)
+            self.rho_channel = int(rho_channel)
+            self.register_buffer("log10_particle_mass",
+                                 torch.tensor([float(s["log10_particle_mass"]) for s in species], dtype=torch.float32))
+            # normalisation of the inputs (for rho) and of the output; set from the dataset with set_normalization
+            # and saved with the checkpoint
+            self.register_buffer("mean_X", torch.zeros(in_channels))
+            self.register_buffer("std_X", torch.ones(in_channels))
+            self.register_buffer("mean_Y", torch.zeros(out_channels))
+            self.register_buffer("std_Y", torch.ones(out_channels))
 
         self.checkpoint_blocks = checkpoint_blocks
         # DistributedFSDPBackend wraps each block with PyTorch's composable
@@ -574,9 +607,41 @@ class FFNO3D(nn.Module):
         ])
 
         self.proj1 = nn.Conv3d(width, width * 2, 1, bias=False)
-        self.proj2 = nn.Conv3d(width * 2, out_channels, 1)
+        self.proj2 = nn.Conv3d(width * 2, head_channels, 1)
+        if output_mode == "level_fraction":
+            # the total corrections start at s = 0, the total rho / mass
+            with torch.no_grad():
+                c = 0
+                for levels in self.species_levels:
+                    self.proj2.weight[c + levels].zero_()
+                    self.proj2.bias[c + levels].zero_()
+                    c += levels + 1
 
         self.act = nn.GELU()
+
+    def set_normalization(self, mean_X, std_X, mean_Y, std_Y):
+        """Copy the dataset's normalisation into the level-fraction head (a no-op for log_population)."""
+        if self.output_mode != "level_fraction":
+            return
+        for name, value in (("mean_X", mean_X), ("std_X", std_X), ("mean_Y", mean_Y), ("std_Y", std_Y)):
+            buffer = getattr(self, name)
+            buffer.copy_(torch.as_tensor(value, dtype=buffer.dtype).broadcast_to(buffer.shape))
+
+    def head_output(self, head, x_in):
+        """Normalised log10 populations from the head's channels and the normalised inputs x_in [B, Cin, D, H, W]."""
+        if self.output_mode == "log_population":
+            return head
+        rho = self.rho_channel
+        log10_rho = x_in[:, rho] * self.std_X[rho] + self.mean_X[rho]
+        out = []
+        c = 0
+        for i, levels in enumerate(self.species_levels):
+            log10_fraction = torch.log_softmax(head[:, c:c + levels], dim=1) / math.log(10.0)
+            s = self.total_bound * torch.tanh(head[:, c + levels] / self.total_bound)
+            out.append((log10_rho - self.log10_particle_mass[i] + s)[:, None] + log10_fraction)
+            c += levels + 1
+        log10_n = torch.cat(out, dim=1)
+        return (log10_n - self.mean_Y[None, :, None, None, None]) / self.std_Y[None, :, None, None, None]
 
     def _run_block(
         self, blk, x, z_scale, dx, dy, collect_stats=False, branch_mask=None
@@ -625,6 +690,7 @@ class FFNO3D(nn.Module):
         return self.proj2(x)
 
     def forward(self, x, z_scale, dx, dy, collect_stats=False, branch_mask=None):
+        x_in = x
         x = self._run_lift(x, collect_stats=collect_stats)
         all_stats = [] if collect_stats else None
 
@@ -652,7 +718,7 @@ class FFNO3D(nn.Module):
                     branch_mask=branch_mask,
                 )
 
-        x = self._run_head(x, collect_stats=collect_stats)
+        x = self.head_output(self._run_head(x, collect_stats=collect_stats), x_in)
         if collect_stats:
             return x, all_stats
         return x

@@ -1061,6 +1061,7 @@ def ffno_train_model(
     device="cuda",
     multi_gpu=False,
     debug_loss=False,
+    lam_total=0.0,
     patience=10,
     min_delta=1e-5,
     use_cosine=False,
@@ -1167,6 +1168,7 @@ def ffno_train_model(
         weight_decay=weight_decay,
         multi_gpu=multi_gpu,
         debug_loss=debug_loss,
+        lam_total=lam_total,
         mean_X=mean_X,
         std_X=std_X,
         mean_Y=mean_Y,
@@ -1455,7 +1457,7 @@ def _distributed_full_forward(model, X, z_scale, dx, dy, *, collect_stats=False,
         if torch.cuda.is_available() and X.is_cuda:
             torch.cuda.empty_cache()
 
-    out = model._run_head(x, collect_stats=False)
+    out = model.head_output(model._run_head(x, collect_stats=False), X)
     return out, all_stats
 
 
@@ -2311,7 +2313,7 @@ def ffno_predict_populations_distributed_full(
 
             pbar.set_postfix(step="head", refresh=True)
             debug_progress("full prediction", "head")
-            pred_log = model._run_head(x, collect_stats=False)
+            pred_log = model.head_output(model._run_head(x, collect_stats=False), X)
             debug_progress("full prediction", "forward done")
             pbar.update(1)
         finally:

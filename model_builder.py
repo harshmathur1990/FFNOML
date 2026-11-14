@@ -35,7 +35,8 @@ class ModelBuilder:
         std_Y=1,
         num_epochs=None,
         use_cosine=False,
-        lr_min=1e-6
+        lr_min=1e-6,
+        lam_total=0.0
     ):
 
         if model == "FFNO3D":
@@ -64,6 +65,7 @@ class ModelBuilder:
         self.world_size = 1
 
         self.debug_loss = debug_loss
+        self.lam_total = lam_total
 
         self.mean_X = mean_X
 
@@ -130,6 +132,9 @@ class ModelBuilder:
     def build_model(self, wrap_fsdp=True):
 
         model = self.model_cls(**self.model_config)
+        # the level-fraction head needs the dataset's normalisation; a loaded checkpoint overwrites it with its own
+        if hasattr(model, "set_normalization"):
+            model.set_normalization(self.mean_X, self.std_X, self.mean_Y, self.std_Y)
 
         # FFNOML_TRAIN_ONLY=proj1,proj2 trains only those top-level submodules (others frozen)
         train_only = os.environ.get("FFNOML_TRAIN_ONLY")
@@ -186,6 +191,7 @@ class ModelBuilder:
             gradient_loss_func=gradient_loss,
             atom_names=self.atom_names,
             debug=self.debug_loss,
+            lam_total=self.lam_total,
             mean_X=self.mean_X,
             std_X=self.std_X,
             mean_Y=self.mean_Y,

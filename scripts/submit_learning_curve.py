@@ -30,7 +30,8 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ATOMS = ("H", "CA")
 # root: Olivia; stage, data_dir, solving_sets_from: eagle7 (learning_curve_eagle7.py)
 SETTINGS = ("root", "stage", "data_dir", "solving_sets_from", "atoms", "epochs", "nodes", "time", "train_flags",
-            "held_out", "train", "val")
+            "held_out", "train", "val", "output_mode", "lam_total")
+OUTPUT_MODES = ("log_population", "level_fraction")   # config.MODEL_CONFIG output_mode (models/ffno_model.py)
 MODEL_SUBDIR = "training_FFNO3D_zscale_expand_lognlte"   # config.MODEL_DIR below the run directory
 
 
@@ -58,6 +59,12 @@ def experiment(parser, name):
     if unknown:
         raise ValueError(f"[{name}]: unknown settings {', '.join(unknown)} (known: {', '.join(SETTINGS)})")
     e = {key: section.get(key, "").strip() for key in SETTINGS}
+    e["output_mode"] = e["output_mode"] or OUTPUT_MODES[0]
+    e["lam_total"] = e["lam_total"] or "0"
+    if e["output_mode"] not in OUTPUT_MODES:
+        raise ValueError(f"[{name}] output_mode = {e['output_mode']!r}: one of {', '.join(OUTPUT_MODES)}")
+    if float(e["lam_total"]) < 0:
+        raise ValueError(f"[{name}] lam_total = {e['lam_total']!r}: must be >= 0")
     if e["atoms"] not in ATOMS:
         raise ValueError(f"[{name}] atoms = {e['atoms']!r}: one of {', '.join(ATOMS)} (production trains H and CA apart; "
                          "make one section per atom)")
@@ -95,6 +102,12 @@ def prediction_name(sim, snap):
     return f"{sim}_{snap}"
 
 
+def model_env(e):
+    """The environment that selects the experiment's head and loss (config.py); training and every prediction need it,
+    since a checkpoint loads only into the head it was trained with."""
+    return {"FFNOML_OUTPUT_MODE": e["output_mode"], "FFNOML_LAM_TOTAL": e["lam_total"]}
+
+
 def eval_lines(e):
     return [f"{role}={sim}/{snap}\n" for role, (sim, snap) in e["eval"]]
 
@@ -122,6 +135,28 @@ def missing_inputs(e, root):
     return missing
 
 
+def job_env(e, root, resume=False):
+    """experiment.env: what learning_curve_train.sbatch sources"""
+    return {
+        "FFNOML_EXPERIMENT": e["name"],
+        "FFNOML_REPO_DIR": REPO,
+        "FFNOML_SOLVING_SETS": os.path.join(root, "solving_sets"),
+        "FFNOML_TRAIN_SPLIT": split_json(e["train"]),
+        "FFNOML_VAL_SPLIT": split_json(e["val"]),
+        "FFNOML_ACTIVE_ATOMS": e["atoms"],
+        "FFNOML_NUM_EPOCHS": e["epochs"],
+        "FFNOML_TRAIN_FLAGS": " ".join(f for f in (e["train_flags"], "--resume" if resume else "") if f),
+        **model_env(e),
+    }
+
+
+def write_job_files(e, run, root, resume=False):
+    with open(os.path.join(run, "experiment.env"), "w") as f:
+        f.writelines(f"{k}='{v}'\n" for k, v in job_env(e, root, resume).items())
+    with open(os.path.join(run, "eval_snapshots.txt"), "w") as f:
+        f.writelines(eval_lines(e))
+
+
 def sbatch(args):
     return subprocess.run(["sbatch", "--parsable"] + args, check=True, stdout=subprocess.PIPE,
                           universal_newlines=True).stdout.strip().split(";")[0]
@@ -144,22 +179,9 @@ def main():
     for name, e in experiments.items():
         root = os.path.abspath(e["root"])
         run = os.path.join(root, name)
-        flags = " ".join(f for f in (e["train_flags"], "--resume" if args.resume else "") if f)
-        env = {
-            "FFNOML_EXPERIMENT": name,
-            "FFNOML_REPO_DIR": REPO,
-            "FFNOML_SOLVING_SETS": os.path.join(root, "solving_sets"),
-            "FFNOML_TRAIN_SPLIT": split_json(e["train"]),
-            "FFNOML_VAL_SPLIT": split_json(e["val"]),
-            "FFNOML_ACTIVE_ATOMS": e["atoms"],
-            "FFNOML_NUM_EPOCHS": e["epochs"],
-            "FFNOML_TRAIN_FLAGS": flags,
-        }
-        with open(os.path.join(run, "experiment.env"), "w") as f:
-            f.writelines(f"{k}='{v}'\n" for k, v in env.items())
-        with open(os.path.join(run, "eval_snapshots.txt"), "w") as f:
-            f.writelines(eval_lines(e))
-        print(f"{name}: {e['atoms']}, {len(e['train'])} training snapshots, {e['epochs']} epochs on {e['nodes']} nodes, "
+        write_job_files(e, run, root, args.resume)
+        print(f"{name}: {e['atoms']}, {e['output_mode']} (lam_total {e['lam_total']}), "
+              f"{len(e['train'])} training snapshots, {e['epochs']} epochs on {e['nodes']} nodes, "
               f"then {len(e['eval'])} predictions; {run}", flush=True)
         if args.dry_run:
             continue

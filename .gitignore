@@ -230,3 +230,27 @@ examples/**/.DS_Store
 # UQ outputs (predictions, atlases); keep only the driver scripts
 uq/*
 !uq/*.sh
+
+# Run outputs kept out of git (data, logs, core dumps, rendered figures; the scripts that make them are tracked)
+core
+*.h5
+*.hdf5
+/outputs/
+/figures_without_hion/
+/figures/**/*.png
+/figures/**/*.pdf
+/figures/*.pdf
+/build.txt
+/forward.txt
+/muram.txt
+/output*.txt
+/population_nrmse_per_level.csv
+slurm-*.out
+slurm-*.err
+/diagnostics/.gitkeep
+/diagnostics/core-*.txt
+/diagnostics/slurm-*/
+/response_run/diagnostics/
+/response_run/inputs/
+/response_run/**/*.out
+*.npy

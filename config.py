@@ -107,6 +107,11 @@ SIMULATIONS = {
     "en024031_by100_helium": {
         "base_path": DATA_DIR + "bifrost_data/en024031_by100_helium",
         "snaps": ["109"]
+    },
+    # half-resolution (252 x 252) runs; s0957 is the test snapshot, never trained or validated on
+    "cbh24": {
+        "base_path": DATA_DIR + "bifrost_data/cbh24",
+        "snaps": ["s0910", "s0928", "s0957"]
     }
 }
 
@@ -115,7 +120,8 @@ TRAIN_SPLIT = {
     "nw012023": ["915"],
     "ch012012_hion": ["910"],
     "ch012006": ["836"],
-    "qs006003_sap": ["689"]
+    "qs006003_sap": ["689"],
+    "cbh24": ["s0910"]
 }
 
 VAL_SPLIT = {
@@ -123,7 +129,8 @@ VAL_SPLIT = {
     "nw012023": ["940"],
     "ch012012_hion": ["984"],
     "ch012006": ["849"],
-    "qs006003_sap": ["900"]
+    "qs006003_sap": ["900"],
+    "cbh24": ["s0928"]
 }
 
 # FFNOML_TRAIN_SPLIT and FFNOML_VAL_SPLIT (JSON, {"sim": ["snap", ...]}) override the splits for scripted experiments
@@ -166,7 +173,12 @@ ATOM_CONFIG = {
             2.1802152677122893e-18
         ], dtype=np.float32),
 
-        "levels": 6
+        "levels": 6,
+
+        # level-fraction head (MODEL_CONFIG output_mode "level_fraction"): the reference total is rho / 2.2697e-24 g,
+        # MULTI3D's H total in most simulations; the head's total correction learns the rest (-0.02 dex in the _hion
+        # simulations, down to -0.5 dex below log T = 3.7, and the readnh = 0 artefacts)
+        "log10_particle_mass": float(np.log10(2.2697e-27))  # kg
     },
 
     "CA": {
@@ -190,7 +202,10 @@ ATOM_CONFIG = {
             1.902059054757628e-18
         ], dtype=np.float32),
 
-        "levels": 6
+        "levels": 6,
+
+        # MULTI3D's Ca total is rho / 1.0375e-18 g in every labelled snapshot
+        "log10_particle_mass": float(np.log10(1.0375e-21))  # kg
     }
 }
 
@@ -270,7 +285,16 @@ MODEL_CONFIG = dict(
     hidden_spectral=128,
     hidden_vertical=128,
     checkpoint_blocks=True,
+    # FFNOML_OUTPUT_MODE=level_fraction: the head predicts each species' split among its levels (models/ffno_model.py)
+    output_mode=os.environ.get("FFNOML_OUTPUT_MODE", "log_population"),
 )
+# FFNOML_MODEL_CONFIG (JSON, {"width": 96, ...}) overrides MODEL_CONFIG entries for scripted experiments
+if os.environ.get("FFNOML_MODEL_CONFIG"):
+    MODEL_CONFIG.update(json.loads(os.environ["FFNOML_MODEL_CONFIG"]))
+if MODEL_CONFIG["output_mode"] == "level_fraction":
+    MODEL_CONFIG["species"] = [
+        {k: ATOM_CONFIG[a][k] for k in ("levels", "log10_particle_mass")} for a in ACTIVE_ATOMS
+    ]
 
 atoms_tag = _active_atoms_tag(ACTIVE_ATOMS)
 
@@ -294,6 +318,8 @@ FORCE_EXPAND_VALIDATION_BASELINE = True
 
 
 DEBUG_LOSS = False
+# FFNOML_LAM_TOTAL weighs the loss on each species' total, |log10 sum of levels pred - true| (loss/nlte_composite_loss.py)
+LAM_TOTAL = float(os.environ.get("FFNOML_LAM_TOTAL", 0.0))
 DEBUG_DIST_INFERENCE = False
 
 # Dataset Params

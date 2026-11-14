@@ -213,6 +213,7 @@ def train_model(*, resume=False, bestpath=False, expand=False, validate_only=Fal
         device=DEVICE,
         multi_gpu=MULTI_GPU,
         debug_loss=DEBUG_LOSS,
+        lam_total=LAM_TOTAL,
         patience=PATIENCE,
         min_delta=MIN_DELTA,
         use_cosine=USE_COSINE,
