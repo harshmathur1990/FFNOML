@@ -97,10 +97,11 @@ class WittEOSCppTests(unittest.TestCase):
         ]
         cls.lib.witt_continuum_state_from_pgas.restype = ctypes.c_int
 
-        sys.path.insert(0, str(SCRIPTS))
-        from witt import witt
+        # the C++ library is WittBifrostEOS's shim: compare with witt.py under the same patches (tolerances, gasc H2 fix)
+        sys.path.insert(0, str(root / "python"))
+        import witt_bifrost
 
-        cls.py_eos = witt()
+        cls.py_eos = witt_bifrost.witt(pf_file=str(SCRIPTS / "pf_Kurucz.input"))
         cls.pf_path = str(SCRIPTS / "pf_Kurucz.input").encode()
 
     @classmethod

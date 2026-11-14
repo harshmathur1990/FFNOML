@@ -483,9 +483,10 @@ first depth index is the top of the atmosphere, and writes `inputs`, `z_scale`,
 `--fsdppredict`. Electron density is selected automatically in priority order:
 `lgne` is read directly, otherwise `lgp` is passed with temperature to the Witt
 EOS, otherwise the Witt EOS derives it from `lgr`. Conversion fails if none of
-these three FITS files exists. The converter finds the repo-local
-`scripts/witt.py` and `scripts/pf_Kurucz.input`
-automatically; set `witt_path` in `[eos]` only when those files live somewhere else. By
+these three FITS files exists. The EOS is WittBifrostEOS's, found as `WittBifrostEOS.jl`
+next to this repository or through `WITTBIFROSTEOS_DIR`: its C++ shim, or with `backend = "python"`
+its `python/witt_bifrost.py` (witt.py with the same patches, so both backends agree to the solver
+tolerance); set `witt_path` in `[eos]` only to patch another `witt.py` and `pf_Kurucz.input`. By
 default, this uses the C++ full-atmosphere EOS backend and all visible CPU
 threads; `show_progress = true` prints a C++-side progress line without Python
 callbacks. Use `backend = "python"` only for debugging or if no C++ compiler
@@ -819,7 +820,7 @@ no conversion: set `[view]` in a `forward_z.toml`-style run.
 | Script | Purpose |
 | --- | --- |
 | `scripts/convert_iris_sim_fits_to_ffno_hdf5.py` | MURaM FITS to prediction solving set (see above) |
-| `scripts/witt.py`, `scripts/pf_Kurucz.input` | Wittmann EOS in Python, and partition functions. The C++ EOS is WittBifrostEOS's (`deps/witt/witt_shim.cpp`, found as `WittBifrostEOS.jl` next to this repository or through `WITTBIFROSTEOS_DIR`): the converter compiles it, and it is the inversion's `libwitt_ffno` |
+| `scripts/pf_Kurucz.input` | Partition functions. The Wittmann EOS, C++ and Python, is WittBifrostEOS's (`deps/witt/witt_shim.cpp`, found as `WittBifrostEOS.jl` next to this repository or through `WITTBIFROSTEOS_DIR`): the converter compiles it, and it is the inversion's `libwitt_ffno` |
 | `scripts/atmosphere_resampler.cpp` | C++/Boost spatial resampler used by the MURaM converter |
 | `export_multi3d_depcoeff.py` | write MULTI3D departure coefficients in the FFNONet prediction layout |
 | `compute_muspel_lte.jl`, `validate_multi3d_dep_loading.jl` | Muspel LTE populations, check of MULTI3D departure-coefficient loading |
