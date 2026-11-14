@@ -22,7 +22,7 @@ TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
 YAML = "ddb6d928-2868-570f-bddf-ab3f9cf99eb6"
 
 [sources]
-HSEMHS = {rev = "29f2310a44b043bfecc3097ca88dfa2497eb9edd", subdir = "HSEMHS", url = "https://github.com/harshmathur1990/1DHSE3dMHS.git"}
+HSEMHS = {rev = "945b914f63c5493b09bddc9703c24188ccd29f96", subdir = "HSEMHS", url = "https://github.com/harshmathur1990/1DHSE3dMHS.git"}
 Muspel = {rev = "01ec68da389be75c9ce31494a910095d3590499a", url = "https://github.com/harshmathur1990/Muspel.jl.git"}
 
 [extensions]

@@ -63,11 +63,20 @@ end
 FFNO and Kurucz LTE sources, its FFNO lines being those `ffno_region_lines` finds in `atom_files`: their opacities and emissivities (one unit, see `source_planck`) add before a single
 formal solution. Every region has one continuum, Muspel's at its central wavelength, whatever its sources: FFNO populations never
 enter it. Its hydrogen, and neutral H in line broadening, are the EOS's at (T, P), or a given atmosphere's own. Kurucz lines that are the
-region's FFNO transitions are dropped."""
+region's FFNO transitions are dropped.
+
+With the NLTE EOS (`[equilibrium] eos_model = "nlte"`), `nlte_hydrogen` (`synthesis_hydrogen(equilibrium)`) is the equilibrium's table: the
+continuum's hydrogen and neutral H in broadening come from it, and the Kurucz lines put the metals in LTE at the atmosphere's nₑ. Without it
+(the default) everything is Wittmann's LTE state at (T, P), as before."""
 function build_synthesis_setup(config,atmosphere::Atmosphere3D,populations::AbstractDict,
-                               eos::WittmannEOS;atom_files::AbstractDict)
+                               eos::WittmannEOS;atom_files::AbstractDict,nlte_hydrogen::Union{Nothing,NLTEHydrogenState}=nothing)
     setups=RegionSynthesisSetup[]
     given=atmosphere.h_neutral!==nothing
+    equilibrium=hasproperty(config,:equilibrium) ? config.equilibrium : nothing
+    if nlte_hydrogen===nothing && !given && equilibrium!==nothing && equilibrium.backend=="HSEMHS" && equilibrium.eos_model=="nlte"
+        throw(ArgumentError("[equilibrium] eos_model = \"nlte\": pass build_synthesis_setup(...; nlte_hydrogen=synthesis_hydrogen(equilibrium)) so that the synthesis uses the NLTE EOS"))
+    end
+    hydrogen_state()=given ? nothing : nlte_hydrogen===nothing ? WittmannKuruczState(eos) : nlte_hydrogen
     line_center=hasproperty(config,:line_center) ? config.line_center : :reference
     population_limit=hasproperty(config,:ffno_population_limit) ? config.ffno_population_limit : 0.0
     no_inversion=hasproperty(config,:ffno_no_inversion) ? config.ffno_no_inversion : false
@@ -78,7 +87,7 @@ function build_synthesis_setup(config,atmosphere::Atmosphere3D,populations::Abst
         air=wavelengths(region); vacuum=eltype(air).(_air_to_vacuum_nm.(air.*1e9).*1e-9)
         isempty(region.sources) && throw(ArgumentError("every region needs at least one opacity source"))
         contributors=OpacityContributor[OpacityContributor(build_muspel_continuum_model(vacuum[(length(vacuum)+1)÷2]*1e9;
-            eos=given ? nothing : WittmannKuruczState(eos)))]
+            eos=hydrogen_state()))]
         lines=any(source.mode==:ffno for source in region.sources) ? ffno_region_lines(region,atom_lines;line_center=line_center) : FFNOLine[]
         ffno_lines=[(line.atomic_number,line.ion_stage,ffno_line_center_nm(line)*1e-9) for line in lines]
         for line in lines
@@ -88,7 +97,7 @@ function build_synthesis_setup(config,atmosphere::Atmosphere3D,populations::Abst
             size(populations[species],4)==line.level_count || throw(DimensionMismatch(
                 "$species FFNO populations have $(size(populations[species],4)) levels; its atom has $(line.level_count)"))
             model=build_muspel_line_model(atmosphere,populations[:H],atom_files[species],line.line_index,line.lower_level,line.upper_level;
-                include_continuum=false,neutral_hydrogen=given ? nothing : WittmannKuruczState(eos),
+                include_continuum=false,neutral_hydrogen=hydrogen_state(),
                 center_nm=line_center===:reference ? line.reference_vacuum_nm : nothing,
                 population_limit=species in given_species ? 0.0 : population_limit,no_inversion=no_inversion && !(species in given_species))
             push!(contributors,OpacityContributor(model,populations[species]))
@@ -100,7 +109,8 @@ function build_synthesis_setup(config,atmosphere::Atmosphere3D,populations::Abst
                 isempty(selected) && throw(ArgumentError("no Kurucz lines overlap configured region: $(source.linelist_file)"))
                 selected=_without_ffno_transitions(selected,ffno_lines)
                 isempty(selected) && (@warn "every Kurucz line in the region is an FFNO transition; source skipped" source.linelist_file; continue)
-                push!(contributors,OpacityContributor(KuruczLTEModel(selected,eos;include_continuum=false)))
+                push!(contributors,OpacityContributor(nlte_hydrogen===nothing ? KuruczLTEModel(selected,eos;include_continuum=false) :
+                    KuruczLTEModel(selected,eos,nlte_hydrogen;include_continuum=false)))
             end
         end
         push!(setups,RegionSynthesisSetup(collect(air),collect(vacuum),MixedIntensitySynthesizer(contributors)))
