@@ -279,6 +279,8 @@ The total-pressure alignment is a lateral force balance that ignores magnetic te
 \subsection{Giving the electron density}
 The LTE EOS can be far from a model's real $\nel$. For FAL-C the tabulated $\nel$ differs from the EOS value by about 9\% in the photosphere and a factor of about 2.6 near 1\,Mm, which alone moves the RH Ca\,\textsc{ii} 854.2\,nm core from 0.81 to $1.45\times10^{-8}$ SI and adds a self-reversal. So \emph{in forward synthesis only}, $\nel$ can be supplied as the truth. $P$ then becomes the pressure at which the EOS gives this $\nel$ at this $T$, and $\rho$ and $\chi_{500}$ follow. No hydrostatic integration is done, and $P$ and $\rho$ can be far from the model's, because the EOS is LTE. Inversions always take $\nel$ from the EOS.
 
+The equilibrium's EOS can instead be HSEMHS's NLTE model (\code{[equilibrium] eos\_model = "nlte"}, the hydrogen ionization of the Bifrost \code{hion} runs). It then sets $P$, $\rho$, $\nel$ and $\chi_{500}$, the continuum's hydrogen and neutral H in line broadening come from its table, and the Kurucz metals are put in LTE at its $\nel$. Unlike a given $\nel$, it is a function of $(T,P)$ and works in inversions. Section~\ref{sec:falcne} compares it on FAL-C.
+
 \subsection{Giving the whole atmosphere}
 With $\nel$ and hydrogen populations both supplied, HSEMHS is not used. As in RH,
 \begin{gather}
@@ -454,6 +456,35 @@ On \code{en024048_hion} 385 against MULTI3D (every fourth column): the log-$\tau
 \end{figure}
 
 A 1D model is far outside the training set, so Figure~\ref{fig:falc} is a stress test. The median difference from RH is about 2\% at \Halpha{} and 5\% at Ca\,\textsc{ii}, and FFNO's cores are about 10\% and 6\% deeper. RH treats H Ly$\alpha$, Ly$\beta$ and Ca\,\textsc{ii} H and K in PRD, which FFNO's training labels may treat differently; only the synthesis side of FFNO is known to be non-PRD. The two descriptions of the same model differ by 0.04\% in RH and about 1\% in FFNO.
+
+\subsection{FAL-C with three electron densities}\label{sec:falcne}
+\begin{figure}[H]\centering
+\includegraphics[width=.92\linewidth]{figures/falc_necmp_spectra.png}
+\caption{FAL-C (\code{FALC_82}, centre pixel, $\mu=1$) with FFNO line populations and three $\nel$: FALC's own with its hydrogen populations (no HSEMHS), and the LTE and NLTE EOS from column hydrostatic equilibrium on $T$ alone ($P=gm$ on the log $m$ grid; $P$ fixed at the bottom, $-100$\,km, on the height grid). Against RH on FAL-C with FALC's $\nel$.}\label{fig:falcne}
+\end{figure}
+\begin{figure}[H]\centering
+\includegraphics[width=.98\linewidth]{figures/falc_necmp_atmosphere.png}
+\caption{The atmospheres of Figure~\ref{fig:falcne}: $\nel$, neutral hydrogen and protons against FALC's, the heights built on the log $m$ grid and $\tau_{500}$, against RH. Solid: log $m$ grid; dashed: height grid.}\label{fig:falcneatm}
+\end{figure}
+
+\begin{table}[H]\centering\small
+\begin{tabular}{llrrrrrr}
+\toprule
+&&\multicolumn{2}{c}{Core against RH}&\multicolumn{4}{c}{$\nel/\nel^{\rm FALC}$ at RH height}\\
+Grid&$\nel$&\Halpha&Ca\,\textsc{ii}&1982\,km&1453\,km&978\,km&702\,km\\\midrule
+log $m$&FALC&$-10\%$&$-5\%$&1&1&1&1\\
+log $m$&LTE EOS&$+1\%$&$+87\%$&2.55&5.04&2.83&1.16\\
+log $m$&NLTE EOS&$-3\%$&$-9\%$&0.76&0.89&1.14&1.70\\
+$z$&FALC&$-10\%$&$-5\%$&1&1&1&1\\
+$z$&LTE EOS&$-2\%$&$+57\%$&1.45&3.73&2.58&1.08\\
+$z$&NLTE EOS&$-13\%$&$-26\%$&0.29&0.70&1.08&1.63\\\bottomrule
+\end{tabular}
+\caption{Line cores and $\nel$ of Figures~\ref{fig:falcne} and \ref{fig:falcneatm}.}
+\end{table}
+
+The LTE EOS puts 2.5--5 times FALC's $\nel$ in the chromosphere, which makes the Ca\,\textsc{ii} core bright and self-reversed, as in RH. The NLTE EOS keeps $\nel$ within 0.76--1.14 of FALC's above 900\,km on the log $m$ grid and brings the Ca\,\textsc{ii} core to $-9\%$, against $-5\%$ with FALC's own $\nel$; it has too many protons, about 3 times FALC's, near 600--700\,km. \Halpha{} hardly depends on $\nel$. On the height grid both EOS runs integrate gas pressure only from the bottom, while FAL-C includes turbulent pressure, so the column thins too fast: photospheric $\nel$ is 0.84 of FALC's, the far wings are 6--7\% bright, and the NLTE $\nel$ falls to 0.3 of FALC's at 2\,Mm. The log $m$ grid, where $P=gm$, is the cleaner test of the EOS.
+
+The profiles are narrower than RH's in all three cases. This is FFNO's populations, not the line profile: $v_{\rm turb}$ is FALC's, and with RH's populations the same synthesis reproduces RH's \Halpha{} widths within 1\% and its Ca\,\textsc{ii} widths within 5--18\%. FFNO's H $n=2$ is 0.27--0.37 of RH's at 500--1000\,km and its Ca\,\textsc{ii} lower level 0.75--0.85 of RH's below 700\,km, so the inner wings lack opacity and are 5\% (\Halpha) and 10--20\% (Ca\,\textsc{ii}) bright.
 
 \subsection{Where populations fail}
 \begin{table}[H]\centering\small
