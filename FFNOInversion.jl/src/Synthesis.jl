@@ -73,7 +73,7 @@ function build_synthesis_setup(config,atmosphere::Atmosphere3D,populations::Abst
     setups=RegionSynthesisSetup[]
     given=atmosphere.h_neutral!==nothing
     equilibrium=hasproperty(config,:equilibrium) ? config.equilibrium : nothing
-    if nlte_hydrogen===nothing && !given && equilibrium!==nothing && equilibrium.backend=="HSEMHS" && equilibrium.eos_model=="nlte"
+    if nlte_hydrogen===nothing && !given && equilibrium!==nothing && equilibrium.backend in ("HSEMHS","given") && equilibrium.eos_model=="nlte"
         throw(ArgumentError("[equilibrium] eos_model = \"nlte\": pass build_synthesis_setup(...; nlte_hydrogen=synthesis_hydrogen(equilibrium)) so that the synthesis uses the NLTE EOS"))
     end
     hydrogen_state()=given ? nothing : nlte_hydrogen===nothing ? WittmannKuruczState(eos) : nlte_hydrogen

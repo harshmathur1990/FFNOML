@@ -180,5 +180,75 @@ import Muspel
         refused=try config("z","z_m = \"zm\"";mode="inversion"); "" catch e; sprint(showerror,e) end
         @test occursin("forward synthesis only",refused)
 
+        # the NLTE EOS: what the input leaves out comes from the NLTE table at (T, P), and the synthesis hydrogen is the table's
+        nlte_table=get(ENV,"HSEMHS_NLTE_EOS_TABLE","/mn/stornext/d9/data/harshm/MHS_nlte/HSEMHS/cache/eos_table_nlte.h5")
+        if isfile(nlte_table)
+            nlte(table)="[equilibrium]\neos_model = \"nlte\"\neos_table_file = \"$table\"\n"
+            cfg=config("z","z_m = \"zm\"";nedata="",extra="rho = \"rho\"\npgas = \"p\"\n",equilibrium="[equilibrium]\neos_model = \"nlte\"\n")
+            refused=try prepare_equilibrium(cfg.equilibrium,distribute_atmosphere(Float64,read_inversion_inputs(cfg).atmosphere,context),context;synthesis_eos=eos); "" catch e; sprint(showerror,e) end
+            @test occursin("needs eos_table_file",refused)
+            table=F.HSEMHS.load_table(nlte_table;model="nlte")
+            for combo in (["rho","pgas"],["pgas"],["rho"],["ne"],["ne","pgas"],["rho","pgas","hp"])
+                @testset "NLTE EOS $(join(combo,"+"))" begin
+                    cfg=config("z","z_m = \"zm\"";nedata="ne" in combo ? lines["ne"] : "",extra=join(lines[k] for k in combo if k!="ne"),equilibrium=nlte(nlte_table))
+                    @test cfg.equilibrium.backend=="given" && cfg.equilibrium.eos_model=="nlte"
+                    distributed=distribute_atmosphere(Float64,read_inversion_inputs(cfg).atmosphere,context)
+                    backend=prepare_equilibrium(cfg.equilibrium,distributed,context;synthesis_eos=eos)
+                    @test backend.provenance["eos_model"]=="nlte"
+                    @test reconstruct_equilibrium!(backend,distributed,context).valid
+                    a=distributed.local_atmosphere
+                    X=log.(Array{Float64,3}(a.temperature)); Y=log.(Array{Float64,3}(a.pgas))
+                    s=[F.HSEMHS.state(table,X[i],Y[i]) for i in eachindex(X)]; h=[F.HSEMHS.hydrogen(table,X[i],Y[i]) for i in eachindex(X)]
+                    tne=reshape(exp.(getindex.(s,2)),size(X)); trho=reshape(exp.(getindex.(s,1)),size(X))
+                    "ne" in combo ? (@test a.ne≈permutedims(ne,(1,3,2)) rtol=1e-12) : (@test a.ne≈tne rtol=1e-12)
+                    if "rho" in combo
+                        @test a.rho≈permutedims(rho,(1,3,2)) rtol=1e-12
+                    elseif "ne" in combo && "pgas" in combo                        # ρ from P/kT − nₑ (set_given_inputs!), as on the LTE route
+                        @test (a.rho./F._GIVEN_MASS_PER_H_KG.*F._GIVEN_TOTAL_ABUNDANCE.+a.ne).*F._KB_SI.*a.temperature≈a.pgas rtol=1e-10
+                    else
+                        @test a.rho≈trho rtol=1e-12
+                    end
+                    "pgas" in combo && @test a.pgas≈permutedims(pressure,(1,3,2)) rtol=1e-12
+                    combo==["rho"] && @test trho≈a.rho rtol=1e-8                     # P found from ρ through the table
+                    combo==["ne"] && @test tne≈a.ne rtol=1e-8
+                    if "hp" in combo
+                        @test synthesis_hydrogen(backend)===nothing
+                        @test a.chi500≈F.given_chi500(a.temperature,a.ne,a.h_neutral,a.h_proton) rtol=1e-12
+                    else
+                        @test synthesis_hydrogen(backend) isa NLTEHydrogenState
+                        nhi=reshape(exp.(getindex.(h,1)),size(X)); np=reshape(exp.(getindex.(h,2)),size(X))
+                        @test a.chi500≈F.given_chi500(a.temperature,a.ne,nhi,np) rtol=1e-12
+                        @test a.h_neutral≈nhi rtol=1e-12                                       # kept for the synthesis
+                        @test a.h_proton≈np rtol=1e-12
+                    end
+                    # not Wittmann's LTE nₑ
+                    r=zeros(size(a.temperature)); n=zeros(size(a.temperature))
+                    F.thermodynamics!(r,n,eos,Array{Float64,3}(a.temperature),Array{Float64,3}(a.pgas))
+                    "ne" in combo || @test !(a.ne≈n)
+                end
+            end
+            # outside the table: HSEMHS's model of it (its Wittmann library: HSEMHS_LIBWITT or deps/witt), continuous across the table's edge
+            if isfile(F.HSEMHS.libwitt_path())
+                state=NLTEHydrogenState(table); Xtop=table.X[end]
+                for (X,Y) in ((log(5.0e6),log(0.1)),(log(4.0e7),log(1.0)),(Xtop+0.05,log(0.3)))
+                    @test !F.HSEMHS.in_table(table,X,Y)
+                    v,_,ok=F.HSEMHS.model_fields(F._nlte_model(state),X,Y); @test ok
+                    @test all(collect(F._nlte_eos(state,X,Y)).==collect(v))
+                end
+                for Y in (log(0.01),log(0.3),log(2.0))
+                    inside=collect(F._nlte_eos(state,Xtop-1e-6,Y)); outside=collect(F._nlte_eos(state,Xtop+1e-6,Y))
+                    @test inside[[1,2,4,5]]≈outside[[1,2,4,5]] rtol=1e-4                     # ρ, nₑ, n_HI, n_p
+                end
+                neutral,protons=F._nlte_hydrogen(state,[6.0e3,5.0e6],[1.0e3,0.1]); @test all(isfinite,neutral) && all(isfinite,protons)
+            else
+                @info "HSEMHS's Wittmann library not found; skipping the NLTE EOS outside its table" F.HSEMHS.libwitt_path()
+            end
+            # the LTE route is unchanged by the option's existence
+            lte=config("z","z_m = \"zm\"";nedata="",extra="rho = \"rho\"\npgas = \"p\"\n")
+            backend=prepare_equilibrium(lte.equilibrium,distribute_atmosphere(Float64,read_inversion_inputs(lte).atmosphere,context),context;synthesis_eos=eos)
+            @test synthesis_hydrogen(backend)===nothing && backend.provenance["eos_model"]=="lte"
+        else
+            @info "HSEMHS NLTE EOS table not found; skipping the given-atmosphere NLTE EOS tests" nlte_table
+        end
     end
 end
