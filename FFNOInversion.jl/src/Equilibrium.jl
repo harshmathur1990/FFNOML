@@ -51,9 +51,19 @@ struct EquilibriumConfig
     on_nonconvergence::Symbol
     column::Any                       # HSEMHS.ColumnZOptions or HSEMHS.ColumnTauOptions (= ColumnMassOptions)
     poisson::Any                      # nothing in Phase 3 (mhs arrives in Phase 4)
+    eos_model::String                 # "lte" (Wittmann) or "nlte" (HSEMHS eos.model: hydrogen ionization of Bifrost hion runs); the table must be of it
 end
+EquilibriumConfig(backend,model,mode,g,table,policy,column,poisson)=EquilibriumConfig(backend,model,mode,g,table,policy,column,poisson,"lte")
 
-const _EQ_KEYS = ("backend","model","gravity_m_s2","eos_table_file","on_nonconvergence","column_z","column_ltau","column_logm")
+const _EQ_KEYS = ("backend","model","gravity_m_s2","eos_table_file","eos_model","on_nonconvergence","column_z","column_ltau","column_logm")
+const EOS_MODELS = ("lte","nlte")
+
+"""`[equilibrium] eos_model`: "lte" (default) or "nlte", HSEMHS's `eos.model`; the EOS table is checked to be of it when loaded."""
+function _eos_model(raw)
+    model=lowercase(String(get(raw,"eos_model","lte")))
+    model in EOS_MODELS || throw(ArgumentError("equilibrium.eos_model must be \"lte\" or \"nlte\", got \"$model\""))
+    model
+end
 const _COLUMN_Z_KEYS = Dict("anchor"=>:anchor,"P_ref_pa"=>:P_ref,"z_ref_m"=>:z_ref,"n_sub"=>:n_sub,"adapt"=>:adapt,
     "rk_tol"=>:rk_tol,"n_sub_max"=>:n_sub_max,"tau_top"=>:tau_top,"H_max_m"=>:H_max,"mu"=>:mu)
 const _COLUMN_LTAU_KEYS = Dict("align"=>:align)
@@ -110,7 +120,7 @@ function _equilibrium_config(raw,vertical_coordinate::Symbol,base::AbstractStrin
     errors=column isa HSEMHS.ColumnTauOptions ? HSEMHS.option_errors(column,[0.0,1.0]) :
         filter(e->!occursin("z_ref",e),HSEMHS.option_errors(column,[1.0,0.0]))     # z_ref is checked against the axis at prepare
     isempty(errors) || throw(ArgumentError("[equilibrium] options: "*join(errors,"; ")))
-    EquilibriumConfig(backend,model,mode,g,table,policy,column,nothing)
+    EquilibriumConfig(backend,model,mode,g,table,policy,column,nothing,_eos_model(raw))
 end
 
 hsemhs_mode_name(mode::Symbol) = replace(String(mode),"_"=>"-")
@@ -365,15 +375,15 @@ function reconstruct_equilibrium!(backend::GivenAtmosphereBackend,distributed::D
 end
 
 """`[equilibrium]` of a given atmosphere (any of `ne`, `rho`, `pgas` and `hydrogen_populations` in the datasets): optional, and only `gravity_m_s2` and
-`eos_table_file` have a use, both for the population mesh's extensions of the columns."""
+`eos_table_file` (with `eos_model`) have a use, both for the population mesh's extensions of the columns."""
 function _given_equilibrium_config(raw,vertical_coordinate::Symbol,base::AbstractString)
     # the column sections configure HSEMHS, which this route doesn't use: ignored, so that the datasets alone choose the mode
-    unknown=setdiff(collect(keys(raw)),["backend","model","gravity_m_s2","eos_table_file","on_nonconvergence","column_z","column_ltau","column_logm"])
+    unknown=setdiff(collect(keys(raw)),collect(_EQ_KEYS))
     isempty(unknown) || throw(ArgumentError("unknown key(s) in [equilibrium]: $(join(sort(unknown),", "))"))
     g=Float64(get(raw,"gravity_m_s2",274.0)); isfinite(g)&&g>0 || throw(ArgumentError("equilibrium.gravity_m_s2 must be positive"))
     table=String(get(raw,"eos_table_file","")); table=isempty(table)||isabspath(table) ? table : normpath(joinpath(base,table))
     mode=vertical_coordinate===:z_m ? :given_z : vertical_coordinate===:log10m ? :given_logm : :given_ltau
-    EquilibriumConfig("given",:given,mode,g,table,:abort,nothing,nothing)
+    EquilibriumConfig("given",:given,mode,g,table,:abort,nothing,nothing,_eos_model(raw))
 end
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -404,7 +414,7 @@ synthesis-side Wittmann EOS: the same partition functions are required (hard
 mismatch → error); the table's other build settings are recorded."""
 function _eos_provenance(table,synthesis_eos)
     meta=table.meta
-    p=Dict{String,Any}("eos_table_sha256"=>HSEMHS.table_sha256(table),"T_sw"=>table.T_sw,"hot_branch"=>table.hot_branch,
+    p=Dict{String,Any}("eos_table_sha256"=>HSEMHS.table_sha256(table),"eos_model"=>HSEMHS.eos_model(table),"T_sw"=>table.T_sw,"hot_branch"=>table.hot_branch,
         "abundances"=>string(get(meta,"abundances","")),"fix_gasc_h2"=>get(meta,"fix_gasc_h2",-1),
         "wittmann_source_sha256"=>string(get(meta,"source_sha256","")),"pf_sha256"=>string(get(meta,"pf_sha256","")),
         "chi500"=>"extinction per length [m^-1] at 5000 A, absorption + scattering")
@@ -456,13 +466,13 @@ function _prepare_hsemhs(eq,distributed,context,synthesis_eos)
         context.enabled && context.size>1 && context.options.decomposition!==:x_slabs && throw(ArgumentError(
             "the HSEMHS equilibrium needs parallel.decomposition = \"x_slabs\" (got $(context.options.decomposition))"))
         isfile(eq.eos_table_file) || throw(ArgumentError("EOS table not found: $(eq.eos_table_file)"))
-        table=HSEMHS.load_table(eq.eos_table_file)
+        table=HSEMHS.load_table(eq.eos_table_file;model=eq.eos_model)
         (table,_eos_provenance(table,synthesis_eos))
     end
     table,provenance=local_state
     column=eq.column
     ws=HSEMHS.prepare_embedded(comm,eq.mode;axis=native_depth(grid),x=grid.x,y=grid.y,eos=table,g=eq.gravity_m_s2,
-        column=column,poisson=eq.poisson,view=hsemhs_view(grid.view),progress=isroot(context))
+        column=column,poisson=eq.poisson,view=hsemhs_view(grid.view),progress=isroot(context),eos_model=eq.eos_model)
     ok=HSEMHS.agree(comm,"equilibrium slab ownership") do
         HSEMHS.owned_columns(ws)==distributed.tile.xrange && distributed.tile.yrange==1:length(grid.y) ||
             throw(ArgumentError("HSEMHS owns x $(HSEMHS.owned_columns(ws)) but this rank's tile is x $(distributed.tile.xrange), y $(distributed.tile.yrange)"))
@@ -546,6 +556,11 @@ function reconstruct_equilibrium!(backend::HSEMHSBackend,distributed::Distribute
     EquilibriumOutcome(st.valid,st.reason,backend.config.model,backend.config.mode,st.steps,st.seconds,copy(st.messages),
         deepcopy(st))
 end
+
+"""The synthesis's NLTE hydrogen (`build_synthesis_setup(...; nlte_hydrogen)`): the equilibrium's table with `eos_model = "nlte"`, else `nothing`
+(Wittmann's LTE state). A given atmosphere keeps its own route."""
+synthesis_hydrogen(backend::HSEMHSBackend)=backend.config.eos_model=="nlte" ? NLTEHydrogenState(backend.workspace.eos) : nothing
+synthesis_hydrogen(backend)=nothing
 
 function close_equilibrium!(backend::HSEMHSBackend)
     backend.closed && return nothing

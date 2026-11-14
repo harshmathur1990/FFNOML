@@ -100,6 +100,44 @@ function WittmannKuruczState(eos::WittmannEOS)
     state
 end
 KuruczLTEModel(lines::Vector{KuruczLine{T}},eos::WittmannEOS;include_continuum=true) where {T<:AbstractFloat}=KuruczLTEModel(lines,WittmannKuruczState(eos),include_continuum)
+
+"""Neutral H and protons from an HSEMHS NLTE EOS table (`[equilibrium] eos_model = "nlte"`) at (T, P), in place of Wittmann's LTE ones:
+the continuum's hydrogen and neutral H in line broadening then follow the equilibrium's EOS, whose nₑ they are used with. They are smooth
+functions of (T, P), so the opacity adjoints differentiate them as they do Wittmann's."""
+struct NLTEHydrogenState{E}
+    table::E
+    function NLTEHydrogenState(table::E) where E
+        HSEMHS.eos_model(table)=="nlte" || throw(ArgumentError(
+            "NLTE hydrogen needs an NLTE EOS table (HSEMHS eos.model = \"nlte\"), got an $(uppercase(HSEMHS.eos_model(table))) table"))
+        new{E}(table)
+    end
+end
+
+"""ln n_HI and ln n_p [m⁻³] at every (T, P); an error where (T, P) is outside the table."""
+function _nlte_hydrogen(state::NLTEHydrogenState,temp,pgas)
+    length(temp)==length(pgas) || throw(DimensionMismatch("temperature and pressure differ"))
+    neutral=zeros(Float64,length(temp)); protons=zeros(Float64,length(temp))
+    for i in eachindex(temp)
+        a,b,_=HSEMHS.hydrogen(state.table,log(Float64(temp[i])),log(Float64(pgas[i])))
+        isfinite(a)&&isfinite(b) || throw(ErrorException(
+            "NLTE hydrogen: T = $(temp[i]) K, P = $(pgas[i]) Pa is outside the NLTE EOS table"))
+        neutral[i]=a; protons[i]=b
+    end
+    neutral,protons
+end
+eos_neutral_hydrogen!(nh,state::NLTEHydrogenState,temp,pgas)=(nh.=exp.(_nlte_hydrogen(state,temp,pgas)[1]); nh)
+eos_protons(state::NLTEHydrogenState,temp,pgas)=exp.(_nlte_hydrogen(state,temp,pgas)[2])
+
+"""Kurucz LTE lines with the NLTE EOS: the metals in LTE at the atmosphere's nₑ (the equilibrium's, as HSEMHS's NLTE model has them)
+rather than at Wittmann's LTE pₑ of (T, P), and neutral H in broadening from the NLTE table. Lines only: Wittmann's continuum is LTE."""
+struct NLTEKuruczState{E}
+    wittmann::WittmannKuruczState
+    hydrogen::NLTEHydrogenState{E}
+end
+function KuruczLTEModel(lines::Vector{KuruczLine{T}},eos::WittmannEOS,hydrogen::NLTEHydrogenState;include_continuum=false) where {T<:AbstractFloat}
+    include_continuum && throw(ArgumentError("Kurucz lines with the NLTE EOS take no Wittmann continuum (it is LTE); use the Muspel continuum"))
+    KuruczLTEModel(lines,NLTEKuruczState(WittmannKuruczState(eos),hydrogen),false)
+end
 struct TabulatedOpacityModel{T<:AbstractFloat,A<:AbstractArray{T,2}} <: AbstractLineOpacityModel
     extinction::A; emissivity::A
 end
@@ -325,8 +363,16 @@ function _add_wittmann_kurucz!(χ,η,model,wavelength,atmosphere,x,y;levels=axes
     atmosphere.pgas===nothing && throw(ArgumentError("Wittmann Kurucz synthesis requires gas pressure"))
     nz=length(levels); temp=Float64.(atmosphere.temperature[levels,x,y]); pgas=Float64.(atmosphere.pgas[levels,x,y])
     continuum=zeros(Float64,nz); lower=zeros(Float64,nz); nh=zeros(Float64,nz)
-    state=model.eos isa WittmannKuruczState ? model.eos : WittmannKuruczState(model.eos)
+    nlte=model.eos isa NLTEKuruczState
+    state=nlte ? model.eos.wittmann : model.eos isa WittmannKuruczState ? model.eos : WittmannKuruczState(model.eos)
     fn=Libdl.dlsym(state.library_handle,:witt_kurucz_populations)
+    if nlte
+        model.include_continuum && throw(ArgumentError("Kurucz lines with the NLTE EOS take no Wittmann continuum"))
+        atmosphere.ne===nothing && throw(ArgumentError("Kurucz lines with the NLTE EOS need the electron density"))
+        fn_ne=Libdl.dlsym(state.library_handle,:witt_kurucz_populations_given_ne;throw_error=false)
+        fn_ne===nothing && throw(ArgumentError("the Wittmann library predates witt_kurucz_populations_given_ne; rebuild it (scripts/build_wittmann_backend.jl)"))
+        ne=Float64.(atmosphere.ne[levels,x,y]); eos_neutral_hydrogen!(nh,model.eos.hydrogen,temp,pgas)
+    end
     # Mixed synthesis already distributes independent columns over Julia
     # threads. Keep the short depth-only kernels serial within each column to
     # avoid nesting a C++ and Julia thread team inside every column task.
@@ -342,9 +388,11 @@ function _add_wittmann_kurucz!(χ,η,model,wavelength,atmosphere,x,y;levels=axes
     end
     for line in model.lines
         line.atomic_number>0 || throw(ArgumentError("production Kurucz synthesis requires K94 species metadata"))
-        status=ccall(fn,Cint,(Ptr{Cvoid},Ptr{Cdouble},Ptr{Cdouble},Cint,Cint,Cdouble,Cdouble,Ptr{Cdouble},Ptr{Cdouble},Csize_t),
-            state.backend,temp,pgas,line.atomic_number,line.ion_stage,
-            line.lower_energy_j,line.lower_g,lower,nh,nz)
+        status=nlte ? ccall(fn_ne,Cint,(Ptr{Cvoid},Ptr{Cdouble},Ptr{Cdouble},Ptr{Cdouble},Cint,Cint,Cdouble,Cdouble,Ptr{Cdouble},Csize_t),
+                state.backend,temp,pgas,ne,line.atomic_number,line.ion_stage,line.lower_energy_j,line.lower_g,lower,nz) :
+            ccall(fn,Cint,(Ptr{Cvoid},Ptr{Cdouble},Ptr{Cdouble},Cint,Cint,Cdouble,Cdouble,Ptr{Cdouble},Ptr{Cdouble},Csize_t),
+                state.backend,temp,pgas,line.atomic_number,line.ion_stage,
+                line.lower_energy_j,line.lower_g,lower,nh,nz)
         status==0 || throw(ErrorException("Wittmann Kurucz state calculation failed"))
         given_neutral===nothing || (nh.=given_neutral)
         λ0=line.wavelength0_m; Aji=6.670e13/(λ0*1e9)^2*10^line.loggf/line.upper_g

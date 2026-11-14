@@ -166,6 +166,19 @@ public:
         return xpa[stage]*statistical_weight*std::exp(-energy_j/(BK*1.0e-7*temp))*1.0e6;
     }
 
+    // As kurucz_lower_population_m3, but at a given electron density instead of the LTE pe of (T, P): the metals in
+    // LTE at another EOS's pe (HSEMHS eos.model = "nlte"). With the LTE ne of (T, P) it is kurucz_lower_population_m3.
+    double kurucz_lower_population_given_ne_m3(double temp,double pgas_pa,double ne_m3,int atomic_number,
+                                               int stage,double energy_j,double statistical_weight) const {
+        if(atomic_number<1 || atomic_number>99 || stage<0) throw std::runtime_error("invalid Kurucz species");
+        if(!(ne_m3>0.0)) throw std::runtime_error("electron density must be positive");
+        const double pgas=pgas_pa*10.0, pe=ne_m3*1.0e-6*BK*temp;
+        if(!(pe<pgas)) throw std::runtime_error("electron pressure must be below the gas pressure");
+        double xpa[8]={}; ion_partials(atomic_number-1,temp,pgas,pe,xpa,0);
+        if(stage>=8) throw std::runtime_error("unsupported Kurucz ion stage");
+        return xpa[stage]*statistical_weight*std::exp(-energy_j/(BK*1.0e-7*temp))*1.0e6;
+    }
+
     double neutral_hydrogen_m3(double temp,double pgas_pa) const {
         const double pgas=pgas_pa*10.0,pe=pe_from_pg(temp,pgas);
         double xpa[8]={},u[8]={}; int count=0;
@@ -777,6 +790,23 @@ extern "C" int witt_kurucz_populations(
         for(std::size_t i=0;i<n;++i) {
             lower_population_m3[i]=eos.kurucz_lower_population_m3(temp[i],pgas_pa[i],atomic_number,stage,energy_j,statistical_weight);
             neutral_hydrogen_m3[i]=eos.neutral_hydrogen_m3(temp[i],pgas_pa[i]);
+        }
+        return 0;
+    } catch(...) { return 1; }
+}
+
+// Lower-level populations of a Kurucz line at given electron densities (the metals in LTE at that pe); no neutral H, which
+// the caller takes from its own EOS.
+extern "C" int witt_kurucz_populations_given_ne(
+    void* backend,const double* temp,const double* pgas_pa,const double* ne_m3,
+    int atomic_number,int stage,double energy_j,double statistical_weight,
+    double* lower_population_m3,std::size_t n
+) {
+    try {
+        if(!backend) return 1;
+        const WittEOS& eos=*static_cast<WittEOS*>(backend);
+        for(std::size_t i=0;i<n;++i) {
+            lower_population_m3[i]=eos.kurucz_lower_population_given_ne_m3(temp[i],pgas_pa[i],ne_m3[i],atomic_number,stage,energy_j,statistical_weight);
         }
         return 0;
     } catch(...) { return 1; }

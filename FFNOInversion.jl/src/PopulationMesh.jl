@@ -475,14 +475,14 @@ end
 """Population-mesh settings of a run, or `nothing` when FFNO runs on the native grid (the default for native z, or disabled)."""
 function population_mesh_options(config)
     config.population_mesh===nothing && return nothing
-    (config=config.population_mesh,eos_table_file=config.equilibrium.eos_table_file,
+    (config=config.population_mesh,eos_table_file=config.equilibrium.eos_table_file,eos_model=config.equilibrium.eos_model,
      gravity=config.equilibrium.gravity_m_s2,native_z=config.atmosphere.vertical_coordinate===:z_m)
 end
 
 """Wrap `model` for prediction on the population mesh (`options` from `population_mesh_options`; `eos` the loaded
 HSEMHS table, shared between species)."""
 wrap_population_mesh(model,::Nothing,eos=nothing)=model
-wrap_population_mesh(model,options,eos=HSEMHS.load_table(options.eos_table_file))=
+wrap_population_mesh(model,options,eos=HSEMHS.load_table(options.eos_table_file;model=options.eos_model))=
     MeshPopulationModel(model,options.config,eos,options.gravity;native_z=options.native_z)
 
 _unwrap_population_model(model)=model
