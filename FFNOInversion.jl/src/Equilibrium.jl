@@ -221,11 +221,14 @@ end
 P [Pa] at which the Wittmann EOS gives `target` at T, on every level: ρ or nₑ, whichever `which` names; both grow with P at fixed T. Regula falsi (Illinois) in ln P,
 on the levels still unconverged at each pass, to 1e-10 in ln of the target.
 """
-function _wittmann_pressure_at(eos,temperature,target,which::Symbol)
+_wittmann_pressure_at(eos,temperature,target,which::Symbol)=_pressure_at((r,e,t,p)->thermodynamics!(r,e,eos,t,p),temperature,target,which)
+
+"""As `_wittmann_pressure_at`, for any EOS `thermo!(ρ, nₑ, T, P)` on (cells, 1, 1) arrays."""
+function _pressure_at(thermo!,temperature,target,which::Symbol)
     t=vec(Array{Float64}(temperature)); y=log.(vec(Array{Float64}(target))); n=length(t)
     function f(indices,lnP)
         cells=length(indices); r=zeros(cells,1,1); e=zeros(cells,1,1)
-        thermodynamics!(r,e,eos,reshape(t[indices],cells,1,1),reshape(exp.(lnP),cells,1,1))
+        thermo!(r,e,reshape(t[indices],cells,1,1),reshape(exp.(lnP),cells,1,1))
         log.(vec(which===:rho ? r : e)).-y[indices]
     end
     guess=which===:rho ? y.+log(_GIVEN_TOTAL_ABUNDANCE*_KB_SI/_GIVEN_MASS_PER_H_KG).+log.(t) : y.+log(2*_KB_SI).+log.(t)
@@ -237,7 +240,7 @@ function _wittmann_pressure_at(eos,temperature,target,which::Symbol)
         isempty(above) || (hi[above].+=step; fhi[above]=f(above,hi[above]))
         step*=1.3
     end
-    outside=count(>(0),flo)+count(<(0),fhi)
+    outside=count(>(0),flo)+count(<(0),fhi)+count(!isfinite,flo)+count(!isfinite,fhi)
     outside>0 && throw(ArgumentError("$outside levels have a given $which no EOS state reaches at their temperature"))
     x=copy(lo); active=findall(i->flo[i]!=0,all_cells)
     for _ in 1:200
@@ -277,6 +280,48 @@ function _given_hydrogen_state_separately(synthesis_eos,temperature,pressure)
         end
     end
     rho,ne,neutral,protons
+end
+
+"""The NLTE EOS table of a given atmosphere with `[equilibrium] eos_model = "nlte"`."""
+function _given_nlte_table(eq)
+    isempty(eq.eos_table_file) && throw(ArgumentError("[equilibrium] eos_model = \"nlte\" on a given atmosphere needs eos_table_file, an NLTE EOS table"))
+    HSEMHS.load_table(eq.eos_table_file;model="nlte")
+end
+
+"""ρ, nₑ, neutral H and protons [SI] from HSEMHS's NLTE EOS at (T, P) (`_nlte_eos`: the table, and HSEMHS's model outside it); an error where it fails."""
+function _given_nlte_fields(nlte::NLTEHydrogenState,temperature,pressure)
+    rho=zeros(Float64,size(temperature)); ne=similar(rho); neutral=similar(rho); protons=similar(rho); failed=Threads.Atomic{Int}(0)
+    X=log.(Float64.(temperature)); Y=log.(Float64.(pressure))
+    any(i->!HSEMHS.in_table(nlte.table,X[i],Y[i]),eachindex(X)) && _nlte_model(nlte)              # built once, before the threads
+    Threads.@threads for i in eachindex(rho)
+        r,e,_,h,p=_nlte_eos(nlte,X[i],Y[i])
+        if isfinite(r)&&isfinite(e)&&isfinite(h)&&isfinite(p)
+            rho[i]=exp(r); ne[i]=exp(e); neutral[i]=exp(h); protons[i]=exp(p)
+        else
+            Threads.atomic_add!(failed,1); rho[i]=ne[i]=neutral[i]=protons[i]=NaN
+        end
+    end
+    failed[]>0 && throw(ArgumentError("HSEMHS's NLTE EOS fails at $(failed[]) levels of the given atmosphere"))
+    rho,ne,neutral,protons
+end
+"""`thermo!(ρ, nₑ, T, P)` of HSEMHS's NLTE EOS for `_pressure_at`: NaN where it fails."""
+_nlte_thermodynamics(nlte::NLTEHydrogenState)=(r,e,t,p)->for i in eachindex(r)
+    lnrho,lnne,_,_,_=_nlte_eos(nlte,log(t[i]),log(p[i])); r[i]=exp(lnrho); e[i]=exp(lnne)
+end
+
+"""ρ and nₑ, where not given, and χ₅₀₀ of a given atmosphere with the NLTE EOS: Muspel's continuum at 500 nm with the EOS's neutral H and protons,
+which are kept in `h_neutral` and `h_proton` for the synthesis (evaluated once: outside the table each is an HSEMHS model solve). With given hydrogen
+populations, χ₅₀₀ and the synthesis use them instead."""
+function _given_nlte_state!(a,nlte::NLTEHydrogenState,hydrogen_given::Bool)
+    rho,ne,neutral,protons=_given_nlte_fields(nlte,a.temperature,a.pgas)
+    S=eltype(a.temperature)
+    a.rho===nothing && (a.rho=S.(rho))
+    a.ne===nothing && (a.ne=S.(ne))
+    if !hydrogen_given
+        a.h_neutral=S.(neutral); a.h_proton=S.(protons)
+    end
+    a.chi500=S.(given_chi500(a.temperature,a.ne,a.h_neutral,a.h_proton))
+    a
 end
 
 """ρ and nₑ, where not given, and χ₅₀₀ of a given atmosphere without hydrogen populations: Muspel's continuum at 500 nm, with neutral H and protons from the EOS at (T, P)."""
@@ -338,21 +383,28 @@ end
 
 """
 The atmosphere is given by any of nₑ, ρ, P and the hydrogen populations. What these don't fix comes from the synthesis Wittmann EOS at (T, P), with P itself found
-from a given nₑ or ρ when it is missing (`set_given_inputs!`). Without hydrogen populations, χ₅₀₀ uses the EOS's hydrogen. `pgas`, `rho` and `chi500` are fixed, and every axis's geometry follows column by column. No HSEMHS, no EOS table and no MPI. Forward only.
+from a given nₑ or ρ when it is missing (`set_given_inputs!`). Without hydrogen populations, χ₅₀₀ uses the EOS's hydrogen. With `[equilibrium] eos_model = "nlte"`
+the EOS is instead HSEMHS's NLTE EOS (`eos_table_file`, and the model it was built from outside it): ρ, nₑ, P and χ₅₀₀'s hydrogen where not given, and, without given hydrogen populations, the synthesis
+hydrogen (`synthesis_hydrogen`). `pgas`, `rho` and `chi500` are fixed, and every axis's geometry follows column by column. No HSEMHS solve, no EOS table but
+the NLTE one, and no MPI. Forward only.
 """
 mutable struct GivenAtmosphereBackend <: AbstractEquilibriumBackend
     config::EquilibriumConfig
     provenance::Dict{String,Any}
+    hydrogen::Any                     # the NLTE table's NLTEHydrogenState for the synthesis (eos_model = "nlte", no given hydrogen populations), else nothing
     function GivenAtmosphereBackend(eq::EquilibriumConfig,distributed::DistributedAtmosphere;synthesis_eos=nothing)
         a=distributed.local_atmosphere
         hydrogen_given=a.h_neutral!==nothing; ne_input=a.ne!==nothing
+        nlte=eq.eos_model=="nlte" ? NLTEHydrogenState(_given_nlte_table(eq)) : nothing
         if a.chi500===nothing
             synthesis_eos===nothing && throw(ArgumentError("a given atmosphere needs the synthesis EOS for what it doesn't fix: prepare_equilibrium(...; synthesis_eos)"))
             if a.pgas===nothing
-                a.pgas=eltype(a.temperature).(a.ne===nothing ? _wittmann_pressure_at(synthesis_eos,a.temperature,a.rho,:rho) :
-                    _wittmann_pressure_at(synthesis_eos,a.temperature,a.ne,:ne))
+                eos_at=nlte===nothing ? (r,e,t,p)->thermodynamics!(r,e,synthesis_eos,t,p) : _nlte_thermodynamics(nlte)
+                a.pgas=eltype(a.temperature).(a.ne===nothing ? _pressure_at(eos_at,a.temperature,a.rho,:rho) : _pressure_at(eos_at,a.temperature,a.ne,:ne))
             end
-            if hydrogen_given
+            if nlte!==nothing
+                _given_nlte_state!(a,nlte,hydrogen_given)
+            elseif hydrogen_given
                 _given_eos_state!(a,synthesis_eos)
                 a.chi500=eltype(a.temperature).(given_chi500(a.temperature,a.ne,a.h_neutral,a.h_proton))
             else
@@ -362,7 +414,8 @@ mutable struct GivenAtmosphereBackend <: AbstractEquilibriumBackend
         all(n->getfield(a,n)!==nothing,(:ne,:rho,:pgas,:chi500)) || throw(ArgumentError(
             "a given atmosphere needs ne, rho, pgas and chi500 (read_inversion_inputs and this constructor fill them from what is given)"))
         new(eq,Dict{String,Any}("mode"=>hsemhs_mode_name(eq.mode),"ne_given"=>ne_input,"hydrogen_populations_given"=>hydrogen_given,
-            "total_abundance"=>_GIVEN_TOTAL_ABUNDANCE,"mass_per_H_kg"=>_GIVEN_MASS_PER_H_KG))
+            "total_abundance"=>_GIVEN_TOTAL_ABUNDANCE,"mass_per_H_kg"=>_GIVEN_MASS_PER_H_KG,"eos_model"=>eq.eos_model),
+            nlte===nothing||hydrogen_given ? nothing : nlte)
     end
 end
 
@@ -558,8 +611,9 @@ function reconstruct_equilibrium!(backend::HSEMHSBackend,distributed::Distribute
 end
 
 """The synthesis's NLTE hydrogen (`build_synthesis_setup(...; nlte_hydrogen)`): the equilibrium's table with `eos_model = "nlte"`, else `nothing`
-(Wittmann's LTE state). A given atmosphere keeps its own route."""
+(Wittmann's LTE state). A given atmosphere with its own hydrogen populations keeps them."""
 synthesis_hydrogen(backend::HSEMHSBackend)=backend.config.eos_model=="nlte" ? NLTEHydrogenState(backend.workspace.eos) : nothing
+synthesis_hydrogen(backend::GivenAtmosphereBackend)=backend.hydrogen
 synthesis_hydrogen(backend)=nothing
 
 function close_equilibrium!(backend::HSEMHSBackend)
