@@ -1,4 +1,5 @@
 using HDF5
+import WittBifrostEOS
 using LinearAlgebra
 import Muspel
 @isdefined(Phase6TwoLevelPopulation) || include("phase6_production_gradient.jl")
@@ -293,12 +294,12 @@ end
     @test exp10(ltz[3])≈1e-6*(zaxis[1]-zaxis[2])/2+1e-6*(zaxis[1]-zaxis[3]) rtol=1e-12
 
     # the abundances are Wittmann's
-    source=read(joinpath(@__DIR__,"..","..","scripts","witt_eos_cpp.cpp"),String)
+    source=read(joinpath(pkgdir(WittBifrostEOS),"deps","witt","witt_eos_cpp.cpp"),String)
     numbers(name)=parse.(Float64,split(replace(match(Regex(name*" = \\{\\{(.*?)\\}\\}","s"),source)[1],"\n"=>""),","))
     ab=exp10.(numbers("ABUND_RAW")); weights=numbers("AMASS")
     @test F._GIVEN_TOTAL_ABUNDANCE≈sum(ab)/ab[1] rtol=1e-7
     @test F._GIVEN_MASS_PER_H_KG≈sum(ab.*weights)/ab[1]*1.66053906660e-27 rtol=1e-3
-    isfile(LOGM_TABLE) && @test F._GIVEN_MASS_PER_H_KG≈F.HSEMHS.mass_per_H(F.HSEMHS.load_table(LOGM_TABLE)) rtol=1e-12
+    isfile(LOGM_TABLE) && @test F._GIVEN_MASS_PER_H_KG≈F.WittBifrostEOS.mass_per_H(F.WittBifrostEOS.load_table(LOGM_TABLE)) rtol=1e-12
 
     # configuration: nothing of HSEMHS is needed, on any axis, and its options are refused
     mktempdir() do dir

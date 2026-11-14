@@ -1,4 +1,5 @@
 using Test
+import WittBifrostEOS
 using FFNOInversion
 using HDF5
 using Libdl
@@ -187,7 +188,7 @@ import Muspel
             cfg=config("z","z_m = \"zm\"";nedata="",extra="rho = \"rho\"\npgas = \"p\"\n",equilibrium="[equilibrium]\neos_model = \"nlte\"\n")
             refused=try prepare_equilibrium(cfg.equilibrium,distribute_atmosphere(Float64,read_inversion_inputs(cfg).atmosphere,context),context;synthesis_eos=eos); "" catch e; sprint(showerror,e) end
             @test occursin("needs eos_table_file",refused)
-            table=F.HSEMHS.load_table(nlte_table;model="nlte")
+            table=F.WittBifrostEOS.load_table(nlte_table;model="nlte")
             for combo in (["rho","pgas"],["pgas"],["rho"],["ne"],["ne","pgas"],["rho","pgas","hp"])
                 @testset "NLTE EOS $(join(combo,"+"))" begin
                     cfg=config("z","z_m = \"zm\"";nedata="ne" in combo ? lines["ne"] : "",extra=join(lines[k] for k in combo if k!="ne"),equilibrium=nlte(nlte_table))
@@ -198,7 +199,7 @@ import Muspel
                     @test reconstruct_equilibrium!(backend,distributed,context).valid
                     a=distributed.local_atmosphere
                     X=log.(Array{Float64,3}(a.temperature)); Y=log.(Array{Float64,3}(a.pgas))
-                    s=[F.HSEMHS.state(table,X[i],Y[i]) for i in eachindex(X)]; h=[F.HSEMHS.hydrogen(table,X[i],Y[i]) for i in eachindex(X)]
+                    s=[F.WittBifrostEOS.state(table,X[i],Y[i]) for i in eachindex(X)]; h=[F.WittBifrostEOS.hydrogen(table,X[i],Y[i]) for i in eachindex(X)]
                     tne=reshape(exp.(getindex.(s,2)),size(X)); trho=reshape(exp.(getindex.(s,1)),size(X))
                     "ne" in combo ? (@test a.ne≈permutedims(ne,(1,3,2)) rtol=1e-12) : (@test a.ne≈tne rtol=1e-12)
                     if "rho" in combo
@@ -227,12 +228,12 @@ import Muspel
                     "ne" in combo || @test !(a.ne≈n)
                 end
             end
-            # outside the table: HSEMHS's model of it (its Wittmann library: HSEMHS_LIBWITT or deps/witt), continuous across the table's edge
-            if isfile(F.HSEMHS.libwitt_path())
+            # outside the table: the model it was built from (WittBifrostEOS.table_model), continuous across the table's edge
+            if isfile(F.WittBifrostEOS.libwitt_path())
                 state=NLTEHydrogenState(table); Xtop=table.X[end]
                 for (X,Y) in ((log(5.0e6),log(0.1)),(log(4.0e7),log(1.0)),(Xtop+0.05,log(0.3)))
-                    @test !F.HSEMHS.in_table(table,X,Y)
-                    v,_,ok=F.HSEMHS.model_fields(F._nlte_model(state),X,Y); @test ok
+                    @test !F.WittBifrostEOS.in_table(table,X,Y)
+                    v,_,ok=F.WittBifrostEOS.model_fields(F._nlte_model(state),X,Y); @test ok
                     @test all(collect(F._nlte_eos(state,X,Y)).==collect(v))
                 end
                 for Y in (log(0.01),log(0.3),log(2.0))
@@ -241,7 +242,7 @@ import Muspel
                 end
                 neutral,protons=F._nlte_hydrogen(state,[6.0e3,5.0e6],[1.0e3,0.1]); @test all(isfinite,neutral) && all(isfinite,protons)
             else
-                @info "HSEMHS's Wittmann library not found; skipping the NLTE EOS outside its table" F.HSEMHS.libwitt_path()
+                @info "WittBifrostEOS's libwitt not found; skipping the NLTE EOS outside its table" F.WittBifrostEOS.libwitt_path()
             end
             # the LTE route is unchanged by the option's existence
             lte=config("z","z_m = \"zm\"";nedata="",extra="rho = \"rho\"\npgas = \"p\"\n")

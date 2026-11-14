@@ -41,14 +41,20 @@ class WittEOSCppTests(unittest.TestCase):
 
         cls.tmpdir = tempfile.TemporaryDirectory()
         cls.lib_path = Path(cls.tmpdir.name) / f"libwitt_eos_cpp_test{shared_library_suffix()}"
-        source_path = SCRIPTS / "witt_eos_cpp.cpp"
+        configured = os.environ.get("WITTBIFROSTEOS_DIR")
+        root = Path(configured).expanduser() if configured else SCRIPTS.parents[1] / "WittBifrostEOS.jl"
+        source_path = root / "deps" / "witt" / "witt_shim.cpp"          # WittBifrostEOS's generated Wittmann source
+        if not source_path.is_file():
+            raise unittest.SkipTest(f"WittBifrostEOS not found at {root} (set WITTBIFROSTEOS_DIR)")
         command = [
             cls.compiler,
-            "-O3",
+            "-O2",
             "-std=c++17",
             "-shared",
             "-fPIC",
             "-pthread",
+            "-fno-fast-math",
+            "-ffp-contract=off",
             str(source_path),
             "-o",
             str(cls.lib_path),

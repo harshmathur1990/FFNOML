@@ -2,7 +2,7 @@
 
 julia_version = "1.12.3"
 manifest_format = "2.0"
-project_hash = "9b0d0cbf49f1667c5638dc936f2a0eda2589894e"
+project_hash = "855bb4684394bf8681b5c667251fbd47a8362275"
 
 [[deps.AbstractFFTs]]
 deps = ["LinearAlgebra"]
@@ -164,7 +164,7 @@ uuid = "f43a241f-c20a-4ad4-852c-f6b1247861c6"
 version = "1.7.0"
 
 [[deps.FFNOInversion]]
-deps = ["AtomicData", "Dates", "FFTW", "HDF5", "HSEMHS", "Libdl", "LinearAlgebra", "MPI", "MPIPreferences", "Muspel", "ProgressMeter", "SHA", "Serialization", "Sockets", "TOML", "YAML"]
+deps = ["AtomicData", "Dates", "FFTW", "HDF5", "HSEMHS", "Libdl", "LinearAlgebra", "MPI", "MPIPreferences", "Muspel", "ProgressMeter", "SHA", "Serialization", "Sockets", "TOML", "WittBifrostEOS", "YAML"]
 path = "."
 uuid = "5f657311-4af4-4e09-9b93-d21004ee51b8"
 version = "0.1.0"
@@ -210,9 +210,9 @@ uuid = "0234f1f7-429e-5d53-9886-15a909be8d59"
 version = "2.1.2+0"
 
 [[deps.HSEMHS]]
-deps = ["Dates", "DelimitedFiles", "FFTW", "HDF5", "Libdl", "LinearAlgebra", "MPI", "MPIPreferences", "OffsetArrays", "Printf", "ProgressMeter", "Random", "SHA", "Statistics", "TOML"]
-git-tree-sha1 = "4e37558453c7a3eb77c1c24e8e16311ec60074a2"
-repo-rev = "945b914f63c5493b09bddc9703c24188ccd29f96"
+deps = ["Dates", "DelimitedFiles", "FFTW", "HDF5", "Libdl", "LinearAlgebra", "MPI", "MPIPreferences", "OffsetArrays", "Printf", "ProgressMeter", "Random", "SHA", "Statistics", "TOML", "WittBifrostEOS"]
+git-tree-sha1 = "2e1835762d60a85865ea7209d1ef2ab82f2ae5f9"
+repo-rev = "7d7dcddb19228cbdbe7bc83a55b0c9e8ddbaac0d"
 repo-subdir = "HSEMHS"
 repo-url = "https://github.com/harshmathur1990/1DHSE3dMHS.git"
 uuid = "3f8a2c4e-6b1d-4e7a-9c55-2d0f7e1a9b31"
@@ -599,6 +599,12 @@ version = "3.0.6"
 uuid = "ea8e919c-243c-51af-8825-aaa63cd721ce"
 version = "0.7.0"
 
+[[deps.Scratch]]
+deps = ["Dates"]
+git-tree-sha1 = "9b81b8393e50b7d4e6d0a9f14e192294d3b7c109"
+uuid = "6c6a2e73-6563-6170-7368-637461726353"
+version = "1.3.0"
+
 [[deps.Serialization]]
 uuid = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
 version = "1.11.0"
@@ -715,6 +721,14 @@ version = "1.28.0"
     Latexify = "23fbe1c1-3f47-55db-b15f-69d7ec21a316"
     NaNMath = "77ba4419-2d1f-58cd-9bb1-8ffee604a2e3"
     Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+
+[[deps.WittBifrostEOS]]
+deps = ["HDF5", "Libdl", "Printf", "Random", "SHA", "Scratch", "Statistics"]
+git-tree-sha1 = "7f06a3d108bf0ea159927608da571942aab38b0a"
+repo-rev = "f2575705b81ded04a39cdb2cceb0c6bc8de744e8"
+repo-url = "https://github.com/harshmathur1990/WittBifrostEOS.git"
+uuid = "ae47c4ec-14cd-4845-8eff-b40a9f32171b"
+version = "0.1.0"
 
 [[deps.WoodburyMatrices]]
 deps = ["LinearAlgebra", "SparseArrays"]

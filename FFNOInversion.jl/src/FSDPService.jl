@@ -295,7 +295,7 @@ function launch_fsdp_population_models(specs::AbstractVector{FSDPModelSpec},cont
     isempty(predicted) && return CompositeDistributedPopulationModel(models)
     client=launch_gpu!(RootGPUCoordinator(() -> launch_fsdp_service(predicted;kwargs...);
         launcher_rank=context.root),context)
-    eos=isroot(context) && population_mesh!==nothing ? HSEMHS.load_table(population_mesh.eos_table_file;model=population_mesh.eos_model) : nothing
+    eos=isroot(context) && population_mesh!==nothing ? WittBifrostEOS.load_table(population_mesh.eos_table_file;model=population_mesh.eos_model) : nothing
     for spec in predicted
         root_model=isroot(context) ? wrap_population_mesh(FSDPFFNOModel(client,spec.name,spec.metadata,0),
             population_mesh,eos) : nothing

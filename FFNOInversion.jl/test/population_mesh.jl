@@ -3,6 +3,7 @@ using FFNOInversion
 using LinearAlgebra
 import HSEMHS
 
+import WittBifrostEOS
 const MESH_EOS_TABLE=get(ENV,"HSEMHS_EOS_TABLE","/mn/stornext/d9/data/harshm/MHS/HSEMHS/cache/eos_table_fullz.h5")
 
 """CPU population model with an exact VJP: ln p_l = sum_c A[l,c] phi_c + B[l] z/1e6, phi from the FFNO features."""
@@ -56,7 +57,7 @@ end
     @test FFNOInversion._population_mesh(Dict{String,Any}("mesh"=>Dict{String,Any}("spacing_m"=>1.5e4)),:log10tau500).spacing_m==1.5e4
     @test_throws ArgumentError FFNOInversion._population_mesh(Dict{String,Any}("mesh"=>Dict{String,Any}("dz"=>1)),:log10tau500)
 
-    eos=HSEMHS.load_table(MESH_EOS_TABLE)
+    eos=WittBifrostEOS.load_table(MESH_EOS_TABLE)
     config=PopulationMeshConfig(bottom_m=-1e6,top_m=3e6,spacing_m=2e4,uniform_top_m=2e6,stretch=1.05,max_spacing_m=5e4)
     inner=SmoothMeshTestPopulations([0.8 0.1 -0.2 0.3 1.1 0.9; -0.5 0.2 0.1 -0.4 0.7 1.3],[0.4,-0.6])
     model=MeshPopulationModel(inner,config,eos,274.0)

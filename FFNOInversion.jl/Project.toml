@@ -15,20 +15,23 @@ MPI = "da04e1cc-30fd-572f-bb4f-1f8673147195"
 MPIPreferences = "3da0fdf6-3ccc-4f1b-acd9-58baa6c99267"
 Muspel = "6074595b-091a-495a-9b39-045a690b2c53"
 ProgressMeter = "92933f4c-e287-5a05-a399-4b506db050ca"
-SHA = "ea8e919c-243c-51af-8825-aaa63cd721ce"
 Serialization = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
+SHA = "ea8e919c-243c-51af-8825-aaa63cd721ce"
 Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"
 TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
+WittBifrostEOS = "ae47c4ec-14cd-4845-8eff-b40a9f32171b"
 YAML = "ddb6d928-2868-570f-bddf-ab3f9cf99eb6"
 
 [sources]
-HSEMHS = {rev = "945b914f63c5493b09bddc9703c24188ccd29f96", subdir = "HSEMHS", url = "https://github.com/harshmathur1990/1DHSE3dMHS.git"}
+HSEMHS = {rev = "7d7dcddb19228cbdbe7bc83a55b0c9e8ddbaac0d", subdir = "HSEMHS", url = "https://github.com/harshmathur1990/1DHSE3dMHS.git"}
+WittBifrostEOS = {rev = "f2575705b81ded04a39cdb2cceb0c6bc8de744e8", url = "https://github.com/harshmathur1990/WittBifrostEOS.git"}
 Muspel = {rev = "01ec68da389be75c9ce31494a910095d3590499a", url = "https://github.com/harshmathur1990/Muspel.jl.git"}
 
 [extensions]
 FFNOInversionMuspelExt = "Muspel"
 
 [compat]
+WittBifrostEOS = "0.1"
 AtomicData = "0.1"
 FFTW = "1.10"
 HDF5 = "0.17.3"
