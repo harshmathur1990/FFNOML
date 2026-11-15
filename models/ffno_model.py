@@ -149,6 +149,31 @@ class LiteMultiScaleVertical(nn.Module):
         return y
 
 
+class SpectralConvZ(nn.Module):
+    """
+    Spectral convolution along depth, per column: the column is zero-padded to twice its length, so that its top and
+    bottom are a column's length apart in the periodic domain instead of neighbours, and its lowest `modes` Fourier
+    modes are mixed across channels with one complex weight matrix per mode. The weights start at zero, so a model with this branch starts as the model without it.
+
+    Input/Output: [N, C, D]
+    """
+
+    def __init__(self, channels, modes):
+        super().__init__()
+        self.modes = int(modes)
+        self.weight_real = nn.Parameter(torch.zeros(channels, channels, self.modes))
+        self.weight_imag = nn.Parameter(torch.zeros(channels, channels, self.modes))
+
+    def forward(self, x):
+        depth = x.shape[-1]
+        x_ft = torch.fft.rfft(x, n=2 * depth, dim=-1)
+        m = min(self.modes, x_ft.shape[-1])
+        weight = torch.complex(self.weight_real[..., :m], self.weight_imag[..., :m])
+        out_ft = torch.zeros_like(x_ft)
+        out_ft[..., :m] = torch.einsum("n i k, i o k -> n o k", x_ft[..., :m], weight)
+        return torch.fft.irfft(out_ft, n=2 * depth, dim=-1)[..., :depth]
+
+
 class BalancedVerticalPhysicsStack(nn.Module):
     """
     Stronger vertical branch:
@@ -156,9 +181,10 @@ class BalancedVerticalPhysicsStack(nn.Module):
       - residual dilated depth blocks
       - channel mixing
       - learned depth gate
+      - optional (z_modes > 0) spectral convolution along depth, gated, added to the residual blocks' output
     """
 
-    def __init__(self, channels, hidden=128, dropout=0.0, chunk=4):
+    def __init__(self, channels, hidden=128, dropout=0.0, chunk=4, z_modes=0):
         super().__init__()
         self.chunk = chunk
 
@@ -188,6 +214,15 @@ class BalancedVerticalPhysicsStack(nn.Module):
             nn.Sigmoid(),
         )
 
+        if z_modes:
+            self.z_spec = SpectralConvZ(hidden, z_modes)
+            self.z_gate = nn.Sequential(
+                nn.Conv1d(hidden, hidden, 1, bias=False),
+                nn.Sigmoid(),
+            )
+        else:
+            self.z_spec = None
+
         self.out_proj = nn.Conv1d(hidden, channels, 1, bias=False)
         self.out_gn = _gn(channels)
 
@@ -216,6 +251,16 @@ class BalancedVerticalPhysicsStack(nn.Module):
             dim=1,
         )
 
+    def columns(self, xi, zi):
+        """The branch on columns xi [N, C, D] with depths zi [N, 1, D], before out_gn (shared with the distributed
+        and batched inference paths)."""
+        h = self.in_proj(xi) + self.z_proj(self._z_features(zi))
+        y = self.net(h)
+        if self.z_spec is not None:
+            y = y + self.z_gate(h) * self.z_spec(h)
+        y = y * self.depth_gate(y)
+        return self.out_proj(y)
+
     def forward(self, x, z_scale):
         B, C, D, H, W = x.shape
         if z_scale.ndim == 4:
@@ -232,14 +277,7 @@ class BalancedVerticalPhysicsStack(nn.Module):
             j = min(i + self.chunk, H * W)
             xi = x[:, i:j].reshape(-1, C, D)
             zi = z_scale[:, i:j].reshape(-1, 1, D)
-            z_feat = self._z_features(zi)
-
-            yi = self.in_proj(xi) + self.z_proj(z_feat)
-            yi = self.net(yi)
-            yi = yi * self.depth_gate(yi)
-            yi = self.out_proj(yi)
-
-            yi = yi.reshape(B, j - i, C, D)
+            yi = self.columns(xi, zi).reshape(B, j - i, C, D)
             chunks.append(yi)
 
         y = torch.cat(chunks, dim=1)
@@ -255,11 +293,15 @@ class SpectralConv2dFull(nn.Module):
     Full-spectrum metric-aware spectral convolution over (H, W),
     applied independently at each depth plane.
 
+    With rank > 0, each frequency also gets its own low-rank channel mixing U(k) V(k), U: out x rank and
+    V: rank x in, from a second small MLP of k; U starts at zero, so the model starts as the one without it.
+
     Input/Output: [B, C, D, H, W]
     """
 
-    def __init__(self, in_channels, out_channels, hidden=128, post_mix_expansion=2):
+    def __init__(self, in_channels, out_channels, hidden=128, post_mix_expansion=2, rank=0):
         super().__init__()
+        self.rank = int(rank)
 
         scale = 1.0 / math.sqrt(in_channels)
 
@@ -285,6 +327,19 @@ class SpectralConv2dFull(nn.Module):
             nn.Linear(hidden, 2),
         )
 
+        if self.rank:
+            self.freq_lowrank = nn.Sequential(
+                nn.Linear(4, hidden),
+                nn.GELU(),
+                nn.Linear(hidden, hidden),
+                nn.GELU(),
+            )
+            self.freq_u = nn.Linear(hidden, out_channels * self.rank)
+            self.freq_v = nn.Linear(hidden, self.rank * in_channels)
+            with torch.no_grad():
+                self.freq_u.weight.zero_()
+                self.freq_u.bias.zero_()
+
         post_hidden = out_channels * post_mix_expansion
         
         self.post = nn.Sequential(
@@ -293,29 +348,16 @@ class SpectralConv2dFull(nn.Module):
             nn.Conv3d(post_hidden, out_channels, 1, bias=False),
         )
 
-    def forward(self, x, dx, dy):
-        B, C, D, H, W = x.shape
-
-        dx = _to_spacing_value(dx, x)
-        dy = _to_spacing_value(dy, x)
-
-        # [B, C, D, H, Wf]
-
-        g = self.input_gate(x)
-        x = x * g
-        x_ft = torch.fft.rfft2(x, dim=(-2, -1))
-
+    @staticmethod
+    def k_features(ky, kx):
+        """The frequency MLPs' input [H, Wf, 4] from the wavenumber grids ky, kx [H, Wf] (in 1/m)."""
         freq_multiplier = 1e5
-
-        ky = torch.fft.fftfreq(H, d=dy, device=x.device)
-        kx = torch.fft.rfftfreq(W, d=dx, device=x.device)
-        ky, kx = torch.meshgrid(ky, kx, indexing="ij")
 
         ky = ky * freq_multiplier
 
         kx = kx * freq_multiplier
 
-        k_feat = torch.stack(
+        return torch.stack(
             [
                 kx,
                 ky,
@@ -323,8 +365,11 @@ class SpectralConv2dFull(nn.Module):
                 torch.sign(ky),
             ],
             dim=-1,
-        )  # [H, Wf, 4]
+        )
 
+    def mix_spectrum(self, x_ft, k_feat):
+        """The channel mixing of the spectrum x_ft [B, Cin, D, H, Wf] at frequencies k_feat [H, Wf, 4] (shared with
+        the distributed inference path)."""
         gate = self.freq_mlp(k_feat)  # [H, Wf, 2]
 
         wr = self.weight_real[:, :, None, None]  # [Cin, Cout, 1, 1]
@@ -350,6 +395,32 @@ class SpectralConv2dFull(nn.Module):
         )
 
         out = torch.complex(out_r, out_i)
+        if self.rank:
+            h = self.freq_lowrank(k_feat)
+            ny, nx = k_feat.shape[:2]
+            u = self.freq_u(h).reshape(ny, nx, -1, self.rank).to(x_ft.dtype)   # [H, Wf, Cout, r]
+            v = self.freq_v(h).reshape(ny, nx, self.rank, -1).to(x_ft.dtype)   # [H, Wf, r, Cin]
+            low = torch.einsum("b i d y x, y x r i -> b r d y x", x_ft, v)
+            out = out + torch.einsum("b r d y x, y x o r -> b o d y x", low, u)
+        return out
+
+    def forward(self, x, dx, dy):
+        B, C, D, H, W = x.shape
+
+        dx = _to_spacing_value(dx, x)
+        dy = _to_spacing_value(dy, x)
+
+        # [B, C, D, H, Wf]
+
+        g = self.input_gate(x)
+        x = x * g
+        x_ft = torch.fft.rfft2(x, dim=(-2, -1))
+
+        ky = torch.fft.fftfreq(H, d=dy, device=x.device)
+        kx = torch.fft.rfftfreq(W, d=dx, device=x.device)
+        ky, kx = torch.meshgrid(ky, kx, indexing="ij")
+
+        out = self.mix_spectrum(x_ft, self.k_features(ky, kx))  # k features [H, Wf, 4]
         y = torch.fft.irfft2(out, s=(H, W), dim=(-2, -1))
         y = self.post(y)
         return y
@@ -365,7 +436,8 @@ class FFNOBlock3dBalanced(nn.Module):
       - normalization on both outputs
       - adaptive branch gating before learned fusion
       - learned channel-mixing fusion after concatenation
-      - small corrective pointwise/mlp path
+      - small corrective pointwise/mlp path (open_side_paths: both start at 0.5 instead of 0.15, and the MLP output
+        is not squashed by tanh)
     """
 
     def __init__(
@@ -376,14 +448,19 @@ class FFNOBlock3dBalanced(nn.Module):
         vertical_dropout=0.0,
         hidden_spectral=128,
         hidden_vertical=128,
+        z_spectral_modes=0,
+        freq_mix_rank=0,
+        open_side_paths=False,
     ):
         super().__init__()
+        self.open_side_paths = bool(open_side_paths)
 
         self.spec = SpectralConv2dFull(
             width,
             width,
             hidden=hidden_spectral,
             post_mix_expansion=2,
+            rank=freq_mix_rank,
         )
 
         self.vertical = BalancedVerticalPhysicsStack(
@@ -391,6 +468,7 @@ class FFNOBlock3dBalanced(nn.Module):
             hidden=hidden_vertical,
             dropout=dropout,
             chunk=4,
+            z_modes=z_spectral_modes,
         )
 
         self.pw = nn.Sequential(
@@ -427,15 +505,20 @@ class FFNOBlock3dBalanced(nn.Module):
         self.norm_pw = _gn(width)
         self.norm_mlp = _gn(width)
 
+        side = 0.5 if self.open_side_paths else 0.15
         self.res_fused = nn.Parameter(torch.tensor([1.0]))
-        self.res_pw = nn.Parameter(torch.tensor([0.15]))
-        self.res_mlp = nn.Parameter(torch.tensor([0.15]))
+        self.res_pw = nn.Parameter(torch.tensor([side]))
+        self.res_mlp = nn.Parameter(torch.tensor([side]))
 
         self.act = nn.GELU()
         self.spec_drop = nn.Dropout(spec_dropout) if spec_dropout > 0 else nn.Identity()
         self.vert_drop = (
             nn.Dropout(vertical_dropout) if vertical_dropout > 0 else nn.Identity()
         )
+
+    def mlp_activation(self, y):
+        """The MLP path's output nonlinearity (shared with the inference paths): tanh, or none with open_side_paths."""
+        return y if self.open_side_paths else torch.tanh(y)
 
     def _fuse_branches(self, x, spec, vert):
         gates = self.branch_gate(torch.cat([x, spec, vert], dim=1))
@@ -462,7 +545,7 @@ class FFNOBlock3dBalanced(nn.Module):
             pw = self.norm_pw(self.pw(x1))
             x2 = x1 + self.res_pw * pw
 
-            mlp = torch.tanh(self.norm_mlp(self.mlp(x2)))
+            mlp = self.mlp_activation(self.norm_mlp(self.mlp(x2)))
             out = x2 + self.res_mlp * mlp
 
             return out
@@ -490,7 +573,7 @@ class FFNOBlock3dBalanced(nn.Module):
         pw = self.norm_pw(self.pw(x1))
         x2 = x1 + (self.res_pw * pw_mask) * pw
 
-        mlp = torch.tanh(self.norm_mlp(self.mlp(x2)))
+        mlp = self.mlp_activation(self.norm_mlp(self.mlp(x2)))
         out = x2 + (self.res_mlp * mlp_mask) * mlp
 
         if collect_stats:
@@ -541,6 +624,9 @@ class FFNO3D(nn.Module):
         checkpoint_blocks=True,
         hidden_spectral=128,
         hidden_vertical=128,
+        z_spectral_modes=0,
+        freq_mix_rank=0,
+        open_side_paths=False,
         output_mode="log_population",
         species=None,
         rho_channel=5,
@@ -555,6 +641,9 @@ class FFNO3D(nn.Module):
         # Any set of positive levels whose total lies within total_bound dex of rho / mass is reproduced exactly; the
         # bound only keeps populations finite in float32. The output stays normalised log10 populations, so the loss
         # and the inference paths are unchanged.
+        # Capacity switches, all off by default so that existing checkpoints load and give the same outputs:
+        # z_spectral_modes (spectral convolution along depth in each vertical branch), freq_mix_rank (per-frequency
+        # low-rank channel mixing in each horizontal spectral branch), open_side_paths (see FFNOBlock3dBalanced).
         if output_mode not in ("log_population", "level_fraction"):
             raise ValueError(f"unknown output_mode {output_mode!r}")
         self.output_mode = output_mode
@@ -601,7 +690,10 @@ class FFNO3D(nn.Module):
                     vertical_dropout, vertical_dropout_layers, layer_idx
                 ),
                 hidden_spectral=hidden_spectral,
-                hidden_vertical=hidden_vertical
+                hidden_vertical=hidden_vertical,
+                z_spectral_modes=z_spectral_modes,
+                freq_mix_rank=freq_mix_rank,
+                open_side_paths=open_side_paths,
             )
             for layer_idx in range(n_layers)
         ])

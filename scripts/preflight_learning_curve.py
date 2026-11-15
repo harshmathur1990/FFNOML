@@ -23,7 +23,7 @@ import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from submit_learning_curve import MODEL_SUBDIR, REPO, read_experiments, write_job_files  # noqa: E402
+from submit_learning_curve import MODEL_SUBDIR, REPO, model_env, read_experiments, write_job_files  # noqa: E402
 
 FAILED = []
 
@@ -110,7 +110,7 @@ def preflight(name, e):
     # 3. model and loss at production size
     import torch
     env_keys = {"FFNOML_RUN_DIR": run, "FFNOML_TRAIN_SPLIT": json.dumps(c["train"]), "FFNOML_VAL_SPLIT": json.dumps(c["val"]),
-                "FFNOML_ACTIVE_ATOMS": e["atoms"], "FFNOML_OUTPUT_MODE": e["output_mode"], "FFNOML_LAM_TOTAL": e["lam_total"]}
+                "FFNOML_ACTIVE_ATOMS": e["atoms"], **model_env(e)}
     os.environ.update(env_keys)
     sys.path.insert(0, REPO)
     for module in [m for m in sys.modules if m == "config"]:

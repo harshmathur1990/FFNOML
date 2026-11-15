@@ -30,7 +30,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ATOMS = ("H", "CA")
 # root: Olivia; stage, data_dir, solving_sets_from: eagle7 (learning_curve_eagle7.py)
 SETTINGS = ("root", "stage", "data_dir", "solving_sets_from", "atoms", "epochs", "nodes", "time", "train_flags",
-            "held_out", "train", "val", "output_mode", "lam_total")
+            "held_out", "train", "val", "output_mode", "lam_total", "model_config")
 OUTPUT_MODES = ("log_population", "level_fraction")   # config.MODEL_CONFIG output_mode (models/ffno_model.py)
 MODEL_SUBDIR = "training_FFNO3D_zscale_expand_lognlte"   # config.MODEL_DIR below the run directory
 
@@ -65,6 +65,14 @@ def experiment(parser, name):
         raise ValueError(f"[{name}] output_mode = {e['output_mode']!r}: one of {', '.join(OUTPUT_MODES)}")
     if float(e["lam_total"]) < 0:
         raise ValueError(f"[{name}] lam_total = {e['lam_total']!r}: must be >= 0")
+    if e["model_config"]:
+        try:
+            overrides = json.loads(e["model_config"])
+        except ValueError as err:
+            raise ValueError(f"[{name}] model_config is not JSON: {err}")
+        if not isinstance(overrides, dict):
+            raise ValueError(f"[{name}] model_config = {e['model_config']!r}: a JSON object, e.g. {{\"width\": 96}}")
+        e["model_config"] = json.dumps(overrides, sort_keys=True)
     if e["atoms"] not in ATOMS:
         raise ValueError(f"[{name}] atoms = {e['atoms']!r}: one of {', '.join(ATOMS)} (production trains H and CA apart; "
                          "make one section per atom)")
@@ -103,9 +111,10 @@ def prediction_name(sim, snap):
 
 
 def model_env(e):
-    """The environment that selects the experiment's head and loss (config.py); training and every prediction need it,
-    since a checkpoint loads only into the head it was trained with."""
-    return {"FFNOML_OUTPUT_MODE": e["output_mode"], "FFNOML_LAM_TOTAL": e["lam_total"]}
+    """The environment that selects the experiment's head, loss and model_config overrides of MODEL_CONFIG (config.py);
+    training and every prediction need it, since a checkpoint loads only into the model it was trained with."""
+    return {"FFNOML_OUTPUT_MODE": e["output_mode"], "FFNOML_LAM_TOTAL": e["lam_total"],
+            "FFNOML_MODEL_CONFIG": e["model_config"]}
 
 
 def eval_lines(e):

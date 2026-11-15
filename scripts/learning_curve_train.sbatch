@@ -28,6 +28,7 @@ source /cluster/home/harshm/loadnvidiampi.sh   # the accelerator-node environmen
 source "${FFNOML_RUN_DIR}/experiment.env"
 export FFNOML_REPO_DIR FFNOML_RUN_DIR FFNOML_TRAIN_SPLIT FFNOML_VAL_SPLIT FFNOML_ACTIVE_ATOMS FFNOML_NUM_EPOCHS
 export FFNOML_OUTPUT_MODE="${FFNOML_OUTPUT_MODE:-log_population}" FFNOML_LAM_TOTAL="${FFNOML_LAM_TOTAL:-0}"
+export FFNOML_MODEL_CONFIG="${FFNOML_MODEL_CONFIG:-}"
 
 MODEL_DIR="${FFNOML_RUN_DIR}/training_FFNO3D_zscale_expand_lognlte"
 mkdir -p "${MODEL_DIR}"
@@ -38,7 +39,7 @@ echo "Experiment: ${FFNOML_EXPERIMENT}"
 echo "Train split: ${FFNOML_TRAIN_SPLIT}"
 echo "Val split: ${FFNOML_VAL_SPLIT}"
 echo "Atoms: ${FFNOML_ACTIVE_ATOMS}  epochs: ${FFNOML_NUM_EPOCHS}  flags: ${FFNOML_TRAIN_FLAGS:-none}"
-echo "Head: ${FFNOML_OUTPUT_MODE}  lam_total: ${FFNOML_LAM_TOTAL}"
+echo "Head: ${FFNOML_OUTPUT_MODE}  lam_total: ${FFNOML_LAM_TOTAL}  model_config: ${FFNOML_MODEL_CONFIG:-defaults}"
 echo "Repository: ${FFNOML_REPO_DIR} ($(git -C "${FFNOML_REPO_DIR}" rev-parse --short HEAD))  run dir: ${FFNOML_RUN_DIR}"
 echo "Job ${SLURM_JOB_ID} on ${SLURM_JOB_NODELIST}, ${SLURM_NNODES} nodes x ${SLURM_GPUS_ON_NODE} GPUs. Start: $(date)"
 

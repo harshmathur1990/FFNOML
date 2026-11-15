@@ -232,7 +232,7 @@ class BatchedFFNOBackend:
         del pointwise
 
         mlp = self._map_depth(self._new_hidden(shape), x, lambda replica: block(replica).mlp)
-        self._groupnorm(mlp, lambda replica: block(replica).norm_mlp, lambda replica, y: torch.tanh(y))
+        self._groupnorm(mlp, lambda replica: block(replica).norm_mlp, lambda replica, y: block(replica).mlp_activation(y))
         x.add_(mlp, alpha=float(template.res_mlp.item()))
         del mlp
         return x

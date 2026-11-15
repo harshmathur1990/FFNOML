@@ -342,14 +342,7 @@ class ProgressVerticalWrapper(nn.Module):
             j = min(i + self.source.chunk, H * W)
             xi = x_cols[:, i:j].reshape(-1, C, D)
             zi = z_cols[:, i:j].reshape(-1, 1, D)
-            z_feat = self.source._z_features(zi)
-
-            yi = self.source.in_proj(xi) + self.source.z_proj(z_feat)
-            yi = self.source.net(yi)
-            yi = yi * self.source.depth_gate(yi)
-            yi = self.source.out_proj(yi)
-
-            yi = yi.reshape(B, j - i, C, D)
+            yi = self.source.columns(xi, zi).reshape(B, j - i, C, D)
             chunks.append(yi)
 
         y = torch.cat(chunks, dim=1)
@@ -461,50 +454,13 @@ class DistributedSpectralConv2dFull(nn.Module):
         if torch.cuda.is_available() and x.is_cuda:
             torch.cuda.empty_cache()
 
-        freq_multiplier = 1e5
-
         ky = torch.fft.fftfreq(h_global, d=dy, device=x.device)
         kx = torch.fft.rfftfreq(w, d=dx, device=x.device)[wf_start:wf_stop]
         ky, kx = torch.meshgrid(ky, kx, indexing="ij")
 
-        ky = ky * freq_multiplier
-
-        kx = kx * freq_multiplier
-
-        k_feat = torch.stack(
-            [
-                kx,
-                ky,
-                torch.sqrt(kx ** 2 + ky ** 2 + 1e-12),
-                torch.sign(ky),
-            ],
-            dim=-1,
-        )
-        gate = self.source.freq_mlp(k_feat)
-
-        wr = self.source.weight_real[:, :, None, None]
-        wi = self.source.weight_imag[:, :, None, None]
-        gr = gate[..., 0][None, None]
-        gi = gate[..., 1][None, None]
-
         self._progress("spectral channel mix")
-        w_real = wr * gr - wi * gi
-        w_imag = wr * gi + wi * gr
-
-        xr = x_ft.real
-        xi = x_ft.imag
-        out_r = (
-            torch.einsum("b i d y x, i o y x -> b o d y x", xr, w_real)
-            - torch.einsum("b i d y x, i o y x -> b o d y x", xi, w_imag)
-        )
-        out_i = (
-            torch.einsum("b i d y x, i o y x -> b o d y x", xr, w_imag)
-            + torch.einsum("b i d y x, i o y x -> b o d y x", xi, w_real)
-        )
-        del xr, xi, x_ft, w_real, w_imag, wr, wi, gr, gi, gate, k_feat, ky, kx
-
-        out = torch.complex(out_r, out_i)
-        del out_r, out_i
+        out = self.source.mix_spectrum(x_ft, self.source.k_features(ky, kx))
+        del x_ft, ky, kx
         self._progress("ifft over H")
         out = torch.fft.ifft(out, dim=-2)
 

@@ -1425,7 +1425,7 @@ def _distributed_full_forward(model, X, z_scale, dx, dy, *, collect_stats=False,
         pw = blk.norm_pw(blk.pw(x1))
         x2 = x1 + (blk.res_pw * pw_mask) * pw
 
-        mlp = torch.tanh(blk.norm_mlp(blk.mlp(x2)))
+        mlp = blk.mlp_activation(blk.norm_mlp(blk.mlp(x2)))
         x = x2 + (blk.res_mlp * mlp_mask) * mlp
 
         if collect_stats:
@@ -2302,7 +2302,7 @@ def ffno_predict_populations_distributed_full(
                 del x1, pw
 
                 debug_progress("full prediction", f"block {i + 1}/{len(model.blocks)} mlp")
-                mlp = torch.tanh(blk.norm_mlp(blk.mlp(x2)))
+                mlp = blk.mlp_activation(blk.norm_mlp(blk.mlp(x2)))
                 x = x2 + blk.res_mlp * mlp
                 del x2, mlp
                 if torch.cuda.is_available() and X.is_cuda:
