@@ -33,6 +33,39 @@ def _resolve_layer_dropout(rate, layers, layer_idx):
     return 0.0
 
 
+# MULTI3D's constants (multi3d/src/mconst.f90), cgs
+_M3D_EE, _M3D_HH, _M3D_EM, _M3D_BK, _M3D_PI = 1.602189e-12, 6.626176e-27, 9.109534e-28, 1.380662e-16, 3.14159265359
+_M3D_LN_CCON = math.log(0.5 * (_M3D_HH / math.sqrt(2.0 * _M3D_PI * _M3D_EM) / math.sqrt(_M3D_BK)) ** 3)
+
+
+def multi3d_lte_tables(atom, levels):
+    """Per level of a MULTI3D atom {"g", "ev", "ion"}: ln(g_i / g_1), ev_i [eV], the Debye-lowering multiple ndxi(ion_i)
+    and ion_i - ion_1, as in calc_lte_populations (multi3d/src/phys_mod.f90)."""
+    g, ev, ion = [float(v) for v in atom["g"]], [float(v) for v in atom["ev"]], [int(v) for v in atom["ion"]]
+    if not len(g) == len(ev) == len(ion) == levels:
+        raise ValueError(f"multi3d_lte atom data has {len(g)}, {len(ev)}, {len(ion)} entries for {levels} levels")
+    ndxi = [0] * 21                     # Fortran ndxi(1:20), index = ionisation stage
+    for i in range(2, 21):
+        ndxi[i] = ndxi[i - 1] + (i - 1)
+    for i in range(1, 21):              # as MULTI3D's loop, which zeroes ndxi(ion_1) on the way: later stages keep theirs
+        ndxi[i] -= ndxi[ion[0]]
+    return ([math.log(gi / g[0]) for gi in g], ev, [float(ndxi[i]) for i in ion],
+            [float(max(i - ion[0], 0)) for i in ion])
+
+
+def multi3d_lte_log_weights(log10_t, log10_ne, log_g, ev, ndxi, dion):
+    """ln of MULTI3D's unnormalised LTE level weights (calc_lte_populations), [B, levels, ...] in float64, from log10 T [K]
+    and log10 ne [m^-3] of shape [B, ...] and per-level tables (multi3d_lte_tables, concatenated over species). Each
+    species' softmax of them is MULTI3D's nstar / totn."""
+    t = torch.pow(10.0, log10_t.double())[:, None]
+    ne = torch.pow(10.0, log10_ne.double() - 6.0)[:, None]          # cm^-3
+    shape = (1, -1) + (1,) * (t.dim() - 2)
+    table = lambda v: torch.tensor(v, dtype=torch.float64, device=t.device).view(shape)
+    conl = _M3D_LN_CCON + torch.log(ne) - 1.5 * torch.log(t)
+    dxi = 4.98e-4 * 5040.0 / t * torch.sqrt(ne * _M3D_BK * t)          # eV
+    return table(log_g) - (_M3D_EE / _M3D_BK) / t * (table(ev) - dxi * table(ndxi)) - table(dion) * conl
+
+
 # ============================================================
 # Pointwise MLP (small corrective branch)
 # ============================================================
@@ -631,6 +664,9 @@ class FFNO3D(nn.Module):
         species=None,
         rho_channel=5,
         total_bound=6.0,
+        lte_prior=False,
+        temperature_channel=0,
+        ne_channel=4,
     ):
         super().__init__()
 
@@ -641,12 +677,19 @@ class FFNO3D(nn.Module):
         # Any set of positive levels whose total lies within total_bound dex of rho / mass is reproduced exactly; the
         # bound only keeps populations finite in float32. The output stays normalised log10 populations, so the loss
         # and the inference paths are unchanged.
+        # lte_prior (level_fraction only): the logits are z_i = ln f*_i(T, ne) + delta_i, with f* MULTI3D's LTE level
+        # fractions (multi3d_lte_log_weights) from the input T and ne and each species' "multi3d_lte" atom data. delta_i
+        # is then ln b_i, the departure coefficient, up to a constant common to the species' levels; the total is still
+        # rho / mass * 10^s, and delta = 0 gives MULTI3D's LTE fractions. Off by default.
         # Capacity switches, all off by default so that existing checkpoints load and give the same outputs:
         # z_spectral_modes (spectral convolution along depth in each vertical branch), freq_mix_rank (per-frequency
         # low-rank channel mixing in each horizontal spectral branch), open_side_paths (see FFNOBlock3dBalanced).
         if output_mode not in ("log_population", "level_fraction"):
             raise ValueError(f"unknown output_mode {output_mode!r}")
         self.output_mode = output_mode
+        self.lte_prior = bool(lte_prior)
+        if self.lte_prior and output_mode != "level_fraction":
+            raise ValueError("lte_prior needs output_mode='level_fraction'")
         head_channels = out_channels
         if output_mode == "level_fraction":
             if not species:
@@ -665,6 +708,14 @@ class FFNO3D(nn.Module):
             self.register_buffer("std_X", torch.ones(in_channels))
             self.register_buffer("mean_Y", torch.zeros(out_channels))
             self.register_buffer("std_Y", torch.ones(out_channels))
+        if self.lte_prior:
+            missing = [i for i, s in enumerate(species) if "multi3d_lte" not in s]
+            if missing:
+                raise ValueError(f"lte_prior needs each species' multi3d_lte atom data (g, ev, ion); missing for {missing}")
+            self.temperature_channel, self.ne_channel = int(temperature_channel), int(ne_channel)
+            # plain constants, not buffers, so that casting the model never rounds them
+            tables = [multi3d_lte_tables(s["multi3d_lte"], s["levels"]) for s in species]
+            self.lte_tables = tuple([v for t in tables for v in t[k]] for k in range(4))
 
         self.checkpoint_blocks = checkpoint_blocks
         # DistributedFSDPBackend wraps each block with PyTorch's composable
@@ -725,13 +776,23 @@ class FFNO3D(nn.Module):
             return head
         rho = self.rho_channel
         log10_rho = x_in[:, rho] * self.std_X[rho] + self.mean_X[rho]
+        lte = None
+        if self.lte_prior:
+            t, e = self.temperature_channel, self.ne_channel
+            lte = multi3d_lte_log_weights(x_in[:, t].double() * self.std_X[t].double() + self.mean_X[t].double(),
+                                          x_in[:, e].double() * self.std_X[e].double() + self.mean_X[e].double(),
+                                          *self.lte_tables)
         out = []
-        c = 0
+        c = k = 0                               # head channel and output channel of the species' first level
         for i, levels in enumerate(self.species_levels):
-            log10_fraction = torch.log_softmax(head[:, c:c + levels], dim=1) / math.log(10.0)
+            logits = head[:, c:c + levels]
+            if lte is not None:                 # in float64: the LTE weights span tens of e-folds
+                logits = logits.double() + lte[:, k:k + levels]
+            log10_fraction = (torch.log_softmax(logits, dim=1) / math.log(10.0)).to(head.dtype)
             s = self.total_bound * torch.tanh(head[:, c + levels] / self.total_bound)
             out.append((log10_rho - self.log10_particle_mass[i] + s)[:, None] + log10_fraction)
             c += levels + 1
+            k += levels
         log10_n = torch.cat(out, dim=1)
         return (log10_n - self.mean_Y[None, :, None, None, None]) / self.std_Y[None, :, None, None, None]
 
