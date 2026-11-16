@@ -274,6 +274,9 @@ class CropDataset(Dataset):
         self.random = random
         self.variable_depth = getattr(dataset, "variable_depth", False)
         self.dynamic_length = getattr(dataset, "dynamic_length", False)
+        self.train_select_seed = getattr(dataset, "train_select_seed", None)
+        if hasattr(dataset, "resample_train_selection"):   # the training loop draws a new selection every epoch
+            self.resample_train_selection = dataset.resample_train_selection
 
     def __len__(self):
         return len(self.dataset)
