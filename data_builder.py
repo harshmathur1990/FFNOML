@@ -3,7 +3,7 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
-from data.dataset import H5PatchDataset, H5CubeDataset
+from data.dataset import CropDataset, H5PatchDataset, H5CubeDataset
 
 
 def is_distributed():
@@ -21,8 +21,10 @@ class DataLoaderBuilder:
         pin_memory=True,
         train_select=1.0,
         train_select_seed=None,
+        crop=0,
     ):
 
+        self.crop = crop
         self.dataset_type = dataset_type
         self.batch_size = batch_size
         self.num_workers = num_workers
@@ -111,6 +113,8 @@ class DataLoaderBuilder:
             train_h5,
             train_select=self.train_select,
         )
+        if self.crop:
+            train_dataset = CropDataset(train_dataset, self.crop, random=True)
 
         train_loader, train_sampler = self.build_dataloader(
             train_dataset,
@@ -123,6 +127,8 @@ class DataLoaderBuilder:
         if val_h5 is not None:
 
             val_dataset = self.build_dataset(val_h5)
+            if self.crop:
+                val_dataset = CropDataset(val_dataset, self.crop, random=False)
 
             val_loader, val_sampler = self.build_dataloader(
                 val_dataset,

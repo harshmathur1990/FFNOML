@@ -262,6 +262,40 @@ class H5PatchDataset(Dataset):
         return x, y, z, dx, dy, scale, weight, log_lte
 
 
+class CropDataset(Dataset):
+    """
+    A crop x crop window of every sample of a patch dataset: at random each time a sample is read (training), or the
+    centre window (validation). For training on small GPUs; the model is the same at any patch width.
+    """
+
+    def __init__(self, dataset, crop, random):
+        self.dataset = dataset
+        self.crop = int(crop)
+        self.random = random
+        self.variable_depth = getattr(dataset, "variable_depth", False)
+        self.dynamic_length = getattr(dataset, "dynamic_length", False)
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        x, y, z, dx, dy, scale, weight, log_lte = self.dataset[idx]
+        h, w = x.shape[-2:]
+        c = self.crop
+        if c > min(h, w):
+            raise ValueError(f"crop {c} is larger than the {h} x {w} patches")
+        if self.random:
+            i0 = int(torch.randint(h - c + 1, ()))
+            j0 = int(torch.randint(w - c + 1, ()))
+        else:
+            i0, j0 = (h - c) // 2, (w - c) // 2
+
+        def window(t):
+            return t[..., i0:i0 + c, j0:j0 + c].contiguous() if t.numel() else t
+
+        return window(x), window(y), window(z), dx, dy, scale, weight, window(log_lte)
+
+
 class H5CubeDataset(Dataset):
     """
     Dataset for full-cube training or evaluation.

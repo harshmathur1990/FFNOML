@@ -1075,6 +1075,7 @@ def ffno_train_model(
     train_select=1.0,
     train_select_seed=None,
     validate_only=False,
+    crop=0,
 ):
     resume_path = get_resume_checkpoint_path(save_path)
     load_path = None
@@ -1239,6 +1240,7 @@ def ffno_train_model(
         pin_memory=pin_memory,
         train_select=train_select,
         train_select_seed=train_select_seed,
+        crop=crop,
     )
 
     train_loader, val_loader, _, _ = data_builder.build(

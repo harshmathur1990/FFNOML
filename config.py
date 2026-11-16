@@ -335,6 +335,8 @@ DEBUG_DIST_INFERENCE = False
 # Dataset Params
 PATCH=40
 STRIDE=20
+# FFNOML_CROP > 0 trains on a random CROP x CROP window of each patch, and validates on its centre window (small GPUs)
+CROP = int(os.environ.get("FFNOML_CROP", 0))
 SCALES=(1,2,3,4,5,6,7,8)
 
 TRAIN_FILE = os.path.join(
