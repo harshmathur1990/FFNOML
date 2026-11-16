@@ -364,7 +364,8 @@ DEVICE = "cuda"
 PATIENCE = 50
 MIN_DELTA = 5e-5
 DATASET_TYPE = "patch"
-TRAINSELECT = 1
+# FFNOML_TRAINSELECT < 1 trains each epoch on that fraction of the patches, drawn again every epoch
+TRAINSELECT = float(os.environ.get("FFNOML_TRAINSELECT", 1))
 TRAINSELECT_SEED = 12345
 USE_COSINE = True
 LOAD_EARLIER_VAL = True
