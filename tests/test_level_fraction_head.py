@@ -1,4 +1,5 @@
-"""The level-fraction head (FFNO3D output_mode='level_fraction'): log10 n_i = log10(rho / mass) + s + log10 softmax(z)_i.
+"""The level-fraction head (FFNO3D output_mode='level_fraction'): log10 n_i = log10(rho / mass) + s + log10 softmax(z)_i,
+with z_i = ln f*_i(T, ne) + delta_i (tests/test_departure_coefficients.py checks f*).
 It reproduces any positive levels whose total lies within total_bound dex of rho / mass, including totals far from it;
 the total starts at rho / mass; gradients reach rho; the batched backend gives what forward gives; and the default
 log_population model is unchanged."""
@@ -13,11 +14,12 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ffno_batched_backend import BatchedFFNOBackend
-from models.ffno_model import FFNO3D
+from config import ATOM_CONFIG
+from models.ffno_model import FFNO3D, multi3d_lte_log_weights
 
 BASE = dict(in_channels=6, width=16, n_layers=2, hidden_spectral=16, hidden_vertical=16)
-H = dict(levels=6, log10_particle_mass=math.log10(2.2697e-27))
-CA = dict(levels=6, log10_particle_mass=math.log10(1.0375e-21))
+H = dict(levels=6, log10_particle_mass=math.log10(2.2697e-27), multi3d_lte=ATOM_CONFIG["H"]["multi3d_lte"])
+CA = dict(levels=6, log10_particle_mass=math.log10(1.0375e-21), multi3d_lte=ATOM_CONFIG["CA"]["multi3d_lte"])
 MEAN_X = np.array([3.8, 0.0, 0.0, 0.0, 16.0, -7.0], np.float32)
 STD_X = np.array([0.4, 5.0, 5.0, 5.0, 2.0, 2.5], np.float32)
 
@@ -56,6 +58,8 @@ class LevelFractionHead(unittest.TestCase):
         x = torch.randn(1, 6, 5, 4, 3, dtype=torch.float64)
         offsets = torch.tensor([-3.16, -0.5, -0.021, 0.0, 1.93, 5.40], dtype=torch.float64)
         ref = torch.stack([log10_reference_total(model, x, i) for i in (0, 1)], 1)  # [1, 2, D, H, W]
+        lte = multi3d_lte_log_weights(x[:, 0] * model.std_X[0] + model.mean_X[0], x[:, 4] * model.std_X[4] + model.mean_X[4],
+                                      *model.lte_tables)
         log10_n = torch.empty(1, 12, 5, 4, 3, dtype=torch.float64)
         head = torch.empty(1, 14, 5, 4, 3, dtype=torch.float64)
         for sp in (0, 1):
@@ -63,7 +67,7 @@ class LevelFractionHead(unittest.TestCase):
             frac = ratios - torch.logsumexp(ratios * math.log(10.0), 1, keepdim=True) / math.log(10.0)
             s = offsets[torch.randint(0, 6, (1, 5, 4, 3))]
             log10_n[:, 6 * sp:6 * sp + 6] = ref[:, sp][:, None] + s[:, None] + frac
-            head[:, 7 * sp:7 * sp + 6] = ratios * math.log(10.0)                    # logits: softmax gives frac
+            head[:, 7 * sp:7 * sp + 6] = ratios * math.log(10.0) - lte[:, 6 * sp:6 * sp + 6]   # softmax(lte + delta) = frac
             head[:, 7 * sp + 6] = model.total_bound * torch.atanh(s / model.total_bound)
         y = model.head_output(head, x) * model.std_Y[None, :, None, None, None] + model.mean_Y[None, :, None, None, None]
         self.assertLess((y - log10_n).abs().max().item(), 1e-9)

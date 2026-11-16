@@ -664,32 +664,27 @@ class FFNO3D(nn.Module):
         species=None,
         rho_channel=5,
         total_bound=6.0,
-        lte_prior=False,
         temperature_channel=0,
         ne_channel=4,
     ):
         super().__init__()
 
         # output_mode "log_population": the head predicts normalised log10 populations directly.
-        # "level_fraction": per species, the head predicts one logit per level and one total correction u:
-        #     log10 n_i = log10(rho / particle mass) + s + log10 softmax(z)_i,   s = total_bound * tanh(u / total_bound)
-        # The softmax is each level's share of the species total, and s the log10 ratio of that total to rho / mass.
-        # Any set of positive levels whose total lies within total_bound dex of rho / mass is reproduced exactly; the
-        # bound only keeps populations finite in float32. The output stays normalised log10 populations, so the loss
-        # and the inference paths are unchanged.
-        # lte_prior (level_fraction only): the logits are z_i = ln f*_i(T, ne) + delta_i, with f* MULTI3D's LTE level
-        # fractions (multi3d_lte_log_weights) from the input T and ne and each species' "multi3d_lte" atom data. delta_i
-        # is then ln b_i, the departure coefficient, up to a constant common to the species' levels; the total is still
-        # rho / mass * 10^s, and delta = 0 gives MULTI3D's LTE fractions. Off by default.
+        # "level_fraction": per species, the head predicts one departure logit delta_i per level and one total
+        # correction u:
+        #     log10 n_i = log10(rho / particle mass) + s + log10 softmax(ln f*_i + delta_i),   s = total_bound * tanh(u / total_bound)
+        # f*_i(T, ne) is MULTI3D's LTE level fraction (multi3d_lte_log_weights, from the input T and ne and the species'
+        # "multi3d_lte" atom data), so delta_i is ln b_i, the departure coefficient, up to a constant common to the
+        # species' levels, and delta = 0 gives MULTI3D's LTE populations. The softmax is each level's share of the
+        # species total, and s the log10 ratio of that total to rho / mass. Any set of positive levels whose total lies
+        # within total_bound dex of rho / mass is reproduced exactly; the bound only keeps populations finite in
+        # float32. The output stays normalised log10 populations, so the loss and the inference paths are unchanged.
         # Capacity switches, all off by default so that existing checkpoints load and give the same outputs:
         # z_spectral_modes (spectral convolution along depth in each vertical branch), freq_mix_rank (per-frequency
         # low-rank channel mixing in each horizontal spectral branch), open_side_paths (see FFNOBlock3dBalanced).
         if output_mode not in ("log_population", "level_fraction"):
             raise ValueError(f"unknown output_mode {output_mode!r}")
         self.output_mode = output_mode
-        self.lte_prior = bool(lte_prior)
-        if self.lte_prior and output_mode != "level_fraction":
-            raise ValueError("lte_prior needs output_mode='level_fraction'")
         head_channels = out_channels
         if output_mode == "level_fraction":
             if not species:
@@ -708,10 +703,10 @@ class FFNO3D(nn.Module):
             self.register_buffer("std_X", torch.ones(in_channels))
             self.register_buffer("mean_Y", torch.zeros(out_channels))
             self.register_buffer("std_Y", torch.ones(out_channels))
-        if self.lte_prior:
             missing = [i for i, s in enumerate(species) if "multi3d_lte" not in s]
             if missing:
-                raise ValueError(f"lte_prior needs each species' multi3d_lte atom data (g, ev, ion); missing for {missing}")
+                raise ValueError(f"output_mode='level_fraction' needs each species' multi3d_lte atom data (g, ev, ion); "
+                                 f"missing for {missing}")
             self.temperature_channel, self.ne_channel = int(temperature_channel), int(ne_channel)
             # plain constants, not buffers, so that casting the model never rounds them
             tables = [multi3d_lte_tables(s["multi3d_lte"], s["levels"]) for s in species]
@@ -776,18 +771,15 @@ class FFNO3D(nn.Module):
             return head
         rho = self.rho_channel
         log10_rho = x_in[:, rho] * self.std_X[rho] + self.mean_X[rho]
-        lte = None
-        if self.lte_prior:
-            t, e = self.temperature_channel, self.ne_channel
-            lte = multi3d_lte_log_weights(x_in[:, t].double() * self.std_X[t].double() + self.mean_X[t].double(),
-                                          x_in[:, e].double() * self.std_X[e].double() + self.mean_X[e].double(),
-                                          *self.lte_tables)
+        t, e = self.temperature_channel, self.ne_channel
+        lte = multi3d_lte_log_weights(x_in[:, t].double() * self.std_X[t].double() + self.mean_X[t].double(),
+                                      x_in[:, e].double() * self.std_X[e].double() + self.mean_X[e].double(),
+                                      *self.lte_tables)
         out = []
         c = k = 0                               # head channel and output channel of the species' first level
         for i, levels in enumerate(self.species_levels):
-            logits = head[:, c:c + levels]
-            if lte is not None:                 # in float64: the LTE weights span tens of e-folds
-                logits = logits.double() + lte[:, k:k + levels]
+            # in float64: the LTE weights span tens of e-folds
+            logits = head[:, c:c + levels].double() + lte[:, k:k + levels]
             log10_fraction = (torch.log_softmax(logits, dim=1) / math.log(10.0)).to(head.dtype)
             s = self.total_bound * torch.tanh(head[:, c + levels] / self.total_bound)
             out.append((log10_rho - self.log10_particle_mass[i] + s)[:, None] + log10_fraction)

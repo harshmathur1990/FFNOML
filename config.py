@@ -180,8 +180,8 @@ ATOM_CONFIG = {
         # simulations, down to -0.5 dex below log T = 3.7, and the readnh = 0 artefacts)
         "log10_particle_mass": float(np.log10(2.2697e-27)),  # kg
 
-        # MULTI3D's atom data (out_par of the training runs), for MODEL_CONFIG lte_prior: MULTI3D's LTE level fractions
-        # from these, T and ne reproduce its nstar to float32 precision
+        # MULTI3D's atom data (out_par of the training runs), for the level-fraction head's departure coefficients:
+        # MULTI3D's LTE level fractions from these, T and ne reproduce its nstar
         "multi3d_lte": dict(g=[2.0, 8.0, 18.0, 32.0, 50.0, 1.0], ion=[1, 1, 1, 1, 1, 2],
                             ev=[0.0, 10.198673740091325, 12.087318311066094, 12.748311674749516, 13.054262568222963,
                                 13.60794573029334]),
@@ -302,9 +302,9 @@ MODEL_CONFIG = dict(
 if os.environ.get("FFNOML_MODEL_CONFIG"):
     MODEL_CONFIG.update(json.loads(os.environ["FFNOML_MODEL_CONFIG"]))
 if MODEL_CONFIG["output_mode"] == "level_fraction":
-    # lte_prior (FFNOML_MODEL_CONFIG {"lte_prior": true}): departure coefficients from MULTI3D's LTE fractions
-    keys = ("levels", "log10_particle_mass") + (("multi3d_lte",) if MODEL_CONFIG.get("lte_prior") else ())
-    MODEL_CONFIG["species"] = [{k: ATOM_CONFIG[a][k] for k in keys} for a in ACTIVE_ATOMS]
+    MODEL_CONFIG["species"] = [
+        {k: ATOM_CONFIG[a][k] for k in ("levels", "log10_particle_mass", "multi3d_lte")} for a in ACTIVE_ATOMS
+    ]
 
 atoms_tag = _active_atoms_tag(ACTIVE_ATOMS)
 

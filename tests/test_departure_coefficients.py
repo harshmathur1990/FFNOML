@@ -1,7 +1,7 @@
-"""The departure-coefficient form of the level-fraction head (FFNO3D lte_prior): the level logits are MULTI3D's LTE
-weights from the input T and ne plus the network's delta = ln b. delta = 0 gives MULTI3D's LTE fractions, as an
-independent transcription of calc_lte_populations (multi3d/src/phys_mod.f90) computes them; switched off, the head is
-unchanged; gradients reach T and ne; the batched backend gives what forward gives."""
+"""Departure coefficients in the level-fraction head: the level logits are MULTI3D's LTE weights from the input T and
+ne plus the network's delta = ln b. delta = 0 gives MULTI3D's LTE fractions, as an independent transcription of
+calc_lte_populations (multi3d/src/phys_mod.f90) computes them; the atom data is required; gradients reach T and ne; the
+batched backend gives what forward gives."""
 import json
 import math
 import os
@@ -54,10 +54,10 @@ def multi3d_nstar_fractions(t, ne_cm3, atom):
     return np.stack(tns, 0) / sumn
 
 
-def model_for(species, lte_prior=True, seed=3, zero_delta=False):
+def model_for(species, seed=3, zero_delta=False):
     torch.manual_seed(seed)
     out = sum(s["levels"] for s in species)
-    model = FFNO3D(out_channels=out, output_mode="level_fraction", species=species, lte_prior=lte_prior, **BASE).eval()
+    model = FFNO3D(out_channels=out, output_mode="level_fraction", species=species, **BASE).eval()
     model.set_normalization(MEAN_X, STD_X, np.linspace(10.0, 15.0, out), np.linspace(1.0, 2.0, out))
     if zero_delta:
         with torch.no_grad():
@@ -115,41 +115,23 @@ class ZeroDeltaIsMulti3dLTE(unittest.TestCase):
         self.assertEqual(multi3d_lte_tables(H_LTE, 6)[2], [0.0] * 5 + [1.0])
 
 
-class Switch(unittest.TestCase):
-    def test_off_is_the_plain_fraction_head(self):
-        x, z = solar_inputs()
-        plain = model_for([H], lte_prior=False)
-        with_data = model_for([dict(H, multi3d_lte=H_LTE)], lte_prior=False)
-        self.assertEqual(list(plain.state_dict()), list(with_data.state_dict()))
-        with torch.no_grad():
-            self.assertTrue(torch.equal(plain(x, z, 48e3, 48e3), with_data(x, z, 48e3, 48e3)))
-        torch.manual_seed(3)
-        default = FFNO3D(out_channels=6, output_mode="level_fraction", species=[H], **BASE)
-        self.assertFalse(default.lte_prior)
-
-    def test_on_adds_no_parameters_or_buffers(self):
-        plain = model_for([H], lte_prior=False)
-        on = model_for([dict(H, multi3d_lte=H_LTE)])
-        self.assertEqual(list(plain.state_dict()), list(on.state_dict()))
-        on.load_state_dict(plain.state_dict(), strict=True)
-
-    def test_needs_level_fraction_and_atom_data(self):
+class Configuration(unittest.TestCase):
+    def test_needs_the_atom_data(self):
         with self.assertRaises(ValueError):
-            FFNO3D(out_channels=6, lte_prior=True, **BASE)
-        with self.assertRaises(ValueError):
-            FFNO3D(out_channels=6, output_mode="level_fraction", species=[H], lte_prior=True, **BASE)
+            FFNO3D(out_channels=6, output_mode="level_fraction", species=[H], **BASE)
 
-    def test_config_switch(self):
-        env = dict(os.environ, FFNOML_OUTPUT_MODE="level_fraction", FFNOML_ACTIVE_ATOMS="H,CA",
-                   FFNOML_MODEL_CONFIG=json.dumps({"lte_prior": True}))
+    def test_adds_no_parameters_or_buffers(self):
+        model = model_for([dict(H, multi3d_lte=H_LTE)])
+        self.assertEqual(sorted(k for k in model.state_dict() if not k.startswith(("lift.", "blocks.", "proj"))),
+                         ["log10_particle_mass", "mean_X", "mean_Y", "std_X", "std_Y"])
+
+    def test_config_gives_the_atom_data(self):
+        env = dict(os.environ, FFNOML_OUTPUT_MODE="level_fraction", FFNOML_ACTIVE_ATOMS="H,CA")
+        env.pop("FFNOML_MODEL_CONFIG", None)
         out = subprocess.run([sys.executable, "-c", "import json, config; print(json.dumps(config.MODEL_CONFIG['species']))"],
                              cwd=REPO, env=env, check=True, capture_output=True, text=True).stdout
         species = json.loads(out.strip().splitlines()[-1])
         self.assertEqual([s["multi3d_lte"] for s in species], [H_LTE, CA_LTE])
-        env.pop("FFNOML_MODEL_CONFIG")
-        out = subprocess.run([sys.executable, "-c", "import json, config; print(json.dumps(config.MODEL_CONFIG['species']))"],
-                             cwd=REPO, env=env, check=True, capture_output=True, text=True).stdout
-        self.assertFalse(any("multi3d_lte" in s for s in json.loads(out.strip().splitlines()[-1])))
 
 
 class Gradients(unittest.TestCase):
@@ -185,7 +167,7 @@ class BatchedBackend(unittest.TestCase):
             stats = {k: getattr(model, k).numpy() for k in ("mean_X", "std_X", "mean_Y", "std_Y")}
             torch.save(dict(model_state=model.state_dict(), epoch=1, io_metadata=dict(Cin=6, Cout=6),
                             normalization_stats=stats), path)
-            config = dict(out_channels=6, output_mode="level_fraction", species=species, lte_prior=True, **BASE)
+            config = dict(out_channels=6, output_mode="level_fraction", species=species, **BASE)
             backend = BatchedFFNOBackend(path, lambda Cin, Cout, device: FFNO3D(**config), devices=["cpu"],
                                          log=lambda message: None, chunk_depth=5, chunk_rows=3, vertical_chunk=7)
             x, z = solar_inputs()
