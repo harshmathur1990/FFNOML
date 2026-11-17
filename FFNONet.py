@@ -1401,7 +1401,7 @@ def _distributed_full_forward(model, X, z_scale, dx, dy, *, collect_stats=False,
     pw_mask = float(branch_mask.get("pw", 1.0))
     mlp_mask = float(branch_mask.get("mlp", 1.0))
 
-    x = model._run_lift(X, collect_stats=False)
+    x = model._run_lift(X, z_scale, collect_stats=False)
     all_stats = [] if collect_stats else None
 
     for i, blk in enumerate(model.blocks):
@@ -2267,7 +2267,7 @@ def ffno_predict_populations_distributed_full(
         try:
             pbar.set_postfix(step="lift", refresh=True)
             debug_progress("full prediction", "lift")
-            x = model._run_lift(X, collect_stats=False)
+            x = model._run_lift(X, z_scale, collect_stats=False)
             pbar.update(1)
 
             for i, blk in enumerate(model.blocks):

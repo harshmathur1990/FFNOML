@@ -519,5 +519,8 @@ def _replace_modules(parent):
 
 
 def enable_distributed_inference(model):
+    if getattr(model, "vertical_operator", False):
+        raise NotImplementedError("the FSDP route does not have vertical_operator's height-weighted GroupNorm yet; "
+                                  "predict with ffno_batched_backend (scripts/predict_batched.py)")
     _replace_modules(model)
     return model
