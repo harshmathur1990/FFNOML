@@ -207,6 +207,53 @@ class SpectralConvZ(nn.Module):
         return torch.fft.irfft(out_ft, n=2 * depth, dim=-1)[..., :depth]
 
 
+class SpectralConvHeight(nn.Module):
+    """
+    Spectral convolution along height on each column's own heights: a convolution in z, the same on any vertical grid
+    and for any number of levels (SpectralConvZ works on the level index instead). Mode m is the fixed wavenumber
+    k_m = 2 pi m / reference_length, and its complex channel mixing W_m is the same in every column. A column is
+    transformed by trapezoid quadrature on its heights and its mixed modes are evaluated back at the same heights:
+        X_m = sum_j x(z_j) exp(-i k_m z_j) w_j,    y(z_j) = (W_0 X_0 + 2 Re sum_{m>=1} W_m X_m exp(i k_m z_j)) / reference_length
+    The reference length (in the units of z_scale, Mm) must be at least twice the tallest column, so that a column's
+    top and bottom are never neighbours in the periodic domain (checked by BalancedVerticalPhysicsStack), and the
+    shortest wavelength, reference_length / (modes - 1), should be resolved by the coarsest grid spacing. The weights
+    start at zero, so a model with this branch starts as the model without it.
+
+    Input: x [N, C, D], z [N, 1, D]. Output: [N, C, D]
+    """
+
+    def __init__(self, channels, modes, reference_length):
+        super().__init__()
+        self.modes = int(modes)
+        self.reference_length = float(reference_length)
+        self.weight_real = nn.Parameter(torch.zeros(channels, channels, self.modes))
+        self.weight_imag = nn.Parameter(torch.zeros(channels, channels, self.modes))
+        k = 2 * math.pi * torch.arange(self.modes, dtype=torch.float32) / self.reference_length
+        self.register_buffer("k", k, persistent=False)
+        self.register_buffer("mode_factor", torch.cat([torch.ones(1), 2 * torch.ones(self.modes - 1)]),
+                             persistent=False)
+
+    def forward(self, x, z):
+        z = z[:, 0]
+        z = z - z.min(dim=-1, keepdim=True).values                  # a shift of z changes nothing but rounding
+        w = torch.zeros_like(z)                                      # trapezoid weights |dz|, levels in any order
+        if z.shape[-1] > 1:
+            step = 0.5 * (z[:, 1:] - z[:, :-1]).abs()
+            w = w + F.pad(step, (0, 1)) + F.pad(step, (1, 0))
+        phase = z.unsqueeze(-1) * self.k                             # [N, D, M]
+        cos, sin = torch.cos(phase), torch.sin(phase)
+        xw = x * w.unsqueeze(1)
+        x_re = torch.einsum("n i d, n d m -> n i m", xw, cos)
+        x_im = -torch.einsum("n i d, n d m -> n i m", xw, sin)
+        y_re = torch.einsum("n i m, i o m -> n o m", x_re, self.weight_real) - \
+            torch.einsum("n i m, i o m -> n o m", x_im, self.weight_imag)
+        y_im = torch.einsum("n i m, i o m -> n o m", x_im, self.weight_real) + \
+            torch.einsum("n i m, i o m -> n o m", x_re, self.weight_imag)
+        y_re, y_im = y_re * self.mode_factor, y_im * self.mode_factor
+        return (torch.einsum("n o m, n d m -> n o d", y_re, cos) -
+                torch.einsum("n o m, n d m -> n o d", y_im, sin)) / self.reference_length
+
+
 class BalancedVerticalPhysicsStack(nn.Module):
     """
     Stronger vertical branch:
@@ -214,12 +261,14 @@ class BalancedVerticalPhysicsStack(nn.Module):
       - residual dilated depth blocks
       - channel mixing
       - learned depth gate
-      - optional (z_modes > 0) spectral convolution along depth, gated, added to the residual blocks' output
+      - optional (z_modes > 0) spectral convolution along depth, gated, added to the residual blocks' output: along
+        height with z_reference_length > 0 (SpectralConvHeight), along the level index with 0 (SpectralConvZ)
     """
 
-    def __init__(self, channels, hidden=128, dropout=0.0, chunk=4, z_modes=0):
+    def __init__(self, channels, hidden=128, dropout=0.0, chunk=4, z_modes=0, z_reference_length=0.0):
         super().__init__()
         self.chunk = chunk
+        self.z_reference_length = float(z_reference_length)
 
         self.z_proj = nn.Sequential(
             nn.Conv1d(4, hidden, 1, bias=False),
@@ -248,7 +297,8 @@ class BalancedVerticalPhysicsStack(nn.Module):
         )
 
         if z_modes:
-            self.z_spec = SpectralConvZ(hidden, z_modes)
+            self.z_spec = (SpectralConvHeight(hidden, z_modes, self.z_reference_length) if self.z_reference_length > 0
+                           else SpectralConvZ(hidden, z_modes))
             self.z_gate = nn.Sequential(
                 nn.Conv1d(hidden, hidden, 1, bias=False),
                 nn.Sigmoid(),
@@ -284,13 +334,20 @@ class BalancedVerticalPhysicsStack(nn.Module):
             dim=1,
         )
 
+    def check_height_span(self, z_scale):
+        """SpectralConvHeight needs every column to span at most half the z reference length."""
+        span = float((z_scale.amax(dim=2) - z_scale.amin(dim=2)).max())
+        if 2 * span > self.z_reference_length:
+            raise ValueError(f"a column spans {span:.3f} in z_scale units, more than half of z_reference_length "
+                             f"{self.z_reference_length}")
+
     def columns(self, xi, zi):
         """The branch on columns xi [N, C, D] with depths zi [N, 1, D], before out_gn (shared with the distributed
         and batched inference paths)."""
         h = self.in_proj(xi) + self.z_proj(self._z_features(zi))
         y = self.net(h)
         if self.z_spec is not None:
-            y = y + self.z_gate(h) * self.z_spec(h)
+            y = y + self.z_gate(h) * (self.z_spec(h, zi) if self.z_reference_length > 0 else self.z_spec(h))
         y = y * self.depth_gate(y)
         return self.out_proj(y)
 
@@ -302,6 +359,8 @@ class BalancedVerticalPhysicsStack(nn.Module):
             raise ValueError(
                 f"z_scale must be [B, D, H, W] or [B, 1, D, H, W], got {tuple(z_scale.shape)}"
             )
+        if self.z_spec is not None and self.z_reference_length > 0:
+            self.check_height_span(z_scale)
         x = x.permute(0, 3, 4, 1, 2).reshape(B, H * W, C, D)
         z_scale = z_scale.permute(0, 3, 4, 1, 2).reshape(B, H * W, 1, D)
 
@@ -482,6 +541,7 @@ class FFNOBlock3dBalanced(nn.Module):
         hidden_spectral=128,
         hidden_vertical=128,
         z_spectral_modes=0,
+        z_reference_length=0.0,
         freq_mix_rank=0,
         open_side_paths=False,
     ):
@@ -502,6 +562,7 @@ class FFNOBlock3dBalanced(nn.Module):
             dropout=dropout,
             chunk=4,
             z_modes=z_spectral_modes,
+            z_reference_length=z_reference_length,
         )
 
         self.pw = nn.Sequential(
@@ -658,6 +719,7 @@ class FFNO3D(nn.Module):
         hidden_spectral=128,
         hidden_vertical=128,
         z_spectral_modes=0,
+        z_reference_length=0.0,
         freq_mix_rank=0,
         open_side_paths=False,
         output_mode="log_population",
@@ -680,8 +742,10 @@ class FFNO3D(nn.Module):
         # within total_bound dex of rho / mass is reproduced exactly; the bound only keeps populations finite in
         # float32. The output stays normalised log10 populations, so the loss and the inference paths are unchanged.
         # Capacity switches, all off by default so that existing checkpoints load and give the same outputs:
-        # z_spectral_modes (spectral convolution along depth in each vertical branch), freq_mix_rank (per-frequency
-        # low-rank channel mixing in each horizontal spectral branch), open_side_paths (see FFNOBlock3dBalanced).
+        # z_spectral_modes (spectral convolution along depth in each vertical branch: along height, independent of the
+        # vertical grid, with z_reference_length > 0 in z_scale units (Mm), at least twice the tallest column; along the
+        # level index with 0, as in the first capacity screens), freq_mix_rank (per-frequency low-rank channel mixing in
+        # each horizontal spectral branch), open_side_paths (see FFNOBlock3dBalanced).
         if output_mode not in ("log_population", "level_fraction"):
             raise ValueError(f"unknown output_mode {output_mode!r}")
         self.output_mode = output_mode
@@ -738,6 +802,7 @@ class FFNO3D(nn.Module):
                 hidden_spectral=hidden_spectral,
                 hidden_vertical=hidden_vertical,
                 z_spectral_modes=z_spectral_modes,
+                z_reference_length=z_reference_length,
                 freq_mix_rank=freq_mix_rank,
                 open_side_paths=open_side_paths,
             )

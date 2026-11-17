@@ -334,6 +334,8 @@ class ProgressVerticalWrapper(nn.Module):
                 f"z_scale must be [B, D, H, W] or [B, 1, D, H, W], got {tuple(z_scale.shape)}"
             )
 
+        if self.source.z_spec is not None and self.source.z_reference_length > 0:
+            self.source.check_height_span(z_scale)
         x_cols = x.permute(0, 3, 4, 1, 2).reshape(B, H * W, C, D)
         z_cols = z_scale.permute(0, 3, 4, 1, 2).reshape(B, H * W, 1, D)
 
