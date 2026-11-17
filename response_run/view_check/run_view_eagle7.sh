@@ -1,5 +1,7 @@
 #!/bin/bash
 # usage (on eagle7, bash -l): run_view_eagle7.sh OUT.h5 [STRIDE MU AZIMUTH]: forward_bifrost_view.jl on this host's GPUs.
+# VIEW_SYNTH_CONFIG picks the synthesis configuration (default forward_multi3d.toml, H-alpha ±0.09 nm only;
+# view_check/forward_multi3d_wide.toml for the wings).
 source ~/loadnvidia.sh >/dev/null 2>&1
 export PATH=/tmp/julia-1.12.3/bin:$PATH
 P=/mn/stornext/d9/data/harshm/FFNOML/FFNOInversion.jl
@@ -12,4 +14,4 @@ export FFNO_GPU_DIAGNOSTICS_DIR=$R/diagnostics
 export OMP_NUM_THREADS=1
 cd $R
 julia --startup-file=no --project=$P --threads=$(nproc --all) $R/view_check/forward_bifrost_view.jl \
-  $R/forward_multi3d.toml $R/ffno_models.jl ${2:-4} ${3:-0.8} ${4:-180} "$1"
+  ${VIEW_SYNTH_CONFIG:-$R/forward_multi3d.toml} $R/ffno_models.jl ${2:-4} ${3:-0.8} ${4:-180} "$1"
