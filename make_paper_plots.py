@@ -1137,7 +1137,7 @@ def _line_profile_dataset_names():
         "en024048_hion_385",
         "nw012023_1050",
         "ch024031_by200bz005_450",
-        "en024031_by100_helium_109",
+        "cbh24_s0957",
     ]
 
 
@@ -1150,13 +1150,14 @@ def _line_profile_short_name(name):
         "nw012023_1050": "NW, snapshot 1050",
         "ch024031_by200bz005_450": "CH, snapshot 450",
         "en024031_by100_helium_109": "EN-He, snapshot 109",
+        "cbh24_s0957": "cbh24, snapshot 957",
     }
     return labels.get(name, name)
 
 
-def _read_line_profile_file(path):
+def _read_line_profile_file(path, atom=PAPER_PLOT_ATOM):
     with h5py.File(path, "r") as intensity_file:
-        atom_group = intensity_file[PAPER_PLOT_ATOM]
+        atom_group = intensity_file[atom]
         wave = np.asarray(atom_group["wave"], dtype=np.float64).squeeze()
         intensity = np.asarray(atom_group["intensity"], dtype=np.float32)
 
@@ -1178,11 +1179,14 @@ def _read_line_profile_file(path):
     return intensity, wave
 
 
-def _iter_line_profile_data():
+def _iter_line_profile_data(atom=PAPER_PLOT_ATOM):
+    """ML and Multi3D intensities of one atom for each test atmosphere; atom defaults to
+    PAPER_PLOT_ATOM, and the files are those written for that atom alone."""
     fnoml_dir = Path(PRED_DIR) / "FFNOML"
     ml_intensity_dir = fnoml_dir / MODEL_DIR
     bifrost_intensity_dir = fnoml_dir / "IO"
     datasets_by_name = {dataset["NAME"]: dataset for dataset in MULTI3D_PRED_DATA}
+    atoms_tag = active_atom_names_tag() if atom == PAPER_PLOT_ATOM else atom
     validate_paper_plot_atom()
 
     for name in _line_profile_dataset_names():
@@ -1191,14 +1195,14 @@ def _iter_line_profile_data():
 
         ml_path = (
             ml_intensity_dir
-            / f"intensity_ml_{name}_{MODEL}_{active_atom_names_tag()}.h5"
+            / f"intensity_ml_{name}_{MODEL}_{atoms_tag}.h5"
         )
         multi3d_path = (
             bifrost_intensity_dir
-            / f"intensity_bifrost_{name}_{active_atom_names_tag()}.h5"
+            / f"intensity_bifrost_{name}_{atoms_tag}.h5"
         )
-        ml_intensity, ml_wave = _read_line_profile_file(ml_path)
-        multi3d_intensity, multi3d_wave = _read_line_profile_file(multi3d_path)
+        ml_intensity, ml_wave = _read_line_profile_file(ml_path, atom)
+        multi3d_intensity, multi3d_wave = _read_line_profile_file(multi3d_path, atom)
 
         if ml_intensity.shape != multi3d_intensity.shape:
             raise ValueError(
@@ -1227,6 +1231,12 @@ def _line_velocity_axis(wave):
     velocity = 299792.458 * (wave - rest_wavelength) / rest_wavelength
     core_index = int(np.argmin(np.abs(velocity)))
     return velocity, core_index
+
+
+def _wing_index(wave):
+    """Index of the wavelength farthest from line centre (the last point for the grids used here)."""
+    velocity, _ = _line_velocity_axis(wave)
+    return int(np.argmax(np.abs(velocity)))
 
 
 def _profile_continuum(profiles):
@@ -1368,7 +1378,13 @@ def _centers_to_edges(centers):
 
 
 def make_line_profile_statistical_comparison_plots(poster=False):
-    """Plot the spatial distribution of profile errors at each wavelength.
+    """Plot the spatial distribution of profile errors at each wavelength, and
+    the spatially averaged H alpha and Ca II 8542 profiles.
+
+    Errors are (I_ML - I_Multi3D) / I_Multi3D(wing), where I_Multi3D(wing) is
+    the Multi3D intensity at the wavelength farthest from line centre, per
+    pixel for the error distributions and of the mean profile for the mean
+    spectra.
 
     In poster mode, replace each descriptive panel title with its uppercase
     panel letter and identify the output with a ``_poster`` suffix. All other
@@ -1387,18 +1403,12 @@ def make_line_profile_statistical_comparison_plots(poster=False):
         multi3d = data["multi3d"].reshape(-1, data["wave"].size)
         ml = data["ml"].reshape(-1, data["wave"].size)
 
-        continuum = np.abs(_profile_continuum(multi3d))
-        finite_continuum = continuum[
-            np.isfinite(continuum) & (continuum > 0.0)
-        ]
-        continuum_floor = (
-            1e-6 * float(np.nanmedian(finite_continuum))
-            if finite_continuum.size else 1e-12
-        )
-        signed_error_percent = (
-            100.0 * (ml[:, wavelength_mask] - multi3d[:, wavelength_mask])
-            / np.maximum(continuum, continuum_floor)[:, np.newaxis]
-        )
+        wing = multi3d[:, _wing_index(data["wave"])]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            signed_error_percent = (
+                100.0 * (ml[:, wavelength_mask] - multi3d[:, wavelength_mask])
+                / wing[:, np.newaxis]
+            )
         finite_error = signed_error_percent[np.isfinite(signed_error_percent)]
         if not finite_error.size:
             raise ValueError(f"No finite profile errors for {data['name']!r}")
@@ -1494,6 +1504,62 @@ def make_line_profile_statistical_comparison_plots(poster=False):
     fig.savefig(
         plot_output_dir()
         / f"line_profile_statistics_{paper_plot_tag()}{output_variant}.pdf",
+        dpi=300,
+        format="pdf",
+    )
+
+    _make_mean_spectra_plot(output_variant)
+
+
+def _make_mean_spectra_plot(output_variant=""):
+    """Mean H alpha and Ca II 8542 profiles of ML and Multi3D for each test
+    atmosphere, with (<I_ML> - <I_Multi3D>) / <I_Multi3D>(wing) below each."""
+    plt.close("all")
+    matplotlib.rc("font", size=8)
+    names = _line_profile_dataset_names()
+    lines = (("H", r"H$\alpha$", 130.0), ("CA", r"Ca II 8542 $\AA$", 100.0))
+    fig, axs = plt.subplots(
+        4, len(names), figsize=(10.0, 5.2), constrained_layout=True,
+        gridspec_kw={"height_ratios": [3.0, 1.3, 3.0, 1.3]},
+    )
+    for line_index, (atom, line_label, velocity_limit) in enumerate(lines):
+        for column, data in enumerate(_iter_line_profile_data(atom)):
+            ml = data["ml"].reshape(-1, data["wave"].size)
+            multi3d = data["multi3d"].reshape(-1, data["wave"].size)
+            finite = np.isfinite(ml).all(axis=1) & np.isfinite(multi3d).all(axis=1)
+            ml_mean = ml[finite].mean(axis=0, dtype=np.float64)
+            multi3d_mean = multi3d[finite].mean(axis=0, dtype=np.float64)
+            velocity, _ = _line_velocity_axis(data["wave"])
+            relative_percent = (
+                100.0 * (ml_mean - multi3d_mean)
+                / multi3d_mean[_wing_index(data["wave"])]
+            )
+            shown = np.abs(velocity) <= velocity_limit
+            profile_ax = axs[2 * line_index, column]
+            error_ax = axs[2 * line_index + 1, column]
+            profile_ax.plot(velocity, multi3d_mean, color="black", linewidth=1.0, label="Multi3D")
+            profile_ax.plot(velocity, ml_mean, color="red", linestyle="--", linewidth=1.0, label="FFNO")
+            error_ax.plot(velocity, relative_percent, color="red", linewidth=1.0)
+            error_ax.axhline(0.0, color="black", linewidth=0.7)
+            for ax, values in (
+                (profile_ax, np.concatenate((ml_mean[shown], multi3d_mean[shown]))),
+                (error_ax, np.append(relative_percent[shown], 0.0)),
+            ):
+                ax.set_xlim(-velocity_limit, velocity_limit)
+                margin = 0.05 * (values.max() - values.min())
+                ax.set_ylim(values.min() - margin, values.max() + margin)
+            error_ax.set_xlabel(r"$\Delta v$ [km s$^{-1}$]")
+            if line_index == 0:
+                family = "In-family" if column < 2 else "Out-of-family"
+                profile_ax.set_title(" ".join(data["name"].rsplit("_", 1)) + f"\n({family})")
+            if column == 0:
+                profile_ax.set_ylabel(f"{line_label}\n" + r"$\langle I \rangle$")
+                error_ax.set_ylabel(r"$\Delta I/I_{\rm wing}$ [%]")
+                if line_index == 0:
+                    profile_ax.legend(frameon=False, loc="lower left")
+
+    fig.savefig(
+        plot_output_dir() / f"mean_spectra_H_CA{output_variant}.pdf",
         dpi=300,
         format="pdf",
     )
