@@ -346,16 +346,27 @@ class HeightSpectralConv(nn.Module):
     The column's height (z_scale) enters pointwise, as the old branch's z features did. reference_length (z_scale units,
     Mm) must be at least twice the tallest column, so that a column's top and bottom are never neighbours in the
     periodic domain.
+    feature_wavelength > 0 gives the frequency MLPs the wavenumber on that fixed physical scale, t = q / (1 + q) with
+    q = k feature_wavelength / 2 pi, so W(k) at a given wavenumber is the same function whatever min_wavelength is
+    (0: q = k min_wavelength / 2 pi, t = q, the first runs' scaling, where the band limit stretched the k axis).
+    column_cutoff: each column keeps only the wavenumbers its own grid resolves, from its median level spacing dz
+    (the spacing where the lines form; only the coronal top is coarser): W(k) is tapered from k = 2 pi / (3 dz) to
+    zero at the Nyquist wavenumber pi / dz, so modes no column sample can carry are not learned from interpolation.
 
     Input: x [B, C, D, H, W], z_scale [B, D, H, W] or [B, 1, D, H, W]. Output: [B, C, D, H, W]
     """
 
-    def __init__(self, channels, reference_length, min_wavelength, hidden=128, rank=0):
+    def __init__(self, channels, reference_length, min_wavelength, hidden=128, rank=0, feature_wavelength=0.0,
+                 column_cutoff=False):
         super().__init__()
         if reference_length <= 0 or min_wavelength <= 0:
             raise ValueError("the height operator needs z_reference_length > 0 and z_min_wavelength > 0")
+        if feature_wavelength < 0:
+            raise ValueError("z_feature_wavelength must be >= 0")
         self.reference_length = float(reference_length)
         self.min_wavelength = float(min_wavelength)
+        self.feature_wavelength = float(feature_wavelength)
+        self.column_cutoff = bool(column_cutoff)
         self.modes = int(math.floor(self.reference_length / self.min_wavelength)) + 1
         self.rank = int(rank)
         scale = 1.0 / math.sqrt(channels)
@@ -388,9 +399,22 @@ class HeightSpectralConv(nn.Module):
                              persistent=False)
 
     def k_features(self):
-        """The frequency MLPs' input [M, 2]: k over the largest wavenumber, and its square."""
-        k = self.k * self.min_wavelength / (2 * math.pi)
-        return torch.stack([k, k * k], dim=-1)
+        """The frequency MLPs' input [M, 2]: t and t^2, t a fixed function of the physical wavenumber when
+        feature_wavelength > 0, otherwise k over the largest wavenumber (the first runs)."""
+        if self.feature_wavelength:
+            q = self.k * self.feature_wavelength / (2 * math.pi)
+            t = q / (1 + q)
+        else:
+            t = self.k * self.min_wavelength / (2 * math.pi)
+        return torch.stack([t, t * t], dim=-1)
+
+    def cutoff(self, columns):
+        """The per-column taper [..., M] of column_cutoff, for columns [..., D] of heights: 1 up to 2 pi / (3 dz),
+        a half cosine down to 0 at pi / dz, dz the column's median level spacing."""
+        dz = (columns[..., 1:] - columns[..., :-1]).abs().median(dim=-1).values[..., None]
+        k_nyquist = math.pi / dz
+        u = ((self.k - 2 * k_nyquist / 3) / (k_nyquist / 3)).clamp(0, 1)
+        return 0.5 * (1 + torch.cos(math.pi * u))
 
     def check_span(self, z_scale):
         span = float((z_scale.amax(dim=-3) - z_scale.amin(dim=-3)).max())
@@ -405,18 +429,21 @@ class HeightSpectralConv(nn.Module):
         x = x * self.input_gate(x) + self.z_proj(z_scale)
         z = z_scale - z_scale.amin(dim=2, keepdim=True)              # a shift of z changes nothing but rounding
         shared = bool((z == z[..., :1, :1]).all())                   # one grid for every column (simulations, mesh)
+        shared = shared and bool((z == z[:1]).all())                 # ... and of every sample in the batch
         if shared:
             column = z[0, 0, :, 0, 0]
             q_re, q_im = height_fourier_weights(column, self.k)      # [D, M]
             phase = column[:, None] * self.k
             x_re = torch.einsum("b c d h w, d m -> b c m h w", x, q_re)
             x_im = torch.einsum("b c d h w, d m -> b c m h w", x, q_im)
+            taper = self.cutoff(column)[:, None, None] if self.column_cutoff else None          # [M, 1, 1]
         else:
             columns = z[:, 0].permute(0, 2, 3, 1)                    # [B, H, W, D]
             q_re, q_im = height_fourier_weights(columns, self.k)     # [B, H, W, D, M]
             phase = z[:, 0, ..., None] * self.k                      # [B, D, H, W, M]
             x_re = torch.einsum("b c d h w, b h w d m -> b c m h w", x, q_re)
             x_im = torch.einsum("b c d h w, b h w d m -> b c m h w", x, q_im)
+            taper = self.cutoff(columns).permute(0, 3, 1, 2)[:, None] if self.column_cutoff else None  # [B, 1, M, H, W]
         cos, sin = torch.cos(phase), torch.sin(phase)
         features = self.k_features()
         gate = self.freq_mlp(features)                               # [M, 2]
@@ -435,6 +462,8 @@ class HeightSpectralConv(nn.Module):
             y_re = y_re + torch.einsum("b r m h w, m o r -> b o m h w", low_re, u)
             y_im = y_im + torch.einsum("b r m h w, m o r -> b o m h w", low_im, u)
         f = self.mode_factor[:, None, None]
+        if taper is not None:
+            f = f * taper
         y_re, y_im = y_re * f, y_im * f
         if shared:
             y = torch.einsum("b o m h w, d m -> b o d h w", y_re, cos) - \
@@ -739,6 +768,8 @@ class FFNOBlock3dBalanced(nn.Module):
         open_side_paths=False,
         vertical_operator=False,
         z_min_wavelength=0.0,
+        z_feature_wavelength=0.0,
+        z_column_cutoff=False,
     ):
         super().__init__()
         self.open_side_paths = bool(open_side_paths)
@@ -757,7 +788,8 @@ class FFNOBlock3dBalanced(nn.Module):
             if z_spectral_modes:
                 raise ValueError("vertical_operator replaces the vertical stack: z_spectral_modes does not apply")
             self.vertical = HeightSpectralConv(width, z_reference_length, z_min_wavelength, hidden=hidden_vertical,
-                                               rank=freq_mix_rank)
+                                               rank=freq_mix_rank, feature_wavelength=z_feature_wavelength,
+                                               column_cutoff=z_column_cutoff)
         else:
             self.vertical = BalancedVerticalPhysicsStack(
                 width,
@@ -936,6 +968,8 @@ class FFNO3D(nn.Module):
         open_side_paths=False,
         vertical_operator=False,
         z_min_wavelength=0.0,
+        z_feature_wavelength=0.0,
+        z_column_cutoff=False,
         output_mode="log_population",
         species=None,
         rho_channel=5,
@@ -964,6 +998,8 @@ class FFNO3D(nn.Module):
         # branch is HeightSpectralConv (spectral in height on each column's own heights, wavenumbers 2 pi m /
         # z_reference_length down to wavelength z_min_wavelength, z_scale units), with freq_mix_rank as its low-rank
         # mixing too; the fusion has no 3x3x3 convolution; every GroupNorm, the lift's included, weights levels by height.
+        # z_feature_wavelength (Mm) puts its frequency MLPs on a fixed physical wavenumber scale, z_column_cutoff keeps
+        # in each column only the wavenumbers its grid resolves (HeightSpectralConv); 0 and false: the first fno runs.
         if output_mode not in ("log_population", "level_fraction"):
             raise ValueError(f"unknown output_mode {output_mode!r}")
         self.output_mode = output_mode
@@ -1025,6 +1061,8 @@ class FFNO3D(nn.Module):
                 freq_mix_rank=freq_mix_rank,
                 vertical_operator=vertical_operator,
                 z_min_wavelength=z_min_wavelength,
+                z_feature_wavelength=z_feature_wavelength,
+                z_column_cutoff=z_column_cutoff,
                 open_side_paths=open_side_paths,
             )
             for layer_idx in range(n_layers)

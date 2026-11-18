@@ -70,6 +70,45 @@ def grid_difference(model):
     return worst
 
 
+PHYSICAL = dict(OPERATOR, z_feature_wavelength=0.3, z_column_cutoff=True)
+
+
+class PhysicalWavenumbers(unittest.TestCase):
+    """z_feature_wavelength and z_column_cutoff: W(k) a function of the physical wavenumber whatever the band limit,
+    and in each column only the wavenumbers its grid resolves."""
+
+    def test_features_do_not_depend_on_the_band_limit(self):
+        coarse = HeightSpectralConv(8, 40.0, 0.3, hidden=8, feature_wavelength=0.3)
+        fine = HeightSpectralConv(8, 40.0, 0.04, hidden=8, feature_wavelength=0.3)
+        self.assertTrue(torch.allclose(coarse.k_features(), fine.k_features()[:coarse.modes]))
+        legacy = HeightSpectralConv(8, 40.0, 0.04, hidden=8)
+        self.assertFalse(torch.allclose(coarse.k_features(), legacy.k_features()[:coarse.modes]))
+
+    def test_taper_follows_the_column_spacing(self):
+        conv = HeightSpectralConv(8, 40.0, 0.04, hidden=8, column_cutoff=True)
+        for dz in (0.012, 0.02, 0.025, 0.164):
+            column = torch.arange(0, 14.0, dz)
+            taper, wavelength = conv.cutoff(column), 2 * np.pi / conv.k[1:]
+            self.assertTrue(torch.all(taper[1:][wavelength >= 3 * dz * 1.001] == 1))
+            self.assertTrue(torch.all(taper[1:][wavelength <= 2 * dz] < 1e-6))
+            self.assertEqual(float(taper[0]), 1.0)
+
+    def test_shared_grid_equals_per_column_path(self):
+        torch.manual_seed(0)
+        conv = HeightSpectralConv(8, 40.0, 0.04, hidden=8, rank=2, feature_wavelength=0.3, column_cutoff=True).double()
+        x = torch.randn(1, 8, 300, 2, 3, dtype=torch.float64)
+        z = torch.linspace(6.0, 0.0, 300, dtype=torch.float64)[None, :, None, None].expand(1, 300, 2, 3).clone()
+        shared = conv(x, z)
+        z[0, 150, 1, 2] += 1e-9                                      # one column apart: the per-column path
+        self.assertLess((conv(x, z) - shared).abs().max().item(), 1e-6)
+
+    def test_still_the_same_populations_on_any_vertical_grid(self):
+        torch.manual_seed(1)
+        got = grid_difference(FFNO3D(**CONFIG, **PHYSICAL))
+        print(f"\ndifference across vertical grids with physical wavenumbers and the column cutoff: {got:.2e}")
+        self.assertLess(got, 5e-3)
+
+
 class HeightOperator(unittest.TestCase):
     def test_same_populations_on_any_vertical_grid(self):
         torch.manual_seed(1)
