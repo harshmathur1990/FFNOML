@@ -7,7 +7,8 @@ training snapshots themselves are fitted poorly where the lines form, the model 
 For every snapshot and atom it builds the solving set if needed (pipeline.py --buildforpredict, raw inputs, shared by all
 checkpoints), predicts the whole cube with the batched backend on the visible GPUs, and compares with MULTI3D's out_pop
 in bins of log10 tau500: |delta log10 n| per level and |delta log10 (n_u / n_l)| of the line's two levels (its source
-function). Predictions are cached, so a rerun only scores.
+function). Predictions are cached, so a rerun only scores. The predictions run one after another on the GPUs, the
+scoring (CPU, about two minutes a cube) in --jobs processes at once.
 
     source ~/loadnvidia.sh
     python scripts/population_error_diagnostic.py --run-dir RUN [--model-dir DIR] [--snapshot role=sim/snap ...]
@@ -19,8 +20,10 @@ Predictions made elsewhere with pipeline.py --fsdppredict (output_3D_sim_s5_<nam
 are taken instead of predicting, so --score-only scores them without a GPU.
 """
 import argparse
+import concurrent.futures
 import glob
 import json
+import multiprocessing
 import os
 import subprocess
 import sys
@@ -77,6 +80,8 @@ def parse_args():
                         help="role=sim/snap, repeatable; roles: train, val, same_sim, unseen_sim")
     parser.add_argument("--snapshots-file", default=None, help="file of role=sim/snap lines, added to --snapshot")
     parser.add_argument("--score-only", action="store_true", help="score the cached predictions, predict nothing")
+    parser.add_argument("--jobs", type=int, default=8, help="snapshots scored at once, one process each (about 10 GB "
+                        "of memory each for a 384^3 cube)")
     return parser.parse_args()
 
 
@@ -198,6 +203,15 @@ def score(pred, true, logtau, atom):
     return result
 
 
+def score_snapshot(snapshot_dir, atom, out_path):
+    """score() of a cached prediction against MULTI3D, in a worker process."""
+    with h5py.File(out_path, "r") as f:
+        pred = f["log10_populations"][...].astype(np.float64)
+    true = multi3d_log10(snapshot_dir, atom, pred.shape)
+    logtau = log10_tau500(snapshot_dir, atom, pred.shape[:3])
+    return score(pred, true, logtau, atom)
+
+
 def print_summary(results, atoms):
     """Median over each role's snapshots of the per-snapshot medians, for the line's lower level and level ratio."""
     for atom in atoms:
@@ -232,7 +246,7 @@ def main():
     devices = [f"cuda:{i}" for i in range(torch.cuda.device_count())]
     if not devices and not args.score_only:
         raise RuntimeError("no GPU visible; use --score-only to score cached predictions")
-    results = []
+    tasks = []                                                                 # (role, name, atom, snapshot_dir, out_path)
     for atom in atoms:
         checkpoint = os.path.join(args.model_dir, f"3D_sim_train_{atom}.pt")
         backend = None
@@ -254,21 +268,30 @@ def main():
                     backend = BatchedFFNOBackend(checkpoint, lambda Cin, Cout, device: create_ffno3d(Cin, Cout, device),
                                                  devices=devices, log=lambda message: None, vertical_norm_slabs=1)
                 solve_path = solving_set(args.solve_run_dir or args.run_dir, args.model_dir, name)
-            else:
-                solve_path = None
-            pred = predict(backend, solve_path, out_path).astype(np.float64)
-            true = multi3d_log10(snapshot_dir, atom, pred.shape)
-            logtau = log10_tau500(snapshot_dir, atom, pred.shape[:3])
-            entry = next((r for r in results if r["name"] == name), None)
-            if entry is None:
-                entry = {"role": role, "name": name, "atoms": {}}
-                results.append(entry)
-            entry["atoms"][atom] = score(pred, true, logtau, atom)
-            line = entry["atoms"][atom]["all"]
-            print(f"{role:10s} {name:28s} {atom:2s} lower level {line['line_lower']['median']:.3f} dex, "
-                  f"ratio {line['line_ratio']['median']:.3f} dex (median, all cells)", flush=True)
+                predict(backend, solve_path, out_path)
+            tasks.append((role, name, atom, snapshot_dir, out_path))
         del backend
         torch.cuda.empty_cache()
+
+    # spawned, not forked: the parent may hold CUDA state from predicting
+    scored = {}
+    with concurrent.futures.ProcessPoolExecutor(max(1, min(args.jobs, len(tasks))),
+                                                mp_context=multiprocessing.get_context("spawn")) as pool:
+        futures = {pool.submit(score_snapshot, snapshot_dir, atom, out_path): (role, name, atom)
+                   for role, name, atom, snapshot_dir, out_path in tasks}
+        for future in concurrent.futures.as_completed(futures):
+            role, name, atom = futures[future]
+            scored[name, atom] = future.result()
+            line = scored[name, atom]["all"]
+            print(f"{role:10s} {name:28s} {atom:2s} lower level {line['line_lower']['median']:.3f} dex, "
+                  f"ratio {line['line_ratio']['median']:.3f} dex (median, all cells)", flush=True)
+    results = []
+    for role, name, atom, _, _ in tasks:                                       # in the listed order
+        entry = next((r for r in results if r["name"] == name), None)
+        if entry is None:
+            entry = {"role": role, "name": name, "atoms": {}}
+            results.append(entry)
+        entry["atoms"][atom] = scored[name, atom]
 
     out = os.path.join(args.run_dir, f"population_errors_{label}.json")
     with open(out, "w") as f:

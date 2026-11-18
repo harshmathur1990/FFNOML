@@ -38,7 +38,7 @@ TORCHRUN=/cluster/home/harshm/nvidiaenv/bin/torchrun
 echo "Experiment: ${FFNOML_EXPERIMENT}"
 echo "Train split: ${FFNOML_TRAIN_SPLIT}"
 echo "Val split: ${FFNOML_VAL_SPLIT}"
-echo "Atoms: ${FFNOML_ACTIVE_ATOMS}  epochs: ${FFNOML_NUM_EPOCHS}  flags: ${FFNOML_TRAIN_FLAGS:-none}"
+echo "Atoms: ${FFNOML_ACTIVE_ATOMS}  epochs: ${FFNOML_NUM_EPOCHS}  trainselect: ${FFNOML_TRAINSELECT:-1}  flags: ${FFNOML_TRAIN_FLAGS:-none}"
 echo "Head: ${FFNOML_OUTPUT_MODE}  lam_total: ${FFNOML_LAM_TOTAL}  model_config: ${FFNOML_MODEL_CONFIG:-defaults}"
 echo "Repository: ${FFNOML_REPO_DIR} ($(git -C "${FFNOML_REPO_DIR}" rev-parse --short HEAD))  run dir: ${FFNOML_RUN_DIR}"
 echo "Job ${SLURM_JOB_ID} on ${SLURM_JOB_NODELIST}, ${SLURM_NNODES} nodes x ${SLURM_GPUS_ON_NODE} GPUs. Start: $(date)"
@@ -82,11 +82,16 @@ run_torch() {   # label, pipeline.py arguments: one torchrun over every node, it
 run_torch train --train ${FFNOML_TRAIN_FLAGS:-}
 echo "Training done: $(date)"
 
-while IFS='=' read -r role snapshot <&3; do
-  name=${snapshot/\//_}
-  ln -sfn "${FFNOML_SOLVING_SETS}/3D_sim_predict_${name}.hdf5" "${MODEL_DIR}/3D_sim_predict_${name}.hdf5"
-  echo "Predicting ${name} (${role}): $(date)"
-  run_torch "predict_${name}" --fsdppredict --predname "${name}"
-done 3< "${FFNOML_RUN_DIR}/eval_snapshots.txt"
+# predict = no (vertical_operator models, which --fsdppredict does not run): predicted on eagle7 after the fetch
+if [ "${FFNOML_PREDICT:-yes}" = yes ]; then
+  while IFS='=' read -r role snapshot <&3; do
+    name=${snapshot/\//_}
+    ln -sfn "${FFNOML_SOLVING_SETS}/3D_sim_predict_${name}.hdf5" "${MODEL_DIR}/3D_sim_predict_${name}.hdf5"
+    echo "Predicting ${name} (${role}): $(date)"
+    run_torch "predict_${name}" --fsdppredict --predname "${name}"
+  done 3< "${FFNOML_RUN_DIR}/eval_snapshots.txt"
+else
+  echo "Predictions skipped (predict = no)"
+fi
 
 echo "End: $(date)"
