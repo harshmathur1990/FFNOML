@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 from models.ffno_model import SpectralConv2dFull as SpectralConv2dFull3D
-from models.ffno_model import BalancedVerticalPhysicsStack, HeightSpectralConv, depth_weights
+from models.ffno_model import BalancedVerticalPhysicsStack, FFNOBlock3dBalanced, HeightSpectralConv, depth_weights
 
 try:
     from config import DEBUG_DIST_INFERENCE
@@ -40,8 +40,43 @@ def debug_progress(progress_label, message):
         print(f"[{progress_label}] {message}", flush=True)
 
 
-# HeightSpectralConv on a rank's H slab runs over this many bytes of mode spectra at a time (ChunkedHeightSpectralConv)
-HEIGHT_CHUNK_BYTES = 4 * 1024 ** 3
+# The batched mode of the FSDP route: a step whose working tensors on the rank's slab would not fit in this fraction of
+# the device's free memory runs over the slab a few levels (or, the height operator, rows) at a time; one that fits runs
+# in one pass. FREE_MEMORY_BYTES, when set, stands in for the device's free memory (tests).
+DEVICE_MEMORY_FRACTION = 0.7
+FREE_MEMORY_BYTES = None
+
+
+def free_device_memory(device):
+    """Bytes the caching allocator can still hand out on device (free memory plus its own unused cache); None, no
+    limit, off the GPU."""
+    if FREE_MEMORY_BYTES is not None:
+        return FREE_MEMORY_BYTES
+    if device.type != "cuda":
+        return None
+    free, _ = torch.cuda.mem_get_info(device)
+    return free + torch.cuda.memory_reserved(device) - torch.cuda.memory_allocated(device)
+
+
+def depth_chunk(x, copies, collective=False):
+    """Levels of x [B, C, D, H, W] per pass of a step that holds `copies` tensors of the size of its input: all D
+    when they fit in DEVICE_MEMORY_FRACTION of the free device memory. collective: the smallest over the ranks, for a
+    step with a collective in every pass."""
+    depth = x.shape[2]
+    chunk = depth
+    free = free_device_memory(x.device)
+    if free is not None:
+        per_level = copies * x[:, :, :1].numel() * x.element_size()
+        chunk = int(max(1, min(depth, DEVICE_MEMORY_FRACTION * free // per_level)))
+    if collective and is_dist():
+        smallest = torch.tensor([chunk], device=x.device)
+        dist.all_reduce(smallest, op=dist.ReduceOp.MIN)
+        chunk = int(smallest.item())
+    return chunk
+
+
+def depth_spans(depth, chunk):
+    return [(a, min(a + chunk, depth)) for a in range(0, depth, chunk)]
 
 
 def block_depth_weights(block, z_scale):
@@ -186,21 +221,23 @@ class DistributedGroupNorm(nn.Module):
         if c != self.num_channels:
             raise ValueError(f"Expected {self.num_channels} channels, got {c}")
 
-        xg = x.reshape(b, self.num_groups, c // self.num_groups, *x.shape[2:])
-        reduce_dims = tuple(range(2, xg.ndim))
+        group = lambda t: t.reshape(b, self.num_groups, c // self.num_groups, *t.shape[2:])   # noqa: E731
+        reduce_dims = tuple(range(2, x.ndim + 1))
+        spans = depth_spans(x.shape[2], depth_chunk(x, 3))        # the batched mode: statistics, then values, by levels
+        local_sum = local_sq = local_count = 0
+        for a, z in spans:
+            xg = group(x[:, :, a:z])
+            if w is None:
+                local_sum = local_sum + xg.sum(dim=reduce_dims, keepdim=True)
+                local_sq = local_sq + (xg * xg).sum(dim=reduce_dims, keepdim=True)
+                local_count = local_count + xg[0, 0].numel()
+            else:
+                wg = w[:, :, a:z].unsqueeze(1)                      # [B, 1, 1, levels, H, W]
+                local_sum = local_sum + (wg * xg).sum(dim=reduce_dims, keepdim=True)
+                local_sq = local_sq + (wg * xg * xg).sum(dim=reduce_dims, keepdim=True)
+                local_count = local_count + wg.sum(dim=reduce_dims, keepdim=True) * xg.shape[2]
         if w is None:
-            local_sum = xg.sum(dim=reduce_dims, keepdim=True)
-            local_sq = (xg * xg).sum(dim=reduce_dims, keepdim=True)
-            local_count = torch.tensor(
-                xg[0, 0].numel(),
-                device=x.device,
-                dtype=x.dtype,
-            )
-        else:
-            wg = w.unsqueeze(1)                                     # [B, 1, 1, D, H, W]
-            local_sum = (wg * xg).sum(dim=reduce_dims, keepdim=True)
-            local_sq = (wg * xg * xg).sum(dim=reduce_dims, keepdim=True)
-            local_count = wg.sum(dim=reduce_dims, keepdim=True) * xg.shape[2]
+            local_count = torch.tensor(local_count, device=x.device, dtype=x.dtype)
 
         if is_dist():
             reduce_sum = lambda t: dist_nn.all_reduce(t, op=dist.ReduceOp.SUM)
@@ -210,13 +247,18 @@ class DistributedGroupNorm(nn.Module):
 
         mean = local_sum / local_count
         var = local_sq / local_count - mean * mean
-        y = (xg - mean) * torch.rsqrt(var.clamp_min(0.0) + self.eps)
-        y = y.reshape_as(x)
+        inverse = torch.rsqrt(var.clamp_min(0.0) + self.eps)
 
-        if self.affine:
-            y = y * self.weight.view(1, -1, *([1] * (x.ndim - 2)))
-            y = y + self.bias.view(1, -1, *([1] * (x.ndim - 2)))
-        return y
+        def normalized(part):
+            y = ((group(part) - mean) * inverse).reshape_as(part)
+            if self.affine:
+                y = y * self.weight.view(1, -1, *([1] * (x.ndim - 2)))
+                y = y + self.bias.view(1, -1, *([1] * (x.ndim - 2)))
+            return y
+
+        if len(spans) == 1:
+            return normalized(x)
+        return torch.cat([normalized(x[:, :, a:z]) for a, z in spans], dim=2)
 
 
 class _HaloExchangeH(torch.autograd.Function):
@@ -371,11 +413,11 @@ class ProgressVerticalWrapper(nn.Module):
 
 
 class ChunkedHeightSpectralConv(nn.Module):
-    """HeightSpectralConv on the local H slab, a few rows of columns at a time. The operator acts on each column alone,
-    so the chunks give the same result, while its mode spectra ([B, C, M, rows, W], several of them at once) stay
-    within HEIGHT_CHUNK_BYTES: on a full slab of a large cube they would not fit on the device."""
+    """HeightSpectralConv on the local H slab, a few rows of columns at a time when its mode spectra ([B, C, M, rows,
+    W], several of them at once) would not fit in the free device memory. The operator acts on each column alone, so the
+    chunks give the same result. budget (bytes for the spectra) overrides the free memory."""
 
-    def __init__(self, source, budget=HEIGHT_CHUNK_BYTES):
+    def __init__(self, source, budget=None):
         super().__init__()
         self.source = source
         self.budget = budget
@@ -386,12 +428,33 @@ class ChunkedHeightSpectralConv(nn.Module):
             z_scale = z_scale.unsqueeze(1)
         b, c, _, h, w = x.shape
         per_row = 8 * b * c * self.source.modes * w * x.element_size()
-        rows = max(1, int(self.budget // per_row))
+        budget = self.budget
+        if budget is None:
+            free = free_device_memory(x.device)
+            # the chunks' outputs and their concatenation take two slabs of their own
+            budget = float("inf") if free is None else DEVICE_MEMORY_FRACTION * free - 2 * x.numel() * x.element_size()
+        rows = max(1, int(min(h, budget // per_row)))
         if rows >= h:
             return self.source(x, z_scale)
         debug_progress(self.progress_label, f"{h} rows in chunks of {rows}")
         return torch.cat([self.source(x[:, :, :, i:i + rows], z_scale[:, :, :, i:i + rows])
                           for i in range(0, h, rows)], dim=3)
+
+
+class DepthChunkedPointwise(nn.Module):
+    """A block's path that acts on each cell alone (pw, mlp), over the local slab a few levels at a time when its working
+    tensors, `copies` of its input's size, would not fit in the free device memory."""
+
+    def __init__(self, source, copies=5):
+        super().__init__()
+        self.source = source
+        self.copies = copies
+
+    def forward(self, x):
+        spans = depth_spans(x.shape[2], depth_chunk(x, self.copies))
+        if len(spans) == 1:
+            return self.source(x)
+        return torch.cat([self.source(x[:, :, a:z]) for a, z in spans], dim=2)
 
 
 def chunked_fuse_branches(block, x, spec, vert, chunk_depth=32, normalize=True):
@@ -404,7 +467,7 @@ def chunked_fuse_branches(block, x, spec, vert, chunk_depth=32, normalize=True):
     depthwise convolution with a one-cell depth halo.
     """
     _, _, depth, _, _ = x.shape
-    fused_chunks = []
+    fused = None                                   # filled in place, so no chunk list and concatenation on top of it
 
     for d0 in range(0, depth, chunk_depth):
         d1 = min(d0 + chunk_depth, depth)
@@ -425,14 +488,14 @@ def chunked_fuse_branches(block, x, spec, vert, chunk_depth=32, normalize=True):
 
         fused_h = block.fuse(torch.cat([spec_mix, vert_mix], dim=1))
         fused_h = fused_h + 0.5 * (spec_mix + vert_mix)
-        fused_chunks.append(fused_h[:, :, inner0:inner1].contiguous())
+        if fused is None:
+            fused = fused_h.new_empty(fused_h.shape[0], fused_h.shape[1], depth, *fused_h.shape[3:])
+        fused[:, :, d0:d1] = fused_h[:, :, inner0:inner1]
         del spec_mix, vert_mix, fused_h
 
         if torch.cuda.is_available() and x.is_cuda:
             torch.cuda.empty_cache()
 
-    fused = torch.cat(fused_chunks, dim=2)
-    del fused_chunks
     if normalize:
         fused = block.act(block.norm_fuse(fused))
     return fused
@@ -450,7 +513,14 @@ class DistributedSpectralConv2dFull(nn.Module):
     def forward(self, x, dx, dy):
         if not is_dist():
             return self.source(x, dx, dy)
+        # each level is transformed and mixed on its own: the batched mode runs the transposes a few levels at a time
+        spans = depth_spans(x.shape[2], depth_chunk(x, 8, collective=True))
+        if len(spans) == 1:
+            return self._levels(x, dx, dy)
+        self._progress(f"{x.shape[2]} levels in {len(spans)} passes")
+        return torch.cat([self._levels(x[:, :, a:z], dx, dy) for a, z in spans], dim=2)
 
+    def _levels(self, x, dx, dy):
         b, c, d, h_local, w = x.shape
         rank = get_rank()
         world_size = get_world_size()
@@ -548,6 +618,10 @@ def _replace_modules(parent):
             setattr(parent, name, ChunkedHeightSpectralConv(child))
             continue
 
+        if isinstance(child, FFNOBlock3dBalanced):
+            child.pw = DepthChunkedPointwise(child.pw)
+            child.mlp = DepthChunkedPointwise(child.mlp)
+
         if isinstance(child, nn.GroupNorm):
             setattr(parent, name, DistributedGroupNorm(child))
             continue
@@ -566,6 +640,8 @@ def _replace_modules(parent):
 
 def enable_distributed_inference(model):
     """The FSDP route's modules, for a model split over the ranks in H slabs. A vertical_operator model's GroupNorms
-    take the slab's depth_weights (block_depth_weights), and its HeightSpectralConv runs in row chunks."""
+    take the slab's depth_weights (block_depth_weights). In the batched mode, the spectral branch, the GroupNorms and the
+    pointwise paths run over a few levels at a time, and HeightSpectralConv over a few rows, whenever a step would not fit
+    in the device's free memory in one pass (depth_chunk)."""
     _replace_modules(model)
     return model

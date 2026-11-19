@@ -42,6 +42,7 @@ from distributed_inference import (
     block_depth_weights,
     chunked_fuse_branches,
     debug_dist_inference_enabled,
+    depth_chunk,
     debug_progress,
     enable_distributed_inference,
     partition_range,
@@ -1422,7 +1423,7 @@ def _distributed_full_forward(model, X, z_scale, dx, dy, *, collect_stats=False,
 
         spec_eff = spec_mask * spec
         vert_eff = vert_mask * vert
-        fused = chunked_fuse_branches(blk, x, spec_eff, vert_eff, normalize=False)
+        fused = chunked_fuse_branches(blk, x, spec_eff, vert_eff, chunk_depth=depth_chunk(x, 12), normalize=False)
         fused = blk.act(blk._norm(blk.norm_fuse, fused, w))
         x1 = residual + blk.res_fused * fused
 
@@ -2293,7 +2294,7 @@ def ffno_predict_populations_distributed_full(
                 for name, module in blk.fuse.named_modules():
                     if hasattr(module, "progress_label"):
                         module.progress_label = f"block {i + 1}/{len(model.blocks)} fuse {name}"
-                fused = chunked_fuse_branches(blk, x, spec, vert, normalize=False)
+                fused = chunked_fuse_branches(blk, x, spec, vert, chunk_depth=depth_chunk(x, 12), normalize=False)
                 del spec, vert
                 if torch.cuda.is_available() and X.is_cuda:
                     torch.cuda.empty_cache()
@@ -2324,6 +2325,9 @@ def ffno_predict_populations_distributed_full(
         finally:
             pbar.close()
 
+    if rank == 0 and torch.cuda.is_available() and X.is_cuda:
+        print(f"full prediction: peak GPU memory on rank 0 {torch.cuda.max_memory_allocated(X.device) / 2**30:.2f} GiB "
+              f"for its slab {tuple(X.shape[2:])}", flush=True)
     if torch.isnan(pred_log).any():
         debug_progress("full prediction", f"[rank {rank}] NaN in prediction")
     if torch.isinf(pred_log).any():
