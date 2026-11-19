@@ -275,6 +275,11 @@ MULTI3D_PRED_DATA = [
         "MULTI3D_ATMOS": DATA_DIR + "bifrost_data/ar098192/270000/atm3d",
         "MESH":  DATA_DIR + "bifrost_data/ar098192/270000/mesh",
         "NAME": "ar098192_270000"
+    },
+    {
+        "MULTI3D_ATMOS": DATA_DIR + "bifrost_data/cbh24/s0957/atm3d",
+        "MESH":  DATA_DIR + "bifrost_data/cbh24/s0957/mesh",
+        "NAME": "cbh24_s0957"
     }
 ]
 

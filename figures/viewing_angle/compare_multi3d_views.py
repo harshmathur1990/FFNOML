@@ -6,7 +6,7 @@
 # against each MULTI3D view, the map correlation and relative rms at the line core and in the wings.
 import sys, h5py, numpy as np, matplotlib
 matplotlib.use("Agg"); import matplotlib.pyplot as plt
-ffno_path = sys.argv[1] if len(sys.argv) > 1 else "response_run/view_check/forward_view_s4.h5"
+ffno_path = sys.argv[1] if len(sys.argv) > 1 else "response_run/view_check/forward_view_s4_wide.h5"
 out = sys.argv[2] if len(sys.argv) > 2 else "figures/viewing_angle/ffno_vs_multi3d_mu08.png"
 M3D = {"MULTI3D mu=1": "/mn/stornext/d9/data/harshm/halpha_output/Multi-3D-H_6_level_populations/output_ray.hdf5",
        "MULTI3D mu=0.8": "/mn/stornext/d9/data/harshm/halpha_output/output_ray_mu08.hdf5"}
@@ -28,6 +28,9 @@ def centred(lam, I):
 grid = np.linspace(-0.45, 0.45, 91)
 def on_grid(lam, I):
     d = centred(lam, I)
+    if d[0] > grid[0] or d[-1] < grid[-1]:   # np.interp would hold the end values: flat, false wings
+        raise ValueError(f"spectrum covers {d[0]:.3f} … {d[-1]:.3f} nm from its minimum, the plot needs "
+                         f"{grid[0]} … {grid[-1]}: synthesize a wider grid (view_check/forward_multi3d_wide.toml)")
     return np.stack([np.interp(grid, d, I[:, i, j]) for i in range(I.shape[1]) for j in range(I.shape[2])], 1) \
         .reshape(len(grid), I.shape[1], I.shape[2])
 F = {k: on_grid(wf, v) for k, v in ffno.items()}
