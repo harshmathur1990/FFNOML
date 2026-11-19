@@ -503,6 +503,34 @@ function calc_line_1D_substeps!(line, buf::RTBuffer{T}, λ, atm, n_up, n_lo, voi
     return nothing
 end
 
+# FFNOInversion's population limit (ext/FFNOInversionMuspelExt.jl, _limited_levels): where an atom's levels sum to more than
+# POPULATION_LIMIT times the atoms that ρ holds, all of them are scaled down to that sum. Without it, the few voxels where the
+# FFNO over-predicts the populations grossly (in nw072100 481 up to 3000 times, mostly at transition-region temperatures) set
+# the emergent intensity of their columns; with it, this synthesis reproduces FFNOInversion's on the same populations.
+const POPULATION_LIMIT = 1.09
+const MASS_PER_H = 2.3396723599405787e-27                                       # kg, FFNOInversion's
+
+"""Lower and upper level populations of a line, with all levels of a voxel scaled down where they exceed the limit."""
+function limited_line_populations(atms::Atmosphere3D, atom, pops, lower_level::Int, upper_level::Int)
+    n_u = pops[:, :, :, upper_level]
+    n_l = pops[:, :, :, lower_level]
+    per_rho = POPULATION_LIMIT * exp10(atom.abundance - 12) / MASS_PER_H
+    nlevels = size(pops, 4)
+    nscaled = 0
+    @inbounds for I in CartesianIndices(n_u)
+        total = sum(pops[I, l] for l in 1:nlevels)
+        limit = per_rho * atms.plasma_density[I]
+        if total > limit
+            scale = limit / total
+            n_u[I] *= scale
+            n_l[I] *= scale
+            nscaled += 1
+        end
+    end
+    println("Population limit: $(nscaled) of $(length(n_u)) voxels scaled down")
+    return n_u, n_l
+end
+
 function synthesize_intensity_3d(
     atms::Atmosphere3D, h_atom,
     line_index::Int,
@@ -527,8 +555,7 @@ function synthesize_intensity_3d(
     nworkers = min(Threads.nthreads(), ncolumns)
     p = Progress(ncolumns; desc="Synthesis columns")
 
-    n_u = nltepops_nz_nx_ny_nlev[:, :, :, upper_level]
-    n_l = nltepops_nz_nx_ny_nlev[:, :, :, lower_level]
+    n_u, n_l = limited_line_populations(atms, h_atom, nltepops_nz_nx_ny_nlev, lower_level, upper_level)
 
     # Expose every (x, y) column to the thread pool.  The old outer-x loop
     # could only keep min(nx, nthreads()) threads busy.  One buffer per worker
