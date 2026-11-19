@@ -107,6 +107,11 @@ SIMULATIONS = {
     "en024031_by100_helium": {
         "base_path": DATA_DIR + "bifrost_data/en024031_by100_helium",
         "snaps": ["109"]
+    },
+    # half-resolution (252 x 252) runs; s0957 is the test snapshot, never trained or validated on
+    "cbh24": {
+        "base_path": DATA_DIR + "bifrost_data/cbh24",
+        "snaps": ["s0910", "s0928", "s0957"]
     }
 }
 
