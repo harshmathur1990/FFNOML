@@ -427,7 +427,8 @@ class ChunkedHeightSpectralConv(nn.Module):
         if z_scale.ndim == 4:
             z_scale = z_scale.unsqueeze(1)
         b, c, _, h, w = x.shape
-        per_row = 8 * b * c * self.source.modes * w * x.element_size()
+        modes = self.source.box(z_scale)[1].numel()               # more than source.modes for columns over L / 2
+        per_row = 8 * b * c * modes * w * x.element_size()
         budget = self.budget
         if budget is None:
             free = free_device_memory(x.device)

@@ -11,7 +11,6 @@
 #       (B) "bifrost": NLTE populations read from Multi3D out_pop (and remapped)
 #   - Synthesizes 1D line profiles for all columns (nx, ny) using Muspel
 #   - Writes intensity + wavelength to an HDF5 file
-#   - Writes two diagnostic plots (PNG)
 # -----------------------------------------------------------------------------
 
 # Julia fixes the size of its thread pool at startup.  Make the common
@@ -34,9 +33,6 @@ if abspath(PROGRAM_FILE) == _FORWARD_SCRIPT &&
     exit()
 end
 
-ENV["GKSwstype"] = "100"     # file / offscreen
-ENV["GKS_WSTYPE"] = "100"    # some setups use this spelling
-
 using Muspel
 using StaticArrays
 using AtomicData
@@ -44,9 +40,6 @@ using HDF5
 using ProgressMeter
 using Base.Threads
 using Interpolations
-using Plots
-gr()                         # ensure GR backend
-default(show=false)
 
 
 # ============================================================
@@ -59,7 +52,8 @@ default(show=false)
 
 const RUN_MODE = :ml
 # const FORWARD_ATOMS = ["H"]
-const FORWARD_ATOMS = ["CA"]
+# FFNOML_ACTIVE_ATOMS (comma-separated, as for config.py) overrides the atoms for scripted runs
+const FORWARD_ATOMS = haskey(ENV, "FFNOML_ACTIVE_ATOMS") ? String.(split(ENV["FFNOML_ACTIVE_ATOMS"], ",")) : ["CA"]
 # const FORWARD_ATOMS = ["H", "CA"]
 
 function atom_tag(atom_names)

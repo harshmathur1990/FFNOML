@@ -1,6 +1,7 @@
 """FFNO3D(vertical_operator=True): a neural operator in x, y and z. The vertical branch is HeightSpectralConv, every
 GroupNorm weights levels by height and nothing counts grid points, so the same atmosphere sampled on different vertical
-grids gives the same populations at the same heights. The batched backend and the FSDP route equal forward."""
+grids gives the same populations at the same heights. The batched backend and the FSDP route equal forward. Columns
+taller than half of z_reference_length take a longer periodic length."""
 import os
 import sys
 import tempfile
@@ -146,11 +147,33 @@ class HeightOperator(unittest.TestCase):
         self.assertLess((norm(x, torch.ones(2, 1, 7, 3, 4)) - plain(x)).abs().max().item(), 1e-5)
         self.assertTrue(torch.equal(norm(x), plain(x)))
 
-    def test_spectral_conv_refuses_tall_columns(self):
+    def test_tall_columns_take_a_longer_box(self):
+        """A column taller than half of reference_length gets a periodic length of twice its height: the same band
+        of wavenumbers, sampled more densely."""
         conv = HeightSpectralConv(4, 20.0, 0.5)
-        x, z = atmosphere(uniform(50))
-        with self.assertRaisesRegex(ValueError, "more than half"):
-            conv(torch.randn(1, 4, *z.shape[1:]), z)
+        x, z = atmosphere(uniform(50))                     # 15 Mm
+        length, k, _ = conv.box(z)
+        self.assertAlmostEqual(length, 30.0, places=4)
+        self.assertEqual(k.numel(), 61)
+        self.assertLessEqual(k.max().item(), 2 * np.pi / 0.5 + 1e-5)
+        self.assertTrue(torch.isfinite(conv(torch.randn(1, 4, *z.shape[1:]), z)).all())
+
+    def test_longer_box_changes_little(self):
+        """The same weights with a longer periodic length (50, not 40 Mm) on columns within 20 Mm: W(k) is sampled
+        between the trained wavenumbers, and the output barely moves."""
+        torch.manual_seed(6)
+        trained = HeightSpectralConv(8, 40.0, 0.3, rank=4, feature_wavelength=0.3, column_cutoff=True).eval()
+        longer = HeightSpectralConv(8, 50.0, 0.3, rank=4, feature_wavelength=0.3, column_cutoff=True).eval()
+        with torch.no_grad():
+            for name, p in trained.named_parameters():
+                if "freq_u" in name:
+                    p.normal_(std=0.1)
+        longer.load_state_dict(trained.state_dict())
+        x, z = atmosphere(stretched(300))
+        x = torch.cat([x, x[:, :2]], 1)
+        with torch.no_grad():
+            a, b = trained(x, z), longer(x, z)
+        self.assertLess(((b - a).abs().max() / (a.max() - a.min())).item(), 1e-2)
 
     def test_parameters_get_gradients(self):
         torch.manual_seed(3)

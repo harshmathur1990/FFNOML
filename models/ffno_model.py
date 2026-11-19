@@ -343,9 +343,10 @@ class HeightSpectralConv(nn.Module):
     wavenumber, plus (rank > 0) a low-rank matrix U(k) V(k) from a second MLP: a smooth function of k, not a table.
     X_m is the exact transform of the piecewise-linear column through the levels (height_fourier_weights), so the
     operator does not depend on how many levels sample a wave; the grid only sets how well the column is represented.
-    The column's height (z_scale) enters pointwise, as the old branch's z features did. reference_length (z_scale units,
-    Mm) must be at least twice the tallest column, so that a column's top and bottom are never neighbours in the
-    periodic domain.
+    The column's height (z_scale) enters pointwise, as the old branch's z features did. The periodic length L is
+    reference_length (z_scale units, Mm), or twice the tallest column when that is longer, so that a column's top and
+    bottom are never neighbours in the periodic domain (box). A longer L only samples k more densely over the same band
+    0 .. 2 pi / min_wavelength, where W(k) is the trained function: between trained wavenumbers, never beyond them.
     feature_wavelength > 0 gives the frequency MLPs the wavenumber on that fixed physical scale, t = q / (1 + q) with
     q = k feature_wavelength / 2 pi, so W(k) at a given wavenumber is the same function whatever min_wavelength is
     (0: q = k min_wavelength / 2 pi, t = q, the first runs' scaling, where the band limit stretched the k axis).
@@ -398,54 +399,65 @@ class HeightSpectralConv(nn.Module):
         self.register_buffer("mode_factor", torch.cat([torch.ones(1), 2 * torch.ones(self.modes - 1)]),
                              persistent=False)
 
-    def k_features(self):
-        """The frequency MLPs' input [M, 2]: t and t^2, t a fixed function of the physical wavenumber when
-        feature_wavelength > 0, otherwise k over the largest wavenumber (the first runs)."""
+    def k_features(self, k=None):
+        """The frequency MLPs' input [M, 2] at wavenumbers k (default: those of reference_length): t and t^2, t a fixed
+        function of the physical wavenumber when feature_wavelength > 0, otherwise k over the largest wavenumber (the
+        first runs)."""
+        k = self.k if k is None else k
         if self.feature_wavelength:
-            q = self.k * self.feature_wavelength / (2 * math.pi)
+            q = k * self.feature_wavelength / (2 * math.pi)
             t = q / (1 + q)
         else:
-            t = self.k * self.min_wavelength / (2 * math.pi)
+            t = k * self.min_wavelength / (2 * math.pi)
         return torch.stack([t, t * t], dim=-1)
 
-    def cutoff(self, columns):
+    def cutoff(self, columns, k=None):
         """The per-column taper [..., M] of column_cutoff, for columns [..., D] of heights: 1 up to 2 pi / (3 dz),
         a half cosine down to 0 at pi / dz, dz the column's median level spacing."""
+        k = self.k if k is None else k
         dz = (columns[..., 1:] - columns[..., :-1]).abs().median(dim=-1).values[..., None]
         k_nyquist = math.pi / dz
-        u = ((self.k - 2 * k_nyquist / 3) / (k_nyquist / 3)).clamp(0, 1)
+        u = ((k - 2 * k_nyquist / 3) / (k_nyquist / 3)).clamp(0, 1)
         return 0.5 * (1 + torch.cos(math.pi * u))
 
-    def check_span(self, z_scale):
+    def box(self, z_scale):
+        """The periodic length L for these columns, its wavenumbers k [M] and the Fourier series' mode factors [M]:
+        reference_length and the module's own, unless twice the tallest column is longer; then L is that, with
+        floor(L / min_wavelength) + 1 wavenumbers 2 pi m / L, the same band sampled more densely."""
         span = float((z_scale.amax(dim=-3) - z_scale.amin(dim=-3)).max())
-        if 2 * span > self.reference_length:
-            raise ValueError(f"a column spans {span:.3f} in z_scale units, more than half of z_reference_length "
-                             f"{self.reference_length}")
+        if 2 * span <= self.reference_length:
+            return self.reference_length, self.k, self.mode_factor
+        length = 2 * span
+        modes = int(math.floor(length / self.min_wavelength)) + 1
+        k = 2 * math.pi * torch.arange(modes, dtype=self.k.dtype, device=self.k.device) / length
+        factor = torch.cat([k.new_ones(1), 2 * k.new_ones(modes - 1)])
+        return length, k, factor
 
     def forward(self, x, z_scale):
         if z_scale.ndim == 4:
             z_scale = z_scale.unsqueeze(1)
-        self.check_span(z_scale)
+        length, k, mode_factor = self.box(z_scale)
+        modes = k.numel()
         x = x * self.input_gate(x) + self.z_proj(z_scale)
         z = z_scale - z_scale.amin(dim=2, keepdim=True)              # a shift of z changes nothing but rounding
         shared = bool((z == z[..., :1, :1]).all())                   # one grid for every column (simulations, mesh)
         shared = shared and bool((z == z[:1]).all())                 # ... and of every sample in the batch
         if shared:
             column = z[0, 0, :, 0, 0]
-            q_re, q_im = height_fourier_weights(column, self.k)      # [D, M]
-            phase = column[:, None] * self.k
+            q_re, q_im = height_fourier_weights(column, k)           # [D, M]
+            phase = column[:, None] * k
             x_re = torch.einsum("b c d h w, d m -> b c m h w", x, q_re)
             x_im = torch.einsum("b c d h w, d m -> b c m h w", x, q_im)
-            taper = self.cutoff(column)[:, None, None] if self.column_cutoff else None          # [M, 1, 1]
+            taper = self.cutoff(column, k)[:, None, None] if self.column_cutoff else None       # [M, 1, 1]
         else:
             columns = z[:, 0].permute(0, 2, 3, 1)                    # [B, H, W, D]
-            q_re, q_im = height_fourier_weights(columns, self.k)     # [B, H, W, D, M]
-            phase = z[:, 0, ..., None] * self.k                      # [B, D, H, W, M]
+            q_re, q_im = height_fourier_weights(columns, k)          # [B, H, W, D, M]
+            phase = z[:, 0, ..., None] * k                           # [B, D, H, W, M]
             x_re = torch.einsum("b c d h w, b h w d m -> b c m h w", x, q_re)
             x_im = torch.einsum("b c d h w, b h w d m -> b c m h w", x, q_im)
-            taper = self.cutoff(columns).permute(0, 3, 1, 2)[:, None] if self.column_cutoff else None  # [B, 1, M, H, W]
+            taper = self.cutoff(columns, k).permute(0, 3, 1, 2)[:, None] if self.column_cutoff else None  # [B, 1, M, H, W]
         cos, sin = torch.cos(phase), torch.sin(phase)
-        features = self.k_features()
+        features = self.k_features(k)
         gate = self.freq_mlp(features)                               # [M, 2]
         gr, gi = gate[:, 0, None, None], gate[:, 1, None, None]      # [M, 1, 1]
         a_re = torch.einsum("b i m h w, i o -> b o m h w", x_re, self.weight_real) - \
@@ -455,13 +467,13 @@ class HeightSpectralConv(nn.Module):
         y_re, y_im = a_re * gr - a_im * gi, a_re * gi + a_im * gr
         if self.rank:
             h = self.freq_lowrank(features)
-            u = self.freq_u(h).reshape(self.modes, -1, self.rank)    # [M, C, r]
-            v = self.freq_v(h).reshape(self.modes, self.rank, -1)    # [M, r, C]
+            u = self.freq_u(h).reshape(modes, -1, self.rank)         # [M, C, r]
+            v = self.freq_v(h).reshape(modes, self.rank, -1)         # [M, r, C]
             low_re = torch.einsum("b i m h w, m r i -> b r m h w", x_re, v)
             low_im = torch.einsum("b i m h w, m r i -> b r m h w", x_im, v)
             y_re = y_re + torch.einsum("b r m h w, m o r -> b o m h w", low_re, u)
             y_im = y_im + torch.einsum("b r m h w, m o r -> b o m h w", low_im, u)
-        f = self.mode_factor[:, None, None]
+        f = mode_factor[:, None, None]
         if taper is not None:
             f = f * taper
         y_re, y_im = y_re * f, y_im * f
@@ -471,7 +483,7 @@ class HeightSpectralConv(nn.Module):
         else:
             y = torch.einsum("b o m h w, b d h w m -> b o d h w", y_re, cos) - \
                 torch.einsum("b o m h w, b d h w m -> b o d h w", y_im, sin)
-        return self.post(y / self.reference_length)
+        return self.post(y / length)
 
 
 class BalancedVerticalPhysicsStack(nn.Module):
