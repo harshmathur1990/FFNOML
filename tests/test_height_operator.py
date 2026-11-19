@@ -1,6 +1,6 @@
 """FFNO3D(vertical_operator=True): a neural operator in x, y and z. The vertical branch is HeightSpectralConv, every
 GroupNorm weights levels by height and nothing counts grid points, so the same atmosphere sampled on different vertical
-grids gives the same populations at the same heights. The batched backend equals forward; the FSDP route refuses it."""
+grids gives the same populations at the same heights. The batched backend and the FSDP route equal forward."""
 import os
 import sys
 import tempfile
@@ -11,7 +11,7 @@ import torch
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
-from distributed_inference import enable_distributed_inference  # noqa: E402
+from distributed_inference import ChunkedHeightSpectralConv, enable_distributed_inference  # noqa: E402
 from ffno_batched_backend import BatchedFFNOBackend  # noqa: E402
 from models.ffno_model import (FFNO3D, DepthWeightedGroupNorm, HeightSpectralConv, height_fourier_weights,  # noqa: E402
                                trapezoid_weights)
@@ -190,9 +190,24 @@ class HeightOperator(unittest.TestCase):
             got = backend.predict_log10(x[0].numpy(), z[0].numpy(), 48e3, 48e3)
             self.assertLess((got - expected).abs().max().item(), 2e-4)
 
-    def test_fsdp_route_refuses(self):
-        with self.assertRaises(NotImplementedError):
-            enable_distributed_inference(FFNO3D(**CONFIG, **OPERATOR))
+    def test_fsdp_route_equals_forward(self):
+        """The --fsdppredict loop (FFNONet._distributed_full_forward) on one rank, with HeightSpectralConv in chunks of
+        two rows: its height-weighted GroupNorms and the row chunks give forward's output."""
+        from FFNONet import _distributed_full_forward
+        torch.manual_seed(5)
+        for config in (OPERATOR, PHYSICAL):
+            with self.subTest(config=config):
+                model = FFNO3D(**CONFIG, **config).eval()
+                x, z = atmosphere(stretched(37), rows=11, columns=9)
+                with torch.no_grad():
+                    expected = model(x, z, 48e3, 48e3)
+                    route = enable_distributed_inference(model)
+                    chunked = [m for m in route.modules() if isinstance(m, ChunkedHeightSpectralConv)]
+                    self.assertEqual(len(chunked), CONFIG["n_layers"])
+                    for m in chunked:
+                        m.budget = 2 * 8 * CONFIG["width"] * m.source.modes * 9 * 4    # two rows
+                    got, _ = _distributed_full_forward(route, x, z, 48e3, 48e3)
+                self.assertLess((got - expected).abs().max().item(), 1e-4)
 
 
 if __name__ == "__main__":

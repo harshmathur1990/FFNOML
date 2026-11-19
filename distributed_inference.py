@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 from models.ffno_model import SpectralConv2dFull as SpectralConv2dFull3D
-from models.ffno_model import BalancedVerticalPhysicsStack
+from models.ffno_model import BalancedVerticalPhysicsStack, HeightSpectralConv, depth_weights
 
 try:
     from config import DEBUG_DIST_INFERENCE
@@ -38,6 +38,15 @@ def debug_progress(progress_label, message):
         and progress_label is not None
     ):
         print(f"[{progress_label}] {message}", flush=True)
+
+
+# HeightSpectralConv on a rank's H slab runs over this many bytes of mode spectra at a time (ChunkedHeightSpectralConv)
+HEIGHT_CHUNK_BYTES = 4 * 1024 ** 3
+
+
+def block_depth_weights(block, z_scale):
+    """depth_weights for the GroupNorms of a vertical_operator block (DepthWeightedGroupNorm), None for any other."""
+    return depth_weights(z_scale) if getattr(block, "vertical_operator", False) else None
 
 
 def partition_range(n, rank=None, world_size=None):
@@ -161,8 +170,10 @@ class DistributedGroupNorm(nn.Module):
             self.register_parameter("weight", None)
             self.register_parameter("bias", None)
 
-    def forward(self, x):
-        if not is_dist():
+    def forward(self, x, w=None):
+        """w: depth_weights [B, 1, D, H, W] of the local slab for a DepthWeightedGroupNorm (vertical_operator), whose
+        statistics weight each level by the height it stands for; None for a plain GroupNorm."""
+        if not is_dist() and w is None:
             return F.group_norm(
                 x,
                 self.num_groups,
@@ -177,18 +188,25 @@ class DistributedGroupNorm(nn.Module):
 
         xg = x.reshape(b, self.num_groups, c // self.num_groups, *x.shape[2:])
         reduce_dims = tuple(range(2, xg.ndim))
-        local_sum = xg.sum(dim=reduce_dims, keepdim=True)
-        local_sq = (xg * xg).sum(dim=reduce_dims, keepdim=True)
-        local_count = torch.tensor(
-            xg[0, 0].numel(),
-            device=x.device,
-            dtype=x.dtype,
-        )
+        if w is None:
+            local_sum = xg.sum(dim=reduce_dims, keepdim=True)
+            local_sq = (xg * xg).sum(dim=reduce_dims, keepdim=True)
+            local_count = torch.tensor(
+                xg[0, 0].numel(),
+                device=x.device,
+                dtype=x.dtype,
+            )
+        else:
+            wg = w.unsqueeze(1)                                     # [B, 1, 1, D, H, W]
+            local_sum = (wg * xg).sum(dim=reduce_dims, keepdim=True)
+            local_sq = (wg * xg * xg).sum(dim=reduce_dims, keepdim=True)
+            local_count = wg.sum(dim=reduce_dims, keepdim=True) * xg.shape[2]
 
-        reduce_sum = lambda t: dist_nn.all_reduce(t, op=dist.ReduceOp.SUM)
-        local_sum = _linear_collective(reduce_sum, local_sum)
-        local_sq = _linear_collective(reduce_sum, local_sq)
-        local_count = dist_nn.all_reduce(local_count, op=dist.ReduceOp.SUM)
+        if is_dist():
+            reduce_sum = lambda t: dist_nn.all_reduce(t, op=dist.ReduceOp.SUM)
+            local_sum = _linear_collective(reduce_sum, local_sum)
+            local_sq = _linear_collective(reduce_sum, local_sq)
+            local_count = _linear_collective(reduce_sum, local_count)
 
         mean = local_sum / local_count
         var = local_sq / local_count - mean * mean
@@ -352,6 +370,30 @@ class ProgressVerticalWrapper(nn.Module):
         return self.source.out_gn(y)
 
 
+class ChunkedHeightSpectralConv(nn.Module):
+    """HeightSpectralConv on the local H slab, a few rows of columns at a time. The operator acts on each column alone,
+    so the chunks give the same result, while its mode spectra ([B, C, M, rows, W], several of them at once) stay
+    within HEIGHT_CHUNK_BYTES: on a full slab of a large cube they would not fit on the device."""
+
+    def __init__(self, source, budget=HEIGHT_CHUNK_BYTES):
+        super().__init__()
+        self.source = source
+        self.budget = budget
+        self.progress_label = None
+
+    def forward(self, x, z_scale):
+        if z_scale.ndim == 4:
+            z_scale = z_scale.unsqueeze(1)
+        b, c, _, h, w = x.shape
+        per_row = 8 * b * c * self.source.modes * w * x.element_size()
+        rows = max(1, int(self.budget // per_row))
+        if rows >= h:
+            return self.source(x, z_scale)
+        debug_progress(self.progress_label, f"{h} rows in chunks of {rows}")
+        return torch.cat([self.source(x[:, :, :, i:i + rows], z_scale[:, :, :, i:i + rows])
+                          for i in range(0, h, rows)], dim=3)
+
+
 def chunked_fuse_branches(block, x, spec, vert, chunk_depth=32, normalize=True):
     """
     Inference-only version of FFNOBlock3dBalanced._fuse_branches.
@@ -502,6 +544,10 @@ def _replace_modules(parent):
             setattr(parent, name, ProgressVerticalWrapper(child))
             continue
 
+        if isinstance(child, HeightSpectralConv):
+            setattr(parent, name, ChunkedHeightSpectralConv(child))
+            continue
+
         if isinstance(child, nn.GroupNorm):
             setattr(parent, name, DistributedGroupNorm(child))
             continue
@@ -519,8 +565,7 @@ def _replace_modules(parent):
 
 
 def enable_distributed_inference(model):
-    if getattr(model, "vertical_operator", False):
-        raise NotImplementedError("the FSDP route does not have vertical_operator's height-weighted GroupNorm yet; "
-                                  "predict with ffno_batched_backend (scripts/predict_batched.py)")
+    """The FSDP route's modules, for a model split over the ranks in H slabs. A vertical_operator model's GroupNorms
+    take the slab's depth_weights (block_depth_weights), and its HeightSpectralConv runs in row chunks."""
     _replace_modules(model)
     return model

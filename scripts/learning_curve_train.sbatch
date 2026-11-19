@@ -15,7 +15,8 @@
 # were built on eagle7 by scripts/learning_curve_eagle7.py prepare; the checkpoint and predictions go back there to
 # be scored. Submitted by scripts/submit_learning_curve.py, which writes ${FFNOML_RUN_DIR}/experiment.env and
 # eval_snapshots.txt. Resubmitted with --resume, training continues from its last epoch and predictions already
-# written are kept (pipeline.py skips them).
+# written are kept (pipeline.py skips them). With FFNOML_PREDICT_ONLY (submit_learning_curve.py --predict-only), the job
+# does not train: it predicts the snapshots listed in ${FFNOML_RUN_DIR}/${FFNOML_PREDICT_ONLY} with the trained checkpoint.
 
 set -o errexit
 set -o nounset
@@ -78,18 +79,25 @@ run_torch() {   # label, pipeline.py arguments: one torchrun over every node, it
   port=$((port + 1))
 }
 
-# from scratch (no --expand), so every experiment starts the same way
-run_torch train --train ${FFNOML_TRAIN_FLAGS:-}
-echo "Training done: $(date)"
+if [ -n "${FFNOML_PREDICT_ONLY:-}" ]; then
+  echo "Predict only: the snapshots in ${FFNOML_PREDICT_ONLY}, no training"
+  eval_file="${FFNOML_RUN_DIR}/${FFNOML_PREDICT_ONLY}"
+  FFNOML_PREDICT=yes
+else
+  # from scratch (no --expand), so every experiment starts the same way
+  run_torch train --train ${FFNOML_TRAIN_FLAGS:-}
+  echo "Training done: $(date)"
+  eval_file="${FFNOML_RUN_DIR}/eval_snapshots.txt"
+fi
 
-# predict = no (vertical_operator models, which --fsdppredict does not run): predicted on eagle7 after the fetch
+# predict = no: predicted on eagle7 after the fetch
 if [ "${FFNOML_PREDICT:-yes}" = yes ]; then
   while IFS='=' read -r role snapshot <&3; do
     name=${snapshot/\//_}
     ln -sfn "${FFNOML_SOLVING_SETS}/3D_sim_predict_${name}.hdf5" "${MODEL_DIR}/3D_sim_predict_${name}.hdf5"
     echo "Predicting ${name} (${role}): $(date)"
     run_torch "predict_${name}" --fsdppredict --predname "${name}"
-  done 3< "${FFNOML_RUN_DIR}/eval_snapshots.txt"
+  done 3< "${eval_file}"
 else
   echo "Predictions skipped (predict = no)"
 fi

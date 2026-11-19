@@ -39,6 +39,7 @@ from train_utils import (
 from scipy.ndimage import gaussian_filter
 from model_builder import ModelBuilder
 from distributed_inference import (
+    block_depth_weights,
     chunked_fuse_branches,
     debug_dist_inference_enabled,
     debug_progress,
@@ -1414,20 +1415,21 @@ def _distributed_full_forward(model, X, z_scale, dx, dy, *, collect_stats=False,
                 vertical.progress_label = f"test block {i + 1}/{len(model.blocks)} vertical"
 
         residual = x
+        w = block_depth_weights(blk, z_scale)
 
-        spec = blk.spec_drop(blk.act(blk.norm_spec(blk.spec(x, dx, dy))))
-        vert = blk.vert_drop(blk.act(blk.norm_vert(blk.vertical(x, z_scale))))
+        spec = blk.spec_drop(blk.act(blk._norm(blk.norm_spec, blk.spec(x, dx, dy), w)))
+        vert = blk.vert_drop(blk.act(blk._norm(blk.norm_vert, blk.vertical(x, z_scale), w)))
 
         spec_eff = spec_mask * spec
         vert_eff = vert_mask * vert
         fused = chunked_fuse_branches(blk, x, spec_eff, vert_eff, normalize=False)
-        fused = blk.act(blk.norm_fuse(fused))
+        fused = blk.act(blk._norm(blk.norm_fuse, fused, w))
         x1 = residual + blk.res_fused * fused
 
-        pw = blk.norm_pw(blk.pw(x1))
+        pw = blk._norm(blk.norm_pw, blk.pw(x1), w)
         x2 = x1 + (blk.res_pw * pw_mask) * pw
 
-        mlp = blk.mlp_activation(blk.norm_mlp(blk.mlp(x2)))
+        mlp = blk.mlp_activation(blk._norm(blk.norm_mlp, blk.mlp(x2), w))
         x = x2 + (blk.res_mlp * mlp_mask) * mlp
 
         if collect_stats:
@@ -2281,10 +2283,11 @@ def ffno_predict_populations_distributed_full(
                     vertical.progress_label = f"block {i + 1}/{len(model.blocks)} vertical"
 
                 residual = x
+                w = block_depth_weights(blk, z_scale)
 
-                spec = blk.spec_drop(blk.act(blk.norm_spec(blk.spec(x, dx, dy))))
+                spec = blk.spec_drop(blk.act(blk._norm(blk.norm_spec, blk.spec(x, dx, dy), w)))
                 debug_progress("full prediction", f"block {i + 1}/{len(model.blocks)} vertical")
-                vert = blk.vert_drop(blk.act(blk.norm_vert(blk.vertical(x, z_scale))))
+                vert = blk.vert_drop(blk.act(blk._norm(blk.norm_vert, blk.vertical(x, z_scale), w)))
 
                 debug_progress("full prediction", f"block {i + 1}/{len(model.blocks)} fuse")
                 for name, module in blk.fuse.named_modules():
@@ -2294,17 +2297,17 @@ def ffno_predict_populations_distributed_full(
                 del spec, vert
                 if torch.cuda.is_available() and X.is_cuda:
                     torch.cuda.empty_cache()
-                fused = blk.act(blk.norm_fuse(fused))
+                fused = blk.act(blk._norm(blk.norm_fuse, fused, w))
                 x1 = residual + blk.res_fused * fused
                 del fused, residual, x
 
                 debug_progress("full prediction", f"block {i + 1}/{len(model.blocks)} pointwise")
-                pw = blk.norm_pw(blk.pw(x1))
+                pw = blk._norm(blk.norm_pw, blk.pw(x1), w)
                 x2 = x1 + blk.res_pw * pw
                 del x1, pw
 
                 debug_progress("full prediction", f"block {i + 1}/{len(model.blocks)} mlp")
-                mlp = blk.mlp_activation(blk.norm_mlp(blk.mlp(x2)))
+                mlp = blk.mlp_activation(blk._norm(blk.norm_mlp, blk.mlp(x2), w))
                 x = x2 + blk.res_mlp * mlp
                 del x2, mlp
                 if torch.cuda.is_available() and X.is_cuda:

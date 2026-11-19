@@ -2,7 +2,7 @@
 eagle7, copy them to Olivia, copy the checkpoints and predictions back, and score them.
 
     python scripts/learning_curve_eagle7.py prepare scripts/learning_curve.ini [EXPERIMENT ...]   # on eagle7
-    python3 scripts/learning_curve_eagle7.py upload scripts/learning_curve.ini [EXPERIMENT ...]   # where ssh reaches Olivia
+    python3 scripts/learning_curve_eagle7.py upload scripts/learning_curve.ini [EXPERIMENT ...] [--snapshots SIM/SNAP ...]
     (on Olivia: python3 scripts/submit_learning_curve.py scripts/learning_curve.ini [EXPERIMENT ...])
     python3 scripts/learning_curve_eagle7.py fetch scripts/learning_curve.ini [EXPERIMENT ...]
     python scripts/learning_curve_eagle7.py predict scripts/learning_curve.ini [EXPERIMENT ...]   # on eagle7, if the job timed out
@@ -11,7 +11,9 @@ eagle7, copy them to Olivia, copy the checkpoints and predictions back, and scor
 prepare builds, for each experiment, its training and validation datasets in STAGE/<section>/IO (pipeline.py --build
 with the experiment's splits, from data_dir/bifrost_data) and records them with their sizes in prepared.json; every
 scoring snapshot's solving set goes to STAGE/solving_sets, linked from solving_sets_from when it is there and built
-(pipeline.py --buildforpredict) otherwise. upload copies those to ROOT/<section> and ROOT/solving_sets on host, and
+(pipeline.py --buildforpredict) otherwise. upload copies those to ROOT/<section> and ROOT/solving_sets on host, with
+--snapshots also the solving sets in STAGE/solving_sets of those snapshots (for submit_learning_curve.py --predict-only),
+and
 fetch copies back each experiment's checkpoint, --fsdppredict outputs and logs, skipping files already there with the
 same size. predict makes, on eagle7's GPUs, the --fsdppredict outputs a job stopped by its time limit did not reach,
 from the fetched best checkpoint. score runs scripts/population_error_diagnostic.py --score-only on them, writing
@@ -30,7 +32,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from submit_learning_curve import (MODEL_SUBDIR, REPO, eval_lines, model_env, prediction_name, read_experiments,  # noqa: E402
-                                   split_json)
+                                   snapshots, split_json)
 
 
 def env_for(e, run_dir):
@@ -115,13 +117,17 @@ def scp(sources, dest, host, *, to_remote):
     subprocess.run(cmd, check=True)
 
 
-def upload(experiments, host):
+def upload(experiments, host, extra=()):
     for name, e in experiments.items():
         stage, root = os.path.abspath(e["stage"]), e["root"]
         run, remote_run = os.path.join(stage, name), f"{root}/{name}"
         with open(os.path.join(run, "prepared.json")) as f:
             prepared = json.load(f)
-        solving = [os.path.join(stage, "solving_sets", f"3D_sim_predict_{prediction_name(*s)}.hdf5") for _, s in e["eval"]]
+        solving = [os.path.join(stage, "solving_sets", f"3D_sim_predict_{prediction_name(*s)}.hdf5")
+                   for s in [s for _, s in e["eval"]] + list(extra)]
+        absent = [p for p in solving if not os.path.exists(p)]
+        if absent:
+            sys.exit("no solving set: " + ", ".join(absent))
         subprocess.run(["ssh"] + ssh_opts() + [host, f"mkdir -p {shlex.quote(remote_run)}/IO {shlex.quote(root)}/solving_sets"],
                        check=True)
         have = remote_sizes(host, [f"{remote_run}/IO", f"{root}/solving_sets"])
@@ -206,6 +212,8 @@ def main():
     cli.add_argument("input")
     cli.add_argument("experiments", nargs="*", help="sections (default: all)")
     cli.add_argument("--host", default="harshm@olivia.sigma2.no", help="where upload and fetch copy to and from")
+    cli.add_argument("--snapshots", nargs="+", metavar="SIM/SNAP", default=[],
+                     help="upload: also these snapshots' solving sets (STAGE/solving_sets)")
     cli.add_argument("--batched", type=int, metavar="SLABS", help="predict: with scripts/predict_batched.py, its vertical "
                      "norm statistics over SLABS slabs as an FSDP run on SLABS ranks (32 on Olivia's 8 nodes)")
     args = cli.parse_args()
@@ -213,7 +221,7 @@ def main():
     if args.step == "prepare":
         prepare(experiments)
     elif args.step == "upload":
-        upload(experiments, args.host)
+        upload(experiments, args.host, snapshots(" ".join(args.snapshots)))
     elif args.step == "fetch":
         fetch(experiments, args.host)
     elif args.step == "predict":
