@@ -366,7 +366,8 @@ NUM_WORKERS = 8
 PIN_MEMORY = True
 GRAD_CLIP = 1.0
 DEVICE = "cuda"
-PATIENCE = 50
+# FFNOML_PATIENCE overrides the early-stopping patience (epochs without a validation improvement) for scripted experiments
+PATIENCE = int(os.environ.get("FFNOML_PATIENCE", 50))
 MIN_DELTA = 5e-5
 DATASET_TYPE = "patch"
 # FFNOML_TRAINSELECT < 1 trains each epoch on that fraction of the patches, drawn again every epoch

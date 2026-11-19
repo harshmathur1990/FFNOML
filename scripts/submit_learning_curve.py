@@ -34,7 +34,8 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ATOMS = ("H", "CA")
 # root: Olivia; stage, data_dir, solving_sets_from: eagle7 (learning_curve_eagle7.py)
 SETTINGS = ("root", "stage", "data_dir", "solving_sets_from", "atoms", "epochs", "nodes", "time", "train_flags",
-            "held_out", "train", "val", "output_mode", "lam_total", "model_config", "trainselect", "predict")
+            "held_out", "train", "val", "output_mode", "lam_total", "model_config", "trainselect", "predict",
+            "patience")
 OUTPUT_MODES = ("log_population", "level_fraction")   # config.MODEL_CONFIG output_mode (models/ffno_model.py)
 MODEL_SUBDIR = "training_FFNO3D_zscale_expand_lognlte"   # config.MODEL_DIR below the run directory
 
@@ -67,6 +68,9 @@ def experiment(parser, name):
     e["lam_total"] = e["lam_total"] or "0"
     e["trainselect"] = e["trainselect"] or "1"
     e["predict"] = e["predict"] or "yes"
+    e["patience"] = e["patience"] or "50"
+    if int(e["patience"]) < 1:
+        raise ValueError(f"[{name}] patience = {e['patience']!r}: epochs without a validation improvement, >= 1")
     if not 0 < float(e["trainselect"]) <= 1:
         raise ValueError(f"[{name}] trainselect = {e['trainselect']!r}: the fraction of training patches per epoch, in (0, 1]")
     if e["predict"] not in ("yes", "no"):
@@ -174,6 +178,7 @@ def job_env(e, root, resume=False):
         "FFNOML_NUM_EPOCHS": e["epochs"],
         "FFNOML_TRAINSELECT": e["trainselect"],
         "FFNOML_PREDICT": e["predict"],
+        "FFNOML_PATIENCE": e["patience"],
         "FFNOML_TRAIN_FLAGS": " ".join(f for f in (e["train_flags"], "--resume" if resume else "") if f),
         **model_env(e),
     }
