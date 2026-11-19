@@ -11,7 +11,6 @@
 #       (B) "bifrost": NLTE populations read from Multi3D out_pop (and remapped)
 #   - Synthesizes 1D line profiles for all columns (nx, ny) using Muspel
 #   - Writes intensity + wavelength to an HDF5 file
-#   - Writes two diagnostic plots (PNG)
 # -----------------------------------------------------------------------------
 
 # Julia fixes the size of its thread pool at startup.  Make the common
@@ -34,9 +33,6 @@ if abspath(PROGRAM_FILE) == _FORWARD_SCRIPT &&
     exit()
 end
 
-ENV["GKSwstype"] = "100"     # file / offscreen
-ENV["GKS_WSTYPE"] = "100"    # some setups use this spelling
-
 using Muspel
 using StaticArrays
 using AtomicData
@@ -44,9 +40,6 @@ using HDF5
 using ProgressMeter
 using Base.Threads
 using Interpolations
-using Plots
-gr()                         # ensure GR backend
-default(show=false)
 
 
 # ============================================================
@@ -421,6 +414,92 @@ function default_background_atom_files()
     return [joinpath(AtomicData.get_atom_dir(), a) for a in bckgr_atoms]
 end
 
+# Line synthesis with the fixes of FFNOInversion's forward solver (FFNOInversion.jl/src/Synthesis.jl, f5ee349;
+# ext/FFNOInversionMuspelExt.jl, 2257bda), in place of Muspel's calc_line_1D!: the same opacity, emissivity and
+# short-characteristic formal solution (source function linear in optical depth, from I = S at the bottom), with
+#   - sub-steps across jumps: where ln χ or ln η change by more than 1 within a step (a transition region on a coarse
+#     grid, where χ can rise 1e8 and S fall 1e5 in one optically thick step, so that the hot end's S would set the
+#     emergent intensity), the step is split into up to 256 sub-steps with χ and η log-linear in height;
+#   - the Voigt function from Muspel's table inside its (a, v) range and exact (Faddeeva) outside it, where the table's
+#     linear extrapolation goes negative for large damping and with it the line opacity.
+# Steps without such jumps give exactly Muspel's piecewise_1D_linear!.
+const MAX_LOG_JUMP = 1.0
+const MAX_SUBSTEPS = 256
+
+struct BoundedVoigt{I,T}
+    table::I
+    a_min::T
+    a_max::T
+    v_max::T
+end
+@inline (f::BoundedVoigt)(a, v) = (f.a_min <= a <= f.a_max && abs(v) <= f.v_max) ? real(f.table(a, abs(v))) :
+    real(Muspel.erfcx(complex(Float64(a), -Float64(abs(v)))))
+
+function bounded_voigt(voigt_cfg)
+    a = LinRange(Float32(voigt_cfg.a_min), Float32(voigt_cfg.a_max), voigt_cfg.a_n)
+    v = LinRange(Float32(voigt_cfg.v_min), Float32(voigt_cfg.v_max), voigt_cfg.v_n)
+    return BoundedVoigt(create_voigt_itp(a, v), Float32(voigt_cfg.a_min), Float32(voigt_cfg.a_max), Float32(voigt_cfg.v_max))
+end
+
+"""Sub-steps for a step whose ends have opacities χa, χb and emissivities ηa, ηb: one unless ln χ or ln η jumps."""
+@inline function substeps(χa, χb, ηa, ηb)
+    (χa > 0 && χb > 0 && ηa > 0 && ηb > 0) || return 1
+    jump = max(abs(log(χb / χa)), abs(log(ηb / ηa)))
+    jump > MAX_LOG_JUMP || return 1
+    return min(ceil(Int, jump / MAX_LOG_JUMP), MAX_SUBSTEPS)
+end
+"""Value at sub-point q of m between a (q = 0) and b (q = m), log-linear in between."""
+@inline substep_value(a, b, q, m) = q == 0 ? a : q == m ? b : (t = oftype(a, q / m); exp((1 - t) * log(a) + t * log(b)))
+
+@inline function formal_weights(dt)
+    if dt > 40
+        w1 = zero(dt); w2 = one(dt) / dt; w3 = one(dt) - w2
+    elseif dt > 0.01
+        w1 = exp(-dt); u0 = (one(dt) - w1) / dt; w2 = u0 - w1; w3 = one(dt) - u0
+    else
+        w1 = one(dt) - dt + dt^2 / 2; w2 = (one(dt) / 2 - dt / 3) * dt; w3 = (one(dt) / 2 - dt / 6) * dt
+    end
+    return w1, w2, w3
+end
+
+"""Emergent intensity at z[1] (the top) from opacity χ and emissivity η on heights z, I = S at the bottom z[end]."""
+function emergent_intensity(z, χ, η)
+    nz = length(z)
+    source = η[nz] / χ[nz]; intensity = source
+    @inbounds for k in nz-1:-1:1
+        m = substeps(χ[k+1], χ[k], η[k+1], η[k])
+        h = abs(z[k+1] - z[k]) / m; chi_prev = χ[k+1]
+        for q in 1:m
+            c = substep_value(χ[k+1], χ[k], q, m); e = substep_value(η[k+1], η[k], q, m)
+            next_source = e / c
+            w1, w2, w3 = formal_weights(h * (chi_prev + c) / 2)
+            intensity = w1 * intensity + w2 * source + w3 * next_source; source = next_source; chi_prev = c
+        end
+    end
+    return intensity
+end
+
+"""As Muspel's calc_line_1D! (disk centre, integrated from the bottom up; calc_line_prep! first), with the formal
+solution of emergent_intensity and a BoundedVoigt."""
+function calc_line_1D_substeps!(line, buf::RTBuffer{T}, λ, atm, n_up, n_lo, voigt::BoundedVoigt) where T
+    γ_energy = T(6.62607015e-34 * 299792458.0 / (4π * line.λ0 * 1e-9))        # h c / (4 π λ0), J
+    χ = buf.α_total; η = buf.source_function                                    # reused as work arrays
+    @inbounds for (i, λi) in enumerate(λ)
+        for iz in 1:atm.nz
+            a = Muspel.damping(buf.γ[iz], λi, buf.ΔλD[iz])
+            v = (λi - line.λ0 + line.λ0 * atm.velocity_z[iz] / 299792458.0) / buf.ΔλD[iz]
+            profile = T(voigt(a, abs(v))) / (sqrt(T(π)) * buf.ΔλD[iz])             # nm^-1
+            α_tmp = γ_energy * profile
+            j_tmp = α_tmp * n_up[iz] * line.Aul
+            α_tmp *= n_lo[iz] * line.Blu - n_up[iz] * line.Bul
+            χ[iz] = α_tmp * 1f9 + buf.α_c[iz]                                     # m^-1
+            η[iz] = j_tmp * 1f-3 + buf.j_c[iz]                                    # kW m^-3 nm^-1
+        end
+        buf.intensity[i] = emergent_intensity(atm.z, χ, η)
+    end
+    return nothing
+end
+
 function synthesize_intensity_3d(
     atms::Atmosphere3D, h_atom,
     line_index::Int,
@@ -435,9 +514,7 @@ function synthesize_intensity_3d(
 
     my_line = h_atom.lines[line_index]
 
-    a = LinRange(Float32(voigt_cfg.a_min), Float32(voigt_cfg.a_max), voigt_cfg.a_n)
-    v = LinRange(Float32(voigt_cfg.v_min), Float32(voigt_cfg.v_max), voigt_cfg.v_n)
-    voigt_itp = create_voigt_itp(a, v)
+    voigt = bounded_voigt(voigt_cfg)
 
     atom_files = default_background_atom_files()
     σ_itp = get_σ_itp(atms, my_line.λ0, atom_files)
@@ -459,8 +536,8 @@ function synthesize_intensity_3d(
             j = mod1(column, atms.ny)
             i = fld(column - 1, atms.ny) + 1
             calc_line_prep!(my_line, buf, atms[:, j, i], σ_itp)
-            calc_line_1D!(my_line, buf, my_line.λ, atms[:, j, i],
-                          n_u[:, j, i], n_l[:, j, i], voigt_itp)
+            calc_line_1D_substeps!(my_line, buf, my_line.λ, atms[:, j, i],
+                                   n_u[:, j, i], n_l[:, j, i], voigt)
             intensity[:, j, i] = buf.intensity
             next!(p)
         end
@@ -576,9 +653,7 @@ function calc_multi3d_hα(mesh_file, atmos_file, pops_file, atom_file)
     atom_files = [joinpath(AtomicData.get_atom_dir(), a) for a in bckgr_atoms]
     σ_itp = get_σ_itp(atmos, my_line.λ0, atom_files)
 
-    a = LinRange(1f-4, 1.5f1, 20000)
-    v = LinRange(0f2, 5f2, 2500)
-    voigt_itp = create_voigt_itp(a, v)
+    voigt = bounded_voigt((a_min=1f-4, a_max=1.5f1, a_n=20000, v_min=0f2, v_max=5f2, v_n=2500))
 
     intensity = Array{Float32, 3}(undef, my_line.nλ, atmos.ny, atmos.nx)
     p = ProgressMeter.Progress(atmos.nx)
@@ -587,7 +662,7 @@ function calc_multi3d_hα(mesh_file, atmos_file, pops_file, atom_file)
         buf = RTBuffer(atmos.nz, my_line.nλ, Float32)  # allocate inside for local scope
         for j in 1:atmos.ny
             calc_line_prep!(my_line, buf, atmos[:, j, i], σ_itp)
-            calc_line_1D!(my_line, buf, my_line.λ, atmos[:, j, i], n_u[:, j, i], n_l[:, j, i], voigt_itp)
+            calc_line_1D_substeps!(my_line, buf, my_line.λ, atmos[:, j, i], n_u[:, j, i], n_l[:, j, i], voigt)
             intensity[:, j, i] = buf.intensity
         end
         ProgressMeter.next!(p)
