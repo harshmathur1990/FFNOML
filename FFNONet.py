@@ -1078,6 +1078,8 @@ def ffno_train_model(
     train_select_seed=None,
     validate_only=False,
     crop=0,
+    augment_z=False,
+    augment_z_min_depth=16,
 ):
     resume_path = get_resume_checkpoint_path(save_path)
     load_path = None
@@ -1243,6 +1245,8 @@ def ffno_train_model(
         train_select=train_select,
         train_select_seed=train_select_seed,
         crop=crop,
+        augment_z=augment_z,
+        augment_z_min_depth=augment_z_min_depth,
     )
 
     train_loader, val_loader, _, _ = data_builder.build(
@@ -1290,7 +1294,8 @@ def ffno_train_model(
                 "[Bestpath baseline] "
                 f"val={initial_val_loss:.6e} "
                 f"L1={initial_val_comp.get('data', 0):.3e} "
-                f"L2={initial_val_comp.get('source', 0):.3e}"
+                f"L2={initial_val_comp.get('source', 0):.3e} "
+                f"Ltot={initial_val_comp.get('total', 0):.3e}"
             )
 
         if validate_only:

@@ -342,6 +342,11 @@ PATCH=40
 STRIDE=20
 # FFNOML_CROP > 0 trains on a random CROP x CROP window of each patch, and validates on its centre window (small GPUs)
 CROP = int(os.environ.get("FFNOML_CROP", 0))
+# FFNOML_AUGMENT_Z=1 adds to every training and validation patch a copy cut to a random window of its levels and one cut
+# to a random uneven selection of them, each of at least FFNOML_AUGMENT_Z_MIN_DEPTH levels, drawn again every epoch in
+# training (data/dataset.py ZAugmentDataset); the stored patches are all kept
+AUGMENT_Z = os.environ.get("FFNOML_AUGMENT_Z", "0") == "1"
+AUGMENT_Z_MIN_DEPTH = int(os.environ.get("FFNOML_AUGMENT_Z_MIN_DEPTH", 16))
 SCALES=(1,2,3,4,5,6,7,8)
 
 TRAIN_FILE = os.path.join(

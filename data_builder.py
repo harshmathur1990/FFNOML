@@ -3,7 +3,7 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
-from data.dataset import CropDataset, H5PatchDataset, H5CubeDataset
+from data.dataset import CropDataset, H5PatchDataset, H5CubeDataset, ZAugmentDataset
 
 
 def is_distributed():
@@ -22,9 +22,15 @@ class DataLoaderBuilder:
         train_select=1.0,
         train_select_seed=None,
         crop=0,
+        augment_z=False,
+        augment_z_min_depth=16,
     ):
 
         self.crop = crop
+        # augment_z adds to every training and validation sample a window and an uneven selection of its levels
+        # (ZAugmentDataset)
+        self.augment_z = augment_z
+        self.augment_z_min_depth = augment_z_min_depth
         self.dataset_type = dataset_type
         self.batch_size = batch_size
         self.num_workers = num_workers
@@ -115,6 +121,8 @@ class DataLoaderBuilder:
         )
         if self.crop:
             train_dataset = CropDataset(train_dataset, self.crop, random=True)
+        if self.augment_z:
+            train_dataset = ZAugmentDataset(train_dataset, self.augment_z_min_depth, random=True)
 
         train_loader, train_sampler = self.build_dataloader(
             train_dataset,
@@ -129,6 +137,8 @@ class DataLoaderBuilder:
             val_dataset = self.build_dataset(val_h5)
             if self.crop:
                 val_dataset = CropDataset(val_dataset, self.crop, random=False)
+            if self.augment_z:
+                val_dataset = ZAugmentDataset(val_dataset, self.augment_z_min_depth, random=False)
 
             val_loader, val_sampler = self.build_dataloader(
                 val_dataset,

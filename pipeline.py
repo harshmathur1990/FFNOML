@@ -228,6 +228,8 @@ def train_model(*, resume=False, bestpath=False, expand=False, validate_only=Fal
         train_select_seed=TRAINSELECT_SEED,
         validate_only=validate_only,
         crop=CROP,
+        augment_z=AUGMENT_Z,
+        augment_z_min_depth=AUGMENT_Z_MIN_DEPTH,
     )
 
 

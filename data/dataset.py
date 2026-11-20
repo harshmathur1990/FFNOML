@@ -64,6 +64,7 @@ class H5PatchDataset(Dataset):
         self.train_select_seed = train_select_seed
 
         self._f = None
+        self._depths = None
         self._group_names = []
         self._group_lengths = []
         self._group_offsets = []
@@ -190,6 +191,19 @@ class H5PatchDataset(Dataset):
     def __len__(self):
         return self.N
 
+    def depth(self, idx):
+        """number of levels of sample idx, from the file's shapes"""
+        if self._depths is None:
+            with h5py.File(self.h5_path, "r") as f:
+                if self.grouped_layout:
+                    self._depths = {name: int(f[name]["inputs"].shape[2]) for name in self._group_names}
+                else:
+                    self._depths = int(f["inputs"].shape[2])
+        if not self.grouped_layout:
+            return self._depths
+        group_idx = bisect.bisect_right(self._group_offsets, idx)
+        return self._depths[self._group_names[group_idx]]
+
     def _locate_group(self, idx):
         group_idx = bisect.bisect_right(self._group_offsets, idx)
         start = 0 if group_idx == 0 else self._group_offsets[group_idx - 1]
@@ -281,6 +295,9 @@ class CropDataset(Dataset):
     def __len__(self):
         return len(self.dataset)
 
+    def depth(self, idx):
+        return self.dataset.depth(idx)
+
     def __getitem__(self, idx):
         x, y, z, dx, dy, scale, weight, log_lte = self.dataset[idx]
         h, w = x.shape[-2:]
@@ -297,6 +314,65 @@ class CropDataset(Dataset):
             return t[..., i0:i0 + c, j0:j0 + c].contiguous() if t.numel() else t
 
         return window(x), window(y), window(z), dx, dy, scale, weight, window(log_lte)
+
+
+class ZAugmentDataset(Dataset):
+    """
+    The N samples of a patch dataset as stored, then N copies cut to a random window of contiguous levels, then N copies
+    cut to a random, unevenly spaced selection of levels (sorted, e.g. 2, 4, 6, 15, 30, 32, ...): 3N samples, so the
+    augmentation only adds data. Each cut keeps at least min_depth levels and is applied alike to the inputs, targets,
+    z_scale and LTE populations. Only the kept level indices are drawn (`resample`); the data are cut when a sample is
+    read. Training draws new cuts every epoch (resample_train_selection, from the training loop's epoch seed, the same
+    on every rank); validation (random=False) keeps the cuts drawn from `seed`.
+    """
+
+    def __init__(self, dataset, min_depth, random, seed=0):
+        self.dataset = dataset
+        self.min_depth = int(min_depth)
+        self.random = random
+        if self.min_depth < 2:
+            raise ValueError(f"z augmentation needs min_depth >= 2, got {self.min_depth}")
+        self.variable_depth = True
+        # the cuts change every epoch in training, so the loader's workers must not keep an old copy of them
+        self.dynamic_length = random or getattr(dataset, "dynamic_length", False)
+        self.train_select_seed = getattr(dataset, "train_select_seed", None)
+        self._inner_resample = getattr(dataset, "resample_train_selection", None)
+        self.resample(seed)
+
+    def resample_train_selection(self, seed=None):
+        if self._inner_resample is not None:
+            self._inner_resample(seed)
+        self.resample(seed)
+
+    def resample(self, seed):
+        rng = np.random.default_rng(seed)
+        n = len(self.dataset)
+        self.kept = []
+        for kind in ("window", "uneven"):
+            for i in range(n):
+                depth = self.dataset.depth(i)
+                length = int(rng.integers(min(self.min_depth, depth), depth + 1))
+                if kind == "window":
+                    start = int(rng.integers(0, depth - length + 1))
+                    self.kept.append(np.arange(start, start + length))
+                else:
+                    self.kept.append(np.sort(rng.choice(depth, size=length, replace=False)))
+
+    def __len__(self):
+        return 3 * len(self.dataset)
+
+    def __getitem__(self, idx):
+        n = len(self.dataset)
+        sample = self.dataset[idx % n]
+        if idx < n:
+            return sample
+        x, y, z, dx, dy, scale, weight, log_lte = sample
+        keep = torch.from_numpy(self.kept[idx - n])
+
+        def cut(t, axis):
+            return t.index_select(axis, keep).contiguous() if t is not None and t.numel() else t
+
+        return cut(x, 1), cut(y, 1), cut(z, 0), dx, dy, scale, weight, cut(log_lte, 1)
 
 
 class H5CubeDataset(Dataset):
