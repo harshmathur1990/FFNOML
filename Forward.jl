@@ -51,6 +51,12 @@ using Interpolations
 # -----------------------------
 
 const RUN_MODE = :ml
+# FFNOML_FORWARD_MODE (ml, bifrost) overrides RUN_MODE for scripted runs
+const FORWARD_MODE = haskey(ENV, "FFNOML_FORWARD_MODE") ? Symbol(ENV["FFNOML_FORWARD_MODE"]) : RUN_MODE
+# FFNOML_FORWARD_ZREFINE = k > 1 synthesises on a finer vertical grid, with k - 1 heights added evenly in every interval
+# (refine_atmos_z); the output file name ends in _zrefine<k>
+const Z_REFINE = parse(Int, get(ENV, "FFNOML_FORWARD_ZREFINE", "1"))
+zrefine_tag() = Z_REFINE > 1 ? "_zrefine$(Z_REFINE)" : ""
 # const FORWARD_ATOMS = ["H"]
 # FFNOML_ACTIVE_ATOMS (comma-separated, as for config.py) overrides the atoms for scripted runs
 const FORWARD_ATOMS = haskey(ENV, "FFNOML_ACTIVE_ATOMS") ? String.(split(ENV["FFNOML_ACTIVE_ATOMS"], ",")) : ["CA"]
@@ -255,7 +261,7 @@ function config_ml(pred)
         plot_diagnostics = false,
         out_h5 = joinpath(
             pred.train_dir,
-            "intensity_ml_$(pred.name)_$(pred.model)_$(atoms_tag).h5"
+            "intensity_ml_$(pred.name)_$(pred.model)_$(atoms_tag)$(zrefine_tag()).h5"
         ),
         out_prefix = joinpath(pred.train_dir, "diag_ml"),
         x_pick = 33,
@@ -280,7 +286,7 @@ function config_bifrost(pred)
         atoms_tag = atoms_tag,
         mesh_file = pred.mesh_file,
         atmos_file = pred.atmos_file,
-        out_h5 = "IO/intensity_bifrost_$(pred.name)_$(atoms_tag).h5",
+        out_h5 = "IO/intensity_bifrost_$(pred.name)_$(atoms_tag)$(zrefine_tag()).h5",
         out_prefix = "diag_bifrost",
         x_pick = 33,
         y_pick = 21,
@@ -313,7 +319,7 @@ end
 # USER CHOOSES WHICH ONE TO RUN
 # ============================================================
 
-function build_config(pred; mode=RUN_MODE)
+function build_config(pred; mode=FORWARD_MODE)
     if mode == :ml
         return config_ml(pred)
     elseif mode == :bifrost
@@ -403,6 +409,50 @@ end
 function load_multi3d_pops(pops_file::String, atmos::Atmosphere3D, nlevels::Int)
     pops_out_nlte, pops_out_lte = read_pops_multi3d(pops_file, atmos.nx, atmos.ny, atmos.nz, nlevels)
     return pops_out_nlte, pops_out_lte
+end
+
+
+# -----------------------------
+# Vertical refinement
+# -----------------------------
+"""The heights z with k - 1 points added evenly in every interval."""
+function refine_heights(z::AbstractVector, k::Int)
+    nz = length(z)
+    zr = similar(z, (nz - 1) * k + 1)
+    for i in 1:nz-1, q in 0:k-1
+        zr[(i - 1) * k + q + 1] = z[i] + (z[i + 1] - z[i]) * q / k
+    end
+    zr[end] = z[end]
+    return zr
+end
+
+"""a (height first) on refine_heights' grid: interpolated linearly in height, or log-linearly where both ends are positive."""
+function refine_z(a::AbstractArray, k::Int; logarithmic::Bool)
+    nz = size(a, 1); rest = size(a)[2:end]
+    out = Array{Float32}(undef, (nz - 1) * k + 1, rest...)
+    cols = CartesianIndices(rest)
+    Threads.@threads for c in cols
+        @inbounds for i in 1:nz-1
+            lo = a[i, c]; hi = a[i + 1, c]
+            for q in 0:k-1
+                t = Float32(q / k)
+                out[(i - 1) * k + q + 1, c] = logarithmic && lo > 0 && hi > 0 ?
+                    exp((1 - t) * log(lo) + t * log(hi)) : (1 - t) * lo + t * hi
+            end
+        end
+        out[end, c] = a[nz, c]
+    end
+    return out
+end
+
+"""The atmosphere on refine_heights' grid: temperature and velocities linear in height, densities log-linear."""
+function refine_atmos_z(atmos::Atmosphere3D, k::Int)
+    lin(a) = refine_z(a, k; logarithmic=false)
+    lg(a) = refine_z(a, k; logarithmic=true)
+    z = refine_heights(atmos.z, k)
+    return Atmosphere3D(atmos.nx, atmos.ny, length(z), atmos.x, atmos.y, z,
+        lin(atmos.temperature), lin(atmos.velocity_x), lin(atmos.velocity_y), lin(atmos.velocity_z),
+        lg(atmos.electron_density), lg(atmos.hydrogen1_density), lg(atmos.proton_density), lg(atmos.plasma_density))
 end
 
 
@@ -797,6 +847,14 @@ function main(cfg)
     # for (k,v) in nlte_atoms
     #     println(k, " NLTE shape = ", size(v))
     # end
+
+    if Z_REFINE > 1
+        println("Refining the vertical grid by $(Z_REFINE): $(atmos.nz) -> $((atmos.nz - 1) * Z_REFINE + 1) heights")
+        atmos = refine_atmos_z(atmos, Z_REFINE)
+        for (name, pops) in nlte_atoms
+            nlte_atoms[name] = refine_z(pops, Z_REFINE; logarithmic=true)
+        end
+    end
 
     println("Synthesizing line profiles...")
     results = Dict{String,Any}()
