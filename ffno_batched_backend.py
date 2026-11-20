@@ -3,7 +3,8 @@
 Not tiling: every operation of FFNO3D is either local or factorizes, so it can be batched without changing the operator.
 
     kernel-1 layers (lift, gates, post, pw, mlp, head)   any batch
-    2D FFT and spectral multiply                         depth planes: each plane is already independent
+    2D FFT and spectral multiply                         depth planes: each plane is already independent; the
+                                                         multiply also over k_y rows, each frequency's own mixing
     vertical branch                                      columns: its inner GroupNorms are per column
     3x3x3 depthwise convolution in the fusion            depth, with a one-cell overlap
     GroupNorm over the volume                            streaming sum and sum of squares, applied in a second pass
@@ -27,8 +28,30 @@ import torch.nn as nn
 
 from distributed_inference import chunked_fuse_branches, partition_range
 from ffno_fsdp_runtime import LOG10_POPULATION_LIMIT, Z_METRES_PER_MODEL_UNIT, VELOCITY_M_S_PER_MODEL_UNIT, linear_populations
-from models.ffno_model import depth_weights
+from models.ffno_model import _to_spacing_value, depth_weights
 from train_utils import get_checkpoint_io_metadata, get_checkpoint_normalization, load_checkpoint
+
+
+SPECTRAL_WEIGHT_BYTES = 2 ** 30   # the largest per-frequency weight tensor, C x C x rows x Wf float32, made at once
+
+
+def spectral_by_frequency_rows(spec, x, dx, dy, weight_bytes=SPECTRAL_WEIGHT_BYTES):
+    """SpectralConv2dFull.forward with mix_spectrum over blocks of k_y rows: each frequency's channel mixing depends on
+    that frequency alone, so this is the same operator, without the C x C x H x Wf weights of the whole plane at once
+    (4.7 GB each at 504 x 504 and C = 96, more than a 16 GB GPU holds with their temporaries)."""
+    _, channels, _, height, width = x.shape
+    dx, dy = _to_spacing_value(dx, x), _to_spacing_value(dy, x)
+    x = x * spec.input_gate(x)
+    x_ft = torch.fft.rfft2(x, dim=(-2, -1))
+    ky, kx = torch.meshgrid(torch.fft.fftfreq(height, d=dy, device=x.device),
+                            torch.fft.rfftfreq(width, d=dx, device=x.device), indexing="ij")
+    k_feat = spec.k_features(ky, kx)
+    rows = max(1, int(weight_bytes // (4 * channels * channels * x_ft.shape[-1])))
+    out = torch.empty_like(x_ft)
+    for y0 in range(0, height, rows):
+        out[..., y0:y0 + rows, :] = spec.mix_spectrum(x_ft[..., y0:y0 + rows, :], k_feat[y0:y0 + rows])
+    del x_ft
+    return spec.post(torch.fft.irfft2(out, s=(height, width), dim=(-2, -1)))
 
 
 def _is_out_of_memory(exception):
@@ -204,7 +227,7 @@ class BatchedFFNOBackend:
         act = lambda replica, y: block(replica).act(y)
 
         def spectral(replica, device, a, b):
-            spec[:, a:b] = block(replica).spec(x[:, a:b].to(device)[None], dx, dy)[0].cpu()
+            spec[:, a:b] = spectral_by_frequency_rows(block(replica).spec, x[:, a:b].to(device)[None], dx, dy)[0].cpu()
 
         spec = self._new_hidden(shape)
         self.pool.run(depth, self.chunk_depth, spectral)
