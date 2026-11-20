@@ -365,7 +365,8 @@ BATCH_SIZE = 1
 LEARNING_RATE = 1e-3
 MIN_LEARNING_RATE = 1e-8
 RESUME_LAST_EPOCH = 0
-RESUME_LAST_LEARNING_RATE = 5e-5
+# FFNOML_RESUME_LR overrides the learning rate a --bestpath restart starts its cosine schedule from
+RESUME_LAST_LEARNING_RATE = float(os.environ.get("FFNOML_RESUME_LR", 5e-5))
 WEIGHT_DECAY = 3e-4
 NUM_WORKERS = 8
 PIN_MEMORY = True
