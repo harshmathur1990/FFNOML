@@ -112,11 +112,45 @@ Input channels are constructed in `FFNONet.py` from:
 
 Targets are:
 
-- `log10(n_NLTE [m^-3])`
+- `log10(n_NLTE [m^-3])`, MULTI3D's populations, one channel per level of each active atom
 
 Prediction outputs are written back in linear space as:
 
 - `nlte_populations = n_NLTE [m^-3]`
+
+### Output heads
+
+The targets, the loss and the outputs are the same for both heads; they differ in what the last layer predicts.
+`MODEL_CONFIG["output_mode"]` (or `FFNOML_OUTPUT_MODE`) chooses:
+
+- **`log_population`** (the default): the last layer gives the normalised log10 populations directly.
+- **`level_fraction`**: per atom, the last layer gives one departure value δᵢ per level and one total correction u,
+  and the head builds the populations from them:
+
+  ```text
+  n_i = n_total × share_i
+  n_total = ρ / m × 10^s,                s = 6 tanh(u / 6)                (m: mass per atom of the species)
+  share_i = f*_i b_i / Σ_j f*_j b_j  =  softmax(ln f*_i + δ_i),  δ_i = ln b_i up to a constant common to the atom's levels
+  ```
+
+  f*ᵢ(T, nₑ) is MULTI3D's own LTE level fraction, computed in the head from the input T and nₑ exactly as MULTI3D's
+  `calc_lte_populations` computes it (Saha–Boltzmann with its Debye lowering and constants, and the atom data from
+  MULTI3D's output, `ATOM_CONFIG[atom]["multi3d_lte"]`); Muspel's LTE is not used. bᵢ = nᵢ / nᵢ(LTE) is the
+  departure coefficient, so δ = 0 gives MULTI3D's LTE populations, and the network only learns the departures from
+  LTE and a small correction to the total (−0.02 dex in the `_hion` simulations, the H₂ deficit below log T = 3.7).
+  With δ = 0 the head reproduces MULTI3D's stored LTE populations to 1.3×10⁻⁵ dex, the float32 precision of the
+  normalised log T input; given MULTI3D's own float32 T and nₑ, the formula matches to 7×10⁻⁸ dex. The species
+  totals can get their own loss term, weighted by `FFNOML_LAM_TOTAL` (`loss/nlte_composite_loss.py`).
+
+The head adds no parameters or inputs: the network still reads the 6 input channels and the head still writes one
+channel per level. A checkpoint loads only into the head it was trained with: set `FFNOML_OUTPUT_MODE` (and
+`FFNOML_MODEL_CONFIG`, for the capacity options below) the same way for training, `--predict`, `--fsdppredict`, the
+batched and FSDP services and the inversion. Level-fraction checkpoints from before the departure coefficients
+(commit `066d327` and earlier, such as the `sims1_lf` learning-curve run) load only with that code.
+
+`FFNOML_MODEL_CONFIG` (JSON) overrides `MODEL_CONFIG` entries, for example
+`{"z_spectral_modes": 64, "freq_mix_rank": 8, "open_side_paths": true, "width": 96}`: the capacity options of
+`models/ffno_model.py`, all off by default.
 
 ## Data And Configuration
 
@@ -723,7 +757,9 @@ that keeps the trained models on the GPUs for the whole run:
   replicate the full-volume activations. Only torchrun rank 0 reads each checkpoint.
 - `ffno_fsdp_diagnostics.py`: opt-in per-rank logs (`FFNO_FSDP_DIAGNOSTICS=1` or `2`)
   and core dumps (`FFNO_FSDP_CORE_DUMPS=1`) for debugging native crashes.
-- `ffno_model_factory.py`: builds FFNO3D from `MODEL_CONFIG` for the service.
+- `ffno_model_factory.py`: builds FFNO3D from `MODEL_CONFIG` for the service. A level-fraction checkpoint needs
+  `FFNOML_OUTPUT_MODE=level_fraction` (and the run's `FFNOML_MODEL_CONFIG`) in the service's environment; see
+  [Output heads](#output-heads).
 
 Julia MPI rank 0 launches it with `FFNOInversion.jl/scripts/ffno_fsdp_service.sh`
 (one `srun --overlap` torchrun job across all nodes of the allocation). The service
@@ -823,6 +859,8 @@ no conversion: set `[view]` in a `forward_z.toml`-style run.
 | `scripts/pf_Kurucz.input` | Partition functions. The Wittmann EOS, C++ and Python, is WittBifrostEOS's (`deps/witt/witt_shim.cpp`, found as `WittBifrostEOS.jl` next to this repository or through `WITTBIFROSTEOS_DIR`): the converter compiles it, and it is the inversion's `libwitt_ffno` |
 | `scripts/atmosphere_resampler.cpp` | C++/Boost spatial resampler used by the MURaM converter |
 | `export_multi3d_depcoeff.py` | write MULTI3D departure coefficients in the FFNONet prediction layout |
+| `scripts/learning_curve.ini`, `scripts/learning_curve_eagle7.py`, `scripts/submit_learning_curve.py` | learning-curve and capacity-screening experiments: build and score on eagle7, train on Olivia (see the ini's header) |
+| `scripts/capacity_benchmark.py` (`.sbatch`) | GPU memory and time per training step of each capacity configuration |
 | `compute_muspel_lte.jl`, `validate_multi3d_dep_loading.jl` | Muspel LTE populations, check of MULTI3D departure-coefficient loading |
 | `compare_population_models.py` | per-level NRMSE of two prediction directories against MULTI3D |
 | `make_paper_plots.py`, `generate_ffno_schematic_matplotlib.py` | paper figures and the architecture schematic |
@@ -838,8 +876,10 @@ python -m pytest tests
 ```
 
 The tests cover the composite NLTE loss, spacing-grouped batches, checkpoint
-consistency, the FSDP service launcher, the Olivia case outcomes and the C++ Witt
-EOS.
+consistency, the FSDP service launcher, the Olivia case outcomes, the C++ Witt
+EOS, the level-fraction head and its departure coefficients against a transcription of MULTI3D's
+`calc_lte_populations` (`tests/test_level_fraction_head.py`, `tests/test_departure_coefficients.py`), and the
+capacity options (`tests/test_capacity_switches.py`).
 
 Julia (from `FFNOInversion.jl/`):
 

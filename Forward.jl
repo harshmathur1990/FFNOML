@@ -52,7 +52,8 @@ using Interpolations
 
 const RUN_MODE = :ml
 # const FORWARD_ATOMS = ["H"]
-const FORWARD_ATOMS = ["CA"]
+# FFNOML_ACTIVE_ATOMS (comma-separated, as for config.py) overrides the atoms for scripted runs
+const FORWARD_ATOMS = haskey(ENV, "FFNOML_ACTIVE_ATOMS") ? String.(split(ENV["FFNOML_ACTIVE_ATOMS"], ",")) : ["CA"]
 # const FORWARD_ATOMS = ["H", "CA"]
 
 function atom_tag(atom_names)
@@ -61,6 +62,7 @@ end
 
 function load_multi3d_pred_data(predname=nothing)
     script = """
+import math
 import os
 import sys
 import types
@@ -70,6 +72,7 @@ sys.modules.setdefault(
     types.SimpleNamespace(
         array=lambda values, dtype=None: values,
         float32=float,
+        log10=math.log10,
     ),
 )
 

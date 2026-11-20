@@ -828,6 +828,12 @@ refused, so start that run fresh.
   0 reads each checkpoint. The service feeds log10 T and velocities in km/s, the
   same as training. `run_inversion!` requires this backend with at least two GPU
   ranks; there is no other production FFNO route.
+- **Checkpoints with the level-fraction head** (departure coefficients from MULTI3D's LTE populations, see
+  [Output heads](../README.md#output-heads)) need `FFNOML_OUTPUT_MODE=level_fraction`, and the run's
+  `FFNOML_MODEL_CONFIG`, in the environment that launches either service. The setting applies to every species
+  the service holds, so H and Ca checkpoints must use the same head. The head still returns log10 populations, so
+  synthesis, the VJP/JVP paths and everything on the Julia side are unchanged; the populations' derivatives now
+  include the LTE dependence on T and nₑ.
 
 The scheduler chooses the rank count and Julia the threads per rank. For example, a
 256-core allocation can run 16 ranks × 16 threads.

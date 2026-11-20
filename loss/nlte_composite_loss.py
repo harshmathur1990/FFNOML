@@ -569,6 +569,18 @@ def extract_temperature(X, mean_X, std_X):
     return T
 
 
+def _log10_total_error(logb_pred, logb_true, mean_Y, std_Y, start, end):
+    """mean |log10 sum of levels pred - true| over one species' levels [start, end) of normalised log10 populations
+    (B, C, ...), divided by the species' mean std_Y"""
+    shape = (1, -1) + (1,) * (logb_pred.ndim - 2)
+    std = std_Y[start:end].to(logb_pred.dtype).view(shape)
+    mean = mean_Y[start:end].to(logb_pred.dtype).view(shape)
+    ln10 = float(np.log(10.0))
+    total_pred = torch.logsumexp((logb_pred[:, start:end] * std + mean) * ln10, dim=1) / ln10
+    total_true = torch.logsumexp((logb_true[:, start:end] * std + mean) * ln10, dim=1) / ln10
+    return (total_pred - total_true).abs().mean() / std.mean()
+
+
 class NLTECompositeLoss(nn.Module):
 
     def __init__(
@@ -583,6 +595,7 @@ class NLTECompositeLoss(nn.Module):
         lam=0,
         lam_S=0,
         lam_g=0,
+        lam_total=0,
         min_stride=2,
         max_frac=0.25,
         delta=1e-1,
@@ -636,6 +649,7 @@ class NLTECompositeLoss(nn.Module):
         self.lam = lam
         self.lam_S = lam_S
         self.lam_g = lam_g
+        self.lam_total = lam_total
         self.min_stride = min_stride
         self.max_frac = max_frac
         self.delta = delta
@@ -718,11 +732,22 @@ class NLTECompositeLoss(nn.Module):
         else:
             L_gradient = torch.zeros((), device=logb_pred.device, dtype=logb_pred.dtype)
 
+        level_offsets = torch.zeros(len(self.levels)+1, device=logb_pred.device, dtype=torch.long)
+        level_offsets[1:] = torch.cumsum(self.levels, dim=0)
+
+        # ------------------ SPECIES TOTAL ------------------ #
+        # |log10 sum_i n_i,pred - log10 sum_i n_i,true| per species, in units of the species' mean std_Y, so it is on the
+        # scale of the L1 half of the data loss; the true total is MULTI3D's own, so cells it fills beyond rho / mass
+        # are asked for exactly that
+        L_total_atoms = torch.stack([
+            _log10_total_error(logb_pred, logb_true, self.mean_Y, self.std_Y, level_offsets[i], level_offsets[i + 1])
+            for i in range(len(self.levels))
+        ])
+        L_species_total = L_total_atoms.mean()
+
         # ------------------ PHYSICS ------------------ #
         per_atom_source_losses = []
         per_atom_debug = []
-        level_offsets = torch.zeros(len(self.levels)+1, device=logb_pred.device, dtype=torch.long)
-        level_offsets[1:] = torch.cumsum(self.levels, dim=0)
 
         # Example:
         # levels = [6,7]
@@ -809,7 +834,7 @@ class NLTECompositeLoss(nn.Module):
             _check_tensor(L_S, f"L_S {rank}", True)
             _check_tensor(L_gradient, f"L_gradient {rank}", True)
 
-        L_total = L_data + self.lam_S * L_S + self.lam_g * L_gradient
+        L_total = L_data + self.lam_S * L_S + self.lam_g * L_gradient + self.lam_total * L_species_total
 
         if self.print_loss:
             _check_tensor(L_total, f"L_total {rank}", True)
@@ -825,6 +850,7 @@ class NLTECompositeLoss(nn.Module):
                 "data": L_data.detach(),
                 "source": L_S.detach(),
                 "gradient": L_gradient.detach(),
+                "total": L_species_total.detach(),
                 "source_per_atom": L_S_atoms.detach(),
                 "atom_names": self.atom_names
             }

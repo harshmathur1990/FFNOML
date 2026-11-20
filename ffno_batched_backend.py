@@ -27,6 +27,7 @@ import torch.nn as nn
 
 from distributed_inference import chunked_fuse_branches, partition_range
 from ffno_fsdp_runtime import LOG10_POPULATION_LIMIT, Z_METRES_PER_MODEL_UNIT, VELOCITY_M_S_PER_MODEL_UNIT, linear_populations
+from models.ffno_model import depth_weights
 from train_utils import get_checkpoint_io_metadata, get_checkpoint_normalization, load_checkpoint
 
 
@@ -43,6 +44,8 @@ class _GPUPool:
         for device in devices:
             replica = copy.deepcopy(model).eval()
             for block in replica.blocks:
+                if getattr(block, "vertical_operator", False):
+                    continue                                   # HeightSpectralConv: no inner GroupNorm, no column loop
                 block.batched_out_gn = block.vertical.out_gn  # applied over the volume or the slabs by _groupnorm
                 block.vertical.out_gn = nn.Identity()
                 block.vertical.chunk = vertical_chunk
@@ -127,6 +130,7 @@ class BatchedFFNOBackend:
         self.chunk_depth = int(chunk_depth)
         self.chunk_rows = int(chunk_rows)
         self.vertical_norm_slabs = int(vertical_norm_slabs)
+        self.weights = None                    # depth_weights of the cube being predicted, for a vertical_operator model
         self.pool = _GPUPool(model, self.devices, int(vertical_chunk))
         self.width = model.lift[0].out_channels
         self.n_blocks = len(model.blocks)
@@ -146,7 +150,10 @@ class BatchedFFNOBackend:
 
     def _groupnorm(self, values, norm, post=None):
         """`norm(values)` in place, with `norm`'s statistics over all of `values` (C, D, H, W): as `DistributedGroupNorm`,
-        with the sums accumulated in double precision. `post` (the replica, the tensor) follows on the same batches."""
+        with the sums accumulated in double precision. `post` (the replica, the tensor) follows on the same batches. For a
+        vertical_operator model the statistics weight each level by `self.weights` (depth_weights, (D, H, W)), as
+        DepthWeightedGroupNorm does."""
+        weights = self.weights
         channels, depth = values.shape[:2]
         groups = norm(next(iter(self.pool.replicas.values()))).num_groups
         per_group = channels // groups
@@ -156,14 +163,16 @@ class BatchedFFNOBackend:
 
         def accumulate(replica, device, a, b):
             v = values[:, a:b].to(device).double().reshape(groups, per_group, b - a, *values.shape[2:])
-            total = v.sum(dim=(1, 2, 3, 4)).cpu()
-            square = (v * v).sum(dim=(1, 2, 3, 4)).cpu()
+            wv = v if weights is None else v * weights[a:b].to(device).double()
+            total = wv.sum(dim=(1, 2, 3, 4)).cpu()
+            square = (wv * v).sum(dim=(1, 2, 3, 4)).cpu()
             with lock:
                 totals.add_(total)
                 squares.add_(square)
 
         self.pool.run(depth, self.chunk_depth, accumulate)
-        count = float(per_group * depth * values.shape[2] * values.shape[3])
+        count = float(per_group * (depth * values.shape[2] * values.shape[3] if weights is None
+                                   else weights.double().sum()))
         mean = totals / count
         variance = (squares / count - mean * mean).clamp_min(0.0)
 
@@ -207,7 +216,7 @@ class BatchedFFNOBackend:
 
         vert = self._new_hidden(shape)
         self.pool.run(rows, self.chunk_rows, vertical_columns)
-        for slab in range(self.vertical_norm_slabs):
+        for slab in range(self.vertical_norm_slabs if self.weights is None else 0):
             h0, h1 = partition_range(rows, slab, self.vertical_norm_slabs)
             self._groupnorm(vert[:, :, h0:h1], lambda replica: block(replica).batched_out_gn)
         self._groupnorm(vert, lambda replica: block(replica).norm_vert, act)
@@ -232,7 +241,7 @@ class BatchedFFNOBackend:
         del pointwise
 
         mlp = self._map_depth(self._new_hidden(shape), x, lambda replica: block(replica).mlp)
-        self._groupnorm(mlp, lambda replica: block(replica).norm_mlp, lambda replica, y: torch.tanh(y))
+        self._groupnorm(mlp, lambda replica: block(replica).norm_mlp, lambda replica, y: block(replica).mlp_activation(y))
         x.add_(mlp, alpha=float(template.res_mlp.item()))
         del mlp
         return x
@@ -254,9 +263,14 @@ class BatchedFFNOBackend:
         shape = (depth, rows, columns)
         self.pool.splits = 0
         normalized = (features - self.mean_x) / self.std_x
+        operator = getattr(next(iter(self.pool.replicas.values())), "vertical_operator", False)
+        self.weights = depth_weights(z[None, None])[0, 0] if operator else None
 
         x = self._new_hidden(shape)
         self._map_depth(x, normalized, lambda replica: replica.lift[0])
+        # the level-fraction head takes the species totals from the normalised rho channel
+        level_fraction = getattr(next(iter(self.pool.replicas.values())), "output_mode", None) == "level_fraction"
+        inputs = normalized if level_fraction else None
         del normalized
         self._groupnorm(x, lambda replica: replica.lift[1], lambda replica, y: replica.lift[2](y))
         self.log(f"BATCHED lift done {time.time() - started:.0f} s")
@@ -267,7 +281,10 @@ class BatchedFFNOBackend:
         output = torch.empty(self.levels, *shape, dtype=torch.float32)
 
         def head(replica, device, a, b):
-            y = replica.proj2(replica.act(replica.proj1(x[:, a:b].to(device)[None])))[0]
+            y = replica.proj2(replica.act(replica.proj1(x[:, a:b].to(device)[None])))
+            if inputs is not None:
+                y = replica.head_output(y, inputs[:, a:b].to(device)[None])
+            y = y[0]
             output[:, a:b] = (y * self.std_y.to(device) + self.mean_y.to(device)).cpu()
 
         self.pool.run(depth, self.chunk_depth, head)

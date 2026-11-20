@@ -13,13 +13,40 @@ flowchart TD
     LIFT --> H0["hidden: [B, width, D, H, W]"]
     H0 --> BLOCKS["repeat n_layers x<br/>FFNOBlock3dBalanced"]
     BLOCKS --> HEAD1["proj1<br/>Conv3d(width -> 2*width, 1)<br/>GELU"]
-    HEAD1 --> HEAD2["proj2<br/>Conv3d(2*width -> out_channels, 1)"]
-    HEAD2 --> Y["output: [B, out_channels, D, H, W]"]
+    HEAD1 --> HEAD2["proj2<br/>Conv3d(2*width -> head_channels, 1)"]
+    HEAD2 --> HO["head_output(head, x)<br/>log_population: identity<br/>level_fraction: see below"]
+    X -. T, ne, rho .-> HO
+    HO --> Y["output: normalised log10 n, [B, out_channels, D, H, W]"]
 
     TRAIN{"training and<br/>checkpoint_blocks and<br/>not collect_stats?"} -. wraps lift/block/head .-> LIFT
     TRAIN -. wraps lift/block/head .-> BLOCKS
     TRAIN -. wraps lift/block/head .-> HEAD1
 ```
+
+`head_channels` is `out_channels` for `output_mode = "log_population"` and `out_channels + n_species` for
+`"level_fraction"` (one departure value per level and one total correction per species).
+
+## Level-fraction head with departure coefficients
+
+```mermaid
+flowchart TD
+    HEAD["proj2 output, per species:<br/>delta_1..delta_L (departures), u (total)"]
+    X["inputs x: log10 T, log10 ne, log10 rho<br/>(un-normalised with mean_X, std_X)"]
+    X --> LTE["multi3d_lte_log_weights (float64)<br/>ln f*_i: MULTI3D calc_lte_populations<br/>Saha-Boltzmann, Debye lowering, MULTI3D atom data"]
+    HEAD --> ADD["z_i = ln f*_i + delta_i<br/>delta_i = ln b_i + constant"]
+    LTE --> ADD
+    ADD --> SM["log_softmax over the species' levels<br/>share_i = f*_i b_i / sum_j f*_j b_j"]
+    HEAD --> S["s = 6 tanh(u / 6)"]
+    X --> TOT["log10 n_total = log10(rho / m) + s"]
+    S --> TOT
+    SM --> N["log10 n_i = log10 n_total + log10 share_i"]
+    TOT --> N
+    N --> NORM["(log10 n - mean_Y) / std_Y"]
+```
+
+δ = 0 gives MULTI3D's LTE populations; the network learns the departure coefficients (up to a constant per species)
+and the total's small offset from ρ / m. The head has no parameters of its own. The capacity options of the blocks
+(`z_spectral_modes`, `freq_mix_rank`, `open_side_paths`) are off by default and not drawn here.
 
 ## `FFNOBlock3dBalanced`
 
