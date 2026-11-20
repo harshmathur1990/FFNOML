@@ -1,7 +1,7 @@
-"""Generate a Matplotlib schematic of the current FFNO3D architecture.
-
-The network is trained to predict log10 NLTE level populations. Inference
-converts those predictions back to linear populations in m^-3.
+"""Generate a Matplotlib schematic of the current FFNO3D architecture: the height operator (vertical_operator, the
+vertical branch a spectral convolution along each column's heights, HeightSpectralConv), rank-8 frequency mixing,
+open side paths, and the level_fraction head, whose output layer turns the head's L + 1 channels per point (one per
+level, one for the element's total) into populations in m^-3.
 
 Run:
     py generate_ffno_schematic_matplotlib.py
@@ -260,7 +260,7 @@ def draw_top_architecture(ax):
     text(ax, 0.20, 7.10, "Fields:\n$\\log_{10}T,\\,v_x,\\,v_y,\\,v_z,\\,\\log_{10}n_e,\\,\\log_{10}\\rho$", size=6.5, ha="left")
     text(ax, 0.20, 6.55, r"Shape: $(N_z,N_y,N_x,6)$", size=7, ha="left")
 
-    rounded_box(ax, (1.86, 7.80), (0.85, 1.02), "Lift Layer\n$(P)$\n\n1x1x1\nConv3D\n+\nGroupNorm\n+\nGELU", fc="#f3f8ff", ec="#2b5c9a", fontsize=6.6, weight="bold")
+    rounded_box(ax, (1.86, 7.80), (0.85, 1.02), "Lift Layer\n$(P)$\n\n1x1x1\nConv3D\n+\nGN$_w$\n+\nGELU", fc="#f3f8ff", ec="#2b5c9a", fontsize=6.6, weight="bold")
     cube(ax, 3.10, 7.85, s=0.55, depth=0.16, kind="latent")
     text(ax, 3.42, 8.90, "Latent Cube\n$v_0$", size=7, weight="bold")
     text(ax, 3.42, 7.32, r"$(N_z,N_y,N_x,C)$", size=7)
@@ -278,7 +278,7 @@ def draw_top_architecture(ax):
         ("Input Gate", "Conv3D -> GELU\n-> Conv3D -> sigmoid\nthen multiply input"),
         ("FFT2", "(x, y)\nper depth\n(rfft2)"),
         ("Metric-aware\nFrequency\nEmbedding", r"$k_x,k_y,$" + "\n" + r"$\sqrt{k_x^2+k_y^2},$" + "\n" + r"$\mathrm{sign}(k_y)$"),
-        ("Frequency\nMLP", "produces\ncomplex\nweights"),
+        ("Frequency\nMLPs", "complex\nweights\n+ rank-8"),
         ("Complex\nSpectral\nMultiplication", r"$\odot$"),
         ("iFFT2", "(x, y)"),
         ("Post Spectral\nMLP", "1x1x1 Conv3D\n-> GELU ->\n1x1x1 Conv3D"),
@@ -293,28 +293,25 @@ def draw_top_architecture(ax):
     text(ax, 9.95, 8.78, r"$v^{spec}$", size=7, color=BLUE, weight="bold", ha="left")
 
     rounded_box(ax, (4.12, 6.48), (5.82, 1.26), "", fc=GREEN_FILL, ec="#acd7a7", lw=0.75, radius=0.06)
-    text(ax, 7.05, 7.62, "Vertical Branch (along z)", size=7.0, color=GREEN, weight="bold")
-    op_box(ax, 4.27, 6.85, 0.66, 0.54, "z-features", "$z$ (height)\n$\\hat z$ (norm.)\n$\\Delta z$ (spacing)\n$L_z$ (extent)", "green", fs=4.9)
-    op_box(ax, 5.10, 6.86, 0.62, 0.52, "z-projection", "Conv1D (1x1)\n+\nGELU", "green", fs=5.0)
-    rounded_box(ax, (5.88, 6.78), (2.78, 0.74), "", fc="#f7fff6", ec=GREEN_EDGE, lw=0.65, radius=0.05, ls="--")
-    text(ax, 7.27, 7.42, "Vertical Physics Stack", size=5.8, color=GREEN, weight="bold")
-    stack = [
-        "MultiScale\nVertical Conv\nkernels\n(3, 7, 15)",
-        "Res. Dilated\nBlock\n$d=1$",
-        "Res. Dilated\nBlock\n$d=2$",
-        "Res. Dilated\nBlock\n$d=4$",
-        "Res. Block\n$k=7$\n($d=1$)",
+    text(ax, 7.02, 7.62, "Vertical Branch (along z, per column)", size=7.0, color=GREEN, weight="bold")
+    verts = [
+        ("Input Gate", "as in x-y\n+ height\nfeature $z$"),
+        ("Height\nTransform", "$X_m=\\int v\\,e^{-ik_m z}dz$\non the column's\nown heights"),
+        ("Physical\nWavenumber", "$k_m=2\\pi m/L$\n$\\lambda\\geq 40$ km"),
+        ("Frequency\nMLPs", "complex\nweights\n+ rank-8"),
+        ("Column\nCutoff", "taper to 0\nat $\\pi/\\Delta z$"),
+        ("Inverse\nSeries", "at $z_j$"),
+        ("Post\nMLP", "1x1x1 Conv3D\n-> GELU ->\n1x1x1 Conv3D"),
     ]
-    sx = 6.02
-    for label in stack:
-        op_box(ax, sx, 6.95, 0.42, 0.38, label, "", "green", fs=4.2)
-        sx += 0.50
-    text(ax, 7.25, 6.66, "(each block uses depthwise-separable 1D convs + GN + GELU + dropout)", size=4.9)
-    op_box(ax, 8.82, 6.86, 0.45, 0.52, "Depth\nGate", "(Sigmoid)", "green", fs=5.2)
-    op_box(ax, 9.43, 6.86, 0.54, 0.52, "Output\nProjection", "Conv1D (1x1)\n+ GN", "green", fs=5.0)
-    for a, b in [((4.93, 7.12), (5.10, 7.12)), ((5.72, 7.12), (5.88, 7.12)), ((8.66, 7.12), (8.82, 7.12)), ((9.27, 7.12), (9.43, 7.12))]:
-        arrow(ax, a, b, lw=0.65, ms=6)
-    text(ax, 9.95, 6.87, r"$v^{vert}$", size=7, color=GREEN, weight="bold", ha="left")
+    x = 4.28
+    widths = [0.55, 0.78, 0.60, 0.56, 0.52, 0.42, 0.62]
+    for i, ((title, body), w) in enumerate(zip(verts, widths)):
+        op_box(ax, x, 6.78, w, 0.68, title, body, "green", fs=4.8)
+        if i < len(verts) - 1:
+            arrow(ax, (x + w + 0.03, 7.12), (x + w + 0.18, 7.12), lw=0.7, ms=6)
+        x += w + 0.22
+    text(ax, 7.02, 6.60, "no part counts grid points: any vertical grid and number of levels", size=4.9)
+    text(ax, 9.95, 6.95, r"$v^{vert}$", size=7, color=GREEN, weight="bold", ha="left")
 
     rounded_box(ax, (10.38, 6.72), (1.55, 2.30), "", fc=ORANGE_FILL, ec=ORANGE_EDGE, lw=0.75, radius=0.06)
     text(ax, 11.15, 8.84, "Gated Fusion", size=7, color=ORANGE, weight="bold")
@@ -323,7 +320,7 @@ def draw_top_architecture(ax):
     op_box(ax, 11.42, 7.60, 0.45, 0.25, r"$g_{vert}$", "", "orange", fs=6.3)
     circled_symbol(ax, 10.84, 7.28, r"$\times$")
     circled_symbol(ax, 11.18, 7.02, "+")
-    op_box(ax, 11.37, 6.72, 0.70, 0.62, "Fusion Network", "1x1x1 Conv3D\n-> DW Conv3D (k=3)\n-> 1x1x1 Conv3D\n+ GELU", "orange", fs=5.0)
+    op_box(ax, 11.37, 6.72, 0.70, 0.62, "Fusion Network", "1x1x1 Conv3D\n-> GELU ->\n1x1x1 Conv3D\n+ GN$_w$ + GELU", "orange", fs=5.0)
     arrow(ax, (9.94, 8.67), (10.38, 8.67), lw=0.7)
     arrow(ax, (9.94, 7.10), (10.84, 7.28), lw=0.7)
     arrow(ax, (11.67, 7.60), (11.67, 7.34), lw=0.7)
@@ -333,14 +330,17 @@ def draw_top_architecture(ax):
 
     cube(ax, 12.45, 7.52, s=0.44, depth=0.13, kind="latent")
     text(ax, 12.60, 8.46, r"$v_{l+1}$", size=9, weight="bold")
-    rounded_box(ax, (13.22, 7.48), (0.83, 1.06), "Projection\nHead\n\nConv3D\n$C \\to 2C$\n+ GELU\n$2C \\to N_{levels}$", fc="#f3f8ff", ec="#2b5c9a", fontsize=5.8, weight="bold")
+    rounded_box(ax, (13.22, 7.48), (0.83, 1.06), "Projection\nHead\n\nConv3D\n$C \\to 2C$\n+ GELU\n$2C \\to L+1$:\n$(\\boldsymbol{\\delta},u)$", fc="#f3f8ff", ec="#2b5c9a", fontsize=5.8, weight="bold")
     arrow(ax, (11.93, 7.04), (12.45, 7.76), lw=0.8)
     arrow(ax, (12.91, 7.76), (13.22, 8.02), lw=0.8)
 
-    text(ax, 14.36, 9.20, "Output: $\\log_{10}$ NLTE\nPopulation Cube", size=6.8, weight="bold")
+    text(ax, 14.42, 9.20, "Output: NLTE\nPopulation Cube $\\widehat{\\mathbf{n}}$", size=6.8, weight="bold")
     cube(ax, 14.12, 7.62, s=0.66, depth=0.15, kind="heat")
     draw_axes_near_cube(ax, 14.12, 7.62, 0.66)
-    text(ax, 14.42, 6.62, "Shape:\n$(N_z,N_y,N_x,N_{levels})$\n$10^x \\to n^{NLTE}$ [m$^{-3}$]", size=6.2)
+    text(ax, 14.30, 6.62, "Output layer, no parameters:\n"
+         r"$\widehat{n}_i=\widehat{n}_{\rm tot}\,f^*_i e^{\delta_i}/\sum_j f^*_j e^{\delta_j}$" "\n"
+         r"$\widehat{n}_{\rm tot}=(\rho/m_{\rm a})\,10^{6\tanh(u/6)}$" "\n"
+         r"$(N_z,N_y,N_x,L)$ [m$^{-3}$]", size=5.6)
     arrow(ax, (14.05, 8.03), (14.12, 8.05), lw=0.8)
 
     circled_symbol(ax, 11.58, 6.34, "+", r=0.085, size=9)
@@ -358,14 +358,14 @@ def draw_spectral_panel(ax):
         ("1. Input Gate", "Conv3D -> GELU\n-> Conv3D -> sigmoid\nthen multiply input"),
         ("2. FFT2 (x, y)", "per depth slice\n(rfft2)"),
         ("3. Metric-aware\nFrequency Embedding", r"$k_x$" + "\n" + r"$k_y$" + "\n" + r"$\sqrt{k_x^2+k_y^2}$" + "\n" + r"$\mathrm{sign}(k_y)$"),
-        ("4. Frequency MLP", r"$\to$ Complex Weights" + "\n\n" + r"$(a_r,a_i)$"),
+        ("4. Frequency MLPs", r"$\to$ Complex Weights" + "\n" + "+ rank-8 term" + "\n" + r"$(a_r,a_i)$"),
         ("5. Complex\nSpectral\nMultiplication", r"$\odot$"),
-        ("6. iFFT2", ""),
-        ("7. Post Spectral MLP", "1x1x1 Conv3D\n+ GELU ->\n1x1x1 Conv3D"),
+        ("6. iFFT2", ""),  # noqa
+        ("7. Post MLP", "1x1x1 Conv3D\n+ GELU ->\n1x1x1 Conv3D"),
     ]
-    xs = [0.35, 1.18, 2.22, 3.30, 4.27, 5.03, 5.67]
+    xs = [0.35, 1.18, 2.22, 3.30, 4.27, 4.98, 5.72]
     for i, (title, body) in enumerate(steps):
-        title_size = 4.6 if i >= 5 else 5.0
+        title_size = 4.4 if i >= 5 else 5.0
         text(ax, xs[i], 4.76, title, size=title_size, weight="bold")
         if i in (0, 5, 6):
             cube(ax, xs[i] - 0.10, 3.44, s=0.38, depth=0.13, kind="blue")
@@ -405,30 +405,63 @@ def draw_spectral_panel(ax):
 
 
 def draw_vertical_panel(ax):
-    rounded_box(ax, (6.35, 2.22), (4.43, 3.05), "", fc="#fbfffb", ec=GREEN_EDGE, lw=0.75, radius=0.05, ls="--")
-    text(ax, 8.56, 5.10, "(c) Vertical Branch (along z)", size=7.2, color=GREEN, weight="bold")
-    text(ax, 6.48, 4.82, "z-features", size=5.8, weight="bold", ha="left")
-    for i, lab in enumerate([r"$z$", r"$\hat z$", r"$\Delta z$", r"$L_z$"]):
-        rounded_box(ax, (6.58, 4.35 - i * 0.22), (0.40, 0.16), lab, fc="#effbea", ec=GREEN_EDGE, fontsize=5.8, radius=0.02)
-    arrow(ax, (6.78, 3.53), (7.22, 3.42), lw=0.7, ms=6)
-    op_box(ax, 7.24, 3.25, 0.62, 0.70, "z-proj.", "Conv1D\n(1x1)\n+ GELU", "green", fs=5.1)
-    tiny_column(ax, 7.74, 2.62, h=0.55, color="#74b95d")
-    text(ax, 7.57, 2.33, r"$(N_z,C)$", size=5.7)
-    op_box(ax, 7.94, 3.25, 0.58, 0.70, "in-proj.", "Conv1D\n(1x1)\n+ GN +\nGELU", "green", fs=4.9)
-    arrow(ax, (7.86, 3.60), (7.94, 3.60), lw=0.7, ms=6)
+    import math
 
-    rounded_box(ax, (8.68, 2.83), (1.16, 1.85), "", fc="#f7fff6", ec=GREEN_EDGE, lw=0.65, radius=0.04, ls="--")
-    text(ax, 9.26, 4.58, "Vertical Physics Stack", size=6.0, color=GREEN, weight="bold")
-    for i, lab in enumerate(["MultiScale Vertical Conv\n(kernels 3, 7, 15)", "Res. Dilated Block\n(d = 1)", "Res. Dilated Block\n(d = 2)", "Res. Dilated Block\n(d = 4)", "Res. Block\n(k = 7, d = 1)"]):
-        rounded_box(ax, (8.78, 4.18 - i * 0.30), (0.94, 0.22), lab, fc="#effbea", ec=GREEN_EDGE, fontsize=4.8, radius=0.03)
-    arrow(ax, (8.52, 3.60), (8.68, 3.60), lw=0.7, ms=6)
-    op_box(ax, 9.98, 3.35, 0.48, 0.52, "Depth\nGate", "(sigmoid)", "green", fs=4.9)
-    tiny_column(ax, 10.63, 3.25, h=0.70, color="#73b865")
-    text(ax, 10.62, 4.22, "Output\n(per column)", size=5.2)
-    op_box(ax, 10.18, 2.74, 0.50, 0.48, "out-proj.", "Conv1D\n(1x1)\n+ GN", "green", fs=4.7)
-    arrow(ax, (9.84, 3.60), (9.98, 3.60), lw=0.7, ms=6)
-    arrow(ax, (10.46, 3.60), (10.59, 3.60), lw=0.7, ms=6)
-    text(ax, 8.56, 2.47, "All ops are 1D convolutions along depth (z).\nDepthwise-separable convs + GN + GELU + dropout inside blocks.", size=6.0)
+    rounded_box(ax, (6.35, 2.22), (4.43, 3.05), "", fc="#fbfffb", ec=GREEN_EDGE, lw=0.75, radius=0.05, ls="--")
+    text(ax, 8.56, 5.10, "(c) Vertical Branch: spectral operator along height", size=7.0, color=GREEN, weight="bold")
+
+    # 1. a column on its own, non-uniform heights
+    text(ax, 6.70, 4.80, "1. Column", size=5.0, weight="bold")
+    heights = [0.0, 0.05, 0.11, 0.18, 0.27, 0.38, 0.52, 0.70, 0.92, 1.20]
+    ax.plot([6.72, 6.72], [3.12, 3.12 + 1.20], color="#555555", lw=1.0)
+    for h in heights:
+        ax.add_patch(Circle((6.72, 3.12 + h), 0.035, facecolor="#74b95d", edgecolor="#444444", lw=0.5, zorder=7))
+    for j, h in enumerate(heights[:-1]):
+        ax.plot([6.80, 6.86], [3.12 + h, 3.12 + h], color="#888888", lw=0.4)
+    text(ax, 6.74, 2.95, "$v(z_j)$, non-\nuniform $z_j$", size=4.6)
+    text(ax, 6.74, 2.70, "gate, $+z$", size=4.6)
+    arrow(ax, (6.95, 3.72), (7.17, 3.72), lw=0.65, ms=6)
+
+    # 2. exact transform of the piecewise-linear column
+    text(ax, 7.60, 4.80, "2. Height transform", size=5.0, weight="bold")
+    rounded_box(ax, (7.20, 3.30), (0.80, 1.20),
+                "$X_m=\\int v(z)\\,e^{-ik_m z}\\,dz$\n\nexact for the\npiecewise-linear\nprofile through $z_j$\n\n$k_m=2\\pi m/L$",
+                fc="#f5fff3", ec=GREEN_EDGE, fontsize=4.4)
+    arrow(ax, (8.04, 3.72), (8.22, 3.72), lw=0.65, ms=6)
+
+    # 3. W(k): a smooth function of the physical wavenumber, cut off per column
+    text(ax, 8.73, 4.80, "3. $Y_m=W(k_m)X_m$", size=5.0, weight="bold")
+    x0, y0, w, h = 8.27, 3.36, 0.92, 0.95
+    ax.add_patch(Rectangle((x0, y0), w, h, facecolor="white", edgecolor="#777777", lw=0.5, zorder=3))
+    ks = [i / 60 for i in range(61)]
+    def taper(k):
+        u = min(max((k - 0.55) / 0.27, 0.0), 1.0)
+        return 0.5 * (1 + math.cos(math.pi * u))
+    wk = [0.55 + 0.25 * math.cos(5 * k) * math.exp(-1.2 * k) for k in ks]
+    ax.plot([x0 + k * w for k in ks], [y0 + h * v for v in wk], color="#8bc37d", lw=0.8, ls=(0, (2, 1.5)), zorder=4)
+    ax.plot([x0 + k * w for k in ks], [y0 + h * v * taper(k) for v, k in zip(wk, ks)], color=GREEN, lw=1.1, zorder=5)
+    for k in [i / 12 for i in range(13)]:
+        ax.add_patch(Circle((x0 + k * w, y0 + h * wk[int(round(k * 60))] * taper(k)), 0.022, facecolor=GREEN,
+                            edgecolor="none", zorder=6))
+    ax.plot([x0 + 0.55 * w] * 2, [y0, y0 + h], color="#999999", lw=0.4, ls=(0, (2, 2)), zorder=4)
+    ax.plot([x0 + 0.82 * w] * 2, [y0, y0 + h], color="#999999", lw=0.4, ls=(0, (2, 2)), zorder=4)
+    text(ax, x0 + 0.52 * w, y0 - 0.09, "$\\frac{2\\pi}{3\\Delta z}$", size=4.8)
+    text(ax, x0 + 0.86 * w, y0 - 0.09, "$\\frac{\\pi}{\\Delta z}$", size=4.8)
+    text(ax, x0 + w + 0.03, y0 + 0.02, "$k$", size=5.5, ha="left")
+    text(ax, 8.73, 2.94, "complex $C\\times C$ matrix $\\times$ MLP($k$)\n+ rank-8 $U(k)V(k)$; taper to 0 at\nthe column's Nyquist ($\\Delta z$: median spacing)",
+         size=4.5)
+    arrow(ax, (9.24, 3.72), (9.42, 3.72), lw=0.65, ms=6)
+
+    # 4. back on the column's heights
+    text(ax, 10.05, 4.80, "4. Inverse series", size=5.0, weight="bold")
+    rounded_box(ax, (9.47, 3.30), (1.15, 1.20),
+                "$v^{vert}(z_j)=\\frac{1}{L}\\,[\\,Y_0$\n$+\\,2\\,\\mathrm{Re}\\sum_{m\\geq1}Y_m e^{ik_m z_j}]$\n\nthen Post MLP\n(1x1x1 Conv3D -> GELU\n-> 1x1x1 Conv3D)",
+                fc="#f5fff3", ec=GREEN_EDGE, fontsize=4.8)
+
+    text(ax, 7.56, 2.28 + 0.18, "$(N_z,C)$ per column", size=5.0)
+    text(ax, 8.73, 2.28 + 0.18, "$(M,C)$ complex", size=5.0)
+    text(ax, 10.05, 2.28 + 0.18, "$(N_z,C)$ per column", size=5.0)
+    text(ax, 8.56, 2.30, "$L=40$ Mm, or twice the column height if longer; shortest wavelength 40 km", size=4.9)
 
 
 def draw_fusion_panel(ax):
@@ -448,7 +481,7 @@ def draw_fusion_panel(ax):
     cube(ax, 11.08, 2.35, s=0.34, depth=0.13, kind="green")
     circled_symbol(ax, 13.20, 3.32, r"$\times$", r=0.060, size=6.5)
     circled_symbol(ax, 13.47, 3.64, "+", r=0.070, size=8)
-    op_box(ax, 13.82, 3.26, 0.76, 0.70, "Fusion Network", "Conv3D -> GELU\n-> DW Conv3D (k=3)\n-> GELU -> Conv3D\n+ branch mean\n+ GN + GELU", "orange", fs=4.3)
+    op_box(ax, 13.82, 3.26, 0.76, 0.70, "Fusion Network", "Conv3D -> GELU\n-> Conv3D\n+ branch mean\n+ GN$_w$ + GELU", "orange", fs=4.3)
     cube(ax, 14.70, 3.25, s=0.30, depth=0.11, kind="latent")
     text(ax, 14.82, 4.23, "Fused\nOutput $v'$", size=5.4, weight="bold")
     text(ax, 14.77, 2.86, r"$(N_z,N_y,N_x,C)$", size=4.6)
@@ -466,12 +499,12 @@ def draw_bottom_panels(ax):
     text(ax, 0.30, 1.70, "Key Points", size=7.6, color="#5a38a2", weight="bold", ha="left")
     key = (
         "- 2D Fourier operator in (x,y) at every depth slice; uses full spectrum (rfft2/irfft2).\n"
-        "- Frequency weights are generated by an MLP conditioned on $(k_x,k_y,\\sqrt{k_x^2+k_y^2},\\mathrm{sign}(k_y))$.\n"
-        "- Vertical branch is a strong 1D CNN stack along z with multi-scale and dilated residual blocks.\n"
-        "- z-features = { $z$, $\\hat z$, $\\Delta z$, $L_z$ } are encoded and used to modulate vertical processing.\n"
+        "- Frequency weights: MLP of $(k_x,k_y,\\sqrt{k_x^2+k_y^2},\\mathrm{sign}(k_y))$, plus a rank-8 mixing term.\n"
+        "- Vertical branch: the same kind of operator along height, on each column's own heights.\n"
+        "- Its transform is exact for the piecewise-linear column; each column keeps only the $k$ it resolves.\n"
         "- Spectral and vertical branches are adaptively gated per block and fused.\n"
-        "- Each FFNO block applies residual fused, pointwise, and tanh-MLP updates with learned scales.\n"
-        "- A two-layer pointwise projection head maps latent channels to log10 NLTE populations."
+        "- Residual fused, pointwise and MLP updates; GN$_w$ weights each level by its height interval.\n"
+        "- The head gives $(\\boldsymbol{\\delta},u)$; a fixed output layer turns them into populations in m$^{-3}$."
     )
     text(ax, 0.28, 1.48, key, size=5.9, ha="left", va="top")
 
@@ -483,9 +516,10 @@ def draw_bottom_panels(ax):
         "$N_x^+$                    - $N_x/2+1$ (rfft along x)\n"
         "$N$                       - number of FFNO blocks (here $N=4$)\n"
         "$\\Delta x,\\Delta y$         - horizontal grid spacings (used in frequencies)\n"
-        "$z,\\hat z,\\Delta z,L_z$      - height, normalized height, spacing, vertical extent\n"
-        "$\\sigma(x)$                 - sigmoid\n"
-        "$GN$                      - Group Normalization"
+        "$k_m,\\ L$                  - vertical wavenumbers, periodic length\n"
+        "$\\Delta z$                    - median level spacing of a column\n"
+        "$L$ levels; $f^*_i$            - LTE level fractions (Saha-Boltzmann)\n"
+        "$\\sigma(x)$; GN$_w$           - sigmoid; height-weighted GroupNorm"
     )
     text(ax, 6.50, 1.48, notation, size=5.6, ha="left", va="top")
 
@@ -494,9 +528,9 @@ def draw_bottom_panels(ax):
     mapping = (
         r"$\mathcal{G}_{\theta}: [\log_{10}T,\ v_x,\ v_y,\ v_z,$"
         "\n"
-        r"$\qquad \log_{10}n_e,\ \log_{10}\rho] \rightarrow \log_{10}\mathbf{n}^{\mathrm{NLTE}}$"
-        "\n\nOne channel per atomic level.\n"
-        r"Inference applies $10^x$ and writes $n^{\mathrm{NLTE}}$ [m$^{-3}$]."
+        r"$\qquad \log_{10}n_e,\ \log_{10}\rho] \rightarrow \widehat{\mathbf{n}}$"
+        "\n\nHead: $L+1$ channels, $\\delta_i$ per level and $u$\nfor the element; output layer in m$^{-3}$.\n"
+        r"Loss on standardised $\log_{10}\widehat{n}_i$."
     )
     text(ax, 11.05, 1.43, mapping, size=6.8, ha="left", va="top")
 
