@@ -1064,6 +1064,9 @@ def ffno_train_model(
     multi_gpu=False,
     debug_loss=False,
     lam_total=0.0,
+    lam_ratio=0.0,
+    lam_ion=0.0,
+    ions=None,
     patience=10,
     min_delta=1e-5,
     use_cosine=False,
@@ -1174,6 +1177,9 @@ def ffno_train_model(
         multi_gpu=multi_gpu,
         debug_loss=debug_loss,
         lam_total=lam_total,
+        lam_ratio=lam_ratio,
+        lam_ion=lam_ion,
+        ions=ions,
         mean_X=mean_X,
         std_X=std_X,
         mean_Y=mean_Y,
@@ -1295,7 +1301,9 @@ def ffno_train_model(
                 f"val={initial_val_loss:.6e} "
                 f"L1={initial_val_comp.get('data', 0):.3e} "
                 f"L2={initial_val_comp.get('source', 0):.3e} "
-                f"Ltot={initial_val_comp.get('total', 0):.3e}"
+                f"Ltot={initial_val_comp.get('total', 0):.3e} "
+                f"Lratio={initial_val_comp.get('ratio', 0):.3e} "
+                f"Lion={initial_val_comp.get('ion', 0):.3e}"
             )
 
         if validate_only:

@@ -36,7 +36,10 @@ class ModelBuilder:
         num_epochs=None,
         use_cosine=False,
         lr_min=1e-6,
-        lam_total=0.0
+        lam_total=0.0,
+        lam_ratio=0.0,
+        lam_ion=0.0,
+        ions=None
     ):
 
         if model == "FFNO3D":
@@ -66,6 +69,9 @@ class ModelBuilder:
 
         self.debug_loss = debug_loss
         self.lam_total = lam_total
+        self.lam_ratio = lam_ratio
+        self.lam_ion = lam_ion
+        self.ions = ions
 
         self.mean_X = mean_X
 
@@ -192,6 +198,9 @@ class ModelBuilder:
             atom_names=self.atom_names,
             debug=self.debug_loss,
             lam_total=self.lam_total,
+            lam_ratio=self.lam_ratio,
+            lam_ion=self.lam_ion,
+            ions=self.ions,
             mean_X=self.mean_X,
             std_X=self.std_X,
             mean_Y=self.mean_Y,

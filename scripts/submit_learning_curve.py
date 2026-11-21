@@ -35,7 +35,7 @@ ATOMS = ("H", "CA")
 # root: Olivia; stage, data_dir, solving_sets_from: eagle7 (learning_curve_eagle7.py)
 SETTINGS = ("root", "stage", "data_dir", "solving_sets_from", "atoms", "epochs", "nodes", "time", "train_flags",
             "held_out", "train", "val", "output_mode", "lam_total", "model_config", "trainselect", "predict",
-            "patience", "augment_z", "augment_z_min_depth", "resume_lr")
+            "patience", "augment_z", "augment_z_min_depth", "resume_lr", "lam_ratio", "lam_ion")
 OUTPUT_MODES = ("log_population", "level_fraction")   # config.MODEL_CONFIG output_mode (models/ffno_model.py)
 MODEL_SUBDIR = "training_FFNO3D_zscale_expand_lognlte"   # config.MODEL_DIR below the run directory
 
@@ -66,6 +66,8 @@ def experiment(parser, name):
     e = {key: section.get(key, "").strip() for key in SETTINGS}
     e["output_mode"] = e["output_mode"] or OUTPUT_MODES[0]
     e["lam_total"] = e["lam_total"] or "0"
+    e["lam_ratio"] = e["lam_ratio"] or "0"
+    e["lam_ion"] = e["lam_ion"] or "0"
     e["trainselect"] = e["trainselect"] or "1"
     e["predict"] = e["predict"] or "yes"
     e["patience"] = e["patience"] or "50"
@@ -84,8 +86,9 @@ def experiment(parser, name):
         raise ValueError(f"[{name}] predict = {e['predict']!r}: yes or no")
     if e["output_mode"] not in OUTPUT_MODES:
         raise ValueError(f"[{name}] output_mode = {e['output_mode']!r}: one of {', '.join(OUTPUT_MODES)}")
-    if float(e["lam_total"]) < 0:
-        raise ValueError(f"[{name}] lam_total = {e['lam_total']!r}: must be >= 0")
+    for key in ("lam_total", "lam_ratio", "lam_ion"):
+        if float(e[key]) < 0:
+            raise ValueError(f"[{name}] {key} = {e[key]!r}: must be >= 0")
     if e["model_config"]:
         try:
             overrides = json.loads(e["model_config"])
@@ -135,6 +138,7 @@ def model_env(e):
     """The environment that selects the experiment's head, loss and model_config overrides of MODEL_CONFIG (config.py);
     training and every prediction need it, since a checkpoint loads only into the model it was trained with."""
     return {"FFNOML_OUTPUT_MODE": e["output_mode"], "FFNOML_LAM_TOTAL": e["lam_total"],
+            "FFNOML_LAM_RATIO": e["lam_ratio"], "FFNOML_LAM_ION": e["lam_ion"],
             "FFNOML_MODEL_CONFIG": e["model_config"]}
 
 

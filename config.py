@@ -229,6 +229,7 @@ lines = [ATOM_CONFIG[a]["lines"] for a in ACTIVE_ATOMS]
 wave  = [ATOM_CONFIG[a]["wave"]  for a in ACTIVE_ATOMS]
 chi   = [ATOM_CONFIG[a]["chi"]   for a in ACTIVE_ATOMS]
 levels = [ATOM_CONFIG[a]["levels"]   for a in ACTIVE_ATOMS]
+ions = [ATOM_CONFIG[a]["multi3d_lte"]["ion"] for a in ACTIVE_ATOMS]
 
 MULTI3D_PRED_DATA = [
     {
@@ -335,6 +336,10 @@ FORCE_EXPAND_VALIDATION_BASELINE = True
 DEBUG_LOSS = False
 # FFNOML_LAM_TOTAL weighs the loss on each species' total, |log10 sum of levels pred - true| (loss/nlte_composite_loss.py)
 LAM_TOTAL = float(os.environ.get("FFNOML_LAM_TOTAL", 0.0))
+# FFNOML_LAM_RATIO weighs |log10 n_u/n_l pred - true| over every line of the atom (the line source functions) and
+# FFNOML_LAM_ION |log10 N_k/N_k+1 pred - true| over adjacent ionisation stages (the ionisation balance), in the same units
+LAM_RATIO = float(os.environ.get("FFNOML_LAM_RATIO", 0.0))
+LAM_ION = float(os.environ.get("FFNOML_LAM_ION", 0.0))
 DEBUG_DIST_INFERENCE = False
 
 # Dataset Params
