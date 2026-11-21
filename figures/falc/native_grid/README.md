@@ -49,3 +49,20 @@ The checkpoints are read from `FFNOMLTrainingWeights/{zaug,l004p}`.
 With l004p, the total Ca II population is about 50 times too low at 1.1–1.8 Mm. With zaug, the total Ca II population
 is within about 30% below 1.8 Mm. Its 8542 excess comes from n(4p ²P₃/₂)/n(3d ²D₅/₂), which is 1.1–1.5 times RH's at
 1.0–1.8 Mm.
+
+## With the population mesh (not in the paper)
+
+The same two falcz runs with `[population.mesh] enabled = true`, using the default mesh. It runs from −1 to 14 Mm, with
+20 km spacing up to 4.5 Mm that then stretches to 100 km. The network predicts on the mesh, and the populations are
+mapped back to FALC's 82 heights for the synthesis.
+
+- Configs: `forward_falc_mesh_necmp_falcz.toml` and `forward_falc_mesh_ca_falcz.toml`.
+- Runs: `RUNS=falcz PREFIX=mesh_necmp_ bash run_necmp.sh` and `RUNS=falcz PREFIX=mesh_ca_ bash run_ca.sh`.
+- Comparison: `compare_mesh.py` writes `falc_mesh_vs_native.png`.
+
+| Line | Run | Line core vs RH | rms (max) vs RH |
+|---|---|---|---|
+| H-alpha (±50 km/s) | own grid | +12.7% | 5.8% (12.9%) |
+| H-alpha (±50 km/s) | population mesh | −2.6% | 5.8% (13.3%, inner wings) |
+| Ca II 8542 (±25 km/s) | own grid | +38.0% | 17.1% (37.8%) |
+| Ca II 8542 (±25 km/s) | population mesh | +15.5% | 7.4% (15.5%) |
