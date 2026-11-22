@@ -1439,6 +1439,10 @@ def _distributed_full_forward(model, X, z_scale, dx, dy, *, collect_stats=False,
         fused = chunked_fuse_branches(blk, x, spec_eff, vert_eff, chunk_depth=depth_chunk(x, 12), normalize=False)
         fused = blk.act(blk._norm(blk.norm_fuse, fused, w))
         x1 = residual + blk.res_fused * fused
+        local = blk.z_local_update(residual, z_scale)
+        if local is not None:
+            x1 = x1 + local
+            del local
 
         pw = blk._norm(blk.norm_pw, blk.pw(x1), w)
         x2 = x1 + (blk.res_pw * pw_mask) * pw
@@ -2313,7 +2317,10 @@ def ffno_predict_populations_distributed_full(
                     torch.cuda.empty_cache()
                 fused = blk.act(blk._norm(blk.norm_fuse, fused, w))
                 x1 = residual + blk.res_fused * fused
-                del fused, residual, x
+                local = blk.z_local_update(residual, z_scale)
+                if local is not None:
+                    x1 = x1 + local
+                del fused, residual, x, local
 
                 debug_progress("full prediction", f"block {i + 1}/{len(model.blocks)} pointwise")
                 pw = blk._norm(blk.norm_pw, blk.pw(x1), w)

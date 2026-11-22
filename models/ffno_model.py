@@ -74,6 +74,33 @@ def depth_weights(z_scale):
     return w / w.mean(dim=2, keepdim=True).clamp_min(1e-12)
 
 
+def height_derivatives(x, z_scale):
+    """d x / dz and d2 x / dz2 of x [B, C, D, H, W] along each column's own heights z_scale [B, D, H, W] or
+    [B, 1, D, H, W]: the three-point finite differences of a non-uniform grid, h- = z_j - z_(j-1), h+ = z_(j+1) - z_j,
+        x'  = (h-^2 x_(j+1) - h+^2 x_(j-1) + (h+^2 - h-^2) x_j) / (h- h+ (h- + h+))
+        x'' = 2 (h- x_(j+1) - (h- + h+) x_j + h+ x_(j-1)) / (h- h+ (h- + h+)),
+    exact for a quadratic; at the end levels the one-sided first difference and the neighbour's x''. Derivatives with
+    respect to z, whichever way the levels run; zero for a single level."""
+    if z_scale.ndim == 4:
+        z_scale = z_scale.unsqueeze(1)
+    if x.shape[2] < 3:
+        d1 = torch.zeros_like(x)
+        if x.shape[2] == 2:
+            d1[:] = (x[:, :, 1:] - x[:, :, :1]) / (z_scale[:, :, 1:] - z_scale[:, :, :1])
+        return d1, torch.zeros_like(x)
+    hm = z_scale[:, :, 1:-1] - z_scale[:, :, :-2]
+    hp = z_scale[:, :, 2:] - z_scale[:, :, 1:-1]
+    den = hm * hp * (hm + hp)
+    xm, x0, xp = x[:, :, :-2], x[:, :, 1:-1], x[:, :, 2:]
+    d1_in = (hm * hm * xp - hp * hp * xm + (hp * hp - hm * hm) * x0) / den
+    d2_in = 2.0 * (hm * xp - (hm + hp) * x0 + hp * xm) / den
+    d1_top = (x[:, :, 1:2] - x[:, :, :1]) / (z_scale[:, :, 1:2] - z_scale[:, :, :1])
+    d1_bot = (x[:, :, -1:] - x[:, :, -2:-1]) / (z_scale[:, :, -1:] - z_scale[:, :, -2:-1])
+    d1 = torch.cat([d1_top, d1_in, d1_bot], dim=2)
+    d2 = torch.cat([d2_in[:, :, :1], d2_in, d2_in[:, :, -1:]], dim=2)
+    return d1, d2
+
+
 class DepthWeightedGroupNorm(nn.GroupNorm):
     """GroupNorm whose statistics weight each level by depth_weights, so that they are means over height and not over
     levels; without weights, nn.GroupNorm. The same parameters as nn.GroupNorm."""
@@ -782,10 +809,13 @@ class FFNOBlock3dBalanced(nn.Module):
         z_min_wavelength=0.0,
         z_feature_wavelength=0.0,
         z_column_cutoff=False,
+        z_local_derivatives=False,
+        z_local_length=0.1,
     ):
         super().__init__()
         self.open_side_paths = bool(open_side_paths)
         self.vertical_operator = bool(vertical_operator)
+        self.z_local_derivatives = bool(z_local_derivatives)
         norm = _wgn if self.vertical_operator else _gn
 
         self.spec = SpectralConv2dFull(
@@ -854,6 +884,18 @@ class FFNOBlock3dBalanced(nn.Module):
         self.res_pw = nn.Parameter(torch.tensor([side]))
         self.res_mlp = nn.Parameter(torch.tensor([side]))
 
+        if self.z_local_derivatives:
+            # the local height path: a 1x1 mix of [x, l dx/dz, l^2 d2x/dz2] on the block input, added to the fused
+            # update; l = z_local_length (z_scale units, Mm) is a fixed physical length, so the same weights mean the
+            # same slope and curvature on any vertical grid. It starts at zero: the block starts as the one without it.
+            if not self.vertical_operator:
+                raise ValueError("z_local_derivatives needs vertical_operator (z_scale in physical units)")
+            if z_local_length <= 0:
+                raise ValueError("z_local_length must be > 0")
+            self.z_local_length = float(z_local_length)
+            self.z_local_mix = nn.Conv3d(3 * width, width, 1, bias=False)
+            nn.init.zeros_(self.z_local_mix.weight)
+
         self.act = nn.GELU()
         self.spec_drop = nn.Dropout(spec_dropout) if spec_dropout > 0 else nn.Identity()
         self.vert_drop = (
@@ -863,6 +905,15 @@ class FFNOBlock3dBalanced(nn.Module):
     def mlp_activation(self, y):
         """The MLP path's output nonlinearity (shared with the inference paths): tanh, or none with open_side_paths."""
         return y if self.open_side_paths else torch.tanh(y)
+
+    def z_local_update(self, x, z_scale):
+        """The local height path's update from the block input x [B, C, D, H, W] (z_local_derivatives), or None. Each
+        column on its own: the inference paths may run it on any set of whole columns."""
+        if not self.z_local_derivatives:
+            return None
+        d1, d2 = height_derivatives(x, z_scale)
+        l = self.z_local_length
+        return self.z_local_mix(torch.cat([x, l * d1, (l * l) * d2], dim=1))
 
     @staticmethod
     def _norm(module, x, w):
@@ -891,6 +942,9 @@ class FFNOBlock3dBalanced(nn.Module):
             fused, _, _, _, _ = self._fuse_branches(x, spec, vert, w)
 
             x1 = residual + self.res_fused * fused
+            local = self.z_local_update(residual, z_scale)
+            if local is not None:
+                x1 = x1 + local
 
             pw = self._norm(self.norm_pw, self.pw(x1), w)
             x2 = x1 + self.res_pw * pw
@@ -919,6 +973,9 @@ class FFNOBlock3dBalanced(nn.Module):
         )
 
         x1 = residual + self.res_fused * fused
+        local = self.z_local_update(residual, z_scale)
+        if local is not None:
+            x1 = x1 + local
 
         pw = self._norm(self.norm_pw, self.pw(x1), w)
         x2 = x1 + (self.res_pw * pw_mask) * pw
@@ -950,6 +1007,8 @@ class FFNOBlock3dBalanced(nn.Module):
                 stats["fused_update"] = (x1 - residual).abs().mean().item()
                 stats["pw_update"] = (x2 - x1).abs().mean().item()
                 stats["mlp_update"] = (out - x2).abs().mean().item()
+                if local is not None:
+                    stats["z_local_update"] = local.abs().mean().item()
 
             return out, stats
 
@@ -982,6 +1041,8 @@ class FFNO3D(nn.Module):
         z_min_wavelength=0.0,
         z_feature_wavelength=0.0,
         z_column_cutoff=False,
+        z_local_derivatives=False,
+        z_local_length=0.1,
         output_mode="log_population",
         species=None,
         rho_channel=5,
@@ -1012,6 +1073,9 @@ class FFNO3D(nn.Module):
         # mixing too; the fusion has no 3x3x3 convolution; every GroupNorm, the lift's included, weights levels by height.
         # z_feature_wavelength (Mm) puts its frequency MLPs on a fixed physical wavenumber scale, z_column_cutoff keeps
         # in each column only the wavenumbers its grid resolves (HeightSpectralConv); 0 and false: the first fno runs.
+        # z_local_derivatives (vertical_operator): every block adds a local height path, a 1x1 mix of its input with
+        # the input's slope and curvature in height on each column's own heights (scaled by z_local_length, Mm),
+        # starting at zero (FFNOBlock3dBalanced.z_local_update); off: the model without it.
         if output_mode not in ("log_population", "level_fraction"):
             raise ValueError(f"unknown output_mode {output_mode!r}")
         self.output_mode = output_mode
@@ -1075,6 +1139,8 @@ class FFNO3D(nn.Module):
                 z_min_wavelength=z_min_wavelength,
                 z_feature_wavelength=z_feature_wavelength,
                 z_column_cutoff=z_column_cutoff,
+                z_local_derivatives=z_local_derivatives,
+                z_local_length=z_local_length,
                 open_side_paths=open_side_paths,
             )
             for layer_idx in range(n_layers)
