@@ -257,17 +257,26 @@ class BatchedFFNOBackend:
         template = next(iter(self.pool.replicas.values())).blocks[index]
         local = None
         if template.z_local_derivatives:
-            # the local height path, on whole columns from the block input, before x takes the fused update
-            def local_columns(replica, device, a, b):
-                y = block(replica).z_local_update(x[:, :, a:b].to(device)[None], z[:, a:b].to(device)[None])
-                local[:, :, a:b] = y[0].cpu()
+            # the local height path from the block input, before x takes the fused update: the derivatives on whole
+            # columns, their norm over the volume, then the mix by levels, written over the first C channels
+            channels = x.shape[0]
 
-            local = self._new_hidden(shape)
-            self.pool.run(rows, self.chunk_rows, local_columns)
+            def derivative_columns(replica, device, a, b):
+                d = block(replica).z_local_derivatives_of(x[:, :, a:b].to(device)[None], z[:, a:b].to(device)[None])
+                local[:, :, a:b] = d[0].cpu()
+
+            def mix(replica, device, a, b):
+                y = block(replica).z_local_mix(torch.cat([x[:, a:b], local[:, a:b]]).to(device)[None])
+                local[:channels, a:b] = y[0].cpu()
+
+            local = x.new_empty((2 * channels, *shape))
+            self.pool.run(rows, self.chunk_rows, derivative_columns)
+            self._groupnorm(local, lambda replica: block(replica).norm_local)
+            self.pool.run(depth, self.chunk_depth, mix)
         x.add_(fused, alpha=float(template.res_fused.item()))
         del fused
         if local is not None:
-            x.add_(local)
+            x.add_(local[:x.shape[0]])
             del local
 
         pointwise = self._map_depth(self._new_hidden(shape), x, lambda replica: block(replica).pw)

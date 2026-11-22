@@ -885,14 +885,19 @@ class FFNOBlock3dBalanced(nn.Module):
         self.res_mlp = nn.Parameter(torch.tensor([side]))
 
         if self.z_local_derivatives:
-            # the local height path: a 1x1 mix of [x, l dx/dz, l^2 d2x/dz2] on the block input, added to the fused
-            # update; l = z_local_length (z_scale units, Mm) is a fixed physical length, so the same weights mean the
-            # same slope and curvature on any vertical grid. It starts at zero: the block starts as the one without it.
+            # the local height path: a 1x1 mix of [x, norm(l dx/dz, l^2 d2x/dz2)] on the block input, added to the
+            # fused update. The slope and curvature are standardised by a GroupNorm of the block's kind (its groups
+            # keep the two apart), so they enter at the scale of the data, whatever the grid spacing; l =
+            # z_local_length (z_scale units, Mm) only scales them before the norm and so changes nothing. It starts at
+            # zero: the block starts as the one without it.
             if not self.vertical_operator:
                 raise ValueError("z_local_derivatives needs vertical_operator (z_scale in physical units)")
             if z_local_length <= 0:
                 raise ValueError("z_local_length must be > 0")
             self.z_local_length = float(z_local_length)
+            # eps far below any derivative variance, so that the norm divides z_local_length out exactly
+            self.norm_local = norm(2 * width)
+            self.norm_local.eps = 1e-10
             self.z_local_mix = nn.Conv3d(3 * width, width, 1, bias=False)
             nn.init.zeros_(self.z_local_mix.weight)
 
@@ -906,14 +911,19 @@ class FFNOBlock3dBalanced(nn.Module):
         """The MLP path's output nonlinearity (shared with the inference paths): tanh, or none with open_side_paths."""
         return y if self.open_side_paths else torch.tanh(y)
 
-    def z_local_update(self, x, z_scale):
-        """The local height path's update from the block input x [B, C, D, H, W] (z_local_derivatives), or None. Each
-        column on its own: the inference paths may run it on any set of whole columns."""
-        if not self.z_local_derivatives:
-            return None
+    def z_local_derivatives_of(self, x, z_scale):
+        """[l dx/dz, l^2 d2x/dz2] of the block input x [B, C, D, H, W], before their norm: each column on its own."""
         d1, d2 = height_derivatives(x, z_scale)
         l = self.z_local_length
-        return self.z_local_mix(torch.cat([x, l * d1, (l * l) * d2], dim=1))
+        return torch.cat([l * d1, (l * l) * d2], dim=1)
+
+    def z_local_update(self, x, z_scale, w=None):
+        """The local height path's update from the block input x [B, C, D, H, W] (z_local_derivatives), or None; w:
+        depth_weights for the norm, as for the block's other GroupNorms."""
+        if not self.z_local_derivatives:
+            return None
+        d = self._norm(self.norm_local, self.z_local_derivatives_of(x, z_scale), w)
+        return self.z_local_mix(torch.cat([x, d], dim=1))
 
     @staticmethod
     def _norm(module, x, w):
@@ -942,7 +952,7 @@ class FFNOBlock3dBalanced(nn.Module):
             fused, _, _, _, _ = self._fuse_branches(x, spec, vert, w)
 
             x1 = residual + self.res_fused * fused
-            local = self.z_local_update(residual, z_scale)
+            local = self.z_local_update(residual, z_scale, w)
             if local is not None:
                 x1 = x1 + local
 
@@ -973,7 +983,7 @@ class FFNOBlock3dBalanced(nn.Module):
         )
 
         x1 = residual + self.res_fused * fused
-        local = self.z_local_update(residual, z_scale)
+        local = self.z_local_update(residual, z_scale, w)
         if local is not None:
             x1 = x1 + local
 
@@ -1074,7 +1084,7 @@ class FFNO3D(nn.Module):
         # z_feature_wavelength (Mm) puts its frequency MLPs on a fixed physical wavenumber scale, z_column_cutoff keeps
         # in each column only the wavenumbers its grid resolves (HeightSpectralConv); 0 and false: the first fno runs.
         # z_local_derivatives (vertical_operator): every block adds a local height path, a 1x1 mix of its input with
-        # the input's slope and curvature in height on each column's own heights (scaled by z_local_length, Mm),
+        # the input's slope and curvature in height on each column's own heights, standardised by a GroupNorm,
         # starting at zero (FFNOBlock3dBalanced.z_local_update); off: the model without it.
         if output_mode not in ("log_population", "level_fraction"):
             raise ValueError(f"unknown output_mode {output_mode!r}")

@@ -1,5 +1,5 @@
 """FFNO3D(z_local_derivatives=True): every block adds a local height path, a 1x1 mix of the block input with its slope
-and curvature in height (height_derivatives) on each column's own heights. The finite differences are exact for a
+and curvature in height (height_derivatives) on each column's own heights, standardised by a GroupNorm. The finite differences are exact for a
 quadratic on non-uniform grids and converge on refinement; at zero initialisation the model equals the one without the
 path; trained, the same atmosphere on different vertical grids gives the same populations at the same heights; the
 batched backend and the FSDP route equal forward."""
@@ -30,7 +30,7 @@ def columns(z, f):
 def randomise_local(model, std=0.05):
     with torch.no_grad():
         for name, p in model.named_parameters():
-            if "z_local_mix" in name:
+            if "z_local_mix" in name or "norm_local" in name:
                 p.normal_(std=std)
 
 
@@ -85,10 +85,38 @@ class LocalHeightPath(unittest.TestCase):
         on = FFNO3D(**CONFIG, **LOCAL).eval()
         missing, unexpected = on.load_state_dict(off.state_dict(), strict=False)
         self.assertEqual(unexpected, [])
-        self.assertTrue(missing and all("z_local_mix" in k for k in missing), missing)
+        self.assertTrue(missing and all("z_local_mix" in k or "norm_local" in k for k in missing), missing)
         x, z = atmosphere(stretched(29))
         with torch.no_grad():
             self.assertEqual((on(x, z, 48e3, 48e3) - off(x, z, 48e3, 48e3)).abs().max().item(), 0.0)
+
+    def test_the_length_does_not_matter(self):
+        """the norm standardises the derivatives, so z_local_length only scales them before it"""
+        torch.manual_seed(6)
+        a = FFNO3D(**CONFIG, **LOCAL).eval()
+        randomise_local(a)
+        b = FFNO3D(**CONFIG, **dict(LOCAL, z_local_length=1.0)).eval()
+        b.load_state_dict(a.state_dict())
+        x, z = atmosphere(stretched(29))
+        with torch.no_grad():
+            ya, yb = a(x, z, 48e3, 48e3), b(x, z, 48e3, 48e3)
+        self.assertLess((ya - yb).abs().max().item(), 1e-4)
+
+    def test_derivatives_enter_at_unit_scale(self):
+        """the derivative channels leave the norm with unit spread on a coarse and a fine grid alike"""
+        from models.ffno_model import depth_weights
+        torch.manual_seed(7)
+        model = FFNO3D(**CONFIG, **LOCAL).eval()
+        blk = model.blocks[0]
+        for depth in (31, 241):
+            x, z = atmosphere(stretched(depth))
+            with torch.no_grad():
+                h = model._run_lift(x, z)
+                normed = blk._norm(blk.norm_local, blk.z_local_derivatives_of(h, z), depth_weights(z))
+            w = depth_weights(z)
+            for part in normed.chunk(2, dim=1):
+                spread = ((w * part ** 2).sum() / (w.sum() * part.shape[1])).sqrt().item()
+                self.assertLess(abs(spread - 1.0), 0.05, (depth, spread))
 
     def test_switch_off_has_no_new_parameters(self):
         names = [k for k in FFNO3D(**CONFIG, **OPERATOR).state_dict() if "z_local" in k]
