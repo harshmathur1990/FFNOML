@@ -57,7 +57,7 @@ def multi3d_nstar_fractions(t, ne_cm3, atom):
 def model_for(species, seed=3, zero_delta=False):
     torch.manual_seed(seed)
     out = sum(s["levels"] for s in species)
-    model = FFNO3D(out_channels=out, output_mode="level_fraction", species=species, **BASE).eval()
+    model = FFNO3D(out_channels=out, species=species, **BASE).eval()
     model.set_normalization(MEAN_X, STD_X, np.linspace(10.0, 15.0, out), np.linspace(1.0, 2.0, out))
     if zero_delta:
         with torch.no_grad():
@@ -118,7 +118,7 @@ class ZeroDeltaIsMulti3dLTE(unittest.TestCase):
 class Configuration(unittest.TestCase):
     def test_needs_the_atom_data(self):
         with self.assertRaises(ValueError):
-            FFNO3D(out_channels=6, output_mode="level_fraction", species=[H], **BASE)
+            FFNO3D(out_channels=6, species=[H], **BASE)
 
     def test_adds_no_parameters_or_buffers(self):
         model = model_for([dict(H, multi3d_lte=H_LTE)])
@@ -126,7 +126,7 @@ class Configuration(unittest.TestCase):
                          ["log10_particle_mass", "mean_X", "mean_Y", "std_X", "std_Y"])
 
     def test_config_gives_the_atom_data(self):
-        env = dict(os.environ, FFNOML_OUTPUT_MODE="level_fraction", FFNOML_ACTIVE_ATOMS="H,CA")
+        env = dict(os.environ, FFNOML_ACTIVE_ATOMS="H,CA")
         env.pop("FFNOML_MODEL_CONFIG", None)
         out = subprocess.run([sys.executable, "-c", "import json, config; print(json.dumps(config.MODEL_CONFIG['species']))"],
                              cwd=REPO, env=env, check=True, capture_output=True, text=True).stdout
@@ -167,9 +167,9 @@ class BatchedBackend(unittest.TestCase):
             stats = {k: getattr(model, k).numpy() for k in ("mean_X", "std_X", "mean_Y", "std_Y")}
             torch.save(dict(model_state=model.state_dict(), epoch=1, io_metadata=dict(Cin=6, Cout=6),
                             normalization_stats=stats), path)
-            config = dict(out_channels=6, output_mode="level_fraction", species=species, **BASE)
+            config = dict(out_channels=6, species=species, **BASE)
             backend = BatchedFFNOBackend(path, lambda Cin, Cout, device: FFNO3D(**config), devices=["cpu"],
-                                         log=lambda message: None, chunk_depth=5, chunk_rows=3, vertical_chunk=7)
+                                         log=lambda message: None, chunk_depth=5, chunk_rows=3)
             x, z = solar_inputs()
             features = x[0] * torch.as_tensor(STD_X)[:, None, None, None] + torch.as_tensor(MEAN_X)[:, None, None, None]
             got = backend.predict_log10(features.numpy(), z[0].numpy(), 48e3, 48e3)

@@ -5,16 +5,13 @@ Not tiling: every operation of FFNO3D is either local or factorizes, so it can b
     kernel-1 layers (lift, gates, post, pw, mlp, head)   any batch
     2D FFT and spectral multiply                         depth planes: each plane is already independent; the
                                                          multiply also over k_y rows, each frequency's own mixing
-    vertical branch                                      columns: its inner GroupNorms are per column
-    3x3x3 depthwise convolution in the fusion            depth, with a one-cell overlap
-    GroupNorm over the volume                            streaming sum and sum of squares, applied in a second pass
+    vertical branch (HeightSpectralConv)                 rows of columns: it acts on each column alone
+    GroupNorm over the volume                            streaming, height-weighted sum and sum of squares, applied in
+                                                         a second pass
 
 Hidden states stay in host RAM (22 GB each for 504 x 504 x 452, four at a time), and batches go through the GPUs that are
 visible. There is no FSDP and no collective, and the checkpoint's own layers do the work. VJPs and JVPs are not available.
 
-`vertical_norm_slabs` reproduces one property of the FSDP routes: `ProgressVerticalWrapper` leaves the vertical branch's
-`out_gn` as a plain GroupNorm, so there its statistics are per H slab and depend on the number of GPUs. 1 is the single
-volume statistic of `FFNO3D.forward`; N equals an FSDP run on N GPUs.
 """
 
 import copy
@@ -24,9 +21,8 @@ import time
 
 import numpy as np
 import torch
-import torch.nn as nn
 
-from distributed_inference import chunked_fuse_branches, partition_range
+from distributed_inference import chunked_fuse_branches
 from ffno_fsdp_runtime import LOG10_POPULATION_LIMIT, Z_METRES_PER_MODEL_UNIT, VELOCITY_M_S_PER_MODEL_UNIT, linear_populations
 from models.ffno_model import _to_spacing_value, depth_weights
 from train_utils import get_checkpoint_io_metadata, get_checkpoint_normalization, load_checkpoint
@@ -62,17 +58,8 @@ class _GPUPool:
     """One model replica per visible GPU, and threads that take index ranges from a shared queue. A range that runs out
     of GPU memory is split in two and queued again; its results are written only once it has succeeded."""
 
-    def __init__(self, model, devices, vertical_chunk):
-        self.replicas = {}
-        for device in devices:
-            replica = copy.deepcopy(model).eval()
-            for block in replica.blocks:
-                if getattr(block, "vertical_operator", False):
-                    continue                                   # HeightSpectralConv: no inner GroupNorm, no column loop
-                block.batched_out_gn = block.vertical.out_gn  # applied over the volume or the slabs by _groupnorm
-                block.vertical.out_gn = nn.Identity()
-                block.vertical.chunk = vertical_chunk
-            self.replicas[device] = replica.to(device)
+    def __init__(self, model, devices):
+        self.replicas = {device: copy.deepcopy(model).eval().to(device) for device in devices}
         self.splits = 0
 
     def run(self, total, step, work):
@@ -129,8 +116,7 @@ class _GPUPool:
 class BatchedFFNOBackend:
     """A checkpoint's FFNO3D on the visible GPUs, predicting a whole cube of any size that fits in host RAM."""
 
-    def __init__(self, checkpoint_path, factory, *, devices=None, chunk_depth=16, chunk_rows=16, vertical_chunk=1024,
-                 vertical_norm_slabs=1, log=print):
+    def __init__(self, checkpoint_path, factory, *, devices=None, chunk_depth=16, chunk_rows=16, log=print):
         checkpoint = load_checkpoint(checkpoint_path, map_location="cpu")
         normalization = get_checkpoint_normalization(checkpoint)
         metadata = get_checkpoint_io_metadata(checkpoint)
@@ -152,9 +138,8 @@ class BatchedFFNOBackend:
         self.devices = list(devices)
         self.chunk_depth = int(chunk_depth)
         self.chunk_rows = int(chunk_rows)
-        self.vertical_norm_slabs = int(vertical_norm_slabs)
-        self.weights = None                    # depth_weights of the cube being predicted, for a vertical_operator model
-        self.pool = _GPUPool(model, self.devices, int(vertical_chunk))
+        self.weights = None                    # depth_weights of the cube being predicted
+        self.pool = _GPUPool(model, self.devices)
         self.width = model.lift[0].out_channels
         self.n_blocks = len(model.blocks)
         self.log = log
@@ -173,9 +158,8 @@ class BatchedFFNOBackend:
 
     def _groupnorm(self, values, norm, post=None):
         """`norm(values)` in place, with `norm`'s statistics over all of `values` (C, D, H, W): as `DistributedGroupNorm`,
-        with the sums accumulated in double precision. `post` (the replica, the tensor) follows on the same batches. For a
-        vertical_operator model the statistics weight each level by `self.weights` (depth_weights, (D, H, W)), as
-        DepthWeightedGroupNorm does."""
+        with the sums accumulated in double precision. `post` (the replica, the tensor) follows on the same batches. The
+        statistics weight each level by `self.weights` (depth_weights, (D, H, W)), as DepthWeightedGroupNorm does."""
         weights = self.weights
         channels, depth = values.shape[:2]
         groups = norm(next(iter(self.pool.replicas.values()))).num_groups
@@ -186,7 +170,7 @@ class BatchedFFNOBackend:
 
         def accumulate(replica, device, a, b):
             v = values[:, a:b].to(device).double().reshape(groups, per_group, b - a, *values.shape[2:])
-            wv = v if weights is None else v * weights[a:b].to(device).double()
+            wv = v * weights[a:b].to(device).double()
             total = wv.sum(dim=(1, 2, 3, 4)).cpu()
             square = (wv * v).sum(dim=(1, 2, 3, 4)).cpu()
             with lock:
@@ -194,8 +178,7 @@ class BatchedFFNOBackend:
                 squares.add_(square)
 
         self.pool.run(depth, self.chunk_depth, accumulate)
-        count = float(per_group * (depth * values.shape[2] * values.shape[3] if weights is None
-                                   else weights.double().sum()))
+        count = float(per_group * weights.double().sum())
         mean = totals / count
         variance = (squares / count - mean * mean).clamp_min(0.0)
 
@@ -239,16 +222,12 @@ class BatchedFFNOBackend:
 
         vert = self._new_hidden(shape)
         self.pool.run(rows, self.chunk_rows, vertical_columns)
-        for slab in range(self.vertical_norm_slabs if self.weights is None else 0):
-            h0, h1 = partition_range(rows, slab, self.vertical_norm_slabs)
-            self._groupnorm(vert[:, :, h0:h1], lambda replica: block(replica).batched_out_gn)
         self._groupnorm(vert, lambda replica: block(replica).norm_vert, act)
 
         def fusion(replica, device, a, b):
-            h0, h1 = max(0, a - 1), min(depth, b + 1)
-            y = chunked_fuse_branches(block(replica), x[:, h0:h1].to(device)[None], spec[:, h0:h1].to(device)[None],
-                                      vert[:, h0:h1].to(device)[None], chunk_depth=h1 - h0, normalize=False)
-            fused[:, a:b] = y[0, :, a - h0:b - h0].cpu()
+            y = chunked_fuse_branches(block(replica), x[:, a:b].to(device)[None], spec[:, a:b].to(device)[None],
+                                      vert[:, a:b].to(device)[None], chunk_depth=b - a, normalize=False)
+            fused[:, a:b] = y[0].cpu()
 
         fused = self._new_hidden(shape)
         self.pool.run(depth, self.chunk_depth, fusion)
@@ -264,7 +243,7 @@ class BatchedFFNOBackend:
         del pointwise
 
         mlp = self._map_depth(self._new_hidden(shape), x, lambda replica: block(replica).mlp)
-        self._groupnorm(mlp, lambda replica: block(replica).norm_mlp, lambda replica, y: block(replica).mlp_activation(y))
+        self._groupnorm(mlp, lambda replica: block(replica).norm_mlp)
         x.add_(mlp, alpha=float(template.res_mlp.item()))
         del mlp
         return x
@@ -286,15 +265,11 @@ class BatchedFFNOBackend:
         shape = (depth, rows, columns)
         self.pool.splits = 0
         normalized = (features - self.mean_x) / self.std_x
-        operator = getattr(next(iter(self.pool.replicas.values())), "vertical_operator", False)
-        self.weights = depth_weights(z[None, None])[0, 0] if operator else None
+        self.weights = depth_weights(z[None, None])[0, 0]
 
         x = self._new_hidden(shape)
         self._map_depth(x, normalized, lambda replica: replica.lift[0])
-        # the level-fraction head takes the species totals from the normalised rho channel
-        level_fraction = getattr(next(iter(self.pool.replicas.values())), "output_mode", None) == "level_fraction"
-        inputs = normalized if level_fraction else None
-        del normalized
+        inputs = normalized                    # the level-fraction head takes rho, T and ne from them
         self._groupnorm(x, lambda replica: replica.lift[1], lambda replica, y: replica.lift[2](y))
         self.log(f"BATCHED lift done {time.time() - started:.0f} s")
         for index in range(self.n_blocks):
@@ -305,14 +280,12 @@ class BatchedFFNOBackend:
 
         def head(replica, device, a, b):
             y = replica.proj2(replica.act(replica.proj1(x[:, a:b].to(device)[None])))
-            if inputs is not None:
-                y = replica.head_output(y, inputs[:, a:b].to(device)[None])
-            y = y[0]
+            y = replica.head_output(y, inputs[:, a:b].to(device)[None])[0]
             output[:, a:b] = (y * self.std_y.to(device) + self.mean_y.to(device)).cpu()
 
         self.pool.run(depth, self.chunk_depth, head)
         self.log(f"BATCHED prediction {rows}x{columns}x{depth}: {time.time() - started:.0f} s on {len(self.devices)} GPUs, "
-                 f"{self.pool.splits} batches split, vertical_norm_slabs={self.vertical_norm_slabs}")
+                 f"{self.pool.splits} batches split")
         return output
 
     def predict_si(self, features, z_m, dx, dy):

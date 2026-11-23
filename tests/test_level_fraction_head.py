@@ -1,8 +1,8 @@
-"""The level-fraction head (FFNO3D output_mode='level_fraction'): log10 n_i = log10(rho / mass) + s + log10 softmax(z)_i,
+"""The level-fraction head of FFNO3D: log10 n_i = log10(rho / mass) + s + log10 softmax(z)_i,
 with z_i = ln f*_i(T, ne) + delta_i (tests/test_departure_coefficients.py checks f*).
 It reproduces any positive levels whose total lies within total_bound dex of rho / mass, including totals far from it;
-the total starts at rho / mass; gradients reach rho; the batched backend gives what forward gives; and the default
-log_population model is unchanged."""
+the total starts at rho / mass; gradients reach rho; the batched backend gives what forward gives; and the model
+needs its species."""
 import math
 import os
 import sys
@@ -27,7 +27,7 @@ STD_X = np.array([0.4, 5.0, 5.0, 5.0, 2.0, 2.5], np.float32)
 def fraction_model(species, seed=3):
     torch.manual_seed(seed)
     out = sum(s["levels"] for s in species)
-    model = FFNO3D(out_channels=out, output_mode="level_fraction", species=species, **BASE).eval()
+    model = FFNO3D(out_channels=out, species=species, **BASE).eval()
     model.set_normalization(MEAN_X, STD_X, np.linspace(10.0, 15.0, out), np.linspace(1.0, 2.0, out))
     return model
 
@@ -119,9 +119,9 @@ class LevelFractionHead(unittest.TestCase):
             stats = {k: getattr(model, k).numpy() for k in ("mean_X", "std_X", "mean_Y", "std_Y")}
             torch.save(dict(model_state=model.state_dict(), epoch=1, io_metadata=dict(Cin=6, Cout=6),
                             normalization_stats=stats), path)
-            config = dict(out_channels=6, output_mode="level_fraction", species=[H], **BASE)
+            config = dict(out_channels=6, species=[H], **BASE)
             backend = BatchedFFNOBackend(path, lambda Cin, Cout, device: FFNO3D(**config), devices=["cpu"],
-                                         log=lambda message: None, chunk_depth=5, chunk_rows=3, vertical_chunk=7)
+                                         log=lambda message: None, chunk_depth=5, chunk_rows=3)
             x, z = inputs()
             features = x[0] * torch.as_tensor(STD_X)[:, None, None, None] + torch.as_tensor(MEAN_X)[:, None, None, None]
             got = backend.predict_log10(features.numpy(), z[0].numpy(), 48e3, 48e3)
@@ -129,22 +129,13 @@ class LevelFractionHead(unittest.TestCase):
             expected = log10_populations(model, x, z)[0]
         self.assertLess((got - expected).abs().max().item(), 2e-4)
 
-    def test_log_population_default_is_unchanged(self):
-        torch.manual_seed(3)
-        model = FFNO3D(out_channels=6, **BASE).eval()
-        self.assertEqual(model.output_mode, "log_population")
-        self.assertEqual(model.proj2.out_channels, 6)
-        self.assertFalse(any(k in model.state_dict() for k in ("mean_X", "std_X", "mean_Y", "std_Y", "log10_particle_mass")))
-        model.set_normalization(MEAN_X, STD_X, np.zeros(6), np.ones(6))
-        x, z = inputs()
-        with torch.no_grad():
-            y = model(x, z, 48e3, 48e3)
-            head = model._run_head(model.blocks[1](model.blocks[0](model.lift(x), z, 48e3, 48e3), z, 48e3, 48e3))
-        self.assertTrue(torch.equal(y, head))
+    def test_needs_species(self):
+        with self.assertRaises(ValueError):
+            FFNO3D(out_channels=6, **BASE)
 
     def test_species_must_match_out_channels(self):
         with self.assertRaises(ValueError):
-            FFNO3D(out_channels=12, output_mode="level_fraction", species=[H], **BASE)
+            FFNO3D(out_channels=12, species=[H], **BASE)
 
 
 if __name__ == "__main__":

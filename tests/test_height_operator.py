@@ -1,7 +1,7 @@
-"""FFNO3D(vertical_operator=True): a neural operator in x, y and z. The vertical branch is HeightSpectralConv, every
-GroupNorm weights levels by height and nothing counts grid points, so the same atmosphere sampled on different vertical
-grids gives the same populations at the same heights. The batched backend and the FSDP route equal forward. Columns
-taller than half of z_reference_length take a longer periodic length."""
+"""FFNO3D, a neural operator in x, y and z: the vertical branch is HeightSpectralConv, every GroupNorm weights levels by
+height and nothing counts grid points, so the same atmosphere sampled on different vertical grids gives the same
+populations at the same heights. The batched backend and the FSDP route equal forward. Columns taller than half of
+z_reference_length take a longer periodic length. The final model's checkpoints load into config.py's defaults."""
 import os
 import sys
 import tempfile
@@ -12,14 +12,26 @@ import torch
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
+from config import ATOM_CONFIG  # noqa: E402
 from distributed_inference import ChunkedHeightSpectralConv, enable_distributed_inference  # noqa: E402
 from ffno_batched_backend import BatchedFFNOBackend  # noqa: E402
 from models.ffno_model import (FFNO3D, DepthWeightedGroupNorm, HeightSpectralConv, height_fourier_weights,  # noqa: E402
                                trapezoid_weights)
 
+H = {k: ATOM_CONFIG["H"][k] for k in ("levels", "log10_particle_mass", "multi3d_lte")}
 CONFIG = dict(in_channels=6, out_channels=6, width=16, n_layers=2, hidden_spectral=16, hidden_vertical=16,
-              spec_dropout=0.0, vertical_dropout=0.0, dropout=0.0)
-OPERATOR = dict(vertical_operator=True, z_reference_length=40.0, z_min_wavelength=0.3, freq_mix_rank=4)
+              spec_dropout=0.0, vertical_dropout=0.0, dropout=0.0, species=[H])
+OPERATOR = dict(z_reference_length=40.0, z_min_wavelength=0.3, z_feature_wavelength=0.3, freq_mix_rank=4)
+# the head's T, ne and rho on solar scales; the outputs stay normalised to themselves (mean 0, std 1)
+MEAN_X = np.array([3.8, 0.0, 0.0, 0.0, 16.0, -7.0], np.float32)
+STD_X = np.array([0.4, 5.0, 5.0, 5.0, 2.0, 2.5], np.float32)
+FINAL = "/mn/stornext/d9/data/harshm/FFNOML/training_FFNO3D_zscale_expand_lognlte_z_aug"
+
+
+def model_of(**overrides):
+    model = FFNO3D(**{**CONFIG, **OPERATOR, **overrides})
+    model.set_normalization(MEAN_X, STD_X, np.zeros(6), np.ones(6))
+    return model
 
 
 def uniform(depth):
@@ -71,22 +83,17 @@ def grid_difference(model):
     return worst
 
 
-PHYSICAL = dict(OPERATOR, z_feature_wavelength=0.3, z_column_cutoff=True)
-
-
 class PhysicalWavenumbers(unittest.TestCase):
-    """z_feature_wavelength and z_column_cutoff: W(k) a function of the physical wavenumber whatever the band limit,
-    and in each column only the wavenumbers its grid resolves."""
+    """W(k) a function of the physical wavenumber whatever the band limit (z_feature_wavelength), and in each column
+    only the wavenumbers its grid resolves."""
 
     def test_features_do_not_depend_on_the_band_limit(self):
-        coarse = HeightSpectralConv(8, 40.0, 0.3, hidden=8, feature_wavelength=0.3)
-        fine = HeightSpectralConv(8, 40.0, 0.04, hidden=8, feature_wavelength=0.3)
+        coarse = HeightSpectralConv(8, 40.0, 0.3, 0.3, hidden=8)
+        fine = HeightSpectralConv(8, 40.0, 0.04, 0.3, hidden=8)
         self.assertTrue(torch.allclose(coarse.k_features(), fine.k_features()[:coarse.modes]))
-        legacy = HeightSpectralConv(8, 40.0, 0.04, hidden=8)
-        self.assertFalse(torch.allclose(coarse.k_features(), legacy.k_features()[:coarse.modes]))
 
     def test_taper_follows_the_column_spacing(self):
-        conv = HeightSpectralConv(8, 40.0, 0.04, hidden=8, column_cutoff=True)
+        conv = HeightSpectralConv(8, 40.0, 0.04, 0.3, hidden=8)
         for dz in (0.012, 0.02, 0.025, 0.164):
             column = torch.arange(0, 14.0, dz)
             taper, wavelength = conv.cutoff(column), 2 * np.pi / conv.k[1:]
@@ -96,30 +103,21 @@ class PhysicalWavenumbers(unittest.TestCase):
 
     def test_shared_grid_equals_per_column_path(self):
         torch.manual_seed(0)
-        conv = HeightSpectralConv(8, 40.0, 0.04, hidden=8, rank=2, feature_wavelength=0.3, column_cutoff=True).double()
+        conv = HeightSpectralConv(8, 40.0, 0.04, 0.3, hidden=8, rank=2).double()
         x = torch.randn(1, 8, 300, 2, 3, dtype=torch.float64)
         z = torch.linspace(6.0, 0.0, 300, dtype=torch.float64)[None, :, None, None].expand(1, 300, 2, 3).clone()
         shared = conv(x, z)
         z[0, 150, 1, 2] += 1e-9                                      # one column apart: the per-column path
         self.assertLess((conv(x, z) - shared).abs().max().item(), 1e-6)
 
-    def test_still_the_same_populations_on_any_vertical_grid(self):
-        torch.manual_seed(1)
-        got = grid_difference(FFNO3D(**CONFIG, **PHYSICAL))
-        print(f"\ndifference across vertical grids with physical wavenumbers and the column cutoff: {got:.2e}")
-        self.assertLess(got, 5e-3)
 
 
 class HeightOperator(unittest.TestCase):
     def test_same_populations_on_any_vertical_grid(self):
         torch.manual_seed(1)
-        operator = FFNO3D(**CONFIG, **OPERATOR)
-        torch.manual_seed(1)
-        stack = FFNO3D(**CONFIG)
-        got, old = grid_difference(operator), grid_difference(stack)
-        print(f"\ndifference across vertical grids (of the output range): operator {got:.2e}, level-index model {old:.2e}")
+        got = grid_difference(model_of())
+        print(f"\ndifference across vertical grids (of the output range): {got:.2e}")
         self.assertLess(got, 5e-3)
-        self.assertLess(got, old / 10)
 
     def test_fourier_weights_are_exact_for_piecewise_linear_columns(self):
         z = stretched(30)
@@ -150,7 +148,7 @@ class HeightOperator(unittest.TestCase):
     def test_tall_columns_take_a_longer_box(self):
         """A column taller than half of reference_length gets a periodic length of twice its height: the same band
         of wavenumbers, sampled more densely."""
-        conv = HeightSpectralConv(4, 20.0, 0.5)
+        conv = HeightSpectralConv(4, 20.0, 0.5, 0.3)
         x, z = atmosphere(uniform(50))                     # 15 Mm
         length, k, _ = conv.box(z)
         self.assertAlmostEqual(length, 30.0, places=4)
@@ -162,8 +160,8 @@ class HeightOperator(unittest.TestCase):
         """The same weights with a longer periodic length (50, not 40 Mm) on columns within 20 Mm: W(k) is sampled
         between the trained wavenumbers, and the output barely moves."""
         torch.manual_seed(6)
-        trained = HeightSpectralConv(8, 40.0, 0.3, rank=4, feature_wavelength=0.3, column_cutoff=True).eval()
-        longer = HeightSpectralConv(8, 50.0, 0.3, rank=4, feature_wavelength=0.3, column_cutoff=True).eval()
+        trained = HeightSpectralConv(8, 40.0, 0.3, 0.3, rank=4).eval()
+        longer = HeightSpectralConv(8, 50.0, 0.3, 0.3, rank=4).eval()
         with torch.no_grad():
             for name, p in trained.named_parameters():
                 if "freq_u" in name:
@@ -177,7 +175,7 @@ class HeightOperator(unittest.TestCase):
 
     def test_parameters_get_gradients(self):
         torch.manual_seed(3)
-        model = FFNO3D(**CONFIG, **OPERATOR).train()
+        model = model_of().train()
         x, z = atmosphere(stretched(40))
         model(x, z, 48e3, 48e3).square().mean().backward()
         for name, p in model.named_parameters():
@@ -187,7 +185,7 @@ class HeightOperator(unittest.TestCase):
                     self.assertGreater(p.grad.abs().max().item(), 0.0)
 
     def test_no_grid_point_kernels(self):
-        model = FFNO3D(**CONFIG, **OPERATOR)
+        model = model_of()
         for name, module in model.named_modules():
             if isinstance(module, (torch.nn.Conv1d, torch.nn.Conv3d)):
                 with self.subTest(module=name):
@@ -195,7 +193,7 @@ class HeightOperator(unittest.TestCase):
 
     def test_batched_backend_equals_forward(self):
         torch.manual_seed(4)
-        model = FFNO3D(**CONFIG, **OPERATOR).eval()
+        model = model_of().eval()
         with torch.no_grad():
             for name, p in model.named_parameters():
                 if ".freq_u." in name:
@@ -208,8 +206,8 @@ class HeightOperator(unittest.TestCase):
             x, z = atmosphere(stretched(37), rows=11, columns=9)
             with torch.no_grad():
                 expected = model(x, z, 48e3, 48e3)[0]
-            backend = BatchedFFNOBackend(path, lambda Cin, Cout, device: FFNO3D(**CONFIG, **OPERATOR), devices=["cpu"],
-                                         log=lambda message: None, chunk_depth=5, chunk_rows=3, vertical_chunk=7)
+            backend = BatchedFFNOBackend(path, lambda Cin, Cout, device: model_of(), devices=["cpu"],
+                                         log=lambda message: None, chunk_depth=5, chunk_rows=3)
             got = backend.predict_log10(x[0].numpy(), z[0].numpy(), 48e3, 48e3)
             self.assertLess((got - expected).abs().max().item(), 2e-4)
 
@@ -220,10 +218,10 @@ class HeightOperator(unittest.TestCase):
         import distributed_inference
         from FFNONet import _distributed_full_forward
         torch.manual_seed(5)
-        for config in (OPERATOR, PHYSICAL):
+        for rank in (4, 0):
             for free in (None, 400_000):
-                with self.subTest(config=config, free=free):
-                    model = FFNO3D(**CONFIG, **config).eval()
+                with self.subTest(rank=rank, free=free):
+                    model = model_of(freq_mix_rank=rank).eval()
                     x, z = atmosphere(stretched(37), rows=11, columns=9)
                     distributed_inference.FREE_MEMORY_BYTES = free
                     try:
@@ -239,6 +237,20 @@ class HeightOperator(unittest.TestCase):
                     finally:
                         distributed_inference.FREE_MEMORY_BYTES = None
                     self.assertLess((got - expected).abs().max().item(), 1e-4)
+
+
+class FinalModel(unittest.TestCase):
+    @unittest.skipUnless(os.path.isdir(FINAL), "the final model's checkpoints are not on this machine")
+    def test_checkpoints_load_into_the_defaults(self):
+        """Both zaug checkpoints load into config.MODEL_CONFIG with every key matching (each with its own species)."""
+        from ffno_model_factory import create_ffno3d
+        from train_utils import load_checkpoint
+        for atom in ("H", "CA"):
+            with self.subTest(atom=atom):
+                checkpoint = load_checkpoint(os.path.join(FINAL, f"3D_sim_train_{atom}.pt"), map_location="cpu")
+                io = checkpoint["io_metadata"]
+                model = create_ffno3d(io["Cin"], io["Cout"], atoms=[atom])
+                model.load_state_dict(checkpoint["model_state"], strict=True)
 
 
 if __name__ == "__main__":

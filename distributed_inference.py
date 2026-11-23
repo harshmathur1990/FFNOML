@@ -4,10 +4,9 @@ import torch.distributed as dist
 import torch.distributed.nn.functional as dist_nn
 import torch.nn as nn
 import torch.nn.functional as F
-from tqdm import tqdm
 
 from models.ffno_model import SpectralConv2dFull as SpectralConv2dFull3D
-from models.ffno_model import BalancedVerticalPhysicsStack, FFNOBlock3dBalanced, HeightSpectralConv, depth_weights
+from models.ffno_model import FFNOBlock3dBalanced, HeightSpectralConv, depth_weights
 
 try:
     from config import DEBUG_DIST_INFERENCE
@@ -80,8 +79,8 @@ def depth_spans(depth, chunk):
 
 
 def block_depth_weights(block, z_scale):
-    """depth_weights for the GroupNorms of a vertical_operator block (DepthWeightedGroupNorm), None for any other."""
-    return depth_weights(z_scale) if getattr(block, "vertical_operator", False) else None
+    """depth_weights for the block's GroupNorms (DepthWeightedGroupNorm)."""
+    return depth_weights(z_scale)
 
 
 def partition_range(n, rank=None, world_size=None):
@@ -206,7 +205,7 @@ class DistributedGroupNorm(nn.Module):
             self.register_parameter("bias", None)
 
     def forward(self, x, w=None):
-        """w: depth_weights [B, 1, D, H, W] of the local slab for a DepthWeightedGroupNorm (vertical_operator), whose
+        """w: depth_weights [B, 1, D, H, W] of the local slab for a DepthWeightedGroupNorm, whose
         statistics weight each level by the height it stands for; None for a plain GroupNorm."""
         if not is_dist() and w is None:
             return F.group_norm(
@@ -261,157 +260,6 @@ class DistributedGroupNorm(nn.Module):
         return torch.cat([normalized(x[:, :, a:z]) for a, z in spans], dim=2)
 
 
-class _HaloExchangeH(torch.autograd.Function):
-    """Exchange one H-boundary cell and reverse the exchange in the VJP."""
-
-    @staticmethod
-    def forward(ctx, x):
-        rank = get_rank()
-        world_size = get_world_size()
-        left_rank = rank - 1
-        right_rank = rank + 1
-        left = torch.zeros_like(x[:, :, :, :1, :])
-        right = torch.zeros_like(x[:, :, :, :1, :])
-        ops = []
-        if left_rank >= 0:
-            left = torch.empty_like(left)
-            ops.append(dist.P2POp(dist.irecv, left, left_rank))
-            ops.append(dist.P2POp(
-                dist.isend, x[:, :, :, :1, :].contiguous(), left_rank
-            ))
-        if right_rank < world_size:
-            right = torch.empty_like(right)
-            ops.append(dist.P2POp(dist.irecv, right, right_rank))
-            ops.append(dist.P2POp(
-                dist.isend, x[:, :, :, -1:, :].contiguous(), right_rank
-            ))
-        for request in dist.batch_isend_irecv(ops):
-            request.wait()
-        ctx.rank = rank
-        ctx.world_size = world_size
-        return torch.cat([left, x, right], dim=3)
-
-    @staticmethod
-    def backward(ctx, grad_halo):
-        rank = ctx.rank
-        world_size = ctx.world_size
-        left_rank = rank - 1
-        right_rank = rank + 1
-        grad = grad_halo[:, :, :, 1:-1, :].contiguous()
-        from_left = None
-        from_right = None
-        ops = []
-        if left_rank >= 0:
-            from_left = torch.empty_like(grad[:, :, :, :1, :])
-            ops.append(dist.P2POp(dist.irecv, from_left, left_rank))
-            ops.append(dist.P2POp(
-                dist.isend, grad_halo[:, :, :, :1, :].contiguous(), left_rank
-            ))
-        if right_rank < world_size:
-            from_right = torch.empty_like(grad[:, :, :, -1:, :])
-            ops.append(dist.P2POp(dist.irecv, from_right, right_rank))
-            ops.append(dist.P2POp(
-                dist.isend, grad_halo[:, :, :, -1:, :].contiguous(), right_rank
-            ))
-        for request in dist.batch_isend_irecv(ops):
-            request.wait()
-        if from_left is not None:
-            grad[:, :, :, :1, :] += from_left
-        if from_right is not None:
-            grad[:, :, :, -1:, :] += from_right
-        return grad
-
-
-class DistributedHDepthwiseConv3d(nn.Module):
-    def __init__(self, source):
-        super().__init__()
-        self.conv = source
-        self.progress_label = None
-        kd, kh, kw = self.conv.kernel_size
-        pd, ph, pw = self.conv.padding
-        if kh != 3 or ph != 1:
-            raise ValueError("DistributedHDepthwiseConv3d currently expects kernel_size/padding 3/1 over H")
-        self.local_padding = (pd, 0, pw)
-
-    def _progress(self, message):
-        debug_progress(self.progress_label, message)
-
-    def forward(self, x):
-        if not is_dist():
-            return self.conv(x)
-        self._progress("halo exchange")
-        x_halo = _linear_collective(_HaloExchangeH.apply, x)
-        self._progress("local depthwise conv")
-        y = F.conv3d(
-            x_halo,
-            self.conv.weight,
-            self.conv.bias,
-            self.conv.stride,
-            self.local_padding,
-            self.conv.dilation,
-            self.conv.groups,
-        )
-        self._progress("done")
-        return y
-
-
-class ProgressVerticalWrapper(nn.Module):
-    def __init__(self, source):
-        super().__init__()
-        self.source = source
-        self.progress_label = None
-
-    def _progress(self, message):
-        debug_progress(self.progress_label, message)
-
-    def forward(self, x, z_scale):
-        self._progress("start")
-        if isinstance(self.source, BalancedVerticalPhysicsStack):
-            y = self._forward_balanced_vertical(x, z_scale)
-        else:
-            y = self.source(x, z_scale)
-        self._progress("done")
-        return y
-
-    def _iter_columns(self, total):
-        iterator = range(0, total, self.source.chunk)
-        if get_rank() != 0 or not debug_dist_inference_enabled():
-            return iterator
-
-        return tqdm(
-            iterator,
-            total=(total + self.source.chunk - 1) // self.source.chunk,
-            desc=self.progress_label or "vertical",
-            leave=False,
-        )
-
-    def _forward_balanced_vertical(self, x, z_scale):
-        B, C, D, H, W = x.shape
-        if z_scale.ndim == 4:
-            z_scale = z_scale.unsqueeze(1)
-        if z_scale.shape != (B, 1, D, H, W):
-            raise ValueError(
-                f"z_scale must be [B, D, H, W] or [B, 1, D, H, W], got {tuple(z_scale.shape)}"
-            )
-
-        if self.source.z_spec is not None and self.source.z_reference_length > 0:
-            self.source.check_height_span(z_scale)
-        x_cols = x.permute(0, 3, 4, 1, 2).reshape(B, H * W, C, D)
-        z_cols = z_scale.permute(0, 3, 4, 1, 2).reshape(B, H * W, 1, D)
-
-        chunks = []
-        for i in self._iter_columns(H * W):
-            j = min(i + self.source.chunk, H * W)
-            xi = x_cols[:, i:j].reshape(-1, C, D)
-            zi = z_cols[:, i:j].reshape(-1, 1, D)
-            yi = self.source.columns(xi, zi).reshape(B, j - i, C, D)
-            chunks.append(yi)
-
-        y = torch.cat(chunks, dim=1)
-        y = y.reshape(B, H, W, C, D).permute(0, 3, 4, 1, 2).contiguous()
-        return self.source.out_gn(y)
-
-
 class ChunkedHeightSpectralConv(nn.Module):
     """HeightSpectralConv on the local H slab, a few rows of columns at a time when its mode spectra ([B, C, M, rows,
     W], several of them at once) would not fit in the free device memory. The operator acts on each column alone, so the
@@ -460,26 +308,15 @@ class DepthChunkedPointwise(nn.Module):
 
 def chunked_fuse_branches(block, x, spec, vert, chunk_depth=32, normalize=True):
     """
-    Inference-only version of FFNOBlock3dBalanced._fuse_branches.
-
-    The standard path materializes full-volume concatenations with 3*width and
-    2*width channels. On full 384^3 slabs this exceeds 16 GB T4 memory. Chunking
-    over depth keeps peak memory bounded while preserving the 3x3x3 fuse
-    depthwise convolution with a one-cell depth halo.
+    Inference-only version of FFNOBlock3dBalanced._fuse_branches, over depth in chunks: the gate and the fusion act on
+    each cell alone, but their concatenations with 3*width and 2*width channels exceed a 16 GB T4 on full 384^3 slabs.
     """
-    _, _, depth, _, _ = x.shape
+    depth = x.shape[2]
     fused = None                                   # filled in place, so no chunk list and concatenation on top of it
 
     for d0 in range(0, depth, chunk_depth):
         d1 = min(d0 + chunk_depth, depth)
-        halo0 = max(0, d0 - 1)
-        halo1 = min(depth, d1 + 1)
-        inner0 = d0 - halo0
-        inner1 = inner0 + (d1 - d0)
-
-        x_h = x[:, :, halo0:halo1]
-        spec_h = spec[:, :, halo0:halo1]
-        vert_h = vert[:, :, halo0:halo1]
+        x_h, spec_h, vert_h = x[:, :, d0:d1], spec[:, :, d0:d1], vert[:, :, d0:d1]
 
         gates = block.branch_gate(torch.cat([x_h, spec_h, vert_h], dim=1))
         spec_gate, vert_gate = gates.chunk(2, dim=1)
@@ -491,7 +328,7 @@ def chunked_fuse_branches(block, x, spec, vert, chunk_depth=32, normalize=True):
         fused_h = fused_h + 0.5 * (spec_mix + vert_mix)
         if fused is None:
             fused = fused_h.new_empty(fused_h.shape[0], fused_h.shape[1], depth, *fused_h.shape[3:])
-        fused[:, :, d0:d1] = fused_h[:, :, inner0:inner1]
+        fused[:, :, d0:d1] = fused_h
         del spec_mix, vert_mix, fused_h
 
         if torch.cuda.is_available() and x.is_cuda:
@@ -611,10 +448,6 @@ def _replace_modules(parent):
             setattr(parent, name, DistributedSpectralConv2dFull(child))
             continue
 
-        if isinstance(child, BalancedVerticalPhysicsStack):
-            setattr(parent, name, ProgressVerticalWrapper(child))
-            continue
-
         if isinstance(child, HeightSpectralConv):
             setattr(parent, name, ChunkedHeightSpectralConv(child))
             continue
@@ -627,20 +460,11 @@ def _replace_modules(parent):
             setattr(parent, name, DistributedGroupNorm(child))
             continue
 
-        if (
-            isinstance(child, nn.Conv3d)
-            and child.groups == child.in_channels == child.out_channels
-            and child.kernel_size == (3, 3, 3)
-            and child.padding == (1, 1, 1)
-        ):
-            setattr(parent, name, DistributedHDepthwiseConv3d(child))
-            continue
-
         _replace_modules(child)
 
 
 def enable_distributed_inference(model):
-    """The FSDP route's modules, for a model split over the ranks in H slabs. A vertical_operator model's GroupNorms
+    """The FSDP route's modules, for a model split over the ranks in H slabs. The GroupNorms
     take the slab's depth_weights (block_depth_weights). In the batched mode, the spectral branch, the GroupNorms and the
     pointwise paths run over a few levels at a time, and HeightSpectralConv over a few rows, whenever a step would not fit
     in the device's free memory in one pass (depth_chunk)."""

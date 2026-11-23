@@ -175,7 +175,7 @@ ATOM_CONFIG = {
 
         "levels": 6,
 
-        # level-fraction head (MODEL_CONFIG output_mode "level_fraction"): the reference total is rho / 2.2697e-24 g,
+        # level-fraction head: the reference total is rho / 2.2697e-24 g,
         # MULTI3D's H total in most simulations; the head's total correction learns the rest (-0.02 dex in the _hion
         # simulations, down to -0.5 dex below log T = 3.7, and the readnh = 0 artefacts)
         "log10_particle_mass": float(np.log10(2.2697e-27)),  # kg
@@ -289,7 +289,8 @@ MULTI_GPU = True
 MODEL = "FFNO3D"
 
 # The final (zaug) model, H and Ca II alike (FFNOMLTrainingWeights/zaug, learning_curve.ini final66_fno_l004{,_ca}_zaug):
-# width 96, the vertical operator with the l004p height scales, the level-fraction head
+# width 96, the height operator (HeightSpectralConv) with its l004p scales, the level-fraction head. The only model
+# this branch builds; the paper model loads only with FFNOML main.
 MODEL_CONFIG = dict(
     in_channels=6,
     out_channels=6,
@@ -304,22 +305,27 @@ MODEL_CONFIG = dict(
     hidden_vertical=128,
     checkpoint_blocks=True,
     freq_mix_rank=8,
-    open_side_paths=True,
-    vertical_operator=True,
-    z_column_cutoff=True,
-    z_feature_wavelength=0.3,
-    z_min_wavelength=0.04,
     z_reference_length=40.0,
-    # FFNOML_OUTPUT_MODE=level_fraction: the head predicts each species' split among its levels (models/ffno_model.py)
-    output_mode=os.environ.get("FFNOML_OUTPUT_MODE", "level_fraction"),
+    z_min_wavelength=0.04,
+    z_feature_wavelength=0.3,
 )
-# FFNOML_MODEL_CONFIG (JSON, {"width": 96, ...}) overrides MODEL_CONFIG entries for scripted experiments
+# Switches of earlier architectures, now fixed: an older FFNOML_MODEL_CONFIG (e.g. a run's experiment.env) may still
+# name them with the final model's values; any other value asks for a model this branch no longer has.
+_FIXED_SWITCHES = {"vertical_operator": True, "open_side_paths": True, "z_column_cutoff": True, "z_spectral_modes": 0}
+# FFNOML_MODEL_CONFIG (JSON, {"width": 48, ...}) overrides MODEL_CONFIG entries for scripted experiments
 if os.environ.get("FFNOML_MODEL_CONFIG"):
-    MODEL_CONFIG.update(json.loads(os.environ["FFNOML_MODEL_CONFIG"]))
-if MODEL_CONFIG["output_mode"] == "level_fraction":
-    MODEL_CONFIG["species"] = [
-        {k: ATOM_CONFIG[a][k] for k in ("levels", "log10_particle_mass", "multi3d_lte")} for a in ACTIVE_ATOMS
-    ]
+    _overrides = json.loads(os.environ["FFNOML_MODEL_CONFIG"])
+    for _key, _value in _FIXED_SWITCHES.items():
+        if _key in _overrides and _overrides.pop(_key) != _value:
+            raise ValueError(f"FFNOML_MODEL_CONFIG {_key}={_value!r} is the only setting this branch supports "
+                             f"(the final model); older models load with FFNOML main")
+    MODEL_CONFIG.update(_overrides)
+if os.environ.get("FFNOML_OUTPUT_MODE", "level_fraction") != "level_fraction":
+    raise ValueError("FFNOML_OUTPUT_MODE: this branch has only the level-fraction head; the log_population head (the "
+                     "paper model) loads with FFNOML main")
+MODEL_CONFIG["species"] = [
+    {k: ATOM_CONFIG[a][k] for k in ("levels", "log10_particle_mass", "multi3d_lte")} for a in ACTIVE_ATOMS
+]
 
 atoms_tag = _active_atoms_tag(ACTIVE_ATOMS)
 

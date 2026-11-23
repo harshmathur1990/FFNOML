@@ -161,179 +161,13 @@ class PointwiseMLP(nn.Module):
 
 
 # ============================================================
-# Stronger Vertical Branch
+# Vertical branch: the height operator
 # ============================================================
-class DepthwiseSeparable1D(nn.Module):
-    def __init__(self, ch, hidden_mult=2, k=5, dilation=1, dropout=0.0):
-        super().__init__()
-
-        pad = dilation * (k // 2)
-
-        self.dw = nn.Conv1d(
-            ch,
-            ch,
-            kernel_size=k,
-            padding=pad,
-            dilation=dilation,
-            groups=ch,
-            bias=False,
-        )
-
-        hidden = ch * hidden_mult
-        self.pw = nn.Sequential(
-            nn.Conv1d(ch, hidden, 1, bias=False),
-            nn.GELU(),
-            nn.Conv1d(hidden, ch, 1, bias=False),
-        )
-
-        self.gn = _gn(ch)
-        self.act = nn.GELU()
-        self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
-
-    def forward(self, x):
-        y = self.dw(x)
-        y = self.pw(y)
-        y = self.gn(y)
-        y = self.act(y)
-        y = self.drop(y)
-        return y
-
-
-class LiteVerticalResidualBlock(nn.Module):
-    def __init__(self, ch, k=5, dilation=1, dropout=0.0):
-        super().__init__()
-        self.b1 = DepthwiseSeparable1D(
-            ch, hidden_mult=2, k=k, dilation=dilation, dropout=dropout
-        )
-        self.b2 = DepthwiseSeparable1D(
-            ch, hidden_mult=2, k=k, dilation=1, dropout=dropout
-        )
-        self.out_gn = _gn(ch)
-        self.act = nn.GELU()
-
-    def forward(self, x):
-        y = self.b1(x)
-        y = self.b2(y)
-        return self.act(self.out_gn(x + y))
-
-
-class LiteMultiScaleVertical(nn.Module):
-    def __init__(self, ch, kernels=(3, 7, 15), dropout=0.0):
-        super().__init__()
-
-        self.branches = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv1d(
-                    ch,
-                    ch,
-                    kernel_size=k,
-                    padding=k // 2,
-                    groups=ch,
-                    bias=False,
-                ),
-                nn.Conv1d(ch, ch, 1, bias=False),
-            )
-            for k in kernels
-        ])
-
-        self.mix = nn.Sequential(
-            nn.Conv1d(ch, 2 * ch, 1, bias=False),
-            nn.GELU(),
-            nn.Conv1d(2 * ch, ch, 1, bias=False),
-        )
-
-        self.gn = _gn(ch)
-        self.act = nn.GELU()
-        self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
-
-    def forward(self, x):
-        y = 0.0
-        for b in self.branches:
-            y = y + b(x)
-        y = self.mix(y)
-        y = self.gn(y)
-        y = self.act(y)
-        y = self.drop(y)
-        return y
-
-
-class SpectralConvZ(nn.Module):
-    """
-    Spectral convolution along depth, per column: the column is zero-padded to twice its length, so that its top and
-    bottom are a column's length apart in the periodic domain instead of neighbours, and its lowest `modes` Fourier
-    modes are mixed across channels with one complex weight matrix per mode. The weights start at zero, so a model with this branch starts as the model without it.
-
-    Input/Output: [N, C, D]
-    """
-
-    def __init__(self, channels, modes):
-        super().__init__()
-        self.modes = int(modes)
-        self.weight_real = nn.Parameter(torch.zeros(channels, channels, self.modes))
-        self.weight_imag = nn.Parameter(torch.zeros(channels, channels, self.modes))
-
-    def forward(self, x):
-        depth = x.shape[-1]
-        x_ft = torch.fft.rfft(x, n=2 * depth, dim=-1)
-        m = min(self.modes, x_ft.shape[-1])
-        weight = torch.complex(self.weight_real[..., :m], self.weight_imag[..., :m])
-        out_ft = torch.zeros_like(x_ft)
-        out_ft[..., :m] = torch.einsum("n i k, i o k -> n o k", x_ft[..., :m], weight)
-        return torch.fft.irfft(out_ft, n=2 * depth, dim=-1)[..., :depth]
-
-
-class SpectralConvHeight(nn.Module):
-    """
-    Spectral convolution along height on each column's own heights: a convolution in z, the same on any vertical grid
-    and for any number of levels (SpectralConvZ works on the level index instead). Mode m is the fixed wavenumber
-    k_m = 2 pi m / reference_length, and its complex channel mixing W_m is the same in every column. A column is
-    transformed by trapezoid quadrature on its heights and its mixed modes are evaluated back at the same heights:
-        X_m = sum_j x(z_j) exp(-i k_m z_j) w_j,    y(z_j) = (W_0 X_0 + 2 Re sum_{m>=1} W_m X_m exp(i k_m z_j)) / reference_length
-    The reference length (in the units of z_scale, Mm) must be at least twice the tallest column, so that a column's
-    top and bottom are never neighbours in the periodic domain (checked by BalancedVerticalPhysicsStack), and the
-    shortest wavelength, reference_length / (modes - 1), should be resolved by the coarsest grid spacing. The weights
-    start at zero, so a model with this branch starts as the model without it.
-
-    Input: x [N, C, D], z [N, 1, D]. Output: [N, C, D]
-    """
-
-    def __init__(self, channels, modes, reference_length):
-        super().__init__()
-        self.modes = int(modes)
-        self.reference_length = float(reference_length)
-        self.weight_real = nn.Parameter(torch.zeros(channels, channels, self.modes))
-        self.weight_imag = nn.Parameter(torch.zeros(channels, channels, self.modes))
-        k = 2 * math.pi * torch.arange(self.modes, dtype=torch.float32) / self.reference_length
-        self.register_buffer("k", k, persistent=False)
-        self.register_buffer("mode_factor", torch.cat([torch.ones(1), 2 * torch.ones(self.modes - 1)]),
-                             persistent=False)
-
-    def forward(self, x, z):
-        z = z[:, 0]
-        z = z - z.min(dim=-1, keepdim=True).values                  # a shift of z changes nothing but rounding
-        w = torch.zeros_like(z)                                      # trapezoid weights |dz|, levels in any order
-        if z.shape[-1] > 1:
-            step = 0.5 * (z[:, 1:] - z[:, :-1]).abs()
-            w = w + F.pad(step, (0, 1)) + F.pad(step, (1, 0))
-        phase = z.unsqueeze(-1) * self.k                             # [N, D, M]
-        cos, sin = torch.cos(phase), torch.sin(phase)
-        xw = x * w.unsqueeze(1)
-        x_re = torch.einsum("n i d, n d m -> n i m", xw, cos)
-        x_im = -torch.einsum("n i d, n d m -> n i m", xw, sin)
-        y_re = torch.einsum("n i m, i o m -> n o m", x_re, self.weight_real) - \
-            torch.einsum("n i m, i o m -> n o m", x_im, self.weight_imag)
-        y_im = torch.einsum("n i m, i o m -> n o m", x_im, self.weight_real) + \
-            torch.einsum("n i m, i o m -> n o m", x_re, self.weight_imag)
-        y_re, y_im = y_re * self.mode_factor, y_im * self.mode_factor
-        return (torch.einsum("n o m, n d m -> n o d", y_re, cos) -
-                torch.einsum("n o m, n d m -> n o d", y_im, sin)) / self.reference_length
-
-
 class HeightSpectralConv(nn.Module):
     """
-    The vertical branch of the height operator (FFNO3D vertical_operator=True): a spectral convolution along height, the
-    counterpart of SpectralConv2dFull in x and y, on each column's own heights, so that it is the same operator on any
-    vertical grid and for any number of levels.
+    The vertical branch of every block: a spectral convolution along height, the counterpart of SpectralConv2dFull in x
+    and y, on each column's own heights, so that it is the same operator on any vertical grid and for any number of
+    levels.
 
     Wavenumbers k_m = 2 pi m / reference_length, m = 0 .. M - 1, up to the shortest wavelength min_wavelength (M =
     reference_length / min_wavelength + 1); nothing above it. A column is transformed on its heights and the mixed modes
@@ -343,31 +177,26 @@ class HeightSpectralConv(nn.Module):
     wavenumber, plus (rank > 0) a low-rank matrix U(k) V(k) from a second MLP: a smooth function of k, not a table.
     X_m is the exact transform of the piecewise-linear column through the levels (height_fourier_weights), so the
     operator does not depend on how many levels sample a wave; the grid only sets how well the column is represented.
-    The column's height (z_scale) enters pointwise, as the old branch's z features did. The periodic length L is
+    The column's height (z_scale) also enters pointwise. The periodic length L is
     reference_length (z_scale units, Mm), or twice the tallest column when that is longer, so that a column's top and
     bottom are never neighbours in the periodic domain (box). A longer L only samples k more densely over the same band
     0 .. 2 pi / min_wavelength, where W(k) is the trained function: between trained wavenumbers, never beyond them.
-    feature_wavelength > 0 gives the frequency MLPs the wavenumber on that fixed physical scale, t = q / (1 + q) with
-    q = k feature_wavelength / 2 pi, so W(k) at a given wavenumber is the same function whatever min_wavelength is
-    (0: q = k min_wavelength / 2 pi, t = q, the first runs' scaling, where the band limit stretched the k axis).
-    column_cutoff: each column keeps only the wavenumbers its own grid resolves, from its median level spacing dz
-    (the spacing where the lines form; only the coronal top is coarser): W(k) is tapered from k = 2 pi / (3 dz) to
-    zero at the Nyquist wavenumber pi / dz, so modes no column sample can carry are not learned from interpolation.
+    The frequency MLPs see the wavenumber on the fixed physical scale feature_wavelength, t = q / (1 + q) with
+    q = k feature_wavelength / 2 pi, so W(k) at a given wavenumber is the same function whatever min_wavelength is.
+    Each column keeps only the wavenumbers its own grid resolves, from its median level spacing dz (the spacing where
+    the lines form; only the coronal top is coarser): W(k) is tapered from k = 2 pi / (3 dz) to zero at the Nyquist
+    wavenumber pi / dz, so modes no column sample can carry are not learned from interpolation.
 
     Input: x [B, C, D, H, W], z_scale [B, D, H, W] or [B, 1, D, H, W]. Output: [B, C, D, H, W]
     """
 
-    def __init__(self, channels, reference_length, min_wavelength, hidden=128, rank=0, feature_wavelength=0.0,
-                 column_cutoff=False):
+    def __init__(self, channels, reference_length, min_wavelength, feature_wavelength, hidden=128, rank=0):
         super().__init__()
-        if reference_length <= 0 or min_wavelength <= 0:
-            raise ValueError("the height operator needs z_reference_length > 0 and z_min_wavelength > 0")
-        if feature_wavelength < 0:
-            raise ValueError("z_feature_wavelength must be >= 0")
+        if reference_length <= 0 or min_wavelength <= 0 or feature_wavelength <= 0:
+            raise ValueError("the height operator needs z_reference_length, z_min_wavelength and z_feature_wavelength > 0")
         self.reference_length = float(reference_length)
         self.min_wavelength = float(min_wavelength)
         self.feature_wavelength = float(feature_wavelength)
-        self.column_cutoff = bool(column_cutoff)
         self.modes = int(math.floor(self.reference_length / self.min_wavelength)) + 1
         self.rank = int(rank)
         scale = 1.0 / math.sqrt(channels)
@@ -401,18 +230,14 @@ class HeightSpectralConv(nn.Module):
 
     def k_features(self, k=None):
         """The frequency MLPs' input [M, 2] at wavenumbers k (default: those of reference_length): t and t^2, t a fixed
-        function of the physical wavenumber when feature_wavelength > 0, otherwise k over the largest wavenumber (the
-        first runs)."""
+        function of the physical wavenumber."""
         k = self.k if k is None else k
-        if self.feature_wavelength:
-            q = k * self.feature_wavelength / (2 * math.pi)
-            t = q / (1 + q)
-        else:
-            t = k * self.min_wavelength / (2 * math.pi)
+        q = k * self.feature_wavelength / (2 * math.pi)
+        t = q / (1 + q)
         return torch.stack([t, t * t], dim=-1)
 
     def cutoff(self, columns, k=None):
-        """The per-column taper [..., M] of column_cutoff, for columns [..., D] of heights: 1 up to 2 pi / (3 dz),
+        """The per-column taper [..., M], for columns [..., D] of heights: 1 up to 2 pi / (3 dz),
         a half cosine down to 0 at pi / dz, dz the column's median level spacing."""
         k = self.k if k is None else k
         dz = (columns[..., 1:] - columns[..., :-1]).abs().median(dim=-1).values[..., None]
@@ -448,14 +273,14 @@ class HeightSpectralConv(nn.Module):
             phase = column[:, None] * k
             x_re = torch.einsum("b c d h w, d m -> b c m h w", x, q_re)
             x_im = torch.einsum("b c d h w, d m -> b c m h w", x, q_im)
-            taper = self.cutoff(column, k)[:, None, None] if self.column_cutoff else None       # [M, 1, 1]
+            taper = self.cutoff(column, k)[:, None, None]                                   # [M, 1, 1]
         else:
             columns = z[:, 0].permute(0, 2, 3, 1)                    # [B, H, W, D]
             q_re, q_im = height_fourier_weights(columns, k)          # [B, H, W, D, M]
             phase = z[:, 0, ..., None] * k                           # [B, D, H, W, M]
             x_re = torch.einsum("b c d h w, b h w d m -> b c m h w", x, q_re)
             x_im = torch.einsum("b c d h w, b h w d m -> b c m h w", x, q_im)
-            taper = self.cutoff(columns, k).permute(0, 3, 1, 2)[:, None] if self.column_cutoff else None  # [B, 1, M, H, W]
+            taper = self.cutoff(columns, k).permute(0, 3, 1, 2)[:, None]                    # [B, 1, M, H, W]
         cos, sin = torch.cos(phase), torch.sin(phase)
         features = self.k_features(k)
         gate = self.freq_mlp(features)                               # [M, 2]
@@ -473,9 +298,7 @@ class HeightSpectralConv(nn.Module):
             low_im = torch.einsum("b i m h w, m r i -> b r m h w", x_im, v)
             y_re = y_re + torch.einsum("b r m h w, m o r -> b o m h w", low_re, u)
             y_im = y_im + torch.einsum("b r m h w, m o r -> b o m h w", low_im, u)
-        f = mode_factor[:, None, None]
-        if taper is not None:
-            f = f * taper
+        f = mode_factor[:, None, None] * taper
         y_re, y_im = y_re * f, y_im * f
         if shared:
             y = torch.einsum("b o m h w, d m -> b o d h w", y_re, cos) - \
@@ -484,129 +307,6 @@ class HeightSpectralConv(nn.Module):
             y = torch.einsum("b o m h w, b d h w m -> b o d h w", y_re, cos) - \
                 torch.einsum("b o m h w, b d h w m -> b o d h w", y_im, sin)
         return self.post(y / length)
-
-
-class BalancedVerticalPhysicsStack(nn.Module):
-    """
-    Stronger vertical branch:
-      - multiscale depth processing
-      - residual dilated depth blocks
-      - channel mixing
-      - learned depth gate
-      - optional (z_modes > 0) spectral convolution along depth, gated, added to the residual blocks' output: along
-        height with z_reference_length > 0 (SpectralConvHeight), along the level index with 0 (SpectralConvZ)
-    """
-
-    def __init__(self, channels, hidden=128, dropout=0.0, chunk=4, z_modes=0, z_reference_length=0.0):
-        super().__init__()
-        self.chunk = chunk
-        self.z_reference_length = float(z_reference_length)
-
-        self.z_proj = nn.Sequential(
-            nn.Conv1d(4, hidden, 1, bias=False),
-            nn.GELU(),
-        )
-
-        self.in_proj = nn.Sequential(
-            nn.Conv1d(channels, hidden, 1, bias=False),
-            _gn(hidden),
-            nn.GELU(),
-        )
-
-        self.net = nn.Sequential(
-            LiteMultiScaleVertical(hidden, kernels=(3, 7, 15), dropout=dropout),
-            LiteVerticalResidualBlock(hidden, k=5, dilation=1, dropout=dropout),
-            LiteVerticalResidualBlock(hidden, k=5, dilation=2, dropout=dropout),
-            LiteVerticalResidualBlock(hidden, k=5, dilation=4, dropout=dropout),
-            LiteVerticalResidualBlock(hidden, k=7, dilation=1, dropout=dropout),
-        )
-
-        self.depth_gate = nn.Sequential(
-            nn.Conv1d(hidden, hidden, 1, bias=False),
-            nn.GELU(),
-            nn.Conv1d(hidden, hidden, 1, bias=False),
-            nn.Sigmoid(),
-        )
-
-        if z_modes:
-            self.z_spec = (SpectralConvHeight(hidden, z_modes, self.z_reference_length) if self.z_reference_length > 0
-                           else SpectralConvZ(hidden, z_modes))
-            self.z_gate = nn.Sequential(
-                nn.Conv1d(hidden, hidden, 1, bias=False),
-                nn.Sigmoid(),
-            )
-        else:
-            self.z_spec = None
-
-        self.out_proj = nn.Conv1d(hidden, channels, 1, bias=False)
-        self.out_gn = _gn(channels)
-
-    def _z_features(self, z_scale):
-        if z_scale.shape[-1] == 1:
-            dz = torch.ones_like(z_scale)
-        else:
-            dz = torch.empty_like(z_scale)
-            dz[:, :, 1:-1] = 0.5 * (z_scale[:, :, 2:] - z_scale[:, :, :-2])
-            dz[:, :, 0] = z_scale[:, :, 1] - z_scale[:, :, 0]
-            dz[:, :, -1] = z_scale[:, :, -1] - z_scale[:, :, -2]
-
-        z_min = z_scale.min(dim=-1, keepdim=True).values
-        z_span = (z_scale.max(dim=-1, keepdim=True).values - z_min).clamp_min(1e-6)
-        z_norm = (z_scale - z_min) / z_span
-        dz_norm = dz.abs() / dz.abs().mean(dim=-1, keepdim=True).clamp_min(1e-6)
-
-        # Keep absolute z_scale as the first channel; derived channels only add geometry context.
-        return torch.cat(
-            [
-                z_scale,
-                z_norm,
-                dz_norm,
-                z_span.expand_as(z_scale),
-            ],
-            dim=1,
-        )
-
-    def check_height_span(self, z_scale):
-        """SpectralConvHeight needs every column to span at most half the z reference length."""
-        span = float((z_scale.amax(dim=2) - z_scale.amin(dim=2)).max())
-        if 2 * span > self.z_reference_length:
-            raise ValueError(f"a column spans {span:.3f} in z_scale units, more than half of z_reference_length "
-                             f"{self.z_reference_length}")
-
-    def columns(self, xi, zi):
-        """The branch on columns xi [N, C, D] with depths zi [N, 1, D], before out_gn (shared with the distributed
-        and batched inference paths)."""
-        h = self.in_proj(xi) + self.z_proj(self._z_features(zi))
-        y = self.net(h)
-        if self.z_spec is not None:
-            y = y + self.z_gate(h) * (self.z_spec(h, zi) if self.z_reference_length > 0 else self.z_spec(h))
-        y = y * self.depth_gate(y)
-        return self.out_proj(y)
-
-    def forward(self, x, z_scale):
-        B, C, D, H, W = x.shape
-        if z_scale.ndim == 4:
-            z_scale = z_scale.unsqueeze(1)
-        if z_scale.shape != (B, 1, D, H, W):
-            raise ValueError(
-                f"z_scale must be [B, D, H, W] or [B, 1, D, H, W], got {tuple(z_scale.shape)}"
-            )
-        if self.z_spec is not None and self.z_reference_length > 0:
-            self.check_height_span(z_scale)
-        x = x.permute(0, 3, 4, 1, 2).reshape(B, H * W, C, D)
-        z_scale = z_scale.permute(0, 3, 4, 1, 2).reshape(B, H * W, 1, D)
-
-        chunks = []
-        for i in range(0, H * W, self.chunk):
-            j = min(i + self.chunk, H * W)
-            xi = x[:, i:j].reshape(-1, C, D)
-            zi = z_scale[:, i:j].reshape(-1, 1, D)
-            yi = self.columns(xi, zi).reshape(B, j - i, C, D)
-            chunks.append(yi)
-
-        y = torch.cat(chunks, dim=1)
-        y = y.reshape(B, H, W, C, D).permute(0, 3, 4, 1, 2).contiguous()
-        return self.out_gn(y)
 
 
 # ============================================================
@@ -755,38 +455,26 @@ class SpectralConv2dFull(nn.Module):
 # ============================================================
 class FFNOBlock3dBalanced(nn.Module):
     """
-    Spectral and vertical branches are both strengthened and fused by:
-      - same input to both branches
-      - normalization on both outputs
-      - adaptive branch gating before learned fusion
-      - learned channel-mixing fusion after concatenation
-      - small corrective pointwise/mlp path (open_side_paths: both start at 0.5 instead of 0.15, and the MLP output
-        is not squashed by tanh)
-    vertical_operator: the vertical branch is HeightSpectralConv, the fusion has no 3x3x3 convolution and every
-    GroupNorm weights levels by their height (DepthWeightedGroupNorm): nothing counts grid points in any direction.
+    One block: a horizontal spectral branch (SpectralConv2dFull) and a vertical one (HeightSpectralConv) on the same
+    input, each normalised, gated pointwise and fused by pointwise channel mixing, then two small pointwise corrective
+    paths (pw, mlp) that start at weight 0.5. Every GroupNorm weights levels by their height (DepthWeightedGroupNorm):
+    nothing counts grid points in any direction.
     """
 
     def __init__(
         self,
-        width=128,
-        dropout=0.05,
+        width=96,
+        dropout=0.0,
         spec_dropout=0.0,
         vertical_dropout=0.0,
         hidden_spectral=128,
         hidden_vertical=128,
-        z_spectral_modes=0,
-        z_reference_length=0.0,
-        freq_mix_rank=0,
-        open_side_paths=False,
-        vertical_operator=False,
-        z_min_wavelength=0.0,
-        z_feature_wavelength=0.0,
-        z_column_cutoff=False,
+        freq_mix_rank=8,
+        z_reference_length=40.0,
+        z_min_wavelength=0.04,
+        z_feature_wavelength=0.3,
     ):
         super().__init__()
-        self.open_side_paths = bool(open_side_paths)
-        self.vertical_operator = bool(vertical_operator)
-        norm = _wgn if self.vertical_operator else _gn
 
         self.spec = SpectralConv2dFull(
             width,
@@ -795,22 +483,8 @@ class FFNOBlock3dBalanced(nn.Module):
             post_mix_expansion=2,
             rank=freq_mix_rank,
         )
-
-        if self.vertical_operator:
-            if z_spectral_modes:
-                raise ValueError("vertical_operator replaces the vertical stack: z_spectral_modes does not apply")
-            self.vertical = HeightSpectralConv(width, z_reference_length, z_min_wavelength, hidden=hidden_vertical,
-                                               rank=freq_mix_rank, feature_wavelength=z_feature_wavelength,
-                                               column_cutoff=z_column_cutoff)
-        else:
-            self.vertical = BalancedVerticalPhysicsStack(
-                width,
-                hidden=hidden_vertical,
-                dropout=dropout,
-                chunk=4,
-                z_modes=z_spectral_modes,
-                z_reference_length=z_reference_length,
-            )
+        self.vertical = HeightSpectralConv(width, z_reference_length, z_min_wavelength, z_feature_wavelength,
+                                           hidden=hidden_vertical, rank=freq_mix_rank)
 
         self.pw = nn.Sequential(
             nn.Conv3d(width, width * 2, 1, bias=False),
@@ -820,54 +494,32 @@ class FFNOBlock3dBalanced(nn.Module):
 
         self.mlp = PointwiseMLP(width, expansion=2, dropout=dropout)
 
-        self.norm_spec = norm(width)
-        self.norm_vert = norm(width)
+        self.norm_spec = _wgn(width)
+        self.norm_vert = _wgn(width)
         self.branch_gate = nn.Sequential(
             nn.Conv3d(3 * width, width, 1, bias=False),
             nn.GELU(),
             nn.Conv3d(width, 2 * width, 1, bias=True),
             nn.Sigmoid(),
         )
-        local = [] if self.vertical_operator else [
-            nn.Conv3d(
-                2 * width,
-                2 * width,
-                kernel_size=3,
-                padding=1,
-                groups=2 * width,
-                bias=False,
-            ),
-            nn.GELU(),
-        ]
         self.fuse = nn.Sequential(
             nn.Conv3d(2 * width, 2 * width, 1, bias=False),
             nn.GELU(),
-            *local,
             nn.Conv3d(2 * width, width, 1, bias=False),
         )
-        self.norm_fuse = norm(width)
-        self.norm_pw = norm(width)
-        self.norm_mlp = norm(width)
+        self.norm_fuse = _wgn(width)
+        self.norm_pw = _wgn(width)
+        self.norm_mlp = _wgn(width)
 
-        side = 0.5 if self.open_side_paths else 0.15
         self.res_fused = nn.Parameter(torch.tensor([1.0]))
-        self.res_pw = nn.Parameter(torch.tensor([side]))
-        self.res_mlp = nn.Parameter(torch.tensor([side]))
+        self.res_pw = nn.Parameter(torch.tensor([0.5]))
+        self.res_mlp = nn.Parameter(torch.tensor([0.5]))
 
         self.act = nn.GELU()
         self.spec_drop = nn.Dropout(spec_dropout) if spec_dropout > 0 else nn.Identity()
         self.vert_drop = (
             nn.Dropout(vertical_dropout) if vertical_dropout > 0 else nn.Identity()
         )
-
-    def mlp_activation(self, y):
-        """The MLP path's output nonlinearity (shared with the inference paths): tanh, or none with open_side_paths."""
-        return y if self.open_side_paths else torch.tanh(y)
-
-    @staticmethod
-    def _norm(module, x, w):
-        """A GroupNorm of the block, weighted by depth_weights w with vertical_operator (w is None otherwise)."""
-        return module(x) if w is None else module(x, w)
 
     def _fuse_branches(self, x, spec, vert, w=None):
         gates = self.branch_gate(torch.cat([x, spec, vert], dim=1))
@@ -878,24 +530,24 @@ class FFNOBlock3dBalanced(nn.Module):
 
         fused = self.fuse(torch.cat([spec_mix, vert_mix], dim=1))
         fused = fused + 0.5 * (spec_mix + vert_mix)
-        fused = self.act(self._norm(self.norm_fuse, fused, w))
+        fused = self.act(self.norm_fuse(fused, w))
         return fused, spec_mix, vert_mix, spec_gate, vert_gate
 
     def forward(self, x, z_scale, dx, dy, collect_stats=False, branch_mask=None):
-        w = depth_weights(z_scale) if self.vertical_operator else None
+        w = depth_weights(z_scale)
         if not collect_stats and branch_mask is None:
             residual = x
 
-            spec = self.spec_drop(self.act(self._norm(self.norm_spec, self.spec(x, dx, dy), w)))
-            vert = self.vert_drop(self.act(self._norm(self.norm_vert, self.vertical(x, z_scale), w)))
+            spec = self.spec_drop(self.act(self.norm_spec(self.spec(x, dx, dy), w)))
+            vert = self.vert_drop(self.act(self.norm_vert(self.vertical(x, z_scale), w)))
             fused, _, _, _, _ = self._fuse_branches(x, spec, vert, w)
 
             x1 = residual + self.res_fused * fused
 
-            pw = self._norm(self.norm_pw, self.pw(x1), w)
+            pw = self.norm_pw(self.pw(x1), w)
             x2 = x1 + self.res_pw * pw
 
-            mlp = self.mlp_activation(self._norm(self.norm_mlp, self.mlp(x2), w))
+            mlp = self.norm_mlp(self.mlp(x2), w)
             out = x2 + self.res_mlp * mlp
 
             return out
@@ -904,8 +556,8 @@ class FFNOBlock3dBalanced(nn.Module):
         stats = {} if collect_stats else None
         branch_mask = branch_mask or {}
 
-        spec = self.spec_drop(self.act(self._norm(self.norm_spec, self.spec(x, dx, dy), w)))
-        vert = self.vert_drop(self.act(self._norm(self.norm_vert, self.vertical(x, z_scale), w)))
+        spec = self.spec_drop(self.act(self.norm_spec(self.spec(x, dx, dy), w)))
+        vert = self.vert_drop(self.act(self.norm_vert(self.vertical(x, z_scale), w)))
 
         spec_mask = float(branch_mask.get("spec", 1.0))
         vert_mask = float(branch_mask.get("vertical", 1.0))
@@ -920,10 +572,10 @@ class FFNOBlock3dBalanced(nn.Module):
 
         x1 = residual + self.res_fused * fused
 
-        pw = self._norm(self.norm_pw, self.pw(x1), w)
+        pw = self.norm_pw(self.pw(x1), w)
         x2 = x1 + (self.res_pw * pw_mask) * pw
 
-        mlp = self.mlp_activation(self._norm(self.norm_mlp, self.mlp(x2), w))
+        mlp = self.norm_mlp(self.mlp(x2), w)
         out = x2 + (self.res_mlp * mlp_mask) * mlp
 
         if collect_stats:
@@ -960,13 +612,26 @@ class FFNOBlock3dBalanced(nn.Module):
 # Full Model
 # ============================================================
 class FFNO3D(nn.Module):
+    """
+    The FFNO: a pointwise lift, n_layers blocks (FFNOBlock3dBalanced: spectral in x and y, the height operator along
+    z, nothing counting grid points), and the level-fraction head. Per species the head predicts one departure logit
+    delta_i per level and one total correction u:
+        log10 n_i = log10(rho / particle mass) + s + log10 softmax(ln f*_i + delta_i),   s = total_bound * tanh(u / total_bound)
+    f*_i(T, ne) is MULTI3D's LTE level fraction (multi3d_lte_log_weights, from the input T and ne and the species'
+    "multi3d_lte" atom data), so delta_i is ln b_i, the departure coefficient, up to a constant common to the species'
+    levels, and delta = 0 gives MULTI3D's LTE populations. The softmax is each level's share of the species total, and s
+    the log10 ratio of that total to rho / mass. Any set of positive levels whose total lies within total_bound dex of
+    rho / mass is reproduced exactly; the bound only keeps populations finite in float32. The output is normalised
+    log10 populations. The defaults are the final model's (zaug); species comes from config.ATOM_CONFIG.
+    """
+
     def __init__(
         self,
         in_channels=6,
         out_channels=6,
-        width=128,
+        width=96,
         n_layers=4,
-        dropout=0.05,
+        dropout=0.0,
         spec_dropout=0.0,
         vertical_dropout=0.0,
         spec_dropout_layers=None,
@@ -974,15 +639,10 @@ class FFNO3D(nn.Module):
         checkpoint_blocks=True,
         hidden_spectral=128,
         hidden_vertical=128,
-        z_spectral_modes=0,
-        z_reference_length=0.0,
-        freq_mix_rank=0,
-        open_side_paths=False,
-        vertical_operator=False,
-        z_min_wavelength=0.0,
-        z_feature_wavelength=0.0,
-        z_column_cutoff=False,
-        output_mode="log_population",
+        freq_mix_rank=8,
+        z_reference_length=40.0,
+        z_min_wavelength=0.04,
+        z_feature_wavelength=0.3,
         species=None,
         rho_channel=5,
         total_bound=6.0,
@@ -991,56 +651,30 @@ class FFNO3D(nn.Module):
     ):
         super().__init__()
 
-        # output_mode "log_population": the head predicts normalised log10 populations directly.
-        # "level_fraction": per species, the head predicts one departure logit delta_i per level and one total
-        # correction u:
-        #     log10 n_i = log10(rho / particle mass) + s + log10 softmax(ln f*_i + delta_i),   s = total_bound * tanh(u / total_bound)
-        # f*_i(T, ne) is MULTI3D's LTE level fraction (multi3d_lte_log_weights, from the input T and ne and the species'
-        # "multi3d_lte" atom data), so delta_i is ln b_i, the departure coefficient, up to a constant common to the
-        # species' levels, and delta = 0 gives MULTI3D's LTE populations. The softmax is each level's share of the
-        # species total, and s the log10 ratio of that total to rho / mass. Any set of positive levels whose total lies
-        # within total_bound dex of rho / mass is reproduced exactly; the bound only keeps populations finite in
-        # float32. The output stays normalised log10 populations, so the loss and the inference paths are unchanged.
-        # Capacity switches, all off by default so that existing checkpoints load and give the same outputs:
-        # z_spectral_modes (spectral convolution along depth in each vertical branch: along height, independent of the
-        # vertical grid, with z_reference_length > 0 in z_scale units (Mm), at least twice the tallest column; along the
-        # level index with 0, as in the first capacity screens), freq_mix_rank (per-frequency low-rank channel mixing in
-        # each horizontal spectral branch), open_side_paths (see FFNOBlock3dBalanced).
-        # vertical_operator: a neural operator in all three directions, nothing counting grid points: the vertical
-        # branch is HeightSpectralConv (spectral in height on each column's own heights, wavenumbers 2 pi m /
-        # z_reference_length down to wavelength z_min_wavelength, z_scale units), with freq_mix_rank as its low-rank
-        # mixing too; the fusion has no 3x3x3 convolution; every GroupNorm, the lift's included, weights levels by height.
-        # z_feature_wavelength (Mm) puts its frequency MLPs on a fixed physical wavenumber scale, z_column_cutoff keeps
-        # in each column only the wavenumbers its grid resolves (HeightSpectralConv); 0 and false: the first fno runs.
-        if output_mode not in ("log_population", "level_fraction"):
-            raise ValueError(f"unknown output_mode {output_mode!r}")
-        self.output_mode = output_mode
-        head_channels = out_channels
-        if output_mode == "level_fraction":
-            if not species:
-                raise ValueError("output_mode='level_fraction' needs species")
-            self.species_levels = [int(s["levels"]) for s in species]
-            if sum(self.species_levels) != out_channels:
-                raise ValueError(f"species levels {self.species_levels} do not add up to out_channels={out_channels}")
-            head_channels = out_channels + len(self.species_levels)
-            self.total_bound = float(total_bound)
-            self.rho_channel = int(rho_channel)
-            self.register_buffer("log10_particle_mass",
-                                 torch.tensor([float(s["log10_particle_mass"]) for s in species], dtype=torch.float32))
-            # normalisation of the inputs (for rho) and of the output; set from the dataset with set_normalization
-            # and saved with the checkpoint
-            self.register_buffer("mean_X", torch.zeros(in_channels))
-            self.register_buffer("std_X", torch.ones(in_channels))
-            self.register_buffer("mean_Y", torch.zeros(out_channels))
-            self.register_buffer("std_Y", torch.ones(out_channels))
-            missing = [i for i, s in enumerate(species) if "multi3d_lte" not in s]
-            if missing:
-                raise ValueError(f"output_mode='level_fraction' needs each species' multi3d_lte atom data (g, ev, ion); "
-                                 f"missing for {missing}")
-            self.temperature_channel, self.ne_channel = int(temperature_channel), int(ne_channel)
-            # plain constants, not buffers, so that casting the model never rounds them
-            tables = [multi3d_lte_tables(s["multi3d_lte"], s["levels"]) for s in species]
-            self.lte_tables = tuple([v for t in tables for v in t[k]] for k in range(4))
+        if not species:
+            raise ValueError("FFNO3D needs species (config.ATOM_CONFIG: levels, log10_particle_mass, multi3d_lte)")
+        self.species_levels = [int(s["levels"]) for s in species]
+        if sum(self.species_levels) != out_channels:
+            raise ValueError(f"species levels {self.species_levels} do not add up to out_channels={out_channels}")
+        head_channels = out_channels + len(self.species_levels)
+        self.total_bound = float(total_bound)
+        self.rho_channel = int(rho_channel)
+        self.register_buffer("log10_particle_mass",
+                             torch.tensor([float(s["log10_particle_mass"]) for s in species], dtype=torch.float32))
+        # normalisation of the inputs (for rho, T, ne) and of the output; set from the dataset with set_normalization
+        # and saved with the checkpoint
+        self.register_buffer("mean_X", torch.zeros(in_channels))
+        self.register_buffer("std_X", torch.ones(in_channels))
+        self.register_buffer("mean_Y", torch.zeros(out_channels))
+        self.register_buffer("std_Y", torch.ones(out_channels))
+        missing = [i for i, s in enumerate(species) if "multi3d_lte" not in s]
+        if missing:
+            raise ValueError(f"the level-fraction head needs each species' multi3d_lte atom data (g, ev, ion); "
+                             f"missing for {missing}")
+        self.temperature_channel, self.ne_channel = int(temperature_channel), int(ne_channel)
+        # plain constants, not buffers, so that casting the model never rounds them
+        tables = [multi3d_lte_tables(s["multi3d_lte"], s["levels"]) for s in species]
+        self.lte_tables = tuple([v for t in tables for v in t[k]] for k in range(4))
 
         self.checkpoint_blocks = checkpoint_blocks
         # DistributedFSDPBackend wraps each block with PyTorch's composable
@@ -1049,10 +683,9 @@ class FFNO3D(nn.Module):
         # module, while lift/head checkpointing remains enabled.
         self.external_block_checkpointing = False
 
-        self.vertical_operator = bool(vertical_operator)
         self.lift = nn.Sequential(
             nn.Conv3d(in_channels, width, 1, bias=False),
-            _wgn(width) if self.vertical_operator else _gn(width),
+            _wgn(width),
             nn.GELU(),
         )
 
@@ -1068,43 +701,34 @@ class FFNO3D(nn.Module):
                 ),
                 hidden_spectral=hidden_spectral,
                 hidden_vertical=hidden_vertical,
-                z_spectral_modes=z_spectral_modes,
-                z_reference_length=z_reference_length,
                 freq_mix_rank=freq_mix_rank,
-                vertical_operator=vertical_operator,
+                z_reference_length=z_reference_length,
                 z_min_wavelength=z_min_wavelength,
                 z_feature_wavelength=z_feature_wavelength,
-                z_column_cutoff=z_column_cutoff,
-                open_side_paths=open_side_paths,
             )
             for layer_idx in range(n_layers)
         ])
 
         self.proj1 = nn.Conv3d(width, width * 2, 1, bias=False)
         self.proj2 = nn.Conv3d(width * 2, head_channels, 1)
-        if output_mode == "level_fraction":
-            # the total corrections start at s = 0, the total rho / mass
-            with torch.no_grad():
-                c = 0
-                for levels in self.species_levels:
-                    self.proj2.weight[c + levels].zero_()
-                    self.proj2.bias[c + levels].zero_()
-                    c += levels + 1
+        # the total corrections start at s = 0, the total rho / mass
+        with torch.no_grad():
+            c = 0
+            for levels in self.species_levels:
+                self.proj2.weight[c + levels].zero_()
+                self.proj2.bias[c + levels].zero_()
+                c += levels + 1
 
         self.act = nn.GELU()
 
     def set_normalization(self, mean_X, std_X, mean_Y, std_Y):
-        """Copy the dataset's normalisation into the level-fraction head (a no-op for log_population)."""
-        if self.output_mode != "level_fraction":
-            return
+        """Copy the dataset's normalisation into the head."""
         for name, value in (("mean_X", mean_X), ("std_X", std_X), ("mean_Y", mean_Y), ("std_Y", std_Y)):
             buffer = getattr(self, name)
             buffer.copy_(torch.as_tensor(value, dtype=buffer.dtype).broadcast_to(buffer.shape))
 
     def head_output(self, head, x_in):
         """Normalised log10 populations from the head's channels and the normalised inputs x_in [B, Cin, D, H, W]."""
-        if self.output_mode == "log_population":
-            return head
         rho = self.rho_channel
         log10_rho = x_in[:, rho] * self.std_X[rho] + self.mean_X[rho]
         t, e = self.temperature_channel, self.ne_channel
@@ -1156,8 +780,6 @@ class FFNO3D(nn.Module):
         )
 
     def _lift(self, x, z_scale):
-        if not self.vertical_operator:
-            return self.lift(x)
         return self.lift[2](self.lift[1](self.lift[0](x), depth_weights(z_scale)))
 
     def _run_lift(self, x, z_scale, collect_stats=False):

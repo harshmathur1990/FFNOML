@@ -1,6 +1,6 @@
-"""Generate a Matplotlib schematic of the current FFNO3D architecture: the height operator (vertical_operator, the
-vertical branch a spectral convolution along each column's heights, HeightSpectralConv), rank-8 frequency mixing,
-open side paths, and the level_fraction head, whose output layer turns the head's L + 1 channels per point (one per
+"""Generate a Matplotlib schematic of the FFNO3D architecture (the final model): the height operator (the vertical
+branch a spectral convolution along each column's heights, HeightSpectralConv), rank-8 frequency mixing, side paths
+starting at 0.5, and the level-fraction head, whose output layer turns the head's L + 1 channels per point (one per
 level, one for the element's total) into populations in m^-3.
 
 Run:
