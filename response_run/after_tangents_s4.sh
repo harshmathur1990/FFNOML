@@ -1,7 +1,7 @@
 #!/bin/bash
 # Runs on eagle7 after run_tangents_eagle7.sh: column responses of the stride-4 linearization atmosphere with the
 # FFNO population term (column_response_s4_ffno.h5).
-R=/mn/stornext/d9/data/harshm/FFNOML/response_run
+R=/mn/stornext/d9/data/harshm/ffnoml_data/archive/FFNOML/response_run
 cd $R
 while pgrep -f ffno_population_tangents.jl >/dev/null; do sleep 60; done
 grep -q "wrote $R/outputs/population_tangents_s4.h5" tangents_s4.log || { echo "tangent run did not finish"; exit 1; }

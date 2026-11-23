@@ -15,8 +15,8 @@ using FFNOInversion, HDF5, Printf
 import HSEMHS
 const F=FFNOInversion
 const BIFROST="/mn/stornext/d9/data/harshm/halpha_output/BIFROST_en024048_hion_0_504_0_504.nc"
-const FORWARD="/mn/stornext/d9/data/harshm/FFNOML/outputs/forward_atmosphere.h5"
-const CONFIG="/mn/stornext/d9/data/harshm/FFNOML/response_run/forward.toml"
+const FORWARD="/mn/stornext/d9/data/harshm/ffnoml_data/archive/FFNOML/outputs/forward_atmosphere.h5"
+const CONFIG="/mn/stornext/d9/data/harshm/ffnoml_data/archive/FFNOML/response_run/forward.toml"
 const HEIGHTS=(0.0,300e3,1200e3)
 
 mu=parse(Float64,ARGS[1]); azimuth=parse(Float64,ARGS[2]); out=ARGS[3]

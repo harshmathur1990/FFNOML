@@ -6,7 +6,7 @@
 using FFNOInversion, HDF5, Libdl, Printf, Statistics
 import Muspel
 include(joinpath(@__DIR__, "..", "..", "FFNOInversion.jl", "scripts", "forward_atmosphere_io.jl"))
-const R = "/mn/stornext/d9/data/harshm/FFNOML/response_run"
+const R = "/mn/stornext/d9/data/harshm/ffnoml_data/archive/FFNOML/response_run"
 path = length(ARGS) >= 1 ? ARGS[1] : joinpath(R, "outputs", "population_tangents_s4_atmosphere.h5")
 stride = length(ARGS) >= 2 ? parse(Int, ARGS[2]) : 16
 atmosphere, populations = read_forward_atmosphere(path)

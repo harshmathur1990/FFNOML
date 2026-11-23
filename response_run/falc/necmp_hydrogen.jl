@@ -2,7 +2,7 @@
 # for NLTE. Writes falc_necmp_<run>_hydrogen.h5 (h_neutral, h_proton on the atmosphere file's layout).
 using FFNOInversion, HDF5, Libdl
 import HSEMHS
-const R="/mn/stornext/d9/data/harshm/FFNOML/response_run"
+const R="/mn/stornext/d9/data/harshm/ffnoml_data/archive/FFNOML/response_run"
 eos=WittmannEOS(joinpath(R,"inputs","wittmann","libwitt_ffno.$(Libdl.dlext)"),joinpath(R,"inputs","pf_Kurucz.input"))
 states=Dict("lte"=>WittmannKuruczState(eos),
     "nlte"=>NLTEHydrogenState(HSEMHS.load_table("/mn/stornext/d9/data/harshm/MHS_nlte/HSEMHS/cache/eos_table_nlte.h5";model="nlte")))

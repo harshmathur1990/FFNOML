@@ -39,12 +39,12 @@
     ]
   },
   "n_train_patches": 966,
-  "production_train_file": "/mn/stornext/d9/data/harshm/FFNOML/IO/3D_sim_train_ch012006_836__ch012012_hion_910__en024048_hion_465__nw012023_915__qs006003_sap_689_atomsCA_target-lognlte_patch40_stride20.hdf5",
-  "production_checkpoint": "/mn/stornext/d9/data/harshm/FFNOML/training_FFNO3D_zscale_expand_lognlte/3D_sim_train_CA.pt",
+  "production_train_file": "/mn/stornext/d9/data/harshm/ffnoml_data/reference/datasets/paper_5+5/3D_sim_train_ch012006_836__ch012012_hion_910__en024048_hion_465__nw012023_915__qs006003_sap_689_atomsCA_target-lognlte_patch40_stride20.hdf5",
+  "production_checkpoint": "/mn/stornext/d9/data/harshm/ffnoml_data/archive/duplicate_checkpoints/paper/3D_sim_train_CA.pt",
   "checkpoint_sha256": "7a9365d26543dcb9b94da29dc574ae1e18b879f0818909e9d579a7aa4af9b760",
   "extra_files": {
     "qs006003_sap/1297": {
-      "path": "/mn/stornext/d9/data/harshm/FFNOML/uq/retrain/data/qs006003_sap_1297_CA.hdf5",
+      "path": "/mn/stornext/d9/data/harshm/ffnoml_data/archive/FFNOML/uq/retrain/data/qs006003_sap_1297_CA.hdf5",
       "sha256": "1631963a777049752d357306f7290e8cd68c9ada548173d996e127817b3a0253"
     }
   },

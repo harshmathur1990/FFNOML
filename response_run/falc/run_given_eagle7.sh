@@ -1,6 +1,6 @@
 #!/bin/bash
 # FALC given (nₑ, H populations) on the three axes, on eagle7.
-R=/mn/stornext/d9/data/harshm/FFNOML/response_run; cd $R/falc
+R=/mn/stornext/d9/data/harshm/ffnoml_data/archive/FFNOML/response_run; cd $R/falc
 source ~/loadnvidia.sh >/dev/null 2>&1
 export CUDA_VISIBLE_DEVICES=4,5 FFNO_FSDP_NPROC=2
 ~/nvidiaenv/bin/python build_falc_logm.py || exit 1

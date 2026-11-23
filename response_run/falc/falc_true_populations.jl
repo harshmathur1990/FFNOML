@@ -4,7 +4,7 @@
 # usage (hyades, after ~/loadgcc.sh): julia --project=FFNOInversion.jl response_run/falc/falc_true_populations.jl
 using FFNOInversion, HDF5, Libdl, Printf
 import Muspel
-const R = "/mn/stornext/d9/data/harshm/FFNOML/response_run"
+const R = "/mn/stornext/d9/data/harshm/ffnoml_data/archive/FFNOML/response_run"
 file(name) = h5read(joinpath(R, "falc", "FALC_82_5x5.hdf5"), name)
 # HDF5.jl reverses h5py's order: scalars (z, y, x, t), populations (z, y, x, level, t)
 T(a) = Float64.(a[:, :, :, 1])

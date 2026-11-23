@@ -1,6 +1,6 @@
 # FALC on 5 x 5 and 96 x 96 columns (centre column) against RH: profiles, populations, spread over identical columns.
 import h5py, numpy as np
-D = "/mn/stornext/d9/data/harshm/FFNOML/response_run/falc/"
+D = "/mn/stornext/d9/data/harshm/ffnoml_data/models/paper/falc/"
 r = h5py.File(D + "falc_rh.h5"); lr = r["wavelength_air_nm"][:]; Ir = r["intensity"][:] * 1e8; H = r["H_n"][...]; Ca = r["CA_n"][...]
 z = h5py.File(D + "FALC_82_5x5.hdf5")["z"][0] / 1e3
 print("RH      Ha edges %.3f %.3f core %.3f | Ca edges %.3f %.3f core %.3f" % (Ir[np.argmin(abs(lr-655.8))], Ir[np.argmin(abs(lr-657.2))], Ir[(lr>655.8)&(lr<657.2)].min(), Ir[np.argmin(abs(lr-853.4))], Ir[np.argmin(abs(lr-854.6))], Ir[(lr>853.4)&(lr<854.6)].min()))

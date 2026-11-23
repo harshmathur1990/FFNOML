@@ -13,7 +13,7 @@ import Muspel
 const F=FFNOInversion
 const BIFROST="/mn/stornext/d9/data/harshm/halpha_output/BIFROST_en024048_hion_0_504_0_504.nc"
 const AUX="/mn/stornext/d9/data/harshm/halpha_output/Multi-3D-H_6_level_populations/output_aux.hdf5"
-const R="/mn/stornext/d9/data/harshm/FFNOML/response_run"
+const R="/mn/stornext/d9/data/harshm/ffnoml_data/archive/FFNOML/response_run"
 include(joinpath(R,"paths.jl"))
 mu=parse(Float64,ARGS[1]); azimuth=parse(Float64,ARGS[2]); stride=parse(Int,ARGS[3]); nrays=parse(Int,ARGS[4]); out=ARGS[5]
 cd(R); config=load_config(joinpath(R,"forward_multi3d.toml"))

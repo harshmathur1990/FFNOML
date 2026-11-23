@@ -1,6 +1,6 @@
 #!/bin/bash
 # The two FALC column-mass runs on eagle7.
-R=/mn/stornext/d9/data/harshm/FFNOML/response_run; cd $R/falc
+R=/mn/stornext/d9/data/harshm/ffnoml_data/archive/FFNOML/response_run; cd $R/falc
 source ~/loadnvidia.sh >/dev/null 2>&1
 export CUDA_VISIBLE_DEVICES=2,3,4,5
 ~/nvidiaenv/bin/python build_falc_logm.py || exit 1

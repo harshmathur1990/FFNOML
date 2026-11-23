@@ -10,7 +10,7 @@ Use a new folder for each experiment, because output files with the same names a
 
 ```bash
 repo=/mn/stornext/d9/data/harshm/FFNOML
-run=/mn/stornext/d9/data/harshm/ffnoml_runs/forward_001
+run=/mn/stornext/d9/data/harshm/ffnoml_data/archive/ffnoml_runs/forward_001
 mkdir -p "$run"
 cp -R "$repo/examples/inversion_run/." "$run/"
 ```
