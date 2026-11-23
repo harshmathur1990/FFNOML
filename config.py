@@ -288,10 +288,12 @@ MULTI_GPU = True
 
 MODEL = "FFNO3D"
 
+# The final (zaug) model, H and Ca II alike (FFNOMLTrainingWeights/zaug, learning_curve.ini final66_fno_l004{,_ca}_zaug):
+# width 96, the vertical operator with the l004p height scales, the level-fraction head
 MODEL_CONFIG = dict(
     in_channels=6,
     out_channels=6,
-    width=48,
+    width=96,
     n_layers=4,
     dropout=0.0,
     spec_dropout=0.08,
@@ -301,8 +303,15 @@ MODEL_CONFIG = dict(
     hidden_spectral=128,
     hidden_vertical=128,
     checkpoint_blocks=True,
+    freq_mix_rank=8,
+    open_side_paths=True,
+    vertical_operator=True,
+    z_column_cutoff=True,
+    z_feature_wavelength=0.3,
+    z_min_wavelength=0.04,
+    z_reference_length=40.0,
     # FFNOML_OUTPUT_MODE=level_fraction: the head predicts each species' split among its levels (models/ffno_model.py)
-    output_mode=os.environ.get("FFNOML_OUTPUT_MODE", "log_population"),
+    output_mode=os.environ.get("FFNOML_OUTPUT_MODE", "level_fraction"),
 )
 # FFNOML_MODEL_CONFIG (JSON, {"width": 96, ...}) overrides MODEL_CONFIG entries for scripted experiments
 if os.environ.get("FFNOML_MODEL_CONFIG"):
@@ -335,7 +344,7 @@ FORCE_EXPAND_VALIDATION_BASELINE = True
 
 DEBUG_LOSS = False
 # FFNOML_LAM_TOTAL weighs the loss on each species' total, |log10 sum of levels pred - true| (loss/nlte_composite_loss.py)
-LAM_TOTAL = float(os.environ.get("FFNOML_LAM_TOTAL", 0.0))
+LAM_TOTAL = float(os.environ.get("FFNOML_LAM_TOTAL", 0.3))     # the final (zaug) model
 # FFNOML_LAM_RATIO weighs |log10 n_u/n_l pred - true| over every line of the atom (the line source functions) and
 # FFNOML_LAM_ION |log10 N_k/N_k+1 pred - true| over adjacent ionisation stages (the ionisation balance), in the same units
 LAM_RATIO = float(os.environ.get("FFNOML_LAM_RATIO", 0.0))

@@ -220,6 +220,7 @@ testdata/
 tmp/
 IO/
 training_FFNO3D_zscale_expand_lognlte/
+training_FFNO3D_zscale_expand_lognlte_z_aug/
 
 # Checked-in run-directory templates contain placeholder files inside folders
 # whose production counterparts are ignored above.
