@@ -4,7 +4,7 @@ using LinearAlgebra
 import HSEMHS
 
 import WittBifrostEOS
-const MESH_EOS_TABLE=get(ENV,"HSEMHS_EOS_TABLE","/mn/stornext/d9/data/harshm/MHS/HSEMHS/cache/eos_table_fullz.h5")
+const MESH_EOS_TABLE=get(ENV,"HSEMHS_EOS_TABLE","/mn/stornext/d9/data/harshm/hsemhs_data/cache/eos_table_fullz.h5")
 
 """CPU population model with an exact VJP: ln p_l = sum_c A[l,c] phi_c + B[l] z/1e6, phi from the FFNO features."""
 struct SmoothMeshTestPopulations <: AbstractPopulationModel

@@ -18,7 +18,7 @@ function atmosphere(name)
             pgas=field("pgas"), rho=field("rho"), ne=field("ne"), z=field("z"))
     end
 end
-eos = HSEMHS.load_table("/mn/stornext/d9/data/harshm/hsemhs_env112/work/e2e/inputs/eos_table_fullz.h5")
+eos = HSEMHS.load_table("/mn/stornext/d9/data/harshm/hsemhs_data/envs/env112/work/e2e/inputs/eos_table_fullz.h5")
 config = PopulationMeshConfig()
 mesh = population_mesh(config)
 runs = Dict{String,Any}()

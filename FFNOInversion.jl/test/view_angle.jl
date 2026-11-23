@@ -14,7 +14,7 @@ include(joinpath(@__DIR__,"test_equilibrium.jl"))
 isdefined(Main,:SmoothMeshTestPopulations) || include(joinpath(@__DIR__,"population_mesh.jl"))
 isdefined(Main,:Phase6TwoLevelPopulation) || include(joinpath(@__DIR__,"phase6_production_gradient.jl"))
 
-const VIEW_EOS_TABLE=get(ENV,"HSEMHS_EOS_TABLE","/mn/stornext/d9/data/harshm/MHS/HSEMHS/cache/eos_table_fullz.h5")
+const VIEW_EOS_TABLE=get(ENV,"HSEMHS_EOS_TABLE","/mn/stornext/d9/data/harshm/hsemhs_data/cache/eos_table_fullz.h5")
 
 """Population model that records the (mesh) atmospheres it is given."""
 struct RecordingMesh <: AbstractPopulationModel

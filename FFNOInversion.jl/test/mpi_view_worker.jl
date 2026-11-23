@@ -9,7 +9,7 @@ using Serialization
 
 include(joinpath(@__DIR__,"test_equilibrium.jl"))
 const H=FFNOInversion.HSEMHS
-const TABLE=get(ENV,"HSEMHS_EOS_TABLE","/mn/stornext/d9/data/harshm/MHS/HSEMHS/cache/eos_table_fullz.h5")
+const TABLE=get(ENV,"HSEMHS_EOS_TABLE","/mn/stornext/d9/data/harshm/hsemhs_data/cache/eos_table_fullz.h5")
 
 struct MPIViewPopulation <: AbstractPopulationModel end
 function FFNOInversion.predict_populations!(out,::MPIViewPopulation,a::Atmosphere3D,cache=nothing)

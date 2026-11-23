@@ -5,7 +5,7 @@
 using FFNOInversion, HDF5, Libdl, Printf
 import Muspel, HSEMHS
 const R = joinpath(@__DIR__); const A = joinpath(R, "..", "inputs")
-mass_per_H = HSEMHS.load_table("/mn/stornext/d9/data/harshm/hsemhs_env112/work/e2e/inputs/eos_table_fullz.h5").mass_per_H
+mass_per_H = HSEMHS.load_table("/mn/stornext/d9/data/harshm/hsemhs_data/envs/env112/work/e2e/inputs/eos_table_fullz.h5").mass_per_H
 @printf("mass_per_H = %.4e kg (%.3f amu)\n", mass_per_H, mass_per_H / 1.66053906660e-27)
 abund = Dict(:H => 1.0, :CA => 10^(6.34 - 12))
 eos = WittmannEOS(joinpath(A, "wittmann", "libwitt_ffno.$(Libdl.dlext)"), joinpath(A, "pf_Kurucz.input"))

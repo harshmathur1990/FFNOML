@@ -7,7 +7,7 @@ using Serialization
 # 0, so the driver can compare rank counts; it also checks collective failures and repeated calls.
 
 const H=FFNOInversion.HSEMHS
-const TABLE=get(ENV,"HSEMHS_EOS_TABLE","/mn/stornext/d9/data/harshm/MHS/HSEMHS/cache/eos_table_fullz.h5")
+const TABLE=get(ENV,"HSEMHS_EOS_TABLE","/mn/stornext/d9/data/harshm/hsemhs_data/cache/eos_table_fullz.h5")
 out=ARGS[1]
 
 context=initialize_parallel(options=ParallelOptions(enabled=true,decomposition=:x_slabs,threads_per_rank=Threads.nthreads()))

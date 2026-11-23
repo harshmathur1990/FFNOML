@@ -17,7 +17,7 @@ include("helpers.jl")
         # the HSEMHS equilibrium table is built from the same Wittmann source with tighter solver tolerances
         # (and FIX_GASC_H2): its density and electron density agree with the library well inside the table's
         # interpolation and tolerance budget at these photospheric points
-        table_path=get(ENV,"HSEMHS_EOS_TABLE","/mn/stornext/d9/data/harshm/MHS/HSEMHS/cache/eos_table_fullz.h5")
+        table_path=get(ENV,"HSEMHS_EOS_TABLE","/mn/stornext/d9/data/harshm/hsemhs_data/cache/eos_table_fullz.h5")
         if isfile(table_path)
             table=FFNOInversion.WittBifrostEOS.load_table(table_path)
             for idx in eachindex(temperature)
