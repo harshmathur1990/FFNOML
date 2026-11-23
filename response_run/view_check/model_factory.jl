@@ -4,8 +4,8 @@ using FFNOInversion
 using Libdl
 using Muspel
 
-const R = "/mn/stornext/d9/data/harshm/FFNOML/response_run"
-const CHECKPOINTS = Dict(:H => "/mn/stornext/d9/data/harshm/FFNOML/training_FFNO3D_zscale_expand_lognlte/3D_sim_train_H.pt")
+const R = "/mn/stornext/d9/data/harshm/ffnoml_data/archive/FFNOML/response_run"
+const CHECKPOINTS = Dict(:H => "/mn/stornext/d9/data/harshm/ffnoml_data/archive/duplicate_checkpoints/paper/3D_sim_train_H.pt")
 const ATOM_FILES = Dict(:H => joinpath(R, "inputs", "atoms", "atom.h6_tiago2.yaml"),
                         :CA => joinpath(R, "inputs", "atoms", "atom.ca2.yaml"))
 const EOS_LIBRARY = joinpath(R, "inputs", "wittmann", "libwitt_ffno.$(Libdl.dlext)")

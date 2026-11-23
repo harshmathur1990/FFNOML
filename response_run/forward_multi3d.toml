@@ -1,7 +1,7 @@
 mode = "forward"
 
 [inputs]
-initial_atmosphere_file = "/mn/stornext/d9/data/harshm/FFNOML/response_run/inputs/multi3d_atmosphere.h5"
+initial_atmosphere_file = "/mn/stornext/d9/data/harshm/ffnoml_data/archive/FFNOML/response_run/inputs/multi3d_atmosphere.h5"
 time_index = 1
 
 [outputs]

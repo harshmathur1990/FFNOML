@@ -1,6 +1,6 @@
 #!/bin/bash
 source ~/loadgcc.sh >/dev/null 2>&1; export PATH=/tmp/julia-1.12.3/bin:$PATH
-H=/mn/stornext/d9/data/harshm/rh_falc/rhf1d; F=/mn/stornext/d9/data/harshm/FFNOML/response_run/falc; PY=~/env/bin/python3.12
+H=/mn/stornext/d9/data/harshm/rh_falc/rhf1d; F=/mn/stornext/d9/data/harshm/ffnoml_data/models/paper/falc; PY=~/env/bin/python3.12
 cd $F; $PY rh_cont_setup.py || exit 1
 cd $H/run_falc_cont; ../solveray > solveray.log 2>&1; echo "solveray exit $?"; tail -3 solveray.log | cut -c1-100
 air=$(cd $F; $PY -c "

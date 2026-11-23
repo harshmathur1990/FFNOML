@@ -25,7 +25,7 @@ OPERATOR = dict(z_reference_length=40.0, z_min_wavelength=0.3, z_feature_wavelen
 # the head's T, ne and rho on solar scales; the outputs stay normalised to themselves (mean 0, std 1)
 MEAN_X = np.array([3.8, 0.0, 0.0, 0.0, 16.0, -7.0], np.float32)
 STD_X = np.array([0.4, 5.0, 5.0, 5.0, 2.0, 2.5], np.float32)
-FINAL = "/mn/stornext/d9/data/harshm/FFNOML/training_FFNO3D_zscale_expand_lognlte_z_aug"
+FINAL = "/mn/stornext/d9/data/harshm/ffnoml_data/models/zaug"
 
 
 def model_of(**overrides):
@@ -247,7 +247,7 @@ class FinalModel(unittest.TestCase):
         from train_utils import load_checkpoint
         for atom in ("H", "CA"):
             with self.subTest(atom=atom):
-                checkpoint = load_checkpoint(os.path.join(FINAL, f"3D_sim_train_{atom}.pt"), map_location="cpu")
+                checkpoint = load_checkpoint(os.path.join(FINAL, atom, f"3D_sim_train_{atom}.pt"), map_location="cpu")
                 io = checkpoint["io_metadata"]
                 model = create_ffno3d(io["Cin"], io["Cout"], atoms=[atom])
                 model.load_state_dict(checkpoint["model_state"], strict=True)

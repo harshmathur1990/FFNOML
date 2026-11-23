@@ -1,7 +1,7 @@
 #!/bin/bash
 # FALC_82 with three nₑ: its own (given, no HSEMHS), the LTE EOS and the NLTE EOS (HSEMHS column HSE), on the log column mass
 # and height axes, on eagle7. Rebuilds the Wittmann library first (witt_kurucz_populations_given_ne, for the NLTE Kurucz lines).
-R=/mn/stornext/d9/data/harshm/FFNOML/response_run; P=/mn/stornext/d9/data/harshm/FFNOML/FFNOInversion.jl; cd $R/falc
+R=/mn/stornext/d9/data/harshm/ffnoml_data/archive/FFNOML/response_run; P=/mn/stornext/d9/data/harshm/FFNOML/FFNOInversion.jl; cd $R/falc
 source ~/loadnvidia.sh >/dev/null 2>&1
 export PATH=/tmp/julia-1.12.3/bin:$PATH CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-4,5} FFNO_FSDP_NPROC=2
 L=$R/inputs/wittmann/libwitt_ffno.so

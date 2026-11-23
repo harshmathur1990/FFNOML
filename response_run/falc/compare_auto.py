@@ -1,6 +1,6 @@
 # FALC's own 82 levels with the automatic corona against RH with the same nₑ: z and log tau with FALC's nₑ, and log tau with HSE nₑ against RH with the EOS nₑ.
 import h5py, numpy as np
-D = "/mn/stornext/d9/data/harshm/FFNOML/response_run/falc/"
+D = "/mn/stornext/d9/data/harshm/ffnoml_data/models/paper/falc/"
 r = h5py.File(D + "falc_rh.h5"); lr = r["wavelength_air_nm"][:]; Ir = r["intensity"][:] * 1e8; q = np.argsort(lr); lr, Ir = lr[q], Ir[q]; H = r["H_n"][...]; Ca = r["CA_n"][...]
 lE, IE = np.load(D + "rh_ne_eos_spectrum.npy"); zF = h5py.File(D + "FALC_82_5x5.hdf5")["z"][0] / 1e3; pts = (655.8, 657.2, 853.4, 854.0, 854.6)
 print("RH FALC ne ", " ".join(f"{np.interp(x, lr, Ir):.3f}" for x in pts), "| Ha core %.3f Ca core %.3f" % (Ir[(lr>655.8)&(lr<657.2)].min(), Ir[(lr>853.4)&(lr<854.6)].min()))

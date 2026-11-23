@@ -321,7 +321,7 @@ repeated epochs, so no margin is added. A slower model than estimated is the mai
 
 ## Phase 0 results (2026-11-13)
 
-Scripts and logs: `/mn/stornext/d9/data/harshm/ffnoml_runs/cbh24_s0910_s0928_checks/`.
+Scripts and logs: `/mn/stornext/d9/data/harshm/ffnoml_data/archive/ffnoml_runs/cbh24_s0910_s0928_checks/`.
 
 - **Links:** `bifrost_data/cbh24/s0910` and `s0928` hold `atm3d`, `mesh` and `H/` as links to the source runs.
 - **out_atm against atm3d:** nₑ, T and ρ are identical; the velocities differ only by the unit factor 10⁵ (cm/s

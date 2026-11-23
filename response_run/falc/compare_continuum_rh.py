@@ -1,7 +1,7 @@
 # RH's chi and S (solveray output after the mu = 1 intensities) against this code's, by depth, at near-continuum wavelengths; and the
 # emergent intensity for each combination of the two codes' chi and S, to split the difference between opacity and source function.
 import struct, h5py, numpy as np
-R = "/mn/stornext/d9/data/harshm/rh_falc/rhf1d/run_falc/"; D = "/mn/stornext/d9/data/harshm/FFNOML/response_run/falc/"
+R = "/mn/stornext/d9/data/harshm/rh_falc/rhf1d/run_falc/"; D = "/mn/stornext/d9/data/harshm/ffnoml_data/models/paper/falc/"
 sp = open(R + "spectrum.out", "rb").read(); nspect = struct.unpack(">i", sp[:4])[0]
 b = open(R + "spectrum_1.00", "rb").read(); p = 8 + 8 * nspect; I_rh = np.frombuffer(b, ">f8", nspect, 8)
 n = struct.unpack(">i", b[p:p+4])[0]; p += 4; nz = 82; chi = {}; S = {}

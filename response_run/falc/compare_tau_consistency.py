@@ -1,6 +1,6 @@
 # Does the tau route recover the z route's column when the tau grid comes from the same given-nₑ atmosphere? P, rho, chi500, z by level; profiles against RH.
 import h5py, numpy as np
-D = "/mn/stornext/d9/data/harshm/FFNOML/response_run/falc/"
+D = "/mn/stornext/d9/data/harshm/ffnoml_data/models/paper/falc/"
 r = h5py.File(D + "falc_rh.h5"); lr = r["wavelength_air_nm"][:]; Ir = r["intensity"][:] * 1e8; q = np.argsort(lr); lr, Ir = lr[q], Ir[q]; H = r["H_n"][...]; Ca = r["CA_n"][...]
 zF = h5py.File(D + "FALC_82_5x5.hdf5")["z"][0] / 1e3; pts = (655.8, 657.2, 853.4, 854.0, 854.6)
 g = lambda a, n: a[n][2, 2, :, 0]

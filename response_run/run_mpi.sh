@@ -10,7 +10,7 @@
 source ~/loadgcc.sh >/dev/null 2>&1
 export PATH=/tmp/julia-1.12.3/bin:$PATH
 P=/mn/stornext/d9/data/harshm/FFNOML/FFNOInversion.jl
-R=/mn/stornext/d9/data/harshm/FFNOML/response_run
+R=/mn/stornext/d9/data/harshm/ffnoml_data/archive/FFNOML/response_run
 export FFNOML_RUN_DIR=$R
 cd $R
 hosts=$1; out=$2; shift 2
@@ -19,5 +19,5 @@ nranks=$(echo "$hosts" | tr ',' '\n' | awk -F: '{n+=($2==""?1:$2)} END{print n}'
 MPIEXEC=$(julia --startup-file=no --project=$P -e 'using MPI; print(MPI.mpiexec().exec[1])')
 "$MPIEXEC" -iface "$iface" -genv FI_PROVIDER tcp -genv FI_TCP_IFACE "$iface" -hosts "$hosts" -n "$nranks" \
   /tmp/julia-1.12.3/bin/julia --startup-file=no --project=$P --threads=auto \
-  $P/scripts/column_response.jl ${CONFIG:-$R/forward.toml} $R/paths.jl ${ATMOSPHERE:-/mn/stornext/d9/data/harshm/FFNOML/outputs/forward_atmosphere.h5} \
+  $P/scripts/column_response.jl ${CONFIG:-$R/forward.toml} $R/paths.jl ${ATMOSPHERE:-/mn/stornext/d9/data/harshm/ffnoml_data/archive/FFNOML/outputs/forward_atmosphere.h5} \
   "$out" "$@"

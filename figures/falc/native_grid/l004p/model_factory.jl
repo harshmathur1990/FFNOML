@@ -4,8 +4,8 @@ using FFNOInversion
 using Libdl
 using Muspel
 
-const R = "/mn/stornext/d9/data/harshm/FFNOML/response_run"
-const CHECKPOINTS = Dict(:H => "/mn/stornext/d9/data/harshm/FFNOMLTrainingWeights/l004p/H/3D_sim_train_H.pt")
+const R = "/mn/stornext/d9/data/harshm/ffnoml_data/archive/FFNOML/response_run"
+const CHECKPOINTS = Dict(:H => "/mn/stornext/d9/data/harshm/ffnoml_data/models/l004p/H/3D_sim_train_H.pt")
 const ATOM_FILES = Dict(:H => joinpath(R, "inputs", "atoms", "atom.h6_tiago2.yaml"))
 const EOS_LIBRARY = joinpath(R, "inputs", "wittmann", "libwitt_ffno.$(Libdl.dlext)")
 const PARTITION_FUNCTIONS = joinpath(R, "inputs", "pf_Kurucz.input")
@@ -18,7 +18,7 @@ function build_falc_model(config, distributed, workspace, context)
     launcher = get(ENV, "FFNO_FSDP_LAUNCHER", "")
     populations = launch_fsdp_population_models([FSDPModelSpec(s, CHECKPOINTS[s], metadata(s)) for s in (:H,)], context;
         population_mesh=population_mesh_options(config), timeout_seconds=900.0,
-        diagnostics_directory=get(ENV, "FFNO_GPU_DIAGNOSTICS_DIR", "/mn/stornext/d9/data/harshm/ffnoml_runs/falc_l004p_native_rerun/diagnostics"),
+        diagnostics_directory=get(ENV, "FFNO_GPU_DIAGNOSTICS_DIR", "/mn/stornext/d9/data/harshm/ffnoml_data/models/l004p/falc/native_rerun/diagnostics"),
         (isempty(launcher) ? (;) : (;launcher=launcher))...)
     outcome = reconstruct_equilibrium!(equilibrium, distributed, context)
     outcome.valid || error("no valid equilibrium: $(outcome.reason)")
