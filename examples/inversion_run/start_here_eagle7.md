@@ -101,7 +101,6 @@ export FFNO_FSDP_LAUNCHER=$repo/FFNOInversion.jl/scripts/ffno_batched_service_lo
 export FFNO_FSDP_PYTHON=\$HOME/nvidiaenv/bin/python
 export FFNO_GPU_CONTROL_HOST=127.0.0.1
 export CUDA_VISIBLE_DEVICES=3,4,5           # the free GPUs from step 4
-export FFNO_BATCHED_VERTICAL_NORM_SLABS=1   # changes the result: see below
 export OMP_NUM_THREADS=1
 export FFNO_THREADS_PER_RANK=64             # the same as --threads below
 cd $run
@@ -116,16 +115,7 @@ Edit the GPU list if needed, and lower the threads if others are using the CPUs,
 nohup bash "$run/run_eagle7.sh" > "$run/run.log" 2>&1 &
 ```
 
-`FFNO_BATCHED_VERTICAL_NORM_SLABS` is the only batched setting that changes the result. It doesn't need to match the number of GPUs you use here:
-
-| Value | Result |
-| --- | --- |
-| `1` (default) | the volume statistic of `FFNO3D.forward` |
-| `N` | reproduces an FSDP run on N GPUs. Use `32` to match Olivia's default 8 nodes × 4 GPUs. |
-
-The FSDP routes normalize one layer per GPU slab, so their results depend on the GPU count. Pick the value you want before comparing with another run.
-
-`FFNO_BATCHED_CHUNK_DEPTH`, `FFNO_BATCHED_CHUNK_ROWS` and `FFNO_BATCHED_VERTICAL_CHUNK` set the batch sizes. They change memory use and speed but not the result.
+`FFNO_BATCHED_CHUNK_DEPTH` and `FFNO_BATCHED_CHUNK_ROWS` set the batch sizes. They change memory use and speed but not the result, which, as an FSDP run's, does not depend on the number of GPUs.
 
 ## 6. Check the result
 

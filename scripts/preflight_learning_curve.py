@@ -40,7 +40,7 @@ def job_config(e, run):
     sbatch = open(os.path.join(REPO, "scripts", "learning_curve_train.sbatch")).read().splitlines()
     exports = [line for line in sbatch if line.startswith("export FFNOML_")]
     probe = ("import config, json; print(json.dumps(dict(atoms=config.ACTIVE_ATOMS, train=config.TRAIN_SPLIT, "
-             "val=config.VAL_SPLIT, epochs=config.NUM_EPOCHS, output_mode=config.MODEL_CONFIG['output_mode'], "
+             "val=config.VAL_SPLIT, epochs=config.NUM_EPOCHS, "
              "species=config.MODEL_CONFIG.get('species'), lam_total=config.LAM_TOTAL, train_file=config.TRAIN_FILE, "
              "test_file=config.TEST_FILE, model_dir=config.MODEL_DIR)))")
     with tempfile.TemporaryDirectory() as tmp:
@@ -77,11 +77,9 @@ def preflight(name, e):
     check(c["atoms"] == [e["atoms"]], f"atoms {c['atoms']}")
     check(c["train"] == split_of(e["train"]) and c["val"] == split_of(e["val"]), f"splits train {c['train']} val {c['val']}")
     check(c["epochs"] == int(e["epochs"]), f"epochs {c['epochs']}")
-    check(c["output_mode"] == e["output_mode"], f"head {c['output_mode']}")
     check(math.isclose(c["lam_total"], float(e["lam_total"])), f"lam_total {c['lam_total']}")
-    if e["output_mode"] == "level_fraction":
-        check(c["species"] is not None and len(c["species"]) == 1,
-              f"species {c['species']} (mass {10 ** c['species'][0]['log10_particle_mass']:.4e} kg)" if c["species"] else "species")
+    check(c["species"] is not None and len(c["species"]) == 1,
+          f"species {c['species']} (mass {10 ** c['species'][0]['log10_particle_mass']:.4e} kg)" if c["species"] else "species")
     datasets = sorted(os.path.join(run, rel) for rel in prepared["datasets"])
     check(sorted([c["train_file"], c["test_file"]]) == datasets, "the job reads the prepared datasets")
     check(os.path.normpath(c["model_dir"]) == os.path.join(run, MODEL_SUBDIR), f"model dir {c['model_dir']}")
@@ -98,14 +96,13 @@ def preflight(name, e):
         group = f[sorted(k for k in f.keys() if isinstance(f[k], h5py.Group))[0]]
         i = int(np.argmax(np.asarray(group["scale"]) == 1))                      # a full-resolution patch
         patch = {k: np.asarray(group[k][i:i + 1]) for k in ("inputs", "targets", "z_scale", "dx", "dy", "log_lte_populations")}
-    if e["output_mode"] == "level_fraction":
-        log10_rho = patch["inputs"][0, 5] * stats["std_X"][5] + stats["mean_X"][5]
-        log10_n = patch["targets"][0].astype(np.float64) * stats["std_Y"][:, None, None, None] + stats["mean_Y"][:, None, None, None]
-        total = np.log10(np.sum(10.0 ** log10_n, 0))
-        s = total - (log10_rho - c["species"][0]["log10_particle_mass"])
-        check(abs(np.median(s)) < 0.1 and np.abs(s).max() < 6.0,
-              f"targets' total against rho / mass on a training patch: median {np.median(s):+.3f} dex, "
-              f"range {s.min():+.2f} to {s.max():+.2f} (the head reaches 6 dex)")
+    log10_rho = patch["inputs"][0, 5] * stats["std_X"][5] + stats["mean_X"][5]
+    log10_n = patch["targets"][0].astype(np.float64) * stats["std_Y"][:, None, None, None] + stats["mean_Y"][:, None, None, None]
+    total = np.log10(np.sum(10.0 ** log10_n, 0))
+    s = total - (log10_rho - c["species"][0]["log10_particle_mass"])
+    check(abs(np.median(s)) < 0.1 and np.abs(s).max() < 6.0,
+          f"targets' total against rho / mass on a training patch: median {np.median(s):+.3f} dex, "
+          f"range {s.min():+.2f} to {s.max():+.2f} (the head reaches 6 dex)")
 
     # 3. model and loss at production size
     import torch
@@ -124,7 +121,7 @@ def preflight(name, e):
     torch.manual_seed(0)
     model = builder.build_model(wrap_fsdp=False)
     _, _, loss_fn = builder.build_training_components(model)
-    head = sum(config.levels) + (len(config.levels) if e["output_mode"] == "level_fraction" else 0)
+    head = sum(config.levels) + len(config.levels)
     check(model.proj2.out_channels == head, f"head channels {model.proj2.out_channels}")
     check(math.isclose(loss_fn.lam_total, float(e["lam_total"])), f"loss weight on the total {loss_fn.lam_total}")
     print(f"  model: {sum(p.numel() for p in model.parameters()):,} parameters ({config.MODEL_CONFIG})", flush=True)
@@ -142,12 +139,11 @@ def preflight(name, e):
     grads = [p.grad for p in model.parameters() if p.requires_grad]
     check(all(g is not None and bool(torch.isfinite(g).all()) for g in grads), f"finite gradients on all {len(grads)} tensors "
           f"({seconds:.0f} s for one patch forward and backward on the CPU)")
-    if e["output_mode"] == "level_fraction":
-        with torch.no_grad():
-            log10_n = pred.detach().double() * model.std_Y.double()[None, :, None, None, None] + model.mean_Y.double()[None, :, None, None, None]
-            total = torch.logsumexp(log10_n * math.log(10.0), 1) / math.log(10.0)
-            ref = (x[:, 5].double() * stats["std_X"][5] + stats["mean_X"][5]) - c["species"][0]["log10_particle_mass"]
-        check(float((total - ref).abs().max()) < 1e-3, f"total at initialisation is rho / mass to {float((total - ref).abs().max()):.1e} dex")
+    with torch.no_grad():
+        log10_n = pred.detach().double() * model.std_Y.double()[None, :, None, None, None] + model.mean_Y.double()[None, :, None, None, None]
+        total = torch.logsumexp(log10_n * math.log(10.0), 1) / math.log(10.0)
+        ref = (x[:, 5].double() * stats["std_X"][5] + stats["mean_X"][5]) - c["species"][0]["log10_particle_mass"]
+    check(float((total - ref).abs().max()) < 1e-3, f"total at initialisation is rho / mass to {float((total - ref).abs().max()):.1e} dex")
 
 
 def main():

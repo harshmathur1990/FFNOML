@@ -118,58 +118,51 @@ Prediction outputs are written back in linear space as:
 
 - `nlte_populations = n_NLTE [m^-3]`
 
-### Output heads
+### Output head
 
-The targets, the loss and the outputs are the same for both heads; they differ in what the last layer predicts.
-`MODEL_CONFIG["output_mode"]` (or `FFNOML_OUTPUT_MODE`) chooses:
+The last layer does not predict the populations themselves: per atom it gives one departure value δᵢ per level and
+one total correction u, and the head builds the populations from them:
 
-- **`level_fraction`** (the default, the final model's head): per atom, the last layer gives one departure value δᵢ per level and one total correction u,
-  and the head builds the populations from them:
+```text
+n_i = n_total × share_i
+n_total = ρ / m × 10^s,                s = 6 tanh(u / 6)                (m: mass per atom of the species)
+share_i = f*_i b_i / Σ_j f*_j b_j  =  softmax(ln f*_i + δ_i),  δ_i = ln b_i up to a constant common to the atom's levels
+```
 
-  ```text
-  n_i = n_total × share_i
-  n_total = ρ / m × 10^s,                s = 6 tanh(u / 6)                (m: mass per atom of the species)
-  share_i = f*_i b_i / Σ_j f*_j b_j  =  softmax(ln f*_i + δ_i),  δ_i = ln b_i up to a constant common to the atom's levels
-  ```
+f*ᵢ(T, nₑ) is MULTI3D's own LTE level fraction, computed in the head from the input T and nₑ exactly as MULTI3D's
+`calc_lte_populations` computes it (Saha–Boltzmann with its Debye lowering and constants, and the atom data from
+MULTI3D's output, `ATOM_CONFIG[atom]["multi3d_lte"]`); Muspel's LTE is not used. bᵢ = nᵢ / nᵢ(LTE) is the
+departure coefficient, so δ = 0 gives MULTI3D's LTE populations, and the network only learns the departures from LTE
+and a small correction to the total (−0.02 dex in the `_hion` simulations, the H₂ deficit below log T = 3.7). With
+δ = 0 the head reproduces MULTI3D's stored LTE populations to 1.3×10⁻⁵ dex, the float32 precision of the normalised
+log T input; given MULTI3D's own float32 T and nₑ, the formula matches to 7×10⁻⁸ dex. The species totals have their
+own loss term, weighted by `FFNOML_LAM_TOTAL` (`loss/nlte_composite_loss.py`).
 
-  f*ᵢ(T, nₑ) is MULTI3D's own LTE level fraction, computed in the head from the input T and nₑ exactly as MULTI3D's
-  `calc_lte_populations` computes it (Saha–Boltzmann with its Debye lowering and constants, and the atom data from
-  MULTI3D's output, `ATOM_CONFIG[atom]["multi3d_lte"]`); Muspel's LTE is not used. bᵢ = nᵢ / nᵢ(LTE) is the
-  departure coefficient, so δ = 0 gives MULTI3D's LTE populations, and the network only learns the departures from
-  LTE and a small correction to the total (−0.02 dex in the `_hion` simulations, the H₂ deficit below log T = 3.7).
-  With δ = 0 the head reproduces MULTI3D's stored LTE populations to 1.3×10⁻⁵ dex, the float32 precision of the
-  normalised log T input; given MULTI3D's own float32 T and nₑ, the formula matches to 7×10⁻⁸ dex. The species
-  totals can get their own loss term, weighted by `FFNOML_LAM_TOTAL` (`loss/nlte_composite_loss.py`).
-- **`log_population`**: the last layer gives the normalised log10 populations directly. This is the head of the
-  original paper model (`FFNOMLTrainingWeights/paper`). To load it, set `FFNOML_OUTPUT_MODE=log_population` and
-  `FFNOML_MODEL_CONFIG='{"width": 48, "vertical_operator": false, "freq_mix_rank": 0, "open_side_paths": false,
-  "z_column_cutoff": false, "z_feature_wavelength": 0.0, "z_min_wavelength": 0.0, "z_reference_length": 0.0}'`,
-  which restores that model's configuration over the final model's defaults.
+The head adds no parameters or inputs: the network reads the 6 input channels, and the model's output is still the
+normalised log10 populations, one channel per level, so the loss, the predictions and the services are unchanged.
 
-The head adds no parameters or inputs: the network still reads the 6 input channels and the head still writes one
-channel per level. A checkpoint loads only into the head and configuration it was trained with. The defaults are the
-final model's (below), so its checkpoints need no settings; for any other, set `FFNOML_OUTPUT_MODE` and
-`FFNOML_MODEL_CONFIG` the same way for training, `--predict`, `--fsdppredict`, the batched and FSDP services and the
-inversion. Level-fraction checkpoints from before the departure coefficients
-(commit `066d327` and earlier, such as the `sims1_lf` learning-curve run) load only with that code.
-
-`FFNOML_MODEL_CONFIG` (JSON) overrides `MODEL_CONFIG` entries, for example `{"width": 48}`; the options are those of
-`FFNO3D` in `models/ffno_model.py`, whose own defaults are all off.
+This branch builds only this model. The original paper model (log10 populations predicted directly, an index-based
+vertical branch, `FFNOMLTrainingWeights/paper`) and the other earlier architectures load only with FFNOML `main`.
+`FFNOML_MODEL_CONFIG` (JSON) can still change the final model's sizes, for example `{"width": 64}`; the switches of
+the earlier architectures (`vertical_operator`, `open_side_paths`, `z_column_cutoff`, `z_spectral_modes`,
+`FFNOML_OUTPUT_MODE`) are accepted only with the final model's values, as in the runs' `experiment.env` files.
 
 ### The final model (zaug)
 
 The final model, for H I and Ca II alike, is **zaug**, and `config.py`'s defaults are its configuration:
 
+Each block has a horizontal spectral branch (2D FFT on each height plane, weights a learned function of the physical
+wavenumber) and a vertical one, `HeightSpectralConv`: a spectral convolution along height on each column's own
+heights, in which each column keeps only the wavenumbers its own level spacing resolves. The branches are fused
+pointwise, two pointwise side paths start at weight 0.5, and every GroupNorm weights levels by the height they stand
+for, so nothing counts grid points in any direction. The head is the level-fraction head ([Output head](#output-head)).
+
 | Setting | Value | What it does |
 | --- | --- | --- |
 | `width`, `n_layers` | 96, 4 | hidden channels, blocks |
-| `vertical_operator` | true | the vertical branch is `HeightSpectralConv`, a spectral convolution along height on each column's own heights; the fusion has no 3×3×3 convolution; every GroupNorm weights levels by the height they stand for. Nothing counts grid points in any direction |
 | `z_reference_length`, `z_min_wavelength` | 40 Mm, 0.04 Mm | the height operator's period and its shortest wavelength (1001 modes) |
-| `z_feature_wavelength` | 0.3 Mm | the frequency MLPs see the wavenumber on this fixed physical scale |
-| `z_column_cutoff` | true | each column keeps only the wavenumbers its own level spacing resolves |
+| `z_feature_wavelength` | 0.3 Mm | the frequency MLPs see the vertical wavenumber on this fixed physical scale |
 | `freq_mix_rank` | 8 | low-rank per-wavenumber channel mixing, in the horizontal and the height operator |
-| `open_side_paths` | true | the pointwise side paths start at 0.5 and the MLP path is not squashed by tanh |
-| `output_mode` | `level_fraction` | departure coefficients from MULTI3D's LTE populations and the species total ([Output heads](#output-heads)) |
 | `LAM_TOTAL` | 0.3 | loss = data loss + 0.3 × the species-total term |
 
 3.18 M parameters. It was trained in two stages on the 6 + 6 split (`TRAIN_SPLIT`, `VAL_SPLIT`, with cbh24 s0910 /
@@ -796,8 +789,7 @@ that keeps the trained models on the GPUs for the whole run:
 - `ffno_model_factory.py`: builds FFNO3D from `MODEL_CONFIG` for the service; the defaults load the final model
   ([The final model](#the-final-model-zaug)). `create_ffno3d(atoms=[...])` sets a level-fraction head's species per
   model, so one service can hold the H and the Ca II network (FFNOInversion passes it as the spec's
-  `factory_kwargs`); without it, every model takes its species from `FFNOML_ACTIVE_ATOMS`. Other checkpoints need
-  their `FFNOML_OUTPUT_MODE` and `FFNOML_MODEL_CONFIG` in the service's environment; see [Output heads](#output-heads).
+  `factory_kwargs`); without it, every model takes its species from `FFNOML_ACTIVE_ATOMS`.
 
 Julia MPI rank 0 launches it with `FFNOInversion.jl/scripts/ffno_fsdp_service.sh`
 (one `srun --overlap` torchrun job across all nodes of the allocation). The service
@@ -897,8 +889,7 @@ no conversion: set `[view]` in a `forward_z.toml`-style run.
 | `scripts/pf_Kurucz.input` | Partition functions. The Wittmann EOS, C++ and Python, is WittBifrostEOS's (`deps/witt/witt_shim.cpp`, found as `WittBifrostEOS.jl` next to this repository or through `WITTBIFROSTEOS_DIR`): the converter compiles it, and it is the inversion's `libwitt_ffno` |
 | `scripts/atmosphere_resampler.cpp` | C++/Boost spatial resampler used by the MURaM converter |
 | `export_multi3d_depcoeff.py` | write MULTI3D departure coefficients in the FFNONet prediction layout |
-| `scripts/learning_curve.ini`, `scripts/learning_curve_eagle7.py`, `scripts/submit_learning_curve.py` | learning-curve and capacity-screening experiments: build and score on eagle7, train on Olivia (see the ini's header) |
-| `scripts/capacity_benchmark.py` (`.sbatch`) | GPU memory and time per training step of each capacity configuration |
+| `scripts/learning_curve.ini`, `scripts/learning_curve_eagle7.py`, `scripts/submit_learning_curve.py` | training experiments of the final model: build and score on eagle7, train on Olivia (see the ini's header) |
 | `compute_muspel_lte.jl`, `validate_multi3d_dep_loading.jl` | Muspel LTE populations, check of MULTI3D departure-coefficient loading |
 | `compare_population_models.py` | per-level NRMSE of two prediction directories against MULTI3D |
 | `make_paper_plots.py`, `generate_ffno_schematic_matplotlib.py` | paper figures and the architecture schematic |
@@ -916,8 +907,9 @@ python -m pytest tests
 The tests cover the composite NLTE loss, spacing-grouped batches, checkpoint
 consistency, the FSDP service launcher, the Olivia case outcomes, the C++ Witt
 EOS, the level-fraction head and its departure coefficients against a transcription of MULTI3D's
-`calc_lte_populations` (`tests/test_level_fraction_head.py`, `tests/test_departure_coefficients.py`), and the
-capacity options (`tests/test_capacity_switches.py`).
+`calc_lte_populations` (`tests/test_level_fraction_head.py`, `tests/test_departure_coefficients.py`), the height
+operator on different vertical grids, the batched and FSDP routes and the loading of the final checkpoints
+(`tests/test_height_operator.py`), and height augmentation (`tests/test_z_augment.py`).
 
 Julia (from `FFNOInversion.jl/`):
 

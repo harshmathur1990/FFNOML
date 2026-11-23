@@ -6,7 +6,7 @@ Source: [`models/ffno_model.py`](../models/ffno_model.py)
 
 ```mermaid
 flowchart TD
-    X["x: [B, in_channels, D, H, W]"] --> LIFT["lift<br/>Conv3d(in_channels -> width, 1)<br/>GroupNorm<br/>GELU"]
+    X["x: [B, in_channels, D, H, W]"] --> LIFT["lift<br/>Conv3d(in_channels -> width, 1)<br/>DepthWeightedGroupNorm<br/>GELU"]
     Z["z_scale: [B, D, H, W] or [B, 1, D, H, W]"] --> BLOCKS
     DX["dx"] --> BLOCKS
     DY["dy"] --> BLOCKS
@@ -14,7 +14,7 @@ flowchart TD
     H0 --> BLOCKS["repeat n_layers x<br/>FFNOBlock3dBalanced"]
     BLOCKS --> HEAD1["proj1<br/>Conv3d(width -> 2*width, 1)<br/>GELU"]
     HEAD1 --> HEAD2["proj2<br/>Conv3d(2*width -> head_channels, 1)"]
-    HEAD2 --> HO["head_output(head, x)<br/>log_population: identity<br/>level_fraction: see below"]
+    HEAD2 --> HO["head_output(head, x)<br/>level-fraction head: see below"]
     X -. T, ne, rho .-> HO
     HO --> Y["output: normalised log10 n, [B, out_channels, D, H, W]"]
 
@@ -23,13 +23,12 @@ flowchart TD
     TRAIN -. wraps lift/block/head .-> HEAD1
 ```
 
-`head_channels` is `out_channels` for `output_mode = "log_population"` and `out_channels + n_species` for
-`"level_fraction"` (one departure value per level and one total correction per species).
+`head_channels` is `out_channels + n_species`: one departure value per level and one total correction per species.
 
-The final model (zaug, `config.py`'s defaults) uses `"level_fraction"`, width 96 and `vertical_operator=True`: the
-GroupNorms are `DepthWeightedGroupNorm` (statistics weighted by each level's share of the column height), each
-block's vertical branch is `HeightSpectralConv` (a spectral convolution along height, low-rank mixing of rank 8,
-column cutoff), and the fusion is pointwise (no 3x3x3 convolution). The diagrams below show the general structure.
+This is the final model (zaug, `config.py`'s defaults, width 96), the only one this branch builds. Every GroupNorm is a
+`DepthWeightedGroupNorm` (statistics weighted by each level's share of the column height), each block's vertical
+branch is `HeightSpectralConv` (a spectral convolution along height, low-rank mixing of rank 8, column cutoff), and
+the fusion is pointwise.
 
 ## Level-fraction head with departure coefficients
 
@@ -50,8 +49,7 @@ flowchart TD
 ```
 
 δ = 0 gives MULTI3D's LTE populations; the network learns the departure coefficients (up to a constant per species)
-and the total's small offset from ρ / m. The head has no parameters of its own. The capacity options of the blocks
-(`z_spectral_modes`, `freq_mix_rank`, `open_side_paths`) are off by default and not drawn here.
+and the total's small offset from ρ / m. The head has no parameters of its own.
 
 ## `FFNOBlock3dBalanced`
 
@@ -62,11 +60,11 @@ flowchart TD
     X --> SPEC["SpectralConv2dFull(x, dx, dy)"]
     DX["dx"] --> SPEC
     DY["dy"] --> SPEC
-    SPEC --> NS["GroupNorm<br/>GELU<br/>optional spec_dropout"]
+    SPEC --> NS["DepthWeightedGroupNorm<br/>GELU<br/>optional spec_dropout"]
 
-    X --> VERT["vertical branch (x, z_scale)<br/>HeightSpectralConv (vertical_operator, final model)<br/>or BalancedVerticalPhysicsStack"]
+    X --> VERT["HeightSpectralConv(x, z_scale)"]
     Z["z_scale"] --> VERT
-    VERT --> NV["GroupNorm<br/>GELU<br/>optional vertical_dropout"]
+    VERT --> NV["DepthWeightedGroupNorm<br/>GELU<br/>optional vertical_dropout"]
 
     X --> GATE["branch_gate<br/>Conv3d(3w -> w, 1)<br/>GELU<br/>Conv3d(w -> 2w, 1)<br/>Sigmoid"]
     NS --> GATE
@@ -81,19 +79,19 @@ flowchart TD
 
     SMIX --> CAT["concat(spec_mix, vert_mix)<br/>[B, 2w, D, H, W]"]
     VMIX --> CAT
-    CAT --> FUSE["fuse<br/>Conv3d(2w -> 2w, 1)<br/>GELU<br/>Depthwise Conv3d(2w -> 2w, 3), GELU<br/>(not with vertical_operator)<br/>Conv3d(2w -> w, 1)"]
+    CAT --> FUSE["fuse<br/>Conv3d(2w -> 2w, 1)<br/>GELU<br/>Conv3d(2w -> w, 1)"]
     SMIX --> AVG["0.5 * (spec_mix + vert_mix)"]
     VMIX --> AVG
     FUSE --> FADD["fused + average branch mix"]
     AVG --> FADD
-    FADD --> NF["GroupNorm<br/>GELU"]
+    FADD --> NF["DepthWeightedGroupNorm<br/>GELU"]
 
     RES --> X1["x1 = residual + res_fused * fused"]
     NF --> X1
-    X1 --> PW["pw<br/>Conv3d(w -> 2w, 1)<br/>GELU<br/>Conv3d(2w -> w, 1)<br/>GroupNorm"]
+    X1 --> PW["pw<br/>Conv3d(w -> 2w, 1)<br/>GELU<br/>Conv3d(2w -> w, 1)<br/>DepthWeightedGroupNorm"]
     PW --> X2["x2 = x1 + res_pw * pw"]
     X1 --> X2
-    X2 --> MLP["PointwiseMLP<br/>Conv3d(w -> 2w, 1)<br/>GELU<br/>Dropout<br/>Conv3d(2w -> w, 1)<br/>GroupNorm<br/>tanh"]
+    X2 --> MLP["PointwiseMLP<br/>Conv3d(w -> 2w, 1)<br/>GELU<br/>Dropout<br/>Conv3d(2w -> w, 1)<br/>DepthWeightedGroupNorm"]
     MLP --> OUT["out = x2 + res_mlp * mlp"]
     X2 --> OUT
 
@@ -128,7 +126,10 @@ flowchart TD
     POST --> Y["spectral branch output"]
 ```
 
-## `HeightSpectralConv` (vertical_operator, the final model)
+With `freq_mix_rank` 8 a second MLP of the same frequency features gives each wavenumber its own low-rank channel
+mixing U(k) V(k), added to the complex channel mixing (U starts at zero).
+
+## `HeightSpectralConv`
 
 ```mermaid
 flowchart TD
@@ -147,42 +148,6 @@ flowchart TD
     POST --> Y["vertical branch output"]
 ```
 
-## `BalancedVerticalPhysicsStack` (vertical_operator=False: the paper and l004 models before the height operator)
-
-```mermaid
-flowchart TD
-    X["x: [B, C, D, H, W]"] --> PERM["permute/reshape columns<br/>[B, H*W, C, D]"]
-    Z["z_scale"] --> ZCHECK["validate shape<br/>[B,1,D,H,W]"]
-    ZCHECK --> ZPERM["permute/reshape columns<br/>[B, H*W, 1, D]"]
-
-    PERM --> CHUNK["process H*W columns<br/>in chunks of 4"]
-    ZPERM --> CHUNK
-
-    CHUNK --> XI["xi: [-1, C, D]"]
-    CHUNK --> ZI["zi: [-1, 1, D]"]
-    ZI --> ZFEAT["z features<br/>z_scale, z_norm, dz_norm, z_span<br/>[-1, 4, D]"]
-
-    XI --> INPROJ["in_proj<br/>Conv1d(C -> hidden, 1)<br/>GroupNorm<br/>GELU"]
-    ZFEAT --> ZPROJ["z_proj<br/>Conv1d(4 -> hidden, 1)<br/>GELU"]
-    INPROJ --> ADD["in_proj(xi) + z_proj(z_feat)"]
-    ZPROJ --> ADD
-
-    ADD --> MS["LiteMultiScaleVertical<br/>depthwise kernels 3,7,15<br/>pointwise mix"]
-    MS --> RB1["LiteVerticalResidualBlock<br/>k=5 dilation=1"]
-    RB1 --> RB2["LiteVerticalResidualBlock<br/>k=5 dilation=2"]
-    RB2 --> RB3["LiteVerticalResidualBlock<br/>k=5 dilation=4"]
-    RB3 --> RB4["LiteVerticalResidualBlock<br/>k=7 dilation=1"]
-
-    RB4 --> DG["depth_gate<br/>Conv1d(hidden -> hidden, 1)<br/>GELU<br/>Conv1d(hidden -> hidden, 1)<br/>Sigmoid"]
-    RB4 --> GATED["yi * depth_gate(yi)"]
-    DG --> GATED
-    GATED --> OUTPROJ["out_proj<br/>Conv1d(hidden -> C, 1)"]
-    OUTPROJ --> COLLECT["reshape chunks back<br/>[B, H, W, C, D]"]
-    COLLECT --> RESTORE["permute to<br/>[B, C, D, H, W]"]
-    RESTORE --> GN["GroupNorm"]
-    GN --> Y["vertical branch output"]
-```
-
 ## Residual Scalars
 
 The block learns three scalar residual strengths:
@@ -190,6 +155,6 @@ The block learns three scalar residual strengths:
 | Parameter | Initial value | Applied to |
 | --- | ---: | --- |
 | `res_fused` | `1.0` | gated spectral/vertical fusion |
-| `res_pw` | `0.15` | pointwise convolution correction |
-| `res_mlp` | `0.15` | pointwise MLP correction |
+| `res_pw` | `0.5` | pointwise convolution correction |
+| `res_mlp` | `0.5` | pointwise MLP correction |
 

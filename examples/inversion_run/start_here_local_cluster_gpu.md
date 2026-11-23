@@ -97,7 +97,6 @@ export FFNO_FSDP_LAUNCHER=$repo/FFNOInversion.jl/scripts/ffno_batched_service_lo
 export FFNO_FSDP_PYTHON=$python
 export FFNO_GPU_CONTROL_HOST=127.0.0.1
 export CUDA_VISIBLE_DEVICES=0,1,2           # the free GPUs
-export FFNO_BATCHED_VERTICAL_NORM_SLABS=1   # changes the result: see below
 export OMP_NUM_THREADS=1
 export FFNO_THREADS_PER_RANK=16             # the same as --threads below
 cd $run
@@ -112,16 +111,7 @@ EOF
 nohup bash "$run/run_local.sh" > "$run/run.log" 2>&1 &
 ```
 
-`FFNO_BATCHED_VERTICAL_NORM_SLABS` is the only batched setting that changes the result. It doesn't need to match the number of GPUs you use here:
-
-| Value | Result |
-| --- | --- |
-| `1` (default) | the volume statistic of `FFNO3D.forward` |
-| `N` | reproduces an FSDP run on N GPUs |
-
-The FSDP routes normalize one layer per GPU slab, so their results depend on the GPU count. Pick the value you want before comparing with another run.
-
-`FFNO_BATCHED_CHUNK_DEPTH`, `FFNO_BATCHED_CHUNK_ROWS` and `FFNO_BATCHED_VERTICAL_CHUNK` (16, 16, 1024) set the batch sizes. They change memory use and speed but not the result. A batch that runs out of GPU memory is split and retried, and more GPUs only make the run faster. Lower the batch sizes if someone else's job leaves too little GPU memory.
+`FFNO_BATCHED_CHUNK_DEPTH` and `FFNO_BATCHED_CHUNK_ROWS` (16, 16) set the batch sizes. They change memory use and speed but not the result, which, as an FSDP run's, does not depend on the number of GPUs. A batch that runs out of GPU memory is split and retried, and more GPUs only make the run faster. Lower the batch sizes if someone else's job leaves too little GPU memory.
 
 Measured on 3 T4s, for the H model:
 

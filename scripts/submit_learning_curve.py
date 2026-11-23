@@ -34,9 +34,8 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ATOMS = ("H", "CA")
 # root: Olivia; stage, data_dir, solving_sets_from: eagle7 (learning_curve_eagle7.py)
 SETTINGS = ("root", "stage", "data_dir", "solving_sets_from", "atoms", "epochs", "nodes", "time", "train_flags",
-            "held_out", "train", "val", "output_mode", "lam_total", "model_config", "trainselect", "predict",
+            "held_out", "train", "val", "lam_total", "model_config", "trainselect", "predict",
             "patience", "augment_z", "augment_z_min_depth", "resume_lr", "lam_ratio", "lam_ion")
-OUTPUT_MODES = ("log_population", "level_fraction")   # config.MODEL_CONFIG output_mode (models/ffno_model.py)
 MODEL_SUBDIR = "training_FFNO3D_zscale_expand_lognlte"   # config.MODEL_DIR below the run directory
 
 
@@ -64,8 +63,7 @@ def experiment(parser, name):
     if unknown:
         raise ValueError(f"[{name}]: unknown settings {', '.join(unknown)} (known: {', '.join(SETTINGS)})")
     e = {key: section.get(key, "").strip() for key in SETTINGS}
-    e["output_mode"] = e["output_mode"] or OUTPUT_MODES[0]
-    e["lam_total"] = e["lam_total"] or "0"
+    e["lam_total"] = e["lam_total"] or "0.3"                # config.LAM_TOTAL, the final model's
     e["lam_ratio"] = e["lam_ratio"] or "0"
     e["lam_ion"] = e["lam_ion"] or "0"
     e["trainselect"] = e["trainselect"] or "1"
@@ -84,8 +82,6 @@ def experiment(parser, name):
         raise ValueError(f"[{name}] trainselect = {e['trainselect']!r}: the fraction of training patches per epoch, in (0, 1]")
     if e["predict"] not in ("yes", "no"):
         raise ValueError(f"[{name}] predict = {e['predict']!r}: yes or no")
-    if e["output_mode"] not in OUTPUT_MODES:
-        raise ValueError(f"[{name}] output_mode = {e['output_mode']!r}: one of {', '.join(OUTPUT_MODES)}")
     for key in ("lam_total", "lam_ratio", "lam_ion"):
         if float(e[key]) < 0:
             raise ValueError(f"[{name}] {key} = {e[key]!r}: must be >= 0")
@@ -135,9 +131,9 @@ def prediction_name(sim, snap):
 
 
 def model_env(e):
-    """The environment that selects the experiment's head, loss and model_config overrides of MODEL_CONFIG (config.py);
+    """The environment that selects the experiment's loss and model_config overrides of MODEL_CONFIG (config.py);
     training and every prediction need it, since a checkpoint loads only into the model it was trained with."""
-    return {"FFNOML_OUTPUT_MODE": e["output_mode"], "FFNOML_LAM_TOTAL": e["lam_total"],
+    return {"FFNOML_LAM_TOTAL": e["lam_total"],
             "FFNOML_LAM_RATIO": e["lam_ratio"], "FFNOML_LAM_ION": e["lam_ion"],
             "FFNOML_MODEL_CONFIG": e["model_config"]}
 
@@ -249,7 +245,7 @@ def main():
             print(f"{name}: predict only, {len(to_predict)} snapshots ({listing}) on {nodes} nodes; {run}", flush=True)
         else:
             write_job_files(e, run, root, args.resume)
-            print(f"{name}: {e['atoms']}, {e['output_mode']} (lam_total {e['lam_total']}), "
+            print(f"{name}: {e['atoms']}, lam_total {e['lam_total']}, "
                   f"{len(e['train'])} training snapshots, {e['epochs']} epochs on {e['nodes']} nodes, "
                   f"then {len(e['eval'])} predictions; {run}", flush=True)
         if args.dry_run:

@@ -191,7 +191,7 @@ Set `atmos_model_format = "multi3d"` and `atmos_directory` (the snapshot directo
 
 ## GPUs too small for your cube (forward only)
 
-On machines like eagle7, a cube such as 504 × 504 doesn't fit in GPU memory through the default service. The [batched service](../../FFNOInversion.jl/README.md#batched-forward-service-small-gpus) runs the same full-domain prediction from host RAM, more slowly, and can't be used for inversions. Set `FFNO_BATCHED_VERTICAL_NORM_SLABS` to the GPU count of an FSDP run you want to match exactly.
+On machines like eagle7, a cube such as 504 × 504 doesn't fit in GPU memory through the default service. The [batched service](../../FFNOInversion.jl/README.md#batched-forward-service-small-gpus) runs the same full-domain prediction from host RAM, more slowly, and can't be used for inversions. Its result, as an FSDP run's, does not depend on the number of GPUs.
 
 To run it, follow [start_here_eagle7.md](start_here_eagle7.md), [start_here_general_hpc.md](start_here_general_hpc.md) for any HPC with GPUs, or [start_here_local_cluster_gpu.md](start_here_local_cluster_gpu.md) for a GPU host without a scheduler. The template `model_factory.jl` uses the launcher named by `FFNO_FSDP_LAUNCHER`, and the Slurm FSDP service when it is unset.
 

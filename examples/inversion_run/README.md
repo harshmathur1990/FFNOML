@@ -16,9 +16,8 @@ Required links:
 - H and Ca checkpoints in `training_FFNO3D_zscale_expand_lognlte`. The final model's
   (`training_FFNO3D_zscale_expand_lognlte_z_aug/3D_sim_train_{H,CA}.pt`) load with `config.py`'s defaults and need
   no environment settings; pass each species to its spec with `factory_kwargs=Dict("atoms" => ["H"])` and
-  `["CA"]` in `model_factory.jl` ([The final model](../../README.md#the-final-model-zaug)). For any other checkpoint
-  export its `FFNOML_OUTPUT_MODE` and `FFNOML_MODEL_CONFIG` before submitting
-  ([Output heads](../../README.md#output-heads))
+  `["CA"]` in `model_factory.jl` ([The final model](../../README.md#the-final-model-zaug)). This branch builds only
+  the final model ([Output head](../../README.md#output-head))
 
 `inputs/wittmann/libwitt_ffno.so` is generated inside the production job before
 distributed work begins.
