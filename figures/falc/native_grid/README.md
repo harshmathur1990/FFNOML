@@ -43,12 +43,16 @@ The checkpoints are read from `FFNOMLTrainingWeights/{zaug,l004p}`.
 
 | Line | zaug line core vs RH | l004p line core vs RH |
 |---|---|---|
-| H-alpha | +12.7% | 2.5 times as bright |
+| H-alpha | +12.7% | 4.5 times as bright |
 | Ca II 8542 | +38% | 2.3 times as bright |
 
 With l004p, the total Ca II population is about 50 times too low at 1.1–1.8 Mm. With zaug, the total Ca II population
 is within about 30% below 1.8 Mm. Its 8542 excess comes from n(4p ²P₃/₂)/n(3d ²D₅/₂), which is 1.1–1.5 times RH's at
 1.0–1.8 Mm.
+
+Relative to RH's far-wing intensity (at +419 km/s for H-alpha, −284 km/s for Ca II 8542; `wing_numbers.py`), the
+zaug line cores are 2.0% (H-alpha) and 7.5% (Ca II 8542) of it brighter than RH's, and l004p's 56% and 26%: the numbers
+in FNOML-Paper Appendix D.
 
 ## With the population mesh (not in the paper)
 
