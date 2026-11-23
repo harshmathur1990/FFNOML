@@ -12,7 +12,7 @@ isdefined(Main,:Phase6TwoLevelPopulation) || include(joinpath(@__DIR__,"phase6_p
 # NLTE table, the Kurucz metals in LTE at the atmosphere's nₑ (witt_kurucz_populations_given_ne). Their adjoints against finite
 # differences, and the objective gradient through the production adjoint. HSEMHS_NLTE_EOS_TABLE as in hsemhs_equilibrium.jl.
 const NLTE_SYNTHESIS_TABLE=get(ENV,"HSEMHS_NLTE_EOS_TABLE","/mn/stornext/d9/data/harshm/MHS_nlte/HSEMHS/cache/eos_table_nlte.h5")
-const LTE_SYNTHESIS_TABLE=get(ENV,"HSEMHS_EOS_TABLE","/mn/stornext/d9/data/harshm/MHS/HSEMHS/cache/eos_table_fullz.h5")
+const LTE_SYNTHESIS_TABLE=get(ENV,"HSEMHS_EOS_TABLE","/mn/stornext/d9/data/harshm/hsemhs_data/cache/eos_table_fullz.h5")
 
 if !isfile(NLTE_SYNTHESIS_TABLE)
     @info "HSEMHS NLTE EOS table not found; skipping the NLTE synthesis tests" NLTE_SYNTHESIS_TABLE

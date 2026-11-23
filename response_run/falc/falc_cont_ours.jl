@@ -6,7 +6,7 @@ air = parse.(Float64, split(ARGS[1], ","))
 config = load_config(joinpath(R, "forward_falc_givenz.toml")); a0 = read_inversion_inputs(config).atmosphere
 context = serial_context(options=ParallelOptions(threads_per_rank=Threads.nthreads()))
 d = distribute_atmosphere(Float64, a0, context); reconstruct_equilibrium!(prepare_equilibrium(config.equilibrium, d, context), d, context); a = d.local_atmosphere
-eos = WittmannEOS("/mn/stornext/d9/data/harshm/hsemhs_env112/work/e2e/inputs/wittmann/libwitt_ffno.$(Libdl.dlext)", "/mn/stornext/d9/data/harshm/hsemhs_env112/work/e2e/inputs/pf_Kurucz.input")
+eos = WittmannEOS("/mn/stornext/d9/data/harshm/hsemhs_data/envs/env112/work/e2e/inputs/wittmann/libwitt_ffno.$(Libdl.dlext)", "/mn/stornext/d9/data/harshm/hsemhs_data/envs/env112/work/e2e/inputs/pf_Kurucz.input")
 nz = nlevels(a.grid); T = a.temperature[:, 3, 3]; ne = a.ne[:, 3, 3]; hi = a.h_neutral[:, 3, 3]; hp = a.h_proton[:, 3, 3]
 out = Dict{String,Any}("air_nm" => air, "T" => T, "z" => a.z[:, 3, 3], "ne" => ne, "h_neutral" => hi, "h_proton" => hp, "pgas" => a.pgas[:, 3, 3])
 terms = zeros(nz, length(air), 6); given = zeros(nz, length(air)); witt = zeros(nz, length(air)); vac = F._air_to_vacuum_nm.(air)

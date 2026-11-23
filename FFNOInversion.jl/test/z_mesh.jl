@@ -52,7 +52,7 @@ FFNOInversion.predict_populations!(out,m::RecordingColumn,a,cache=nothing)=(m.se
 
 # Where the mesh must extrapolate above a column: a transition region to a coronal temperature, hydrostatic from the column's top.
 @testset "Corona above a column's top on the population mesh" begin
-    table=WittBifrostEOS.load_table(get(ENV,"HSEMHS_TEST_TABLE","/mn/stornext/d9/data/harshm/hsemhs_env112/work/e2e/inputs/eos_table_fullz.h5"))
+    table=WittBifrostEOS.load_table(get(ENV,"HSEMHS_TEST_TABLE","/mn/stornext/d9/data/harshm/hsemhs_data/envs/env112/work/e2e/inputs/eos_table_fullz.h5"))
     # configuration: on by default wherever the mesh is used; 0 keeps the top values
     @test FFNOInversion._population_mesh(Dict{String,Any}(),:log10tau500).corona_temperature_k==1e6
     @test FFNOInversion._population_mesh(Dict{String,Any}("mesh"=>Dict{String,Any}("enabled"=>true)),:z_m).corona_temperature_k==1e6

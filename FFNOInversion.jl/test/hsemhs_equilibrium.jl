@@ -6,7 +6,7 @@ include("test_equilibrium.jl")
 # direct HSEMHS calls, coordinate semantics, physics, failures, provenance and lifecycle. Uses the real HSEMHS EOS
 # table (HSEMHS_EOS_TABLE, default the MHS checkout's cache); multi-rank checks are in mpi_equilibrium_worker.jl.
 
-const HSEMHS_TABLE=get(ENV,"HSEMHS_EOS_TABLE","/mn/stornext/d9/data/harshm/MHS/HSEMHS/cache/eos_table_fullz.h5")
+const HSEMHS_TABLE=get(ENV,"HSEMHS_EOS_TABLE","/mn/stornext/d9/data/harshm/hsemhs_data/cache/eos_table_fullz.h5")
 const H=FFNOInversion.HSEMHS
 
 """A non-square atmosphere with T varying independently along z/τ, x and y, optional B."""

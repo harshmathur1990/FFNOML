@@ -7,7 +7,7 @@ import Muspel
 # The native log10 column-mass grid: axis rules, configuration and input reading, the formal solution on the mass axis
 # and its VJP, and the column-hse-logm HSEMHS mode. Multi-rank checks are in mpi_equilibrium_worker.jl.
 
-const LOGM_TABLE=get(ENV,"HSEMHS_EOS_TABLE","/mn/stornext/d9/data/harshm/MHS/HSEMHS/cache/eos_table_fullz.h5")
+const LOGM_TABLE=get(ENV,"HSEMHS_EOS_TABLE","/mn/stornext/d9/data/harshm/hsemhs_data/cache/eos_table_fullz.h5")
 
 function logm_config_text(file;datasets="log10m = \"lm\"",equilibrium="",coordinate="log10m",mode="forward",extra="")
     """mode = "$mode"\n[inputs]\ninitial_atmosphere_file = "$file"\n[outputs]\nsynthesis_file = "s.h5"\natmosphere_file = "o.h5"

@@ -4,7 +4,7 @@ using FFNOInversion, HDF5, Libdl, Printf
 import Muspel
 const F = FFNOInversion; const R = @__DIR__
 rl = h5read(joinpath(R, "falc_rh_air.h5"), "wavelength_air_nm"); rI = h5read(joinpath(R, "falc_rh_air.h5"), "intensity"); q = sortperm(rl); rl, rI = rl[q], rI[q]
-eos = WittmannEOS("/mn/stornext/d9/data/harshm/hsemhs_env112/work/e2e/inputs/wittmann/libwitt_ffno.$(Libdl.dlext)", "/mn/stornext/d9/data/harshm/hsemhs_env112/work/e2e/inputs/pf_Kurucz.input")
+eos = WittmannEOS("/mn/stornext/d9/data/harshm/hsemhs_data/envs/env112/work/e2e/inputs/wittmann/libwitt_ffno.$(Libdl.dlext)", "/mn/stornext/d9/data/harshm/hsemhs_data/envs/env112/work/e2e/inputs/pf_Kurucz.input")
 targets = [minimum(rl[rl .> 399.8]), minimum(rl[rl .> 401.0]), minimum(rl[rl .> 402.7]), minimum(rl[rl .> 422.0])]
 context = serial_context(options=ParallelOptions(threads_per_rank=Threads.nthreads()))
 for (axis, file) in (("log column mass", "forward_falc_givenm.toml"), ("log tau500", "forward_falc_giventau.toml"), ("height", "forward_falc_givenz.toml"))

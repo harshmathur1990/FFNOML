@@ -33,7 +33,7 @@ vz = "vz"
 
 [equilibrium]
 gravity_m_s2 = 274.0
-eos_table_file = "/mn/stornext/d9/data/harshm/hsemhs_env112/work/e2e/inputs/eos_table_fullz.h5"
+eos_table_file = "/mn/stornext/d9/data/harshm/hsemhs_data/envs/env112/work/e2e/inputs/eos_table_fullz.h5"
 
 
 [[regions]]

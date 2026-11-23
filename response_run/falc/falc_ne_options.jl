@@ -7,7 +7,7 @@ import Muspel, HSEMHS
 const F = FFNOInversion; const R = @__DIR__; const A = joinpath(R, "..", "inputs"); const TRAIN = joinpath(R, "..", "..", "training_FFNO3D_zscale_expand_lognlte")
 falc(name) = h5read(joinpath(R, "FALC_82_5x5.hdf5"), name)
 neF = Float64.(falc("electron_density")[:, 1, 1, 1]); nF = 82
-table = HSEMHS.load_table("/mn/stornext/d9/data/harshm/hsemhs_env112/work/e2e/inputs/eos_table_fullz.h5")
+table = HSEMHS.load_table("/mn/stornext/d9/data/harshm/hsemhs_data/envs/env112/work/e2e/inputs/eos_table_fullz.h5")
 function load_state(run)
     h5open(joinpath(R, "falc_$(run)_atmosphere.h5")) do f
         d(n) = permutedims(read(f[n])[1, :, :, :], (1, 3, 2))
