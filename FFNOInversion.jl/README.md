@@ -828,6 +828,17 @@ refused, so start that run fresh.
   0 reads each checkpoint. The service feeds log10 T and velocities in km/s, the
   same as training. `run_inversion!` requires this backend with at least two GPU
   ranks; there is no other production FFNO route.
+- **The final model** (zaug, [The final model](../README.md#the-final-model-zaug)) is `config.py`'s default, so
+  its H and Ca checkpoints (`training_FFNO3D_zscale_expand_lognlte_z_aug/`) need no `FFNOML_OUTPUT_MODE` or
+  `FFNOML_MODEL_CONFIG`. Its level-fraction head (departure coefficients from MULTI3D's LTE populations, see
+  [Output heads](../README.md#output-heads)) builds each species' LTE populations from that species' atom data, so
+  when one service holds both networks, give each spec its species:
+  `FSDPModelSpec(:CA, path, metadata; factory_kwargs=Dict("atoms" => ["CA"]))` (and `["H"]` for H). Without it,
+  every model takes its species from `FFNOML_ACTIVE_ATOMS`, and the Ca network would be built with H's. The head
+  still returns log10 populations, so synthesis, the VJP/JVP paths and everything on the Julia side are unchanged;
+  the populations' derivatives include the LTE dependence on T and nₑ. Any other checkpoint needs its own
+  `FFNOML_OUTPUT_MODE` and `FFNOML_MODEL_CONFIG` in the environment that launches either service; these apply to
+  every species the service holds.
 
 The scheduler chooses the rank count and Julia the threads per rank. For example, a
 256-core allocation can run 16 ranks × 16 threads.

@@ -39,8 +39,10 @@ from train_utils import (
 from scipy.ndimage import gaussian_filter
 from model_builder import ModelBuilder
 from distributed_inference import (
+    block_depth_weights,
     chunked_fuse_branches,
     debug_dist_inference_enabled,
+    depth_chunk,
     debug_progress,
     enable_distributed_inference,
     partition_range,
@@ -1061,6 +1063,10 @@ def ffno_train_model(
     device="cuda",
     multi_gpu=False,
     debug_loss=False,
+    lam_total=0.0,
+    lam_ratio=0.0,
+    lam_ion=0.0,
+    ions=None,
     patience=10,
     min_delta=1e-5,
     use_cosine=False,
@@ -1074,6 +1080,9 @@ def ffno_train_model(
     train_select=1.0,
     train_select_seed=None,
     validate_only=False,
+    crop=0,
+    augment_z=False,
+    augment_z_min_depth=16,
 ):
     resume_path = get_resume_checkpoint_path(save_path)
     load_path = None
@@ -1167,6 +1176,10 @@ def ffno_train_model(
         weight_decay=weight_decay,
         multi_gpu=multi_gpu,
         debug_loss=debug_loss,
+        lam_total=lam_total,
+        lam_ratio=lam_ratio,
+        lam_ion=lam_ion,
+        ions=ions,
         mean_X=mean_X,
         std_X=std_X,
         mean_Y=mean_Y,
@@ -1237,6 +1250,9 @@ def ffno_train_model(
         pin_memory=pin_memory,
         train_select=train_select,
         train_select_seed=train_select_seed,
+        crop=crop,
+        augment_z=augment_z,
+        augment_z_min_depth=augment_z_min_depth,
     )
 
     train_loader, val_loader, _, _ = data_builder.build(
@@ -1284,7 +1300,10 @@ def ffno_train_model(
                 "[Bestpath baseline] "
                 f"val={initial_val_loss:.6e} "
                 f"L1={initial_val_comp.get('data', 0):.3e} "
-                f"L2={initial_val_comp.get('source', 0):.3e}"
+                f"L2={initial_val_comp.get('source', 0):.3e} "
+                f"Ltot={initial_val_comp.get('total', 0):.3e} "
+                f"Lratio={initial_val_comp.get('ratio', 0):.3e} "
+                f"Lion={initial_val_comp.get('ion', 0):.3e}"
             )
 
         if validate_only:
@@ -1397,7 +1416,7 @@ def _distributed_full_forward(model, X, z_scale, dx, dy, *, collect_stats=False,
     pw_mask = float(branch_mask.get("pw", 1.0))
     mlp_mask = float(branch_mask.get("mlp", 1.0))
 
-    x = model._run_lift(X, collect_stats=False)
+    x = model._run_lift(X, z_scale, collect_stats=False)
     all_stats = [] if collect_stats else None
 
     for i, blk in enumerate(model.blocks):
@@ -1410,20 +1429,21 @@ def _distributed_full_forward(model, X, z_scale, dx, dy, *, collect_stats=False,
                 vertical.progress_label = f"test block {i + 1}/{len(model.blocks)} vertical"
 
         residual = x
+        w = block_depth_weights(blk, z_scale)
 
-        spec = blk.spec_drop(blk.act(blk.norm_spec(blk.spec(x, dx, dy))))
-        vert = blk.vert_drop(blk.act(blk.norm_vert(blk.vertical(x, z_scale))))
+        spec = blk.spec_drop(blk.act(blk._norm(blk.norm_spec, blk.spec(x, dx, dy), w)))
+        vert = blk.vert_drop(blk.act(blk._norm(blk.norm_vert, blk.vertical(x, z_scale), w)))
 
         spec_eff = spec_mask * spec
         vert_eff = vert_mask * vert
-        fused = chunked_fuse_branches(blk, x, spec_eff, vert_eff, normalize=False)
-        fused = blk.act(blk.norm_fuse(fused))
+        fused = chunked_fuse_branches(blk, x, spec_eff, vert_eff, chunk_depth=depth_chunk(x, 12), normalize=False)
+        fused = blk.act(blk._norm(blk.norm_fuse, fused, w))
         x1 = residual + blk.res_fused * fused
 
-        pw = blk.norm_pw(blk.pw(x1))
+        pw = blk._norm(blk.norm_pw, blk.pw(x1), w)
         x2 = x1 + (blk.res_pw * pw_mask) * pw
 
-        mlp = torch.tanh(blk.norm_mlp(blk.mlp(x2)))
+        mlp = blk.mlp_activation(blk._norm(blk.norm_mlp, blk.mlp(x2), w))
         x = x2 + (blk.res_mlp * mlp_mask) * mlp
 
         if collect_stats:
@@ -1455,7 +1475,7 @@ def _distributed_full_forward(model, X, z_scale, dx, dy, *, collect_stats=False,
         if torch.cuda.is_available() and X.is_cuda:
             torch.cuda.empty_cache()
 
-    out = model._run_head(x, collect_stats=False)
+    out = model.head_output(model._run_head(x, collect_stats=False), X)
     return out, all_stats
 
 
@@ -2263,7 +2283,7 @@ def ffno_predict_populations_distributed_full(
         try:
             pbar.set_postfix(step="lift", refresh=True)
             debug_progress("full prediction", "lift")
-            x = model._run_lift(X, collect_stats=False)
+            x = model._run_lift(X, z_scale, collect_stats=False)
             pbar.update(1)
 
             for i, blk in enumerate(model.blocks):
@@ -2277,30 +2297,31 @@ def ffno_predict_populations_distributed_full(
                     vertical.progress_label = f"block {i + 1}/{len(model.blocks)} vertical"
 
                 residual = x
+                w = block_depth_weights(blk, z_scale)
 
-                spec = blk.spec_drop(blk.act(blk.norm_spec(blk.spec(x, dx, dy))))
+                spec = blk.spec_drop(blk.act(blk._norm(blk.norm_spec, blk.spec(x, dx, dy), w)))
                 debug_progress("full prediction", f"block {i + 1}/{len(model.blocks)} vertical")
-                vert = blk.vert_drop(blk.act(blk.norm_vert(blk.vertical(x, z_scale))))
+                vert = blk.vert_drop(blk.act(blk._norm(blk.norm_vert, blk.vertical(x, z_scale), w)))
 
                 debug_progress("full prediction", f"block {i + 1}/{len(model.blocks)} fuse")
                 for name, module in blk.fuse.named_modules():
                     if hasattr(module, "progress_label"):
                         module.progress_label = f"block {i + 1}/{len(model.blocks)} fuse {name}"
-                fused = chunked_fuse_branches(blk, x, spec, vert, normalize=False)
+                fused = chunked_fuse_branches(blk, x, spec, vert, chunk_depth=depth_chunk(x, 12), normalize=False)
                 del spec, vert
                 if torch.cuda.is_available() and X.is_cuda:
                     torch.cuda.empty_cache()
-                fused = blk.act(blk.norm_fuse(fused))
+                fused = blk.act(blk._norm(blk.norm_fuse, fused, w))
                 x1 = residual + blk.res_fused * fused
                 del fused, residual, x
 
                 debug_progress("full prediction", f"block {i + 1}/{len(model.blocks)} pointwise")
-                pw = blk.norm_pw(blk.pw(x1))
+                pw = blk._norm(blk.norm_pw, blk.pw(x1), w)
                 x2 = x1 + blk.res_pw * pw
                 del x1, pw
 
                 debug_progress("full prediction", f"block {i + 1}/{len(model.blocks)} mlp")
-                mlp = torch.tanh(blk.norm_mlp(blk.mlp(x2)))
+                mlp = blk.mlp_activation(blk._norm(blk.norm_mlp, blk.mlp(x2), w))
                 x = x2 + blk.res_mlp * mlp
                 del x2, mlp
                 if torch.cuda.is_available() and X.is_cuda:
@@ -2311,12 +2332,15 @@ def ffno_predict_populations_distributed_full(
 
             pbar.set_postfix(step="head", refresh=True)
             debug_progress("full prediction", "head")
-            pred_log = model._run_head(x, collect_stats=False)
+            pred_log = model.head_output(model._run_head(x, collect_stats=False), X)
             debug_progress("full prediction", "forward done")
             pbar.update(1)
         finally:
             pbar.close()
 
+    if rank == 0 and torch.cuda.is_available() and X.is_cuda:
+        print(f"full prediction: peak GPU memory on rank 0 {torch.cuda.max_memory_allocated(X.device) / 2**30:.2f} GiB "
+              f"for its slab {tuple(X.shape[2:])}", flush=True)
     if torch.isnan(pred_log).any():
         debug_progress("full prediction", f"[rank {rank}] NaN in prediction")
     if torch.isinf(pred_log).any():

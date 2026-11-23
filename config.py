@@ -107,6 +107,11 @@ SIMULATIONS = {
     "en024031_by100_helium": {
         "base_path": DATA_DIR + "bifrost_data/en024031_by100_helium",
         "snaps": ["109"]
+    },
+    # half-resolution (252 x 252) runs; s0957 is the test snapshot, never trained or validated on
+    "cbh24": {
+        "base_path": DATA_DIR + "bifrost_data/cbh24",
+        "snaps": ["s0910", "s0928", "s0957"]
     }
 }
 
@@ -115,7 +120,8 @@ TRAIN_SPLIT = {
     "nw012023": ["915"],
     "ch012012_hion": ["910"],
     "ch012006": ["836"],
-    "qs006003_sap": ["689"]
+    "qs006003_sap": ["689"],
+    "cbh24": ["s0910"]
 }
 
 VAL_SPLIT = {
@@ -123,7 +129,8 @@ VAL_SPLIT = {
     "nw012023": ["940"],
     "ch012012_hion": ["984"],
     "ch012006": ["849"],
-    "qs006003_sap": ["900"]
+    "qs006003_sap": ["900"],
+    "cbh24": ["s0928"]
 }
 
 # FFNOML_TRAIN_SPLIT and FFNOML_VAL_SPLIT (JSON, {"sim": ["snap", ...]}) override the splits for scripted experiments
@@ -166,7 +173,18 @@ ATOM_CONFIG = {
             2.1802152677122893e-18
         ], dtype=np.float32),
 
-        "levels": 6
+        "levels": 6,
+
+        # level-fraction head (MODEL_CONFIG output_mode "level_fraction"): the reference total is rho / 2.2697e-24 g,
+        # MULTI3D's H total in most simulations; the head's total correction learns the rest (-0.02 dex in the _hion
+        # simulations, down to -0.5 dex below log T = 3.7, and the readnh = 0 artefacts)
+        "log10_particle_mass": float(np.log10(2.2697e-27)),  # kg
+
+        # MULTI3D's atom data (out_par of the training runs), for the level-fraction head's departure coefficients:
+        # MULTI3D's LTE level fractions from these, T and ne reproduce its nstar
+        "multi3d_lte": dict(g=[2.0, 8.0, 18.0, 32.0, 50.0, 1.0], ion=[1, 1, 1, 1, 1, 2],
+                            ev=[0.0, 10.198673740091325, 12.087318311066094, 12.748311674749516, 13.054262568222963,
+                                13.60794573029334]),
     },
 
     "CA": {
@@ -190,7 +208,14 @@ ATOM_CONFIG = {
             1.902059054757628e-18
         ], dtype=np.float32),
 
-        "levels": 6
+        "levels": 6,
+
+        # MULTI3D's Ca total is rho / 1.0375e-18 g in every labelled snapshot
+        "log10_particle_mass": float(np.log10(1.0375e-21)),  # kg
+
+        "multi3d_lte": dict(g=[2.0, 4.0, 6.0, 2.0, 4.0, 1.0], ion=[2, 2, 2, 2, 2, 3],
+                            ev=[0.0, 1.69242903005873, 1.6999489817497997, 3.12337806212316, 3.151018087686871,
+                                11.87181686885173]),
     }
 }
 
@@ -204,6 +229,7 @@ lines = [ATOM_CONFIG[a]["lines"] for a in ACTIVE_ATOMS]
 wave  = [ATOM_CONFIG[a]["wave"]  for a in ACTIVE_ATOMS]
 chi   = [ATOM_CONFIG[a]["chi"]   for a in ACTIVE_ATOMS]
 levels = [ATOM_CONFIG[a]["levels"]   for a in ACTIVE_ATOMS]
+ions = [ATOM_CONFIG[a]["multi3d_lte"]["ion"] for a in ACTIVE_ATOMS]
 
 MULTI3D_PRED_DATA = [
     {
@@ -262,10 +288,12 @@ MULTI_GPU = True
 
 MODEL = "FFNO3D"
 
+# The final (zaug) model, H and Ca II alike (FFNOMLTrainingWeights/zaug, learning_curve.ini final66_fno_l004{,_ca}_zaug):
+# width 96, the vertical operator with the l004p height scales, the level-fraction head
 MODEL_CONFIG = dict(
     in_channels=6,
     out_channels=6,
-    width=48,
+    width=96,
     n_layers=4,
     dropout=0.0,
     spec_dropout=0.08,
@@ -275,7 +303,23 @@ MODEL_CONFIG = dict(
     hidden_spectral=128,
     hidden_vertical=128,
     checkpoint_blocks=True,
+    freq_mix_rank=8,
+    open_side_paths=True,
+    vertical_operator=True,
+    z_column_cutoff=True,
+    z_feature_wavelength=0.3,
+    z_min_wavelength=0.04,
+    z_reference_length=40.0,
+    # FFNOML_OUTPUT_MODE=level_fraction: the head predicts each species' split among its levels (models/ffno_model.py)
+    output_mode=os.environ.get("FFNOML_OUTPUT_MODE", "level_fraction"),
 )
+# FFNOML_MODEL_CONFIG (JSON, {"width": 96, ...}) overrides MODEL_CONFIG entries for scripted experiments
+if os.environ.get("FFNOML_MODEL_CONFIG"):
+    MODEL_CONFIG.update(json.loads(os.environ["FFNOML_MODEL_CONFIG"]))
+if MODEL_CONFIG["output_mode"] == "level_fraction":
+    MODEL_CONFIG["species"] = [
+        {k: ATOM_CONFIG[a][k] for k in ("levels", "log10_particle_mass", "multi3d_lte")} for a in ACTIVE_ATOMS
+    ]
 
 atoms_tag = _active_atoms_tag(ACTIVE_ATOMS)
 
@@ -299,11 +343,24 @@ FORCE_EXPAND_VALIDATION_BASELINE = True
 
 
 DEBUG_LOSS = False
+# FFNOML_LAM_TOTAL weighs the loss on each species' total, |log10 sum of levels pred - true| (loss/nlte_composite_loss.py)
+LAM_TOTAL = float(os.environ.get("FFNOML_LAM_TOTAL", 0.3))     # the final (zaug) model
+# FFNOML_LAM_RATIO weighs |log10 n_u/n_l pred - true| over every line of the atom (the line source functions) and
+# FFNOML_LAM_ION |log10 N_k/N_k+1 pred - true| over adjacent ionisation stages (the ionisation balance), in the same units
+LAM_RATIO = float(os.environ.get("FFNOML_LAM_RATIO", 0.0))
+LAM_ION = float(os.environ.get("FFNOML_LAM_ION", 0.0))
 DEBUG_DIST_INFERENCE = False
 
 # Dataset Params
 PATCH=40
 STRIDE=20
+# FFNOML_CROP > 0 trains on a random CROP x CROP window of each patch, and validates on its centre window (small GPUs)
+CROP = int(os.environ.get("FFNOML_CROP", 0))
+# FFNOML_AUGMENT_Z=1 adds to every training and validation patch a copy cut to a random window of its levels and one cut
+# to a random uneven selection of them, each of at least FFNOML_AUGMENT_Z_MIN_DEPTH levels, drawn again every epoch in
+# training (data/dataset.py ZAugmentDataset); the stored patches are all kept
+AUGMENT_Z = os.environ.get("FFNOML_AUGMENT_Z", "0") == "1"
+AUGMENT_Z_MIN_DEPTH = int(os.environ.get("FFNOML_AUGMENT_Z_MIN_DEPTH", 16))
 SCALES=(1,2,3,4,5,6,7,8)
 
 TRAIN_FILE = os.path.join(
@@ -322,16 +379,19 @@ BATCH_SIZE = 1
 LEARNING_RATE = 1e-3
 MIN_LEARNING_RATE = 1e-8
 RESUME_LAST_EPOCH = 0
-RESUME_LAST_LEARNING_RATE = 5e-5
+# FFNOML_RESUME_LR overrides the learning rate a --bestpath restart starts its cosine schedule from
+RESUME_LAST_LEARNING_RATE = float(os.environ.get("FFNOML_RESUME_LR", 5e-5))
 WEIGHT_DECAY = 3e-4
 NUM_WORKERS = 8
 PIN_MEMORY = True
 GRAD_CLIP = 1.0
 DEVICE = "cuda"
-PATIENCE = 50
+# FFNOML_PATIENCE overrides the early-stopping patience (epochs without a validation improvement) for scripted experiments
+PATIENCE = int(os.environ.get("FFNOML_PATIENCE", 50))
 MIN_DELTA = 5e-5
 DATASET_TYPE = "patch"
-TRAINSELECT = 1
+# FFNOML_TRAINSELECT < 1 trains each epoch on that fraction of the patches, drawn again every epoch
+TRAINSELECT = float(os.environ.get("FFNOML_TRAINSELECT", 1))
 TRAINSELECT_SEED = 12345
 USE_COSINE = True
 LOAD_EARLIER_VAL = True

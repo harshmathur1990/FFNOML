@@ -1116,7 +1116,10 @@ def train(
                         f"train={train_loss:.6e} "
                         f"val={val_loss:.6e} (saved best) "
                         f"L1={val_comp.get('data', 0):.3e} "
-                        f"L2={val_comp.get('source', 0):.3e}"
+                        f"L2={val_comp.get('source', 0):.3e} "
+                        f"Ltot={val_comp.get('total', 0):.3e} "
+                        f"Lratio={val_comp.get('ratio', 0):.3e} "
+                        f"Lion={val_comp.get('ion', 0):.3e}"
                     )
                     print(msg)
 
@@ -1129,7 +1132,10 @@ def train(
                         f"train={train_loss:.6e} "
                         f"val={val_loss:.6e} "
                         f"L1={val_comp.get('data', 0):.3e} "
-                        f"L2={val_comp.get('source', 0):.3e}"
+                        f"L2={val_comp.get('source', 0):.3e} "
+                        f"Ltot={val_comp.get('total', 0):.3e} "
+                        f"Lratio={val_comp.get('ratio', 0):.3e} "
+                        f"Lion={val_comp.get('ion', 0):.3e}"
                     )
                     print(msg)
 

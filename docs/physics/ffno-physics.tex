@@ -1,9 +1,9 @@
 \input{../preamble.tex}
 \begin{document}
-\doctitle{The physics of FFNO}{From the solar atmosphere to NLTE populations, synthetic spectra and 3D inversions. FFNOML repository, 4 November 2026. The companion document \code{docs/technical/ffno-technical.pdf} covers the implementation.}
+\doctitle{The physics of FFNO}{From the solar atmosphere to NLTE populations, synthetic spectra and 3D inversions. FFNOML repository, 4 November 2026, updated 23 November 2026 for the final model (zaug, branch \code{level-fractions-capacity}). The companion document \code{docs/technical/ffno-technical.pdf} covers the implementation.}
 
 \begin{abstract}
-\noindent Chromospheric spectral lines are the main window on the layer of the Sun where the atmosphere changes from gas-pressure dominated to magnetically dominated, but they form out of local thermodynamic equilibrium (NLTE). Their atomic level populations depend on the radiation field, and the radiation field depends on the populations everywhere else, so an accurate calculation has to solve radiative transfer and statistical equilibrium together in 3D. That is too expensive for routine use and far too expensive inside an inversion. FFNO is a factorized Fourier neural operator trained to replace exactly that one expensive step. It maps a 3D atmosphere $(T,\mathbf v,\nel,\rho)$ on a height grid to the 3D NLTE populations of a model atom. Everything around it remains ordinary physics: a hydrostatic reconstruction turns a temperature into pressure, density and height; a formal solution of the radiative transfer equation turns populations into spectra; and a bounded quasi-Newton optimizer, with exact adjoints through the network, fits the whole 3D volume to observations. This document starts from first principles and states what is physics, what is learned, what is assumed, and how well it has been measured to work.
+\noindent Chromospheric spectral lines are the main window on the layer of the Sun where the atmosphere changes from gas-pressure dominated to magnetically dominated, but they form out of local thermodynamic equilibrium (NLTE). Their atomic level populations depend on the radiation field, and the radiation field depends on the populations everywhere else, so an accurate calculation has to solve radiative transfer and statistical equilibrium together in 3D. That is too expensive for routine use and far too expensive inside an inversion. FFNO is a factorized Fourier neural operator trained to replace exactly that one expensive step. It maps a 3D atmosphere $(T,\mathbf v,\nel,\rho)$ on a height grid to the 3D NLTE populations of a model atom, predicted as departures from MULTI3D's LTE populations and a correction to the element total. Everything around it remains ordinary physics: a hydrostatic reconstruction turns a temperature into pressure, density and height; a formal solution of the radiative transfer equation turns populations into spectra; and a bounded quasi-Newton optimizer, with exact adjoints through the network, fits the whole 3D volume to observations. This document starts from first principles and states what is physics, what is learned, what is assumed, and how well it has been measured to work.
 \end{abstract}
 
 \tableofcontents
@@ -152,15 +152,18 @@ Simulation&Train / validation snapshot&$n_x{\times}n_y{\times}n_z$&$\Delta x$ [k
 \code{nw012023}&915 / 940&$256^2\times350$&46.9&$-0.97$ to 14.30&24.6--162.2\\
 \code{ch012012_hion}&910 / 984&$256^2\times256$&46.9&$-2.45$ to 7.98&24.7--141.0\\
 \code{ch012006}&836 / 849&$256^2\times256$&46.9&$-2.45$ to 7.98&24.7--141.0\\
-\code{qs006003_sap}&689 / 900&$256^2\times256$&23.4&$-2.51$ to 0.62&12.3\\\bottomrule
+\code{qs006003_sap}&689 / 900&$256^2\times256$&23.4&$-2.51$ to 0.62&12.3\\
+\code{cbh24}&s0910 / s0928&$252^2\times460$&95.2&$-0.89$ to 14.38&19.8--97.2\\\bottomrule
 \end{tabular}
-\caption{Training and validation data: one snapshot per simulation for each. Grids were read from the mesh files. Further labelled snapshots, including the $384^3$ boxes \code{ch024031_by200bz005} and \code{en024031_by100_helium} ($-2.49$ to 14.30\,Mm, $\Delta x=62.5$\,km), are used only for evaluation.}\label{tab:sims}
+\caption{Training and validation data of the final model: one snapshot per simulation for each (the paper model was trained without \code{cbh24}). Grids were read from the mesh files. Further labelled snapshots, including the $384^3$ boxes \code{ch024031_by200bz005} and \code{en024031_by100_helium} ($-2.49$ to 14.30\,Mm, $\Delta x=62.5$\,km), are used only for evaluation.}\label{tab:sims}
 \end{table}
 
 The set deliberately covers different magnetic regimes and resolutions, and the vertical grids are all non-uniform in a similar way: fine through the lower atmosphere and stretched above. This matters later: the network has only ever seen such grids.
 
 \subsection{Patches and scales}
-Each snapshot is cut into patches of $40\times40$ columns with stride 20, at horizontal coarsening factors $s=1,\dots,8$ with an anti-alias Gaussian ($\sigma=s/2$ pixels). Only factors 1 to 6 actually yield a 40-pixel patch from a 256-pixel box, giving 161 patches per simulation. Coarsening gives the operator examples of the same physics at a different horizontal spacing $\Delta x\to s\Delta x$. The depth axis is always kept whole, at its native resolution.
+Each snapshot is cut into patches of $40\times40$ columns with stride 20, at horizontal coarsening factors $s=1,\dots,8$ with an anti-alias Gaussian ($\sigma=s/2$ pixels). Only factors 1 to 6 actually yield a 40-pixel patch from a 256-pixel box, giving 161 patches per simulation. Coarsening gives the operator examples of the same physics at a different horizontal spacing $\Delta x\to s\Delta x$. The stored patches keep the depth axis whole, at its native resolution.
+
+The final model was trained in two stages: first on these patches alone, then, continuing from that model's best weights for 400 epochs, with \textbf{height augmentation}. Every patch then also appears twice more, cut to a random window of contiguous levels and to a random, unevenly spaced selection of levels, each of at least 16 levels and redrawn every epoch; validation uses fixed cuts. The augmentation adds columns of other extents and other samplings of the same atmospheres, which the height operator (Section~\ref{sec:vertical}) can take as they are.
 
 \section{What the network learns}\label{sec:target}
 
@@ -176,34 +179,38 @@ The output at one point depends on the input everywhere in the box, as it must p
 \begin{tabularx}{\linewidth}{lrrY}
 \toprule
 Channel&Mean&Std&Physical role\\\midrule
-$\log_{10}T$ [K]&4.555&0.867&Sets collisional rates, Boltzmann and Saha factors, thermal Doppler width, and the local Planck source.\\
-$v_x,v_y,v_z$ [km\,s$^{-1}$]&$-0.084,-0.040,0.540$&6.316, 5.316, 7.200&Velocity gradients shift line profiles between points, so they change how much radiation each point absorbs ($\bar J$).\\
-$\log_{10}\nel$ [m$^{-3}$]&17.73&3.616&Collisional rates with electrons, and recombination.\\
-$\log_{10}\rho$ [kg\,m$^{-3}$]&$-7.977$&4.059&Sets the element density and so the amount of absorbing matter.\\
+$\log_{10}T$ [K]&4.398&0.835&Sets collisional rates, Boltzmann and Saha factors, thermal Doppler width, and the local Planck source.\\
+$v_x,v_y,v_z$ [km\,s$^{-1}$]&$-0.048,-0.102,-0.004$&7.774, 7.436, 8.836&Velocity gradients shift line profiles between points, so they change how much radiation each point absorbs ($\bar J$).\\
+$\log_{10}\nel$ [m$^{-3}$]&17.45&3.403&Collisional rates with electrons, and recombination.\\
+$\log_{10}\rho$ [kg\,m$^{-3}$]&$-8.113$&3.767&Sets the element density and so the amount of absorbing matter.\\
 \bottomrule
 \end{tabularx}
-\caption{Input channels with the normalization of the production checkpoints (identical for H and Ca). The large standard deviations reflect the many decades between the photosphere and the corona. All channels are standardized to zero mean and unit variance.}
+\caption{Input channels with the normalization of the final model's checkpoints (identical for H and Ca). The large standard deviations reflect the many decades between the photosphere and the corona. All channels are standardized to zero mean and unit variance.}
 \end{table}
 
 Three geometric quantities also enter: the heights $z$ [Mm], and the horizontal spacings $\Delta x$, $\Delta y$ [m], since the optical thickness between two points depends on their physical separation.
 
 Two quantities are deliberately absent. The \textbf{magnetic field} is not an input, because the populations here are computed without magnetic effects on the atomic rates; $\mathbf B$ acts only indirectly, through the $T$, $\rho$ and $\mathbf v$ it has shaped. \textbf{Microturbulence} $\vturb$ is not an input, so populations do not respond to it, even though it broadens lines in synthesis.
 
-\subsection{The target: log populations, not departure coefficients}
-The network's output channels are standardized values of $\log_{10}n_i$, with $n_i$ in m$^{-3}$. The code's earlier target was $\log_{10}b_i$, and some old notes and variable names (\code{logb}) still say so, but the production checkpoints and datasets store \code{log10_nlte_population_m-3}. Logarithms are essential because a single level spans many decades:
+\subsection{The target: log populations, built from departure coefficients}
+The labels, the loss and the output are standardized values of $\log_{10}n_i$, with $n_i$ in m$^{-3}$; the datasets store \code{log10_nlte_population_m-3}, and the \code{logb} variable names in the loss are historical. What the last layer predicts is different in the final model: per species, one departure value $\delta_i$ per level and one total correction $u$, from which the head builds the populations,
+\begin{equation}
+n_i=\frac{\rho}{m}\,10^{s}\,\frac{f^*_i\,e^{\delta_i}}{\sum_j f^*_j\,e^{\delta_j}},\qquad s=6\tanh(u/6),
+\end{equation}
+with $m$ the species' mass per atom and $f^*_i(T,\nel)$ MULTI3D's own LTE level fraction, computed in the head from the input $T$ and $\nel$ as MULTI3D's \code{calc_lte_populations} does (Saha--Boltzmann with its Debye lowering and atom data). So $\delta_i=\ln b_i$ up to a constant common to the species' levels: $\delta=0$ gives MULTI3D's LTE populations, and the network learns only the departures from LTE and a small correction $s$ to the total $\rho/m$. The head adds no parameters. (The paper model's last layer gave the standardized $\log_{10}n_i$ directly.) Logarithms are essential because a single level spans many decades:
 
 \begin{table}[H]\centering\small
 \begin{tabular}{l*{6}{r}}
 \toprule
 Mean $\pm$ std of $\log_{10}n_i$ [m$^{-3}$]&ch.\,1&ch.\,2&ch.\,3&ch.\,4&ch.\,5&ch.\,6\\\midrule
-Hydrogen&$16.02\pm6.87$&$9.64\pm8.02$&$8.66\pm8.11$&$8.51\pm8.10$&$8.49\pm8.13$&$17.63\pm3.67$\\
-Calcium&$11.32\pm5.34$&$10.39\pm5.52$&$10.58\pm5.50$&$8.60\pm6.06$&$8.87\pm6.06$&$12.30\pm3.73$\\
+Hydrogen&$16.12\pm6.28$&$9.79\pm7.26$&$8.65\pm7.36$&$8.43\pm7.37$&$8.38\pm7.40$&$17.53\pm3.37$\\
+Calcium&$11.16\pm5.02$&$10.22\pm5.17$&$10.41\pm5.15$&$8.38\pm5.66$&$8.66\pm5.67$&$12.19\pm3.43$\\
 \bottomrule
 \end{tabular}
-\caption{Target normalization from the production checkpoints.}
+\caption{Target normalization from the final model's checkpoints.}
 \end{table}
 
-One consequence needs stating directly. A prediction in $\log_{10}n_i$ has no built-in constraint on the element total: the sum $\sum_i n_i$ should equal the element density, which follows from $\rho$ and the abundance, but the network only learns this approximately. The difference needs no labels to compute and turns out to be a useful error indicator (Section~\ref{sec:validation}).
+The element total is built in: $\sum_i n_i=(\rho/m)\,10^s$, so the total departs from $\rho/m$ only by the learned correction $s$ (typically $-0.02$\,dex in the \code{_hion} simulations, more where H$_2$ forms below $\log T=3.7$), and the loss weighs the error of the total separately (Section~\ref{sec:objective}). The paper model had no such constraint, and there the conservation residual $|\log\sum n_i-\log n_{\rm element}|$ was a useful, label-free error indicator (Section~\ref{sec:validation}); in the final model it is the head's own $s$.
 
 \section{The architecture, read physically}
 
@@ -211,37 +218,43 @@ The model is a factorized Fourier neural operator. A general 3D convolution or 3
 
 \begin{figure}[H]\centering
 \begin{tikzpicture}[node distance=4mm and 5mm]
-\node[box,fill=boxc,text width=26mm](x){Hidden state $\mathbf u$\\48 channels at every $(z,x,y)$};
+\node[box,fill=boxc,text width=26mm](x){Hidden state $\mathbf u$\\96 channels at every $(z,x,y)$};
 \node[box,right=9mm of x,yshift=11mm,text width=40mm](s){\textbf{Horizontal spectral branch}\\2D FFT on each height plane, mixes channels, with weights from a learned function of $\mathbf k$ in physical units};
-\node[box,right=9mm of x,yshift=-11mm,text width=40mm](v){\textbf{Vertical branch}\\1D convolutions along each column, conditioned on $z$, $\Delta z$ and the column's span};
+\node[box,right=9mm of x,yshift=-11mm,text width=40mm](v){\textbf{Vertical branch}\\Fourier transform along each column's own heights, with weights from a learned function of the vertical wavenumber};
 \node[box,fill=boxd,right=9mm of s,yshift=-11mm,text width=24mm](f){\textbf{Gated fusion}\\learned local weighting of the two};
 \node[box,right=7mm of f,text width=20mm](p){Pointwise corrections};
 \node[box,fill=boxc,right=7mm of p,text width=14mm](o){$\mathbf u'$};
 \draw[arr](x.east)--(s.west);\draw[arr](x.east)--(v.west);\draw[arr](s.east)--(f.west);\draw[arr](v.east)--(f.west);\draw[arr](f)--(p);\draw[arr](p)--(o);
 \draw[arr,dashed](x.south)--++(0,-13mm)-|node[pos=.25,above,font=\scriptsize]{residual}(o.south);
 \end{tikzpicture}
-\caption{One block. Four such blocks sit between a pointwise lift from 6 to 48 channels and a pointwise projection to the 6 output channels. Total: 3.12 million parameters.}\label{fig:block}
+\caption{One block of the final model. Four such blocks sit between a pointwise lift from 6 to 96 channels and a pointwise projection to the 6 departure values and the total correction of the species. Total: 3.18 million parameters.}\label{fig:block}
 \end{figure}
 
-\subsection{Horizontal branch: radiation coupling across columns}
+\subsection{Horizontal branch: radiation coupling across columns}\label{sec:horizontal}
 On each height plane, independently of the others, the state is Fourier transformed in $(x,y)$ and multiplied in spectral space:
 \begin{equation}
 \hat u'_o(\mathbf k,z)=g(\mathbf k)\sum_i W_{io}\,\hat u_i(\mathbf k,z),\qquad g(\mathbf k)=\mathrm{MLP}\big(k_x,k_y,|\mathbf k|,\mathrm{sign}\,k_y\big)\in\mathbb C,
 \end{equation}
-where $W$ is a complex channel-mixing matrix. A multiplication at each $\mathbf k$ is a convolution over the whole plane in real space, so one layer communicates across the entire box. This is the structure of the real problem: a horizontally uniform layer's response to a perturbation depends on its horizontal scale, because small-scale structure is smoothed by radiative exchange and large-scale structure is not. Since $g$ is a function of the wavenumber in physical units (m$^{-1}$), not of a mode number, the same weights apply to any grid size and spacing. This is what makes a model trained on $40\times40$ patches applicable to whole cubes.
+where $W$ is a complex channel-mixing matrix. A multiplication at each $\mathbf k$ is a convolution over the whole plane in real space, so one layer communicates across the entire box. This is the structure of the real problem: a horizontally uniform layer's response to a perturbation depends on its horizontal scale, because small-scale structure is smoothed by radiative exchange and large-scale structure is not. Since $g$ is a function of the wavenumber in physical units (m$^{-1}$), not of a mode number, the same weights apply to any grid size and spacing. This is what makes a model trained on $40\times40$ patches applicable to whole cubes. In the final model a second, low-rank term (rank 8) lets the channel mixing itself vary with $\mathbf k$, instead of one scalar gate scaling the same matrix at every wavenumber.
 
-\subsection{Vertical branch: stratification and optical depth}
-Along each column, a stack of 1D convolutions processes the state (three parallel kernels 3, 7 and 15 points wide, then residual blocks with dilations 1, 2 and 4, then a block of kernel 7), and it is given the column's geometry: absolute height $z$, normalized height $(z-z_{\rm min})/z_{\rm span}$, local spacing $\Delta z/\langle\Delta z\rangle$ and the span $z_{\rm span}$. These are the terms that replace an explicit optical-depth integration. The filters run over grid \emph{index}, so physical distance enters only through these features.
+\subsection{Vertical branch: stratification and optical depth}\label{sec:vertical}
+The vertical branch is the counterpart of the horizontal one along height: a spectral convolution on each column's own heights. With wavenumbers $k_m=2\pi m/L$, $m=0,\dots,M-1$, up to the shortest wavelength $\lambda_{\rm min}$,
+\begin{equation}
+X_m=\int u(z)\,e^{-ik_mz}\,\dd z,\qquad u'(z_j)=\frac1L\Big(Y_0+2\,\mathrm{Re}\sum_{m\ge1}Y_m\,e^{ik_mz_j}\Big),\qquad Y_m=W(k_m)\,X_m,
+\end{equation}
+where $X_m$ is the exact transform of the piecewise-linear column through its levels and $W(k)$ a complex channel matrix scaled by a small network of the physical wavenumber, plus a low-rank term of rank 8, as in the horizontal branch. In the final model $L=40$\,Mm (or twice the tallest column, if longer, so that top and bottom are never neighbours) and $\lambda_{\rm min}=40$\,km, which gives 1001 modes; the wavenumber enters the frequency network on a fixed physical scale of 0.3\,Mm, and each column keeps only the wavenumbers its own median level spacing $\Delta z$ resolves, tapered from $2\pi/(3\Delta z)$ to zero at $\pi/\Delta z$. The column's height also enters pointwise. A multiplication at each $k$ is a convolution along the whole column, which is how the branch carries the non-local coupling in depth that an optical-depth integration would.
 
-This design has a consequence the physics depends on: the network sees index-based stencils and whole-column descriptors, so it is sensitive to how the column is sampled and how far it extends, and it should only be used on grids resembling its training grids. Section~\ref{sec:mesh} builds exactly such a grid.
+Nothing in it counts grid points: the transform integrates over height, so the same weights apply to any number of levels and any spacing, and the GroupNorms weight each level by the height it stands for (its trapezoid share of the column), not by how many levels lie near it. The grid only sets how well a column is represented. The network is still trained only on the heights, extents and atmospheres of its training columns and their height-cut copies, so the population mesh (Section~\ref{sec:mesh}) remains the default for columns unlike a simulation grid.
+
+The paper model's vertical branch was different: a stack of 1D convolutions over grid \emph{index} (kernels 3, 7 and 15, then dilated residual blocks), given the column's geometry as features ($z$, normalized height, local spacing and span). It was sensitive to how a column is sampled and how far it extends.
 
 \subsection{Fusion and local corrections}
-A sigmoid gate, computed pointwise from the state and both branch outputs, decides how much of each branch to use at each location. This lets the network favour vertical information in optically thick, stratified layers and horizontal information elsewhere, though the weights are learned rather than imposed. A small $3\times3\times3$ depthwise convolution inside the fusion adds a short-range coupling. Two further pointwise terms provide local nonlinearity, which is what thermodynamic relations such as Saha and Boltzmann are. The learned residual weights in the production H checkpoint are about 0.76--0.92 for the fused update and 0.15--0.20 for each pointwise term, so the combined spectral and vertical update dominates.
+A sigmoid gate, computed pointwise from the state and both branch outputs, decides how much of each branch to use at each location. This lets the network favour vertical information in optically thick, stratified layers and horizontal information elsewhere, though the weights are learned rather than imposed. In the final model the fusion is pointwise; the paper model had a small $3\times3\times3$ depthwise convolution in it, which counted grid points and was zero-padded at the box edge (Section~\ref{sec:validation}). Two further pointwise terms provide local nonlinearity, which is what thermodynamic relations such as Saha and Boltzmann are; they start at weight 0.5 and the second is not squashed by a tanh. The learned residual weights in the final H checkpoint are 0.44--0.84 for the fused update and 0.20--0.52 for each pointwise term (Ca: 0.72--0.91 and 0.43--0.54).
 
 \subsection{What the network does not have}
-It contains no radiative transfer equation, no statistical equilibrium and no explicit atomic data. Physics enters through the data, the choice of inputs and outputs, and the factorization.
+It contains no radiative transfer equation and no statistical equilibrium. The only atomic data are those of MULTI3D's LTE populations in the head. Physics enters through the data, the choice of inputs and outputs, the head and the factorization.
 
-\section{The training objective}
+\section{The training objective}\label{sec:objective}
 Over normalized targets $y$, with prediction $\hat y$, the data term is
 \begin{equation}
 \mathcal L=\tfrac12\,\big\langle(1+|y|)(\hat y-y)^2\big\rangle+\tfrac12\,\big\langle|\hat y-y|\big\rangle .
@@ -250,7 +263,11 @@ The $L^1$ part reduces sensitivity to outliers, and the factor $1+|y|$ puts more
 \begin{equation}
 x_{lu}=\ln\frac{b_l}{b_u}+\frac{E_u-E_l}{kT},\qquad S_\nu=\frac{2h\nu^3}{c^2}\,\frac{1}{e^{x_{lu}}-1},
 \end{equation}
-and a horizontal-gradient term. \emph{Both have weight zero in production:} the source term is computed and logged as a monitor, but the checkpoints were optimized on the data term alone. Conservation is not enforced either. The production checkpoints reached validation losses of $5.9\times10^{-3}$ (H, best epoch 171) and $7.3\times10^{-3}$ (Ca, best epoch 252), with training losses $4.3\times10^{-3}$ and $3.6\times10^{-3}$.
+and a horizontal-gradient term. \emph{Both have weight zero:} the source term is computed and logged as a monitor only. The final model adds one term, the error of each species' total,
+\begin{equation}
+\mathcal L_{\rm tot}=\Big\langle\big|\log_{10}\textstyle\sum_i\hat n_i-\log_{10}\sum_in_i\big|\Big\rangle\big/\bar\sigma_Y,\qquad \mathcal L_{\rm train}=\mathcal L+0.3\,\mathcal L_{\rm tot},
+\end{equation}
+with $\bar\sigma_Y$ the species' mean target standard deviation, so that it is on the scale of the $L^1$ part. The true total is MULTI3D's own, so where MULTI3D holds more than $\rho/m$ the head's $s$ is asked for exactly that. Terms on the line ratios $n_u/n_l$ and on the ionization stages exist in the code with weight zero; trained from scratch with weight 0.3 each, they did not improve on the final model. The best checkpoints reached validation data losses of $4.24\times10^{-3}$ (H, epoch 174 of 400) and $1.06\times10^{-2}$ (Ca, epoch 240), with training data losses $2.26\times10^{-3}$ and $4.30\times10^{-3}$; the validation set includes the height-cut copies, which are harder, and checkpoints were selected on $\mathcal L_{\rm train}$. (The paper model reached $5.9\times10^{-3}$ and $7.3\times10^{-3}$ on its own validation snapshots, without \code{cbh24} or height cuts, so the numbers are only roughly comparable.)
 
 \section{From a temperature to a full atmosphere}\label{sec:equilibrium}
 
@@ -297,7 +314,7 @@ FFNO still predicts the line populations in this mode. This route exists for com
 \section{The population mesh}\label{sec:mesh}
 
 \subsection{Why it is needed}
-FFNO has seen only height grids that are one set of heights for every column, spaced 12--30\,km through the photosphere and chromosphere, with bottoms 1--2.5\,Mm below the surface and tops up to 14\,Mm. A typical inversion column has 95 log-$\tau$ points spaced from 30\,km to several Mm, at different heights in each column. Fed directly, H $n=2$ comes out about 100 times wrong in the chromosphere, even with the simulation's own $T$, $\mathbf v$, $\nel$ and $\rho$. The fix is to \emph{bring the atmosphere to the network} rather than asking it to extrapolate.
+FFNO has seen only height grids that are one set of heights for every column, spaced 12--30\,km through the photosphere and chromosphere, with bottoms 1--2.5\,Mm below the surface and tops up to 14\,Mm (and, for the final model, height-cut copies of them). A typical inversion column has 95 log-$\tau$ points spaced from 30\,km to several Mm, at different heights in each column. Fed directly to the paper model, whose vertical filters ran over grid index, H $n=2$ came out about 100 times wrong in the chromosphere, even with the simulation's own $T$, $\mathbf v$, $\nel$ and $\rho$. The final model's height operator does not count grid points, but it has still learned only from columns like its training columns. The safe course for both is to \emph{bring the atmosphere to the network} rather than asking it to extrapolate.
 
 \subsection{Construction}
 The default mesh has 452 levels running from $-1$\,Mm to 14\,Mm: 20\,km spacing to 4.5\,Mm, then growing by 1\% per point up to 100\,km. Then, for each column:
@@ -320,7 +337,7 @@ The default mesh has 452 levels running from $-1$\,Mm to 14\,Mm: 20\,km spacing 
 The network predicts on the mesh, and the populations are interpolated back to the column's own points, log-linearly in $z$. The extensions exist \emph{only} for the network: synthesis uses the column's own levels. The mesh is on by default for log $\tau$ and log $m$, and optional on $z$, where it is needed for anything unlike a simulation grid.
 
 \subsection{Why the corona matters}
-Filling the volume above a short column is not a detail. The network is not local in height: populations low down respond to what occupies the mesh above. For FAL-C, holding its 100\,000\,K top values up to 14\,Mm made total hydrogen up to 15 times too high in the photosphere, and changing a corona from 1\,MK to 0.5\,MK doubled it at 250\,km. This reflects the operator's learned dependence on column context, not a physical influence of that gas on the photosphere; it is the same effect that appears as the column-span dependence in Section~\ref{sec:validation}. Columns already reaching the mesh top, like Bifrost cubes on log $\tau$, never use this extension.
+Filling the volume above a short column is not a detail. The network is not local in height: populations low down respond to what occupies the mesh above. For FAL-C with the paper model, holding its 100\,000\,K top values up to 14\,Mm made total hydrogen up to 15 times too high in the photosphere, and changing a corona from 1\,MK to 0.5\,MK doubled it at 250\,km. This reflects the operator's learned dependence on column context, not a physical influence of that gas on the photosphere; it is the same effect that appears as the column-span dependence in Section~\ref{sec:validation}. Columns already reaching the mesh top, like Bifrost cubes on log $\tau$, never use this extension.
 
 \section{Spectral synthesis}
 
@@ -428,6 +445,25 @@ A real inversion is ill-posed: many atmospheres fit the same spectra, and layers
 
 All numbers below come from runs in this repository. Note that every labelled snapshot has now been inspected during development, so there is no pristine test set. A final evaluation needs a new MULTI3D snapshot.
 
+\subsection{The final model against MULTI3D}
+\begin{table}[H]\centering\small
+\begin{tabular}{lrrrrrr}
+\toprule
+&\multicolumn{3}{c}{H}&\multicolumn{3}{c}{Ca}\\
+Test snapshot&median $\delta$&P90 $\delta$&\Halpha{} core NMAE&median $\delta$&P90 $\delta$&854.2 core NMAE\\\midrule
+\code{en024048_hion} 385&0.040&0.307&0.9\%&0.171&0.317&1.4\%\\
+\code{nw012023} 1050&0.041&0.403&1.6\%&0.281&1.560&2.6\%\\
+\code{ch024031_by200bz005} 450&0.032&0.244&1.4\%&0.066&0.510&2.8\%\\
+\code{cbh24} 957&0.185&0.795&7.2\%&0.244&5.920&4.7\%\\
+\code{nw072100} 481&0.074&0.496&5.5\%&2.569&12.28&4.1\%\\\bottomrule
+\end{tabular}
+\caption{The final model on the five test snapshots of FNOML-Paper (branch \code{zaug}, Table 2): population error $\delta=|n_{\rm pred}-n_{\rm Multi3D}|/n_{\rm Multi3D}$ over all voxels and levels, and the line-core NMAE $\langle|I_{\rm FFNO}-I_{\rm Multi3D}|\rangle/I_{\rm wing}$, $I_{\rm wing}$ the mean Multi3D intensity at the wavelength farthest from line centre; both syntheses use the same formal solution. \code{ch024031_by200bz005} and \code{nw072100} are simulations absent from training. For \code{nw072100}, H is on its native $720\times720\times635$ grid and Ca on a $240\times240\times450$ subset.}\label{tab:final}
+\end{table}
+
+The large Ca $\delta$ of \code{nw072100} comes from the Ca\,\textsc{ii} levels in the upper atmosphere, where nearly all calcium is Ca\,\textsc{iii}; Ca\,\textsc{iii} and the total are accurate, and the 854.2\,nm core is not much affected. Its \Halpha{} core is 38\% too bright on average, and the error lies in the predicted $n_3/n_2$, the line's source function: taking that one ratio from Multi3D brings the core NMAE to 0.4\%. On FAL-C, on its own 82 heights with its own $\nel$, the final model's line cores are 13\% (\Halpha) and 38\% (Ca\,\textsc{ii}) brighter than RH's (\code{figures/falc/native_grid/README.md}).
+
+\emph{The subsections that follow were measured with the paper model} (log-population head, 48 channels, index-based vertical branch) and have not been repeated for the final model, except where stated.
+
 \subsection{Spectra against MULTI3D}
 \begin{table}[H]\centering\small
 \begin{tabular}{lrr}
@@ -502,7 +538,7 @@ Physics, unconfirmed&Helium simulation&$\nel$ at fixed $(T,\rho)$ scatters by $\
 The dependence on column extent is strong: even training snapshot \code{nw012023} 915 shifts by 0.1--0.3\,dex under a moderate crop, and a hard crop to $z\le4$\,Mm gives errors of 0.5--0.9\,dex. So predictions should be trusted only for column extents seen in training.
 
 \subsection{Horizontal boundaries}
-The horizontal Fourier layers are periodic, as the simulations are, but the small $3\times3\times3$ convolution in the fusion step pads with zeros. This breaks horizontal translation invariance near the box edge. Repeating one real column over a square grid (H model, largest difference over depth and level) measured this directly:
+The horizontal Fourier layers are periodic, as the simulations are, but the paper model's small $3\times3\times3$ convolution in the fusion step pads with zeros. This breaks horizontal translation invariance near the box edge. The final model has no such convolution, so this source of edge error is absent from it; the test below has not been repeated for it. Repeating one real column over a square grid (H model, largest difference over depth and level) measured this directly:
 
 \begin{table}[H]\centering\small
 \begin{tabular}{lrrrrrrr}
@@ -535,7 +571,7 @@ Conservation residual $|\log\sum n_i-\log n_{\rm element}|$&Free and needs no la
 \item \textbf{Hydrostatic columns} in the inversion. MHS modes exist in HSEMHS but are not connected, and the boundary pressure is not a control.
 \item \textbf{LTE EOS} for $P$, $\rho$, $\nel$ and $\chi_{500}$, in a chromosphere that is not in LTE. Composition also differs slightly from the training simulations, whose $\rho/(n_{\rm H}m_{\rm H})$ is 1.357, against 1.398 for Wittmann's composition.
 \item \textbf{Continuum in LTE form}, with hydrogen from the EOS, and scattering treated as thermal.
-\item \textbf{Domain of validity.} Bifrost-like solar atmospheres on grids resembling the training grids, with column extents seen in training. No guard stops a user from going beyond this. Very hot corona, new magnetic regimes and other stars are unvalidated.
+\item \textbf{Domain of validity.} Bifrost-like solar atmospheres with column extents and height ranges seen in training (the final model's height operator removes the dependence on how a column is sampled, not on what it contains). No guard stops a user from going beyond this. Very hot corona, new magnetic regimes and other stars are unvalidated.
 \item \textbf{Network derivatives} are used in the gradient but were never trained on.
 \end{itemize}
 

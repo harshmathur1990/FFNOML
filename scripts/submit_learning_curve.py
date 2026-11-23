@@ -2,6 +2,7 @@
 from more of the same one?
 
     python3 scripts/submit_learning_curve.py scripts/learning_curve.ini [EXPERIMENT ...] [--dry-run] [--resume]
+    python3 scripts/submit_learning_curve.py scripts/learning_curve.ini EXPERIMENT --predict-only SIM/SNAP ... [--nodes N]
 
 The input file (INI) has a [DEFAULT] section of settings shared by every experiment, and one section per experiment
 naming its training and validation snapshots (sim/snap, separated by spaces or newlines). Any setting can be overridden
@@ -15,12 +16,15 @@ ROOT/solving_sets. One job per experiment then trains (pipeline.py --train) and 
 (pipeline.py --fsdppredict); the checkpoint and predictions are copied back and scored on eagle7
 (learning_curve_eagle7.py score). Before anything is submitted, every experiment is checked for its datasets and solving
 sets. With no EXPERIMENT names, every section is submitted. --resume continues jobs stopped by their time limit:
-training carries on from its last epoch and predictions already written are kept.
+training carries on from its last epoch and predictions already written are kept. --predict-only runs no training: the
+job predicts the snapshots named (sim/snap; their solving sets in ROOT/solving_sets) with the experiment's trained
+checkpoint, e.g. snapshots outside its scoring set; --nodes and --time override the section's for that job.
 
 Only the standard library of Python 3.6 is used, so it runs with the login node's python3 (3.6.15 on Olivia).
 """
 import argparse
 import configparser
+import hashlib
 import json
 import os
 import subprocess
@@ -30,7 +34,9 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ATOMS = ("H", "CA")
 # root: Olivia; stage, data_dir, solving_sets_from: eagle7 (learning_curve_eagle7.py)
 SETTINGS = ("root", "stage", "data_dir", "solving_sets_from", "atoms", "epochs", "nodes", "time", "train_flags",
-            "held_out", "train", "val")
+            "held_out", "train", "val", "output_mode", "lam_total", "model_config", "trainselect", "predict",
+            "patience", "augment_z", "augment_z_min_depth", "resume_lr", "lam_ratio", "lam_ion")
+OUTPUT_MODES = ("log_population", "level_fraction")   # config.MODEL_CONFIG output_mode (models/ffno_model.py)
 MODEL_SUBDIR = "training_FFNO3D_zscale_expand_lognlte"   # config.MODEL_DIR below the run directory
 
 
@@ -58,6 +64,39 @@ def experiment(parser, name):
     if unknown:
         raise ValueError(f"[{name}]: unknown settings {', '.join(unknown)} (known: {', '.join(SETTINGS)})")
     e = {key: section.get(key, "").strip() for key in SETTINGS}
+    e["output_mode"] = e["output_mode"] or OUTPUT_MODES[0]
+    e["lam_total"] = e["lam_total"] or "0"
+    e["lam_ratio"] = e["lam_ratio"] or "0"
+    e["lam_ion"] = e["lam_ion"] or "0"
+    e["trainselect"] = e["trainselect"] or "1"
+    e["predict"] = e["predict"] or "yes"
+    e["patience"] = e["patience"] or "50"
+    e["augment_z"] = e["augment_z"] or "no"
+    e["augment_z_min_depth"] = e["augment_z_min_depth"] or "16"
+    e["resume_lr"] = e["resume_lr"] or "5e-5"
+    if not float(e["resume_lr"]) > 0:
+        raise ValueError(f"[{name}] resume_lr = {e['resume_lr']!r}: the --bestpath starting learning rate, > 0")
+    if e["augment_z"] not in ("yes", "no") or int(e["augment_z_min_depth"]) < 2:
+        raise ValueError(f"[{name}] augment_z = yes or no, augment_z_min_depth >= 2")
+    if int(e["patience"]) < 1:
+        raise ValueError(f"[{name}] patience = {e['patience']!r}: epochs without a validation improvement, >= 1")
+    if not 0 < float(e["trainselect"]) <= 1:
+        raise ValueError(f"[{name}] trainselect = {e['trainselect']!r}: the fraction of training patches per epoch, in (0, 1]")
+    if e["predict"] not in ("yes", "no"):
+        raise ValueError(f"[{name}] predict = {e['predict']!r}: yes or no")
+    if e["output_mode"] not in OUTPUT_MODES:
+        raise ValueError(f"[{name}] output_mode = {e['output_mode']!r}: one of {', '.join(OUTPUT_MODES)}")
+    for key in ("lam_total", "lam_ratio", "lam_ion"):
+        if float(e[key]) < 0:
+            raise ValueError(f"[{name}] {key} = {e[key]!r}: must be >= 0")
+    if e["model_config"]:
+        try:
+            overrides = json.loads(e["model_config"])
+        except ValueError as err:
+            raise ValueError(f"[{name}] model_config is not JSON: {err}")
+        if not isinstance(overrides, dict):
+            raise ValueError(f"[{name}] model_config = {e['model_config']!r}: a JSON object, e.g. {{\"width\": 96}}")
+        e["model_config"] = json.dumps(overrides, sort_keys=True)
     if e["atoms"] not in ATOMS:
         raise ValueError(f"[{name}] atoms = {e['atoms']!r}: one of {', '.join(ATOMS)} (production trains H and CA apart; "
                          "make one section per atom)")
@@ -95,6 +134,14 @@ def prediction_name(sim, snap):
     return f"{sim}_{snap}"
 
 
+def model_env(e):
+    """The environment that selects the experiment's head, loss and model_config overrides of MODEL_CONFIG (config.py);
+    training and every prediction need it, since a checkpoint loads only into the model it was trained with."""
+    return {"FFNOML_OUTPUT_MODE": e["output_mode"], "FFNOML_LAM_TOTAL": e["lam_total"],
+            "FFNOML_LAM_RATIO": e["lam_ratio"], "FFNOML_LAM_ION": e["lam_ion"],
+            "FFNOML_MODEL_CONFIG": e["model_config"]}
+
+
 def eval_lines(e):
     return [f"{role}={sim}/{snap}\n" for role, (sim, snap) in e["eval"]]
 
@@ -122,6 +169,42 @@ def missing_inputs(e, root):
     return missing
 
 
+def missing_for_prediction(e, root, names):
+    """What a --predict-only job reads: the experiment's checkpoint and the named snapshots' solving sets."""
+    run = os.path.join(root, e["name"])
+    paths = [os.path.join(run, MODEL_SUBDIR, "3D_sim_train_{}.pt".format(e["atoms"]))]
+    paths += [os.path.join(root, "solving_sets", "3D_sim_predict_{}.hdf5".format(prediction_name(*s))) for s in names]
+    return [p for p in paths if not os.path.exists(p)]
+
+
+def job_env(e, root, resume=False):
+    """experiment.env: what learning_curve_train.sbatch sources"""
+    return {
+        "FFNOML_EXPERIMENT": e["name"],
+        "FFNOML_REPO_DIR": REPO,
+        "FFNOML_SOLVING_SETS": os.path.join(root, "solving_sets"),
+        "FFNOML_TRAIN_SPLIT": split_json(e["train"]),
+        "FFNOML_VAL_SPLIT": split_json(e["val"]),
+        "FFNOML_ACTIVE_ATOMS": e["atoms"],
+        "FFNOML_NUM_EPOCHS": e["epochs"],
+        "FFNOML_TRAINSELECT": e["trainselect"],
+        "FFNOML_PREDICT": e["predict"],
+        "FFNOML_PATIENCE": e["patience"],
+        "FFNOML_AUGMENT_Z": "1" if e["augment_z"] == "yes" else "0",
+        "FFNOML_AUGMENT_Z_MIN_DEPTH": e["augment_z_min_depth"],
+        "FFNOML_RESUME_LR": e["resume_lr"],
+        "FFNOML_TRAIN_FLAGS": " ".join(f for f in (e["train_flags"], "--resume" if resume else "") if f),
+        **model_env(e),
+    }
+
+
+def write_job_files(e, run, root, resume=False):
+    with open(os.path.join(run, "experiment.env"), "w") as f:
+        f.writelines(f"{k}='{v}'\n" for k, v in job_env(e, root, resume).items())
+    with open(os.path.join(run, "eval_snapshots.txt"), "w") as f:
+        f.writelines(eval_lines(e))
+
+
 def sbatch(args):
     return subprocess.run(["sbatch", "--parsable"] + args, check=True, stdout=subprocess.PIPE,
                           universal_newlines=True).stdout.strip().split(";")[0]
@@ -133,37 +216,45 @@ def main():
     cli.add_argument("experiments", nargs="*", help="sections to submit (default: all)")
     cli.add_argument("--dry-run", action="store_true", help="check the inputs and write the run directories, submit nothing")
     cli.add_argument("--resume", action="store_true", help="continue the experiments stopped by their time limit")
+    cli.add_argument("--predict-only", nargs="+", metavar="SIM/SNAP",
+                     help="no training: predict these snapshots with the experiment's trained checkpoint")
+    cli.add_argument("--nodes", help="with --predict-only: nodes for the job (default: the section's)")
+    cli.add_argument("--time", help="with --predict-only: time limit for the job (default: the section's)")
     args = cli.parse_args()
+    if (args.nodes or args.time) and not args.predict_only:
+        cli.error("--nodes and --time go with --predict-only")
     experiments = read_experiments(args.input, args.experiments)
+    to_predict = snapshots(" ".join(args.predict_only)) if args.predict_only else None
+    if to_predict is not None and len(experiments) != 1:
+        cli.error("--predict-only takes one experiment")
 
     # everything is checked before anything is submitted
-    problems = {name: missing_inputs(e, os.path.abspath(e["root"])) for name, e in experiments.items()}
+    problems = {name: (missing_for_prediction(e, os.path.abspath(e["root"]), to_predict) if to_predict is not None
+                       else missing_inputs(e, os.path.abspath(e["root"]))) for name, e in experiments.items()}
     if any(problems.values()):
         sys.exit("missing:\n" + "\n".join(f"  [{n}] {p}" for n, ps in problems.items() for p in ps))
 
     for name, e in experiments.items():
         root = os.path.abspath(e["root"])
         run = os.path.join(root, name)
-        flags = " ".join(f for f in (e["train_flags"], "--resume" if args.resume else "") if f)
-        env = {
-            "FFNOML_EXPERIMENT": name,
-            "FFNOML_REPO_DIR": REPO,
-            "FFNOML_SOLVING_SETS": os.path.join(root, "solving_sets"),
-            "FFNOML_TRAIN_SPLIT": split_json(e["train"]),
-            "FFNOML_VAL_SPLIT": split_json(e["val"]),
-            "FFNOML_ACTIVE_ATOMS": e["atoms"],
-            "FFNOML_NUM_EPOCHS": e["epochs"],
-            "FFNOML_TRAIN_FLAGS": flags,
-        }
-        with open(os.path.join(run, "experiment.env"), "w") as f:
-            f.writelines(f"{k}='{v}'\n" for k, v in env.items())
-        with open(os.path.join(run, "eval_snapshots.txt"), "w") as f:
-            f.writelines(eval_lines(e))
-        print(f"{name}: {e['atoms']}, {len(e['train'])} training snapshots, {e['epochs']} epochs on {e['nodes']} nodes, "
-              f"then {len(e['eval'])} predictions; {run}", flush=True)
+        export = f"ALL,FFNOML_RUN_DIR={run}"
+        nodes, time = args.nodes or e["nodes"], args.time or e["time"]
+        if to_predict is not None:
+            # the list in a file of its own, so that jobs predicting different snapshots can be queued together
+            lines = [f"predict={sim}/{snap}\n" for sim, snap in to_predict]
+            listing = "predict_only_{}.txt".format(hashlib.md5("".join(lines).encode()).hexdigest()[:8])
+            with open(os.path.join(run, listing), "w") as f:
+                f.writelines(lines)
+            export += f",FFNOML_PREDICT_ONLY={listing}"
+            print(f"{name}: predict only, {len(to_predict)} snapshots ({listing}) on {nodes} nodes; {run}", flush=True)
+        else:
+            write_job_files(e, run, root, args.resume)
+            print(f"{name}: {e['atoms']}, {e['output_mode']} (lam_total {e['lam_total']}), "
+                  f"{len(e['train'])} training snapshots, {e['epochs']} epochs on {e['nodes']} nodes, "
+                  f"then {len(e['eval'])} predictions; {run}", flush=True)
         if args.dry_run:
             continue
-        job = sbatch(["--chdir", run, "--export", f"ALL,FFNOML_RUN_DIR={run}", "--nodes", e["nodes"], "--time", e["time"],
+        job = sbatch(["--chdir", run, "--export", export, "--nodes", nodes, "--time", time,
                       "--job-name", f"lc_{name}", "--output", f"{run}/slurm-%j.out", "--error", f"{run}/slurm-%j.err",
                       os.path.join(REPO, "scripts", "learning_curve_train.sbatch")])
         print(f"  job {job}", flush=True)

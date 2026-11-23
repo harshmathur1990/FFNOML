@@ -13,13 +13,45 @@ flowchart TD
     LIFT --> H0["hidden: [B, width, D, H, W]"]
     H0 --> BLOCKS["repeat n_layers x<br/>FFNOBlock3dBalanced"]
     BLOCKS --> HEAD1["proj1<br/>Conv3d(width -> 2*width, 1)<br/>GELU"]
-    HEAD1 --> HEAD2["proj2<br/>Conv3d(2*width -> out_channels, 1)"]
-    HEAD2 --> Y["output: [B, out_channels, D, H, W]"]
+    HEAD1 --> HEAD2["proj2<br/>Conv3d(2*width -> head_channels, 1)"]
+    HEAD2 --> HO["head_output(head, x)<br/>log_population: identity<br/>level_fraction: see below"]
+    X -. T, ne, rho .-> HO
+    HO --> Y["output: normalised log10 n, [B, out_channels, D, H, W]"]
 
     TRAIN{"training and<br/>checkpoint_blocks and<br/>not collect_stats?"} -. wraps lift/block/head .-> LIFT
     TRAIN -. wraps lift/block/head .-> BLOCKS
     TRAIN -. wraps lift/block/head .-> HEAD1
 ```
+
+`head_channels` is `out_channels` for `output_mode = "log_population"` and `out_channels + n_species` for
+`"level_fraction"` (one departure value per level and one total correction per species).
+
+The final model (zaug, `config.py`'s defaults) uses `"level_fraction"`, width 96 and `vertical_operator=True`: the
+GroupNorms are `DepthWeightedGroupNorm` (statistics weighted by each level's share of the column height), each
+block's vertical branch is `HeightSpectralConv` (a spectral convolution along height, low-rank mixing of rank 8,
+column cutoff), and the fusion is pointwise (no 3x3x3 convolution). The diagrams below show the general structure.
+
+## Level-fraction head with departure coefficients
+
+```mermaid
+flowchart TD
+    HEAD["proj2 output, per species:<br/>delta_1..delta_L (departures), u (total)"]
+    X["inputs x: log10 T, log10 ne, log10 rho<br/>(un-normalised with mean_X, std_X)"]
+    X --> LTE["multi3d_lte_log_weights (float64)<br/>ln f*_i: MULTI3D calc_lte_populations<br/>Saha-Boltzmann, Debye lowering, MULTI3D atom data"]
+    HEAD --> ADD["z_i = ln f*_i + delta_i<br/>delta_i = ln b_i + constant"]
+    LTE --> ADD
+    ADD --> SM["log_softmax over the species' levels<br/>share_i = f*_i b_i / sum_j f*_j b_j"]
+    HEAD --> S["s = 6 tanh(u / 6)"]
+    X --> TOT["log10 n_total = log10(rho / m) + s"]
+    S --> TOT
+    SM --> N["log10 n_i = log10 n_total + log10 share_i"]
+    TOT --> N
+    N --> NORM["(log10 n - mean_Y) / std_Y"]
+```
+
+δ = 0 gives MULTI3D's LTE populations; the network learns the departure coefficients (up to a constant per species)
+and the total's small offset from ρ / m. The head has no parameters of its own. The capacity options of the blocks
+(`z_spectral_modes`, `freq_mix_rank`, `open_side_paths`) are off by default and not drawn here.
 
 ## `FFNOBlock3dBalanced`
 
@@ -32,7 +64,7 @@ flowchart TD
     DY["dy"] --> SPEC
     SPEC --> NS["GroupNorm<br/>GELU<br/>optional spec_dropout"]
 
-    X --> VERT["BalancedVerticalPhysicsStack(x, z_scale)"]
+    X --> VERT["vertical branch (x, z_scale)<br/>HeightSpectralConv (vertical_operator, final model)<br/>or BalancedVerticalPhysicsStack"]
     Z["z_scale"] --> VERT
     VERT --> NV["GroupNorm<br/>GELU<br/>optional vertical_dropout"]
 
@@ -49,7 +81,7 @@ flowchart TD
 
     SMIX --> CAT["concat(spec_mix, vert_mix)<br/>[B, 2w, D, H, W]"]
     VMIX --> CAT
-    CAT --> FUSE["fuse<br/>Conv3d(2w -> 2w, 1)<br/>GELU<br/>Depthwise Conv3d(2w -> 2w, 3)<br/>GELU<br/>Conv3d(2w -> w, 1)"]
+    CAT --> FUSE["fuse<br/>Conv3d(2w -> 2w, 1)<br/>GELU<br/>Depthwise Conv3d(2w -> 2w, 3), GELU<br/>(not with vertical_operator)<br/>Conv3d(2w -> w, 1)"]
     SMIX --> AVG["0.5 * (spec_mix + vert_mix)"]
     VMIX --> AVG
     FUSE --> FADD["fused + average branch mix"]
@@ -96,7 +128,26 @@ flowchart TD
     POST --> Y["spectral branch output"]
 ```
 
-## `BalancedVerticalPhysicsStack`
+## `HeightSpectralConv` (vertical_operator, the final model)
+
+```mermaid
+flowchart TD
+    X["x: [B, C, D, H, W]"] --> G["x * input_gate(x)<br/>Conv3d 1x1, GELU, Conv3d 1x1, sigmoid"]
+    Z["z_scale: each column's own heights [Mm]"] --> FW["height_fourier_weights<br/>exact transform of the piecewise-linear column"]
+    Z --> ZP["z_proj(z): pointwise height term"]
+    G --> ADD["x * gate + z_proj(z)"]
+    ZP --> ADD
+    ADD --> FT["X_m = integral x(z) exp(-i k_m z) dz<br/>k_m = 2 pi m / L, m = 0..L/min_wavelength<br/>(L = 40 Mm, 1001 modes)"]
+    FW --> FT
+    FT --> W["Y_m = W(k_m) X_m<br/>W = complex C x C matrix x freq_mlp(t(k))<br/>+ low-rank U(k) V(k), rank 8<br/>t(k) on the fixed scale z_feature_wavelength = 0.3 Mm"]
+    Z --> CUT["column_cutoff: taper from 2 pi / (3 dz) to 0 at pi / dz<br/>dz = the column's median spacing"]
+    CUT --> W
+    W --> INV["y(z_j) = (Y_0 + 2 Re sum Y_m exp(i k_m z_j)) / L<br/>at the column's own heights"]
+    INV --> POST["post: Conv3d C -> 2C -> C, 1x1"]
+    POST --> Y["vertical branch output"]
+```
+
+## `BalancedVerticalPhysicsStack` (vertical_operator=False: the paper and l004 models before the height operator)
 
 ```mermaid
 flowchart TD

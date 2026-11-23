@@ -569,6 +569,52 @@ def extract_temperature(X, mean_X, std_X):
     return T
 
 
+def _log10_total_error(logb_pred, logb_true, mean_Y, std_Y, start, end):
+    """mean |log10 sum of levels pred - true| over one species' levels [start, end) of normalised log10 populations
+    (B, C, ...), divided by the species' mean std_Y"""
+    shape = (1, -1) + (1,) * (logb_pred.ndim - 2)
+    std = std_Y[start:end].to(logb_pred.dtype).view(shape)
+    mean = mean_Y[start:end].to(logb_pred.dtype).view(shape)
+    ln10 = float(np.log(10.0))
+    total_pred = torch.logsumexp((logb_pred[:, start:end] * std + mean) * ln10, dim=1) / ln10
+    total_true = torch.logsumexp((logb_true[:, start:end] * std + mean) * ln10, dim=1) / ln10
+    return (total_pred - total_true).abs().mean() / std.mean()
+
+
+def _log10_line_ratio_error(logb_pred, logb_true, mean_Y, std_Y, start, end, lines):
+    """mean |log10 (n_u / n_l) pred - true| over every line (l, u) of one species' levels [start, end) of normalised
+    log10 populations (B, C, ...), divided by the species' mean std_Y; the ratio sets each line's source function"""
+    shape = (1, -1) + (1,) * (logb_pred.ndim - 2)
+    std = std_Y[start:end].to(logb_pred.dtype).view(shape)
+    mean = mean_Y[start:end].to(logb_pred.dtype).view(shape)
+    log_pred = logb_pred[:, start:end] * std + mean
+    log_true = logb_true[:, start:end] * std + mean
+    lower, upper = lines[:, 0], lines[:, 1]
+    ratio_pred = log_pred[:, upper] - log_pred[:, lower]
+    ratio_true = log_true[:, upper] - log_true[:, lower]
+    return (ratio_pred - ratio_true).abs().mean() / std.mean()
+
+
+def _log10_stage_ratio_error(logb_pred, logb_true, mean_Y, std_Y, start, end, ions):
+    """mean |log10 (N_k / N_k+1) pred - true| over each pair of adjacent ionisation stages of one species' levels
+    [start, end) of normalised log10 populations (B, C, ...), N_k the sum of stage k's levels, divided by the species'
+    mean std_Y; zero for a species with one stage"""
+    shape = (1, -1) + (1,) * (logb_pred.ndim - 2)
+    std = std_Y[start:end].to(logb_pred.dtype).view(shape)
+    mean = mean_Y[start:end].to(logb_pred.dtype).view(shape)
+    ln10 = float(np.log(10.0))
+    log_pred = (logb_pred[:, start:end] * std + mean) * ln10
+    log_true = (logb_true[:, start:end] * std + mean) * ln10
+    stages = torch.unique(ions)
+    if stages.numel() < 2:
+        return torch.zeros((), device=logb_pred.device, dtype=logb_pred.dtype)
+    def stage_totals(log_n):
+        return [torch.logsumexp(log_n[:, ions == k], dim=1) / ln10 for k in stages]
+    pred, true = stage_totals(log_pred), stage_totals(log_true)
+    errors = [((pred[k] - pred[k + 1]) - (true[k] - true[k + 1])).abs().mean() for k in range(len(pred) - 1)]
+    return torch.stack(errors).mean() / std.mean()
+
+
 class NLTECompositeLoss(nn.Module):
 
     def __init__(
@@ -583,6 +629,10 @@ class NLTECompositeLoss(nn.Module):
         lam=0,
         lam_S=0,
         lam_g=0,
+        lam_total=0,
+        lam_ratio=0,
+        lam_ion=0,
+        ions=None,
         min_stride=2,
         max_frac=0.25,
         delta=1e-1,
@@ -636,6 +686,18 @@ class NLTECompositeLoss(nn.Module):
         self.lam = lam
         self.lam_S = lam_S
         self.lam_g = lam_g
+        self.lam_total = lam_total
+        self.lam_ratio = lam_ratio
+        self.lam_ion = lam_ion
+        # ionisation stage of each level, per species (config.ATOM_CONFIG multi3d_lte ion); without it every level is
+        # one stage and the stage-ratio term is zero
+        if ions is None:
+            ions = [[1] * int(n) for n in levels]
+        if [len(i) for i in ions] != [int(n) for n in levels]:
+            raise ValueError(f"ions {ions} must give one stage per level of each species ({levels})")
+        self.ions = nn.ParameterList(
+            [nn.Parameter(torch.tensor(i, dtype=torch.long), requires_grad=False) for i in ions]
+        )
         self.min_stride = min_stride
         self.max_frac = max_frac
         self.delta = delta
@@ -718,11 +780,37 @@ class NLTECompositeLoss(nn.Module):
         else:
             L_gradient = torch.zeros((), device=logb_pred.device, dtype=logb_pred.dtype)
 
+        level_offsets = torch.zeros(len(self.levels)+1, device=logb_pred.device, dtype=torch.long)
+        level_offsets[1:] = torch.cumsum(self.levels, dim=0)
+
+        # ------------------ SPECIES TOTAL ------------------ #
+        # |log10 sum_i n_i,pred - log10 sum_i n_i,true| per species, in units of the species' mean std_Y, so it is on the
+        # scale of the L1 half of the data loss; the true total is MULTI3D's own, so cells it fills beyond rho / mass
+        # are asked for exactly that
+        L_total_atoms = torch.stack([
+            _log10_total_error(logb_pred, logb_true, self.mean_Y, self.std_Y, level_offsets[i], level_offsets[i + 1])
+            for i in range(len(self.levels))
+        ])
+        L_species_total = L_total_atoms.mean()
+
+        # ------------------ LINE AND STAGE RATIOS ------------------ #
+        # |log10 n_u/n_l pred - true| over every line of the atom, and |log10 N_k/N_k+1 pred - true| over adjacent
+        # ionisation stages, in the same units as the species total: the ratios that set the line source functions and
+        # the ionisation balance, which the per-level data loss weighs only through the levels' ~5 dex std_Y
+        L_ratio = torch.stack([
+            _log10_line_ratio_error(logb_pred, logb_true, self.mean_Y, self.std_Y, level_offsets[i], level_offsets[i + 1],
+                                    self.lines[i])
+            for i in range(len(self.levels))
+        ]).mean()
+        L_ion = torch.stack([
+            _log10_stage_ratio_error(logb_pred, logb_true, self.mean_Y, self.std_Y, level_offsets[i], level_offsets[i + 1],
+                                     self.ions[i])
+            for i in range(len(self.levels))
+        ]).mean()
+
         # ------------------ PHYSICS ------------------ #
         per_atom_source_losses = []
         per_atom_debug = []
-        level_offsets = torch.zeros(len(self.levels)+1, device=logb_pred.device, dtype=torch.long)
-        level_offsets[1:] = torch.cumsum(self.levels, dim=0)
 
         # Example:
         # levels = [6,7]
@@ -809,7 +897,8 @@ class NLTECompositeLoss(nn.Module):
             _check_tensor(L_S, f"L_S {rank}", True)
             _check_tensor(L_gradient, f"L_gradient {rank}", True)
 
-        L_total = L_data + self.lam_S * L_S + self.lam_g * L_gradient
+        L_total = (L_data + self.lam_S * L_S + self.lam_g * L_gradient + self.lam_total * L_species_total
+                   + self.lam_ratio * L_ratio + self.lam_ion * L_ion)
 
         if self.print_loss:
             _check_tensor(L_total, f"L_total {rank}", True)
@@ -825,6 +914,9 @@ class NLTECompositeLoss(nn.Module):
                 "data": L_data.detach(),
                 "source": L_S.detach(),
                 "gradient": L_gradient.detach(),
+                "total": L_species_total.detach(),
+                "ratio": L_ratio.detach(),
+                "ion": L_ion.detach(),
                 "source_per_atom": L_S_atoms.detach(),
                 "atom_names": self.atom_names
             }

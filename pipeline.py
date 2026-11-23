@@ -213,6 +213,10 @@ def train_model(*, resume=False, bestpath=False, expand=False, validate_only=Fal
         device=DEVICE,
         multi_gpu=MULTI_GPU,
         debug_loss=DEBUG_LOSS,
+        lam_total=LAM_TOTAL,
+        lam_ratio=LAM_RATIO,
+        lam_ion=LAM_ION,
+        ions=ions,
         patience=PATIENCE,
         min_delta=MIN_DELTA,
         use_cosine=USE_COSINE,
@@ -226,6 +230,9 @@ def train_model(*, resume=False, bestpath=False, expand=False, validate_only=Fal
         train_select=TRAINSELECT,
         train_select_seed=TRAINSELECT_SEED,
         validate_only=validate_only,
+        crop=CROP,
+        augment_z=AUGMENT_Z,
+        augment_z_min_depth=AUGMENT_Z_MIN_DEPTH,
     )
 
 

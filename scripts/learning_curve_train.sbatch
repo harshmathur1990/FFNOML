@@ -15,7 +15,8 @@
 # were built on eagle7 by scripts/learning_curve_eagle7.py prepare; the checkpoint and predictions go back there to
 # be scored. Submitted by scripts/submit_learning_curve.py, which writes ${FFNOML_RUN_DIR}/experiment.env and
 # eval_snapshots.txt. Resubmitted with --resume, training continues from its last epoch and predictions already
-# written are kept (pipeline.py skips them).
+# written are kept (pipeline.py skips them). With FFNOML_PREDICT_ONLY (submit_learning_curve.py --predict-only), the job
+# does not train: it predicts the snapshots listed in ${FFNOML_RUN_DIR}/${FFNOML_PREDICT_ONLY} with the trained checkpoint.
 
 set -o errexit
 set -o nounset
@@ -27,6 +28,12 @@ source /cluster/home/harshm/loadnvidiampi.sh   # the accelerator-node environmen
 : "${FFNOML_RUN_DIR:?set by submit_learning_curve.py}"
 source "${FFNOML_RUN_DIR}/experiment.env"
 export FFNOML_REPO_DIR FFNOML_RUN_DIR FFNOML_TRAIN_SPLIT FFNOML_VAL_SPLIT FFNOML_ACTIVE_ATOMS FFNOML_NUM_EPOCHS
+export FFNOML_OUTPUT_MODE="${FFNOML_OUTPUT_MODE:-log_population}" FFNOML_LAM_TOTAL="${FFNOML_LAM_TOTAL:-0}"
+export FFNOML_LAM_RATIO="${FFNOML_LAM_RATIO:-0}" FFNOML_LAM_ION="${FFNOML_LAM_ION:-0}"
+export FFNOML_MODEL_CONFIG="${FFNOML_MODEL_CONFIG:-}"
+export FFNOML_PATIENCE="${FFNOML_PATIENCE:-50}"
+export FFNOML_AUGMENT_Z="${FFNOML_AUGMENT_Z:-0}" FFNOML_AUGMENT_Z_MIN_DEPTH="${FFNOML_AUGMENT_Z_MIN_DEPTH:-16}"
+export FFNOML_RESUME_LR="${FFNOML_RESUME_LR:-5e-5}"
 
 MODEL_DIR="${FFNOML_RUN_DIR}/training_FFNO3D_zscale_expand_lognlte"
 mkdir -p "${MODEL_DIR}"
@@ -36,7 +43,8 @@ TORCHRUN=/cluster/home/harshm/nvidiaenv/bin/torchrun
 echo "Experiment: ${FFNOML_EXPERIMENT}"
 echo "Train split: ${FFNOML_TRAIN_SPLIT}"
 echo "Val split: ${FFNOML_VAL_SPLIT}"
-echo "Atoms: ${FFNOML_ACTIVE_ATOMS}  epochs: ${FFNOML_NUM_EPOCHS}  flags: ${FFNOML_TRAIN_FLAGS:-none}"
+echo "Atoms: ${FFNOML_ACTIVE_ATOMS}  epochs: ${FFNOML_NUM_EPOCHS}  trainselect: ${FFNOML_TRAINSELECT:-1}  flags: ${FFNOML_TRAIN_FLAGS:-none}"
+echo "Head: ${FFNOML_OUTPUT_MODE}  lam_total: ${FFNOML_LAM_TOTAL}  lam_ratio: ${FFNOML_LAM_RATIO}  lam_ion: ${FFNOML_LAM_ION}  model_config: ${FFNOML_MODEL_CONFIG:-defaults}"
 echo "Repository: ${FFNOML_REPO_DIR} ($(git -C "${FFNOML_REPO_DIR}" rev-parse --short HEAD))  run dir: ${FFNOML_RUN_DIR}"
 echo "Job ${SLURM_JOB_ID} on ${SLURM_JOB_NODELIST}, ${SLURM_NNODES} nodes x ${SLURM_GPUS_ON_NODE} GPUs. Start: $(date)"
 
@@ -75,15 +83,27 @@ run_torch() {   # label, pipeline.py arguments: one torchrun over every node, it
   port=$((port + 1))
 }
 
-# from scratch (no --expand), so every experiment starts the same way
-run_torch train --train ${FFNOML_TRAIN_FLAGS:-}
-echo "Training done: $(date)"
+if [ -n "${FFNOML_PREDICT_ONLY:-}" ]; then
+  echo "Predict only: the snapshots in ${FFNOML_PREDICT_ONLY}, no training"
+  eval_file="${FFNOML_RUN_DIR}/${FFNOML_PREDICT_ONLY}"
+  FFNOML_PREDICT=yes
+else
+  # from scratch (no --expand), so every experiment starts the same way
+  run_torch train --train ${FFNOML_TRAIN_FLAGS:-}
+  echo "Training done: $(date)"
+  eval_file="${FFNOML_RUN_DIR}/eval_snapshots.txt"
+fi
 
-while IFS='=' read -r role snapshot <&3; do
-  name=${snapshot/\//_}
-  ln -sfn "${FFNOML_SOLVING_SETS}/3D_sim_predict_${name}.hdf5" "${MODEL_DIR}/3D_sim_predict_${name}.hdf5"
-  echo "Predicting ${name} (${role}): $(date)"
-  run_torch "predict_${name}" --fsdppredict --predname "${name}"
-done 3< "${FFNOML_RUN_DIR}/eval_snapshots.txt"
+# predict = no: predicted on eagle7 after the fetch
+if [ "${FFNOML_PREDICT:-yes}" = yes ]; then
+  while IFS='=' read -r role snapshot <&3; do
+    name=${snapshot/\//_}
+    ln -sfn "${FFNOML_SOLVING_SETS}/3D_sim_predict_${name}.hdf5" "${MODEL_DIR}/3D_sim_predict_${name}.hdf5"
+    echo "Predicting ${name} (${role}): $(date)"
+    run_torch "predict_${name}" --fsdppredict --predname "${name}"
+  done 3< "${eval_file}"
+else
+  echo "Predictions skipped (predict = no)"
+fi
 
 echo "End: $(date)"
