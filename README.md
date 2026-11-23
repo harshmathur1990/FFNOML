@@ -123,8 +123,7 @@ Prediction outputs are written back in linear space as:
 The targets, the loss and the outputs are the same for both heads; they differ in what the last layer predicts.
 `MODEL_CONFIG["output_mode"]` (or `FFNOML_OUTPUT_MODE`) chooses:
 
-- **`log_population`** (the default): the last layer gives the normalised log10 populations directly.
-- **`level_fraction`**: per atom, the last layer gives one departure value δᵢ per level and one total correction u,
+- **`level_fraction`** (the default, the final model's head): per atom, the last layer gives one departure value δᵢ per level and one total correction u,
   and the head builds the populations from them:
 
   ```text
@@ -141,16 +140,53 @@ The targets, the loss and the outputs are the same for both heads; they differ i
   With δ = 0 the head reproduces MULTI3D's stored LTE populations to 1.3×10⁻⁵ dex, the float32 precision of the
   normalised log T input; given MULTI3D's own float32 T and nₑ, the formula matches to 7×10⁻⁸ dex. The species
   totals can get their own loss term, weighted by `FFNOML_LAM_TOTAL` (`loss/nlte_composite_loss.py`).
+- **`log_population`**: the last layer gives the normalised log10 populations directly. This is the head of the
+  original paper model (`FFNOMLTrainingWeights/paper`). To load it, set `FFNOML_OUTPUT_MODE=log_population` and
+  `FFNOML_MODEL_CONFIG='{"width": 48, "vertical_operator": false, "freq_mix_rank": 0, "open_side_paths": false,
+  "z_column_cutoff": false, "z_feature_wavelength": 0.0, "z_min_wavelength": 0.0, "z_reference_length": 0.0}'`,
+  which restores that model's configuration over the final model's defaults.
 
 The head adds no parameters or inputs: the network still reads the 6 input channels and the head still writes one
-channel per level. A checkpoint loads only into the head it was trained with: set `FFNOML_OUTPUT_MODE` (and
-`FFNOML_MODEL_CONFIG`, for the capacity options below) the same way for training, `--predict`, `--fsdppredict`, the
-batched and FSDP services and the inversion. Level-fraction checkpoints from before the departure coefficients
+channel per level. A checkpoint loads only into the head and configuration it was trained with. The defaults are the
+final model's (below), so its checkpoints need no settings; for any other, set `FFNOML_OUTPUT_MODE` and
+`FFNOML_MODEL_CONFIG` the same way for training, `--predict`, `--fsdppredict`, the batched and FSDP services and the
+inversion. Level-fraction checkpoints from before the departure coefficients
 (commit `066d327` and earlier, such as the `sims1_lf` learning-curve run) load only with that code.
 
-`FFNOML_MODEL_CONFIG` (JSON) overrides `MODEL_CONFIG` entries, for example
-`{"z_spectral_modes": 64, "freq_mix_rank": 8, "open_side_paths": true, "width": 96}`: the capacity options of
-`models/ffno_model.py`, all off by default.
+`FFNOML_MODEL_CONFIG` (JSON) overrides `MODEL_CONFIG` entries, for example `{"width": 48}`; the options are those of
+`FFNO3D` in `models/ffno_model.py`, whose own defaults are all off.
+
+### The final model (zaug)
+
+The final model, for H I and Ca II alike, is **zaug**, and `config.py`'s defaults are its configuration:
+
+| Setting | Value | What it does |
+| --- | --- | --- |
+| `width`, `n_layers` | 96, 4 | hidden channels, blocks |
+| `vertical_operator` | true | the vertical branch is `HeightSpectralConv`, a spectral convolution along height on each column's own heights; the fusion has no 3×3×3 convolution; every GroupNorm weights levels by the height they stand for. Nothing counts grid points in any direction |
+| `z_reference_length`, `z_min_wavelength` | 40 Mm, 0.04 Mm | the height operator's period and its shortest wavelength (1001 modes) |
+| `z_feature_wavelength` | 0.3 Mm | the frequency MLPs see the wavenumber on this fixed physical scale |
+| `z_column_cutoff` | true | each column keeps only the wavenumbers its own level spacing resolves |
+| `freq_mix_rank` | 8 | low-rank per-wavenumber channel mixing, in the horizontal and the height operator |
+| `open_side_paths` | true | the pointwise side paths start at 0.5 and the MLP path is not squashed by tanh |
+| `output_mode` | `level_fraction` | departure coefficients from MULTI3D's LTE populations and the species total ([Output heads](#output-heads)) |
+| `LAM_TOTAL` | 0.3 | loss = data loss + 0.3 × the species-total term |
+
+3.18 M parameters. It was trained in two stages on the 6 + 6 split (`TRAIN_SPLIT`, `VAL_SPLIT`, with cbh24 s0910 /
+s0928): first without height augmentation (`l004p`), then continued from that model's best checkpoint
+(`--resume --bestpath`) for 400 epochs, cosine from lr 1e-3, with **height augmentation** (`FFNOML_AUGMENT_Z=1`,
+`FFNOML_AUGMENT_Z_MIN_DEPTH=16`): every patch also appears cut to a random window of its levels and to a random uneven
+selection of them, redrawn every epoch (`data/dataset.py`, `ZAugmentDataset`). The sections are
+`final66_fno_l004{,_ca}_zaug` of `scripts/learning_curve.ini`.
+
+| Atom | Training job | Best epoch (of 400) | Val data loss |
+| --- | --- | --- | --- |
+| H | 3087598 | 174 | 4.243e-3 |
+| Ca II | 3087628 | 240 | 1.060e-2 |
+
+The checkpoints, the Olivia predictions (jobs 3111416, 3111417) and the H-alpha and Ca II 8542 syntheses from them
+are in `training_FFNO3D_zscale_expand_lognlte_z_aug/` (see its `README.txt`); the checkpoints with their resume files
+and training logs are also in `FFNOMLTrainingWeights/zaug`. The models are evaluated in FNOML-Paper, branch `zaug`.
 
 ## Data And Configuration
 
@@ -757,9 +793,11 @@ that keeps the trained models on the GPUs for the whole run:
   replicate the full-volume activations. Only torchrun rank 0 reads each checkpoint.
 - `ffno_fsdp_diagnostics.py`: opt-in per-rank logs (`FFNO_FSDP_DIAGNOSTICS=1` or `2`)
   and core dumps (`FFNO_FSDP_CORE_DUMPS=1`) for debugging native crashes.
-- `ffno_model_factory.py`: builds FFNO3D from `MODEL_CONFIG` for the service. A level-fraction checkpoint needs
-  `FFNOML_OUTPUT_MODE=level_fraction` (and the run's `FFNOML_MODEL_CONFIG`) in the service's environment; see
-  [Output heads](#output-heads).
+- `ffno_model_factory.py`: builds FFNO3D from `MODEL_CONFIG` for the service; the defaults load the final model
+  ([The final model](#the-final-model-zaug)). `create_ffno3d(atoms=[...])` sets a level-fraction head's species per
+  model, so one service can hold the H and the Ca II network (FFNOInversion passes it as the spec's
+  `factory_kwargs`); without it, every model takes its species from `FFNOML_ACTIVE_ATOMS`. Other checkpoints need
+  their `FFNOML_OUTPUT_MODE` and `FFNOML_MODEL_CONFIG` in the service's environment; see [Output heads](#output-heads).
 
 Julia MPI rank 0 launches it with `FFNOInversion.jl/scripts/ffno_fsdp_service.sh`
 (one `srun --overlap` torchrun job across all nodes of the allocation). The service

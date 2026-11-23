@@ -2,6 +2,14 @@
 
 Written 2026-11-13, updated 2026-11-16. Living copy: https://claude.ai/artifact/5qMZnySRnLHVWUqSubHykT
 
+**Outcome (2026-11-23).** The plan has ended in the final model, **zaug**, for H and Ca II: the level-fraction head,
+width 96, the height operator (`vertical_operator`, l004p settings), lam_total 0.3, trained without height augmentation
+(l004p) and then continued with it (jobs 3087598 H and 3087628 Ca II). `config.py`'s defaults are this model; see
+[The final model](../README.md#the-final-model-zaug) in the README. Later experiments were not adopted: the line-ratio
+and ionisation-stage loss terms and the data loss alone, trained from scratch (`zaug_ratio_scratch`,
+`zaug_lam0_scratch`), came to about zaug's validation loss without beating it, and a local height-derivative path in
+every block (`z_local_derivatives`) was removed again (commit 23d5be0). The status below is that of 2026-11-16.
+
 **Status (2026-11-16).** Phases 0–3 are done. The level-fraction head now predicts **departure coefficients**
 relative to MULTI3D's own LTE populations (see *Level-fraction output*), and Phase 4 runs on that head: `cap0_base`
 (Olivia job 2978340) and `cap1_zspec` (2978341). Ca waits until an H model has passed every phase, then gets one

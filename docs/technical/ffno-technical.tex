@@ -1,6 +1,6 @@
 \input{../preamble.tex}
 \begin{document}
-\doctitle{FFNOML: technical reference}{Implementation of the Python training and inference code, the GPU service and the FFNOInversion.jl synthesis and inversion package. Written from the source at commit \code{3cb9c14} on \code{main}, 4 November 2026. The physics is in \code{docs/physics/ffno-physics.pdf}.}
+\doctitle{FFNOML: technical reference}{Implementation of the Python training and inference code, the GPU service and the FFNOInversion.jl synthesis and inversion package. Written from the source at commit \code{3cb9c14} on \code{main}, 4 November 2026; the configuration, network, training and inference sections updated on 23 November 2026 for the final model (zaug) on branch \code{level-fractions-capacity}. The physics is in \code{docs/physics/ffno-physics.pdf}.}
 
 \tableofcontents
 
@@ -82,7 +82,12 @@ Name&Value&Meaning\\\midrule
 \code{BATCH_SIZE}&1&Required: depth varies between simulations\\
 \code{LEARNING_RATE}, \code{MIN_LEARNING_RATE}&$10^{-3}$, $10^{-8}$&Cosine schedule endpoints\\
 \code{WEIGHT_DECAY}, \code{GRAD_CLIP}&$3\times10^{-4}$, 1.0&AdamW; gradient norm clip\\
-\code{PATIENCE}, \code{MIN_DELTA}&50, $5\times10^{-5}$&Early stopping\\
+\code{PATIENCE}, \code{MIN_DELTA}&50, $5\times10^{-5}$&Early stopping; env \code{FFNOML_PATIENCE}\\
+\code{LAM_TOTAL}&0.3&Weight of the species-total loss term (the final model); env \code{FFNOML_LAM_TOTAL}\\
+\code{LAM_RATIO}&0&Line-ratio loss term; env \code{FFNOML_LAM_RATIO}\\
+\code{LAM_ION}&0&Ionisation-stage loss term; env \code{FFNOML_LAM_ION}\\
+\code{AUGMENT_Z}&off&Height augmentation (\code{ZAugmentDataset}); env \code{FFNOML_AUGMENT_Z=1}\\
+\code{AUGMENT_Z_MIN_DEPTH}&16&Fewest levels of a cut copy; env \code{FFNOML_AUGMENT_Z_MIN_DEPTH}\\
 \code{TRAINSELECT}, \code{TRAINSELECT_SEED}&1, 12345&Fraction of patches per epoch\\
 \code{MULTI_GPU}, \code{DEVICE}&True, \code{cuda}&\\
 \code{TILED}, \code{TENSOR_SCALE}&True, 1.0&Prediction options\\
@@ -92,9 +97,9 @@ Name&Value&Meaning\\\midrule
 \caption{Main settings in \code{config.py}.}
 \end{table}
 
-\code{ATOM_CONFIG} gives, per species, the MULTI3D output subdirectory, line level pairs and wavelengths [\AA], level energies \code{chi} [J] for levels above the ground and the level count. It is only needed for the loss's source-function term.
+\code{ATOM_CONFIG} gives, per species, the MULTI3D output subdirectory, line level pairs and wavelengths [\AA], level energies \code{chi} [J] for levels above the ground and the level count, and, for the level-fraction head, \code{log10_particle_mass} and \code{multi3d_lte} (MULTI3D's $g$, energies and ionisation stages from the training runs' \code{out_par}).
 
-\code{MODEL_CONFIG} is \code{in_channels=6, out_channels=6, width=48, n_layers=4, dropout=0, spec_dropout=vertical_dropout=0.08} in all four layers, \code{hidden_spectral=hidden_vertical=128, checkpoint_blocks=True}. \code{MODEL_CONFIG} must match the checkpoint: \code{ffno_model_factory.create_ffno3d} builds from it, and the service loads with \code{strict=True}.
+\code{MODEL_CONFIG} is the final model (zaug, for H and Ca alike): \code{in_channels=6, out_channels=6, width=96, n_layers=4, dropout=0, spec_dropout=vertical_dropout=0.08} in all four layers, \code{hidden_spectral=hidden_vertical=128, checkpoint_blocks=True, freq_mix_rank=8, open_side_paths=True, vertical_operator=True, z_column_cutoff=True, z_feature_wavelength=0.3, z_min_wavelength=0.04, z_reference_length=40.0} and \code{output_mode="level_fraction"} (env \code{FFNOML_OUTPUT_MODE}); with that head, \code{species} is filled from \code{ATOM_CONFIG} for \code{ACTIVE_ATOMS}. env \code{FFNOML_MODEL_CONFIG} (JSON) overrides entries; \code{FFNO3D}'s own defaults have every option off. \code{MODEL_CONFIG} must match the checkpoint: \code{ffno_model_factory.create_ffno3d} builds from it (\code{atoms=[...]} sets the species per model, so one service can hold the H and the Ca network), and the service loads with \code{strict=True}. The paper model loads with \code{FFNOML_OUTPUT_MODE=log_population} and \code{FFNOML_MODEL_CONFIG} restoring \code{width=48} and switching the other options off (README, Output heads).
 
 \section{Data}
 
@@ -140,6 +145,8 @@ File attributes&\code{Cin}, \code{Cout}, \code{N}, \code{patch}, \code{stride}, 
 \code{weights} are the inverse scale count, normalized to mean 1. See Section~\ref{sec:issues} for why they currently have no effect.
 
 \subsection{Loaders}
+With \code{AUGMENT_Z}, \code{ZAugmentDataset} wraps the training and validation sets: after the $N$ stored samples come $N$ copies cut to a random window of contiguous levels and $N$ cut to a random, unevenly spaced selection of levels, each of at least \code{AUGMENT_Z_MIN_DEPTH} levels and applied alike to inputs, targets, $z$ and LTE populations. Training redraws the cuts every epoch from the epoch seed (the same on every rank); validation keeps fixed cuts.
+
 \code{H5PatchDataset} opens the file lazily in each worker and returns \code{(x, y, z, dx, dy, scale, weight, log_lte)}. It reads both flat legacy and grouped layouts. With \code{train_select < 1} it selects, per weight class, a fraction of patches and reassigns weights so that each class total is conserved; \code{resample_train_dataset} redraws at each epoch with seed derived from the epoch. \code{DataLoaderBuilder} rejects \code{batch_size != 1} for variable depth, uses \code{DistributedSampler} when distributed, and turns off persistent workers for dynamic lengths.
 
 \code{build_solving_set_ffno} writes an unnormalized single cube for prediction (\code{_save_hdf5_cube}). Normalization for prediction is taken from the checkpoint.
@@ -147,27 +154,30 @@ File attributes&\code{Cin}, \code{Cout}, \code{N}, \code{patch}, \code{stride}, 
 \section{The network}
 
 \subsection{Forward pass}
-\code{FFNO3D.forward(x, z_scale, dx, dy)}, with $x$ \code{[B,6,D,H,W]} normalized and $z$ \code{[B,D,H,W]} in Mm:
+\code{FFNO3D.forward(x, z_scale, dx, dy)}, with $x$ \code{[B,6,D,H,W]} normalized and $z$ \code{[B,D,H,W]} in Mm, for the final model:
 \begin{lstlisting}
-x = GELU(GroupNorm(Conv3d(6 -> 48, kernel 1, no bias)(x)))    # lift
+w = depth_weights(z)                                          # each level's trapezoid share of its column
+x = GELU(wGroupNorm(Conv3d(6 -> 96, kernel 1, no bias)(x), w))   # lift
 for block in 4 x FFNOBlock3dBalanced: x = block(x, z, dx, dy)
-y = Conv3d(96 -> 6, kernel 1)(GELU(Conv3d(48 -> 96, kernel 1, no bias)(x)))    # head
+h = Conv3d(192 -> 6 + 1, kernel 1)(GELU(Conv3d(96 -> 192, kernel 1, no bias)(x)))  # head: delta_1..6, u
+y = head_output(h, x_in)                                      # normalized log10 n (level-fraction head)
 \end{lstlisting}
+\code{head_output} un-normalizes $\log_{10}\rho$, $\log_{10}T$ and $\log_{10}\nel$ from the input with \code{mean_X}, \code{std_X} (buffers saved with the checkpoint), computes MULTI3D's LTE level fractions in float64 (\code{multi3d_lte_log_weights}), and returns $\log_{10}n_i=\log_{10}(\rho/m)+s+\log_{10}\mathrm{softmax}(\ln f^*_i+\delta_i)$, $s=6\tanh(u/6)$, normalized with \code{mean_Y}, \code{std_Y}. The total channel \code{u} starts at zero weight. With \code{output_mode="log_population"} (the paper model) the head has 6 channels and \code{head_output} is the identity.
 
-\code{_gn(c)} is \code{GroupNorm} with the largest group count $\le 8$ dividing $c$. Over 48 channels this is 8 groups. GroupNorm statistics cover the whole input volume, \emph{so the normalization itself makes every output depend on the whole box and its size}.
+\code{_gn(c)} is \code{GroupNorm} with the largest group count $\le 8$ dividing $c$: 8 groups over 96 channels. With \code{vertical_operator} every GroupNorm is a \code{DepthWeightedGroupNorm}, whose mean and variance weight each level by \code{depth_weights}, so they are means over height, not over levels. The statistics still cover the whole input volume, \emph{so the normalization makes every output depend on the whole box}.
 
 \subsection{Block}
 \begin{lstlisting}
-spec = spec_drop(GELU(norm_spec(SpectralConv2dFull(x, dx, dy))))
-vert = vert_drop(GELU(norm_vert(BalancedVerticalPhysicsStack(x, z))))
-g_s, g_v = chunk(branch_gate(cat[x, spec, vert]))              # sigmoid, 2*48 channels
+spec = spec_drop(GELU(norm_spec(SpectralConv2dFull(x, dx, dy), w)))
+vert = vert_drop(GELU(norm_vert(HeightSpectralConv(x, z), w)))   # BalancedVerticalPhysicsStack without vertical_operator
+g_s, g_v = chunk(branch_gate(cat[x, spec, vert]))              # sigmoid, 2*96 channels
 s, v = spec*g_s, vert*g_v
-fused = GELU(norm_fuse(fuse(cat[s, v]) + 0.5*(s + v)))
+fused = GELU(norm_fuse(fuse(cat[s, v]) + 0.5*(s + v), w))
 x1 = x + res_fused * fused                                     # init 1.0
-x2 = x1 + res_pw * norm_pw(pw(x1))                             # init 0.15
-out = x2 + res_mlp * tanh(norm_mlp(mlp(x2)))                   # init 0.15
+x2 = x1 + res_pw * norm_pw(pw(x1), w)                          # init 0.5 (open_side_paths; 0.15 without)
+out = x2 + res_mlp * norm_mlp(mlp(x2), w)                      # init 0.5, no tanh (open_side_paths; tanh without)
 \end{lstlisting}
-\code{branch_gate}: Conv3d($3w\to w$, 1), GELU, Conv3d($w\to2w$, 1, bias), Sigmoid. \code{fuse}: Conv3d($2w\to2w$, 1), GELU, depthwise Conv3d($2w$, kernel 3, padding 1), GELU, Conv3d($2w\to w$, 1). \code{pw} and \code{mlp} are two-layer kernel-1 convolutions with expansion 2. Both are pointwise. With \code{collect_stats} or a \code{branch_mask} the block returns diagnostics or supports ablation.
+\code{branch_gate}: Conv3d($3w\to w$, 1), GELU, Conv3d($w\to2w$, 1, bias), Sigmoid. \code{fuse} with \code{vertical_operator}: Conv3d($2w\to2w$, 1), GELU, Conv3d($2w\to w$, 1), all pointwise; without it, a depthwise Conv3d($2w$, kernel 3, padding 1) and a GELU sit between the two (the paper model). \code{pw} and \code{mlp} are two-layer kernel-1 convolutions with expansion 2. Both are pointwise. Trained residual weights of the final H model: \code{res_fused} 0.44--0.84, \code{res_pw} and \code{res_mlp} 0.20--0.52. With \code{collect_stats} or a \code{branch_mask} the block returns diagnostics or supports ablation.
 
 \subsection{Spectral branch: \texttt{SpectralConv2dFull}}
 \begin{lstlisting}
@@ -175,13 +185,28 @@ x = x * input_gate(x)                          # pointwise sigmoid gate
 X = rfft2(x, dim=(-2,-1))                      # all modes kept, on every depth plane
 ky = fftfreq(H, d=dy) * 1e5;  kx = rfftfreq(W, d=dx) * 1e5
 g = freq_mlp([kx, ky, sqrt(kx^2+ky^2+1e-12), sign(ky)])   # 4 -> 128 -> 128 -> 2, complex gate
-Y_o = sum_i X_i * (W_real + i W_imag)_io * (g_r + i g_i)  # 48 x 48 complex matrix, shared over all k and depths
-y = post(irfft2(Y, s=(H, W)))                  # Conv3d 48 -> 96 -> 48, kernel 1
+Y_o = sum_i X_i * (W_real + i W_imag)_io * (g_r + i g_i)  # 96 x 96 complex matrix, shared over all k and depths
+Y_o += sum_r U(k)_or sum_i V(k)_ri X_i         # rank 8 (freq_mix_rank); U, V from a second MLP of k, U starts at 0
+y = post(irfft2(Y, s=(H, W)))                  # Conv3d 96 -> 192 -> 96, kernel 1
 \end{lstlisting}
-Frequencies are in m$^{-1}$, scaled by $10^5$, so the map applies at any grid size. No modes are truncated. Note that the same 48$\times$48 matrix is modulated by one scalar gate per $\mathbf k$: every channel pair sees the same $\mathbf k$ dependence.
+Frequencies are in m$^{-1}$, scaled by $10^5$, so the map applies at any grid size. No modes are truncated. The full matrix is modulated by one scalar gate per $\mathbf k$; the low-rank term (absent with \code{freq_mix_rank=0}, the paper model) gives the channel mixing its own $\mathbf k$ dependence.
 
-\subsection{Vertical branch: \texttt{BalancedVerticalPhysicsStack}}
-Columns are reshaped to \code{[B*chunk, C, D]} and processed in chunks of 4 columns to bound memory.
+\subsection{Vertical branch: \texttt{HeightSpectralConv} (the final model)}
+With \code{vertical_operator=True}, a spectral convolution along height on each column's own heights:
+\begin{lstlisting}
+L = max(z_reference_length, 2 * tallest column)               # 40 Mm; k_m = 2 pi m / L, m < L / z_min_wavelength + 1
+x = x * input_gate(x) + z_proj(z)                             # pointwise sigmoid gate and height term
+X_m = sum_d q_dm x_d                                          # height_fourier_weights: exact transform of the
+                                                              #   piecewise-linear column, one grid shared or per column
+Y_m = (W_real + i W_imag)^T X_m * g(t(k_m)) + U(k_m) V(k_m) X_m   # g: freq_mlp 2 -> 128 -> 128 -> 2; rank 8
+Y_m *= taper_m                                                # z_column_cutoff: 1 to 2 pi/(3 dz), 0 at pi/dz,
+                                                              #   dz the column's median spacing
+y(z_j) = post((Y_0 + 2 Re sum_m Y_m exp(i k_m z_j)) / L)      # post: Conv3d 96 -> 192 -> 96, kernel 1
+\end{lstlisting}
+$t(k)=q/(1+q)$ with $q=k\cdot$\code{z_feature_wavelength}$/2\pi$ (0.3\,Mm), so $W(k)$ at a given physical wavenumber does not depend on \code{z_min_wavelength}; the MLPs see $(t,t^2)$. With 40\,Mm and 40\,km there are 1001 modes. Nothing counts grid points, and the branch has no GroupNorm of its own. In \code{--fsdppredict} it runs on each rank's $H$ slab, a few rows at a time when the mode spectra would not fit (\code{ChunkedHeightSpectralConv}); the batched backend also runs it a few rows of columns at a time.
+
+\subsection{Vertical branch: \texttt{BalancedVerticalPhysicsStack} (the paper model)}
+Without \code{vertical_operator}, columns are reshaped to \code{[B*chunk, C, D]} and processed in chunks of 4 columns to bound memory.
 \begin{lstlisting}
 z_feat = cat[z, (z-zmin)/span, |dz|/mean|dz|, span]   # with span clamped; dz central differences
 y = in_proj(x) + z_proj(z_feat)                       # both to 128 channels
@@ -197,12 +222,14 @@ All convolutions are depthwise-separable 1D with zero padding at the top and bot
 \begin{tabular}{lrlr}
 \toprule
 Component (one block)&Parameters&Component (one block)&Parameters\\\midrule
-Spectral branch&35\,842&\code{branch_gate}&11\,616\\
-Vertical branch&697\,056&\code{fuse}&16\,416\\
-\code{pw}&9\,216&\code{mlp}&9\,216\\\midrule
-\multicolumn{3}{l}{Whole model (4 blocks, lift, head)}&\textbf{3\,124\,954}\\\bottomrule
+Spectral branch&306\,434&\code{branch_gate}&46\,272\\
+Vertical branch (\code{HeightSpectralConv})&306\,018&\code{fuse}&55\,296\\
+\code{pw}&36\,864&\code{mlp}&36\,864\\
+Five GroupNorms&960&\code{res_*}&3\\\midrule
+One block&788\,711&Lift, head&768, 19\,783\\
+\multicolumn{3}{l}{Whole model (4 blocks, lift, head)}&\textbf{3\,175\,395}\\\bottomrule
 \end{tabular}
-\caption{Counted by instantiating \code{FFNO3D(**MODEL_CONFIG)}. The vertical branch holds most of the weights.}
+\caption{The final model, counted by instantiating \code{FFNO3D(**MODEL_CONFIG)}. In each branch the rank-8 low-rank mixing holds most of the weights ($2\times99\,072$ in \code{freq_u}, \code{freq_v}). The paper model (width 48, index-based vertical branch) had 3\,124\,954, most of them in the vertical branch.}
 \end{table}
 
 \subsection{Activation checkpointing}
@@ -219,10 +246,11 @@ With \code{checkpoint_blocks=True}, lift, head and each block use non-reentrant 
 With env \code{FFNOML_TRAIN_ONLY=proj1,proj2}, other top-level modules are frozen and DDP replaces FSDP, because FSDP makes every wrapped unit's output require gradients, so frozen blocks would still be recomputed. This is the head-only fine-tuning of the UQ work.
 
 \subsection{Loss as actually configured}
-\code{NLTECompositeLoss} takes \code{lam=0, lam_S=0, lam_g=0} by default and \code{ModelBuilder} passes none of them:
+\code{NLTECompositeLoss} takes \code{lam_S=0, lam_g=0}, and \code{pipeline.py} passes \code{lam_total=LAM_TOTAL} (0.3), \code{lam_ratio=LAM_RATIO} and \code{lam_ion=LAM_ION} (both 0) through \code{ModelBuilder}:
 \begin{equation}
-L=\underbrace{\tfrac12\langle(1+|y|)(\hat y-y)^2\rangle+\tfrac12\langle|\hat y-y|\rangle}_{\texttt{WeightedMSE\_L1}}+0\cdot L_S+0\cdot L_g .
+L=\underbrace{\tfrac12\langle(1+|y|)(\hat y-y)^2\rangle+\tfrac12\langle|\hat y-y|\rangle}_{\texttt{WeightedMSE\_L1}}+0.3\,L_{\rm tot}+0\cdot L_{\rm ratio}+0\cdot L_{\rm ion}+0\cdot L_S+0\cdot L_g ,
 \end{equation}
+where $L_{\rm tot}$ is $|\log_{10}\sum_i\hat n_i-\log_{10}\sum_in_i|$ per species, in units of the species' mean \code{std_Y} so that it is on the scale of the $L^1$ part, averaged over species; $L_{\rm ratio}$ and $L_{\rm ion}$ are the same for $\log_{10}n_u/n_l$ over every line and $\log_{10}N_k/N_{k+1}$ over adjacent stages. The validation loss that selects checkpoints is this $L$; the logs print the data part as \code{L1=} and $L_{\rm tot}$ as \code{Ltot=}.
 The source term is still evaluated on every step for logging. It compares $x_{lu}$ between prediction and truth, where $x_{lu}$ is built from de-normalized $\log n-\log n^*$ and $\Delta E/kT$, $T$ being de-normalized from channel 0. It therefore costs compute without influencing the weights. \code{logb} in that file is a historical name for $\log_{10}n$.
 
 \subsection{The loop}
@@ -241,12 +269,13 @@ Resume file (\code{get_resume_checkpoint_path})&Latest state, with scheduler and
 \end{table}
 
 \begin{table}[H]\centering\small
-\begin{tabular}{lrrr}
+\begin{tabular}{lrrrr}
 \toprule
-Production checkpoint&Epoch&Train loss&Validation loss\\\midrule
-\code{3D_sim_train_H.pt}&171&$4.32\times10^{-3}$&$5.88\times10^{-3}$\\
-\code{3D_sim_train_CA.pt}&252&$3.59\times10^{-3}$&$7.31\times10^{-3}$\\\bottomrule
+Final model (zaug)&Epoch&Train loss&Val.\ loss&Val.\ data loss\\\midrule
+\code{3D_sim_train_H.pt}, job 3087598&174 of 400&$2.41\times10^{-3}$&$4.41\times10^{-3}$&$4.24\times10^{-3}$\\
+\code{3D_sim_train_CA.pt}, job 3087628&240 of 400&$4.43\times10^{-3}$&$1.070\times10^{-2}$&$1.060\times10^{-2}$\\\bottomrule
 \end{tabular}
+\caption{The final model's checkpoints, in \code{training_FFNO3D_zscale_expand_lognlte_z_aug/} (with the Olivia predictions, jobs 3111416 and 3111417) and \code{FFNOMLTrainingWeights/zaug}. Both continue the height-operator models without augmentation (l004p) from their best checkpoints with \code{--resume --bestpath}, \code{RESUME_LR}$=10^{-3}$, \code{AUGMENT_Z} with minimum depth 16 and patience 400; sections \code{final66_fno_l004\{,_ca\}_zaug} of \code{scripts/learning_curve.ini}. The validation set includes the height-cut copies. The paper model's checkpoints (epochs 171 and 252, validation $5.88\times10^{-3}$ and $7.31\times10^{-3}$) are in \code{FFNOMLTrainingWeights/paper}.}
 \end{table}
 
 \subsection{Resume and expansion}
@@ -273,9 +302,10 @@ Production checkpoint&Epoch&Train loss&Validation loss\\\midrule
 \toprule
 Module&Distributed behaviour\\\midrule
 \code{SpectralConv2dFull}&\code{rfft} over $W$; all-to-all so that each rank owns a slab of $W$-frequencies with all of $H$; \code{fft} over $H$; the spectral multiply on local frequencies; reverse transforms and all-to-all. Needs $\lfloor n_y/2\rfloor+1\ge$ world size.\\
-\code{nn.GroupNorm}&\code{DistributedGroupNorm}: all-reduce of the sum, sum of squares and count, reproducing whole-volume statistics. Differentiable.\\
-Depthwise \code{Conv3d}, kernel 3&\code{DistributedHDepthwiseConv3d}: one-cell halo exchange in $H$ (a custom autograd function with a reversed exchange as its VJP), with zeros at the outer edges, matching single-GPU zero padding.\\
-\code{BalancedVerticalPhysicsStack}&Local columns, wrapped for progress reports.\\
+\code{nn.GroupNorm}&\code{DistributedGroupNorm}: all-reduce of the sum, sum of squares and count, reproducing whole-volume statistics; with the depth weights of a \code{DepthWeightedGroupNorm} (final model), of the weighted sums. Differentiable.\\
+\code{HeightSpectralConv}&\code{ChunkedHeightSpectralConv}: local columns, in chunks of rows when the mode spectra exceed free memory (final model).\\
+Depthwise \code{Conv3d}, kernel 3&\code{DistributedHDepthwiseConv3d}: one-cell halo exchange in $H$ (a custom autograd function with a reversed exchange as its VJP), with zeros at the outer edges, matching single-GPU zero padding. Only in the paper model's fusion.\\
+\code{BalancedVerticalPhysicsStack}&Local columns, wrapped for progress reports (paper model).\\
 Fusion at inference&\code{chunked_fuse_branches}: over depth in chunks of 32 with a one-cell depth halo, because the concatenations exceed T4 memory at $384^3$.\\\bottomrule
 \end{tabularx}
 \end{table}
@@ -628,7 +658,7 @@ Entry&Coverage\\\midrule
 \code{scripts/validate_muspel_reference.jl}&Synthesis against a Muspel reference\\
 \code{scripts/compare_service_with_ffnonet.py}&Service against a direct prediction; should match to float32 round-off\\
 \code{scripts/run_olivia_runtime_tests.sbatch}&Regression chain on Olivia, including GPU probes, deliberate stalls and recovery\\
-\code{tests/}&Python: loss, spacing, checkpoints, launcher, Wittmann, Olivia outcomes\\
+\code{tests/}&Python: loss (species total, line and stage ratios), spacing, checkpoints, launcher, Wittmann, Olivia outcomes; the level-fraction head and MULTI3D's LTE (\code{test_level_fraction_head}, \code{test_departure_coefficients}); the height operator on different vertical grids, the batched and FSDP routes (\code{test_height_operator}, \code{test_height_spectral}); height augmentation (\code{test_z_augment}); the capacity switches (\code{test_capacity_switches}). \code{test_nlte_composite_loss} is stale: it imports a function the loss no longer has\\
 \code{FFNOInversion.jl/test/ffno_jvp_cpu_check.py}&Distributed JVP against finite differences on CPU\\\bottomrule
 \end{tabularx}
 \end{table}
@@ -655,12 +685,12 @@ These come from reading the source. Unless a measurement is mentioned, they have
 
 \begin{longtable}{L{4.2cm}L{12.3cm}}
 \toprule Issue&Detail\\\midrule\endhead
-\textbf{Non-periodic padding in \code{fuse}}&\code{models/ffno_model.py}: the depthwise $3\times3\times3$ convolution uses zero padding, and \code{_HaloExchangeH} fills the outer halos with zeros, though the simulations are periodic. Measured with one real column repeated on a square grid (\code{response_run/diagnostics_edge_test.py}, H model): outputs differ from the centre by up to 0.49\,dex at the edge, 0.10\,dex one pixel in, 0.017\,dex at 4 pixels and 0.001\,dex at 9, on $21\times21$. On $5\times5$ the first ring differs by 0.14\,dex. Likely source of the 4\% spread in FAL-C spectra. A circular padding adds no weights, but the trained weights assumed zero padding, so it would call for retraining or fine-tuning. The package README still says this cause is uninvestigated.\\
+\textbf{Non-periodic padding in \code{fuse}} (paper model only; the final model's fusion is pointwise)&\code{models/ffno_model.py}: the depthwise $3\times3\times3$ convolution uses zero padding, and \code{_HaloExchangeH} fills the outer halos with zeros, though the simulations are periodic. Measured with one real column repeated on a square grid (\code{response_run/diagnostics_edge_test.py}, H model): outputs differ from the centre by up to 0.49\,dex at the edge, 0.10\,dex one pixel in, 0.017\,dex at 4 pixels and 0.001\,dex at 9, on $21\times21$. On $5\times5$ the first ring differs by 0.14\,dex. Likely source of the 4\% spread in FAL-C spectra. A circular padding adds no weights, but the trained weights assumed zero padding, so it would call for retraining or fine-tuning. The package README still says this cause is uninvestigated.\\
 \textbf{Scale weights have no effect}&\code{train_utils.compute_loss}: \code{(loss*weight).sum()/(weight.sum()+1e-12)} with scalar \code{loss} from \code{WeightedMSE_L1} returns \code{loss}. So \code{weights} in the dataset, and the reweighting in \code{TRAINSELECT}, do not change the optimization. Coarse scales are therefore weighted by their patch counts (121 at $s=1$, 1 at $s=6$).\\
 \textbf{$H$/$W$ spacing swap}&\code{SpectralConv2dFull}: \code{ky} is built from axis $H$ with \code{d=dy} and \code{kx} from $W$ with \code{d=dx}, but $H=n_x$ and $W=n_y$ in the data and in the service. Harmless when $\Delta x=\Delta y$, as in all training data. Anisotropic grids, such as deprojected footprints at $\mu<1$ on log $\tau$, get swapped spacings in the frequency features.\\
 \textbf{\code{reject_trial} is not implemented in the objective}&\code{Solvers.evaluate_objective!} throws on an invalid equilibrium, with the comment ``the reject-trial policy arrives in Phase 4'', although the README says the solver rejects that trial.\\
 \textbf{Stale documents}&\code{docs/paper_draft_ffno_nlte.md} says the target is $\log_{10}b_i$; the code predicts $\log_{10}n_i$. \code{docs/ffno_full_forward.*} shows checkpointing conditioned on training; it is conditioned on gradient mode. The \code{logb} variable names in the loss are historical.\\
-\textbf{Inert loss cost}&Source term computed each step with weight 0 (\code{lam_S=0}).\\
+\textbf{Inert loss cost}&Source term computed each step with weight 0 (\code{lam_S=0}), and the line and stage ratios with \code{lam_ratio=lam_ion=0}.\\
 \textbf{Unused table in the line model}&\code{build_muspel_line_model} still builds a continuum table from FFNO hydrogen when \code{include_continuum=false}. It is not read, so this only costs setup time. Its default remains \code{include_continuum=true} for direct callers.\\
 \textbf{Region PSF}&\code{psf_type}, \code{psf_file} are validated but no per-region PSF is applied.\\
 \textbf{Composition differs}&Wittmann mass per H is 1.398\,$m_{\rm H}$; UQ measured $\rho/(n_{\rm H}m_{\rm H})=1.357$ in the MULTI3D data.\\\bottomrule
