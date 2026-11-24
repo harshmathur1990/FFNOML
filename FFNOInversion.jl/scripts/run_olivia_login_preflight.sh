@@ -25,13 +25,15 @@ esac
 unset JULIA_PROJECT JULIA_DEPOT_PATH JULIA_LOAD_PATH
 unset OLIVIA_ENV_SCRIPT OLIVIA_JULIA OLIVIA_PYTHON OLIVIA_JULIA_DEPOT OLIVIA_JULIA_PROJECT
 mkdir -p "${preflight_depot}"
-export JULIA_DEPOT_PATH="${preflight_depot}"
-export JULIA_LOAD_PATH="@:@stdlib"
-export JULIA_PKG_PRECOMPILE_AUTO=0
 
 module --quiet reset
 module load "${FFNO_PREFLIGHT_STACK_MODULE:-NRIS/Login}"
 module load "${FFNO_PREFLIGHT_JULIA_MODULE:-Julia/1.12.2}"
+
+# after the modules: Olivia's Julia module sets JULIA_DEPOT_PATH=":" (the default ~/.julia)
+export JULIA_DEPOT_PATH="${preflight_depot}"
+export JULIA_LOAD_PATH="@:@stdlib"
+export JULIA_PKG_PRECOMPILE_AUTO=0
 
 julia_candidate=${FFNO_PREFLIGHT_JULIA:-julia}
 julia_executable=$(command -v "${julia_candidate}") || {
