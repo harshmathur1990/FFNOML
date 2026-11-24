@@ -22,5 +22,5 @@ cd "${SLURM_SUBMIT_DIR}"
 ep=${EPOCHS}; [ "${BRANCH}" = A_base ] && ep=$(( (12 * EPOCHS + 5) / 10 ))
 export FFNOML_ACTIVE_ATOMS=${ATOM} FFNOML_NUM_EPOCHS=${ep} FFNOML_RUN_DIR=$PWD/uq/retrain/${ATOM}_${BRANCH}
 export FFNOML_TRAIN_ONLY= OMP_NUM_THREADS=8 NCCL_DEBUG=ERROR
-/cluster/home/harshm/nvidiaenv/bin/torchrun --standalone --nproc_per_node=4 pipeline.py --train --resume --bestpath \
+/cluster/projects/nn2834k/harshm/nvidiaenv/bin/torchrun --standalone --nproc_per_node=4 pipeline.py --train --resume --bestpath \
   2>&1 | tee "${FFNOML_RUN_DIR}/train_olivia_${SLURM_JOB_ID}.log"

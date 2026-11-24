@@ -78,7 +78,7 @@ echo "MASTER_PORT=${MASTER_PORT}"
 
 
 srun --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 \
-  /cluster/home/harshm/nvidiaenv/bin/torchrun \
+  /cluster/projects/nn2834k/harshm/nvidiaenv/bin/torchrun \
     --nnodes="${SLURM_NNODES}" \
     --nproc_per_node="${SLURM_GPUS_ON_NODE}" \
     --node_rank="${SLURM_PROCID}" \
