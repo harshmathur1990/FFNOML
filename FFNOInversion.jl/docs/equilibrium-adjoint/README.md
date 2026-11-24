@@ -1,6 +1,6 @@
 # Equilibrium adjoint in FFNOInversion (Phase 7 of the HSEMHS plan)
 
-Branch `equilibrium-adjoint` (FFNOML), started 24 Nov 2026. Plan only. The HSEMHS side is planned in HSEMHS
+Branch `equilibrium-adjoint` (FFNOML), started 24 Nov 2026. **Implemented 24 Nov 2026** (status at the end). The HSEMHS side is planned in HSEMHS
 `design/adjoint/` (same branch name); this file covers what changes here once `HSEMHS.adjoint_embedded!` exists.
 
 ## Today
@@ -45,3 +45,15 @@ regularization, which is an explicit function of the fields.
 
 README "Known limitations" (the finite-difference equilibrium derivative), "Gradients", `examples/inversion_run`
 comments, START_HERE, the HSEMHS pin in `Project.toml`.
+
+## Status (24 Nov 2026)
+
+Implemented as planned, with two differences: the configuration switch is the gradient backend's keyword
+(`HybridAdjointObjectiveGradient(equilibrium = :adjoint | :finite_difference)`) rather than a TOML key, and backends
+without an adjoint (`supports_equilibrium_adjoint` false: a given atmosphere, test stand-ins) fall back to the
+finite-difference route automatically. `set_equilibrium_record!` makes the HSEMHS backend record its reconstructions; the
+gradient turns it on. Tests: `test/equilibrium_adjoint.jl` (regularization gradient, equilibrium VJP for the three
+column modes with and without B, objective gradient on τ and height grids against the finite-difference equilibrium
+2e-10 / 1e-11 and the full oracle 3e-10), `test/mpi_equilibrium_worker.jl` + `mpi_equilibrium_compare.jl` (1, 2, 3 ranks
+equal to 1e-10). HSEMHS and WittBifrostEOS come from local path sources until their `equilibrium-adjoint` branches are
+pushed and pinned.

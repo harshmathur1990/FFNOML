@@ -556,16 +556,26 @@ end
 # Force-balance/regularization composite VJP and complete objective gradient
 # ---------------------------------------------------------------------------
 
+"""
+The production objective gradient. `equilibrium = :adjoint` (default): the regularization by its analytic gradient and the
+equilibrium by its adjoint (`equilibrium_vjp!`, HSEMHS.adjoint_embedded!), at a cost independent of the number of control
+coordinates; a backend without an adjoint falls back to the finite differences. `:finite_difference`: the equilibrium
+and regularization by central differences per control coordinate (step `force_balance_step`), as before the adjoint;
+kept as a check.
+"""
 struct HybridAdjointObjectiveGradient{T<:AbstractFloat} <: AbstractObjectiveGradient
     force_balance_step::T
-    function HybridAdjointObjectiveGradient(force_balance_step::T) where T<:AbstractFloat
+    equilibrium::Symbol
+    function HybridAdjointObjectiveGradient(force_balance_step::T,equilibrium::Symbol=:adjoint) where T<:AbstractFloat
         isfinite(force_balance_step)&&force_balance_step>0 || throw(ArgumentError(
             "force-balance VJP step must be positive"))
-        new{T}(force_balance_step)
+        equilibrium in (:adjoint,:finite_difference) || throw(ArgumentError(
+            "equilibrium gradient must be :adjoint or :finite_difference, got :$equilibrium"))
+        new{T}(force_balance_step,equilibrium)
     end
 end
-HybridAdjointObjectiveGradient(;force_balance_step::Real=1e-4)=
-    HybridAdjointObjectiveGradient(Float64(force_balance_step))
+HybridAdjointObjectiveGradient(;force_balance_step::Real=1e-4,equilibrium::Symbol=:adjoint)=
+    HybridAdjointObjectiveGradient(Float64(force_balance_step),equilibrium)
 
 function _derived_pairing(bar::AtmosphereCotangent,atmosphere,context)
     local_value=zero(eltype(atmosphere.temperature))
@@ -636,6 +646,8 @@ end
 
 function objective_gradient!(backend::HybridAdjointObjectiveGradient,
         problem::DistributedInversionProblem,layout::ControlMapLayout{T},parameters,context) where T
+    adjoint=backend.equilibrium===:adjoint && supports_equilibrium_adjoint(problem.model.equilibrium)
+    set_equilibrium_record!(problem.model.equilibrium,adjoint)          # the reconstruction below keeps its tape
     evaluation=evaluate_objective!(problem,layout,parameters,context)
     isfinite(evaluation.components.total) || throw(ArgumentError("cannot differentiate an infeasible atmosphere"))
     synthetic=problem.workspace.output.data; observation=problem.observation
@@ -663,11 +675,17 @@ function objective_gradient!(backend::HybridAdjointObjectiveGradient,
     end
     predict_distributed_populations_vjp!(atmosphere_bar,problem.model.populations,
         problem.distributed,population_bar,context)
+    if adjoint                      # regularization and equilibrium pulled back onto the fields, then the controls
+        distributed_regularization_vjp!(atmosphere_bar,problem.distributed,problem.regularization,problem.dx_m,
+            problem.dy_m,context)
+        status=equilibrium_vjp!(atmosphere_bar,problem.model.equilibrium,problem.distributed,context)
+        _forward_stage(context,"gradient equilibrium adjoint status=$status")
+    end
     gradient=zeros(T,layout.parameter_count)
     for spec in layout.specs
         accumulate_control_vjp!(gradient,layout,spec.variable,
             _direct_bar(atmosphere_bar,spec.variable,problem.distributed.global_grid.view),problem.distributed,context)
     end
-    _force_regularization_vjp!(gradient,backend,atmosphere_bar,problem,layout,parameters,evaluation,context)
+    adjoint || _force_regularization_vjp!(gradient,backend,atmosphere_bar,problem,layout,parameters,evaluation,context)
     ObjectiveGradientEvaluation(evaluation,gradient,1)
 end

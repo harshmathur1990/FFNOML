@@ -462,3 +462,121 @@ function distributed_regularization_penalty(distributed::DistributedAtmosphere,s
     end
     (total=sum(values(terms);init=0.0),terms=terms)
 end
+
+"""Gradient of `_vertical_penalty(a, axis, typ)` with respect to `a`."""
+function _vertical_penalty_grad(a,axis,typ)
+    g=zero(a)
+    (typ==0 || isempty(a)) && return g
+    typ==3 && return 2 .* a ./ length(a)
+    typ==2 && return 2 .* (a .- sum(a,dims=1)./size(a,1)) ./ length(a)
+    axis===nothing && throw(ArgumentError(
+        "vertical regularization types 1 and 4 on a height grid need regularization.vertical.length_scale_m"))
+    size(a,1)>=2 || return g
+    spacing=reshape(diff(axis),:,1,1)
+    slope=diff(a,dims=1)./spacing
+    sbar=if typ==1
+        2 .* slope ./ length(slope)
+    else
+        size(a,1)>=3 || return g
+        dc=reshape(diff((axis[1:end-1].+axis[2:end])./2),:,1,1)
+        curv=diff(slope,dims=1)./dc
+        cb=2 .* curv ./ length(curv) ./ dc
+        s=zero(slope); s[1:end-1,:,:].-=cb; s[2:end,:,:].+=cb; s
+    end
+    sb=sbar./spacing
+    g[1:end-1,:,:].-=sb; g[2:end,:,:].+=sb
+    g
+end
+
+"""Adds ∂/∂field of the cotangent `g` of the regularized variable `variable` (as `_atmospheric_variable` forms it) to `bar`."""
+function _add_variable_cotangent!(bar,atmosphere,variable::Symbol,g)
+    if variable===:temperature || variable in (:vx,:vy,:vz,:vturb,:pgas,:rho,:ne,:z)
+        getfield(bar,variable).+=g
+    elseif variable===:vlos
+        v=atmosphere.grid.view
+        if is_vertical(v)
+            bar.vz.+=g
+        else
+            n=view_direction(v); bar.vx.+=n[1].*g; bar.vy.+=n[2].*g; bar.vz.+=n[3].*g
+        end
+    elseif variable===:pgas_boundary
+        @views bar.pgas[1:1,:,:].+=g
+    elseif variable in (:Bx,:By,:Bz)
+        getfield(bar.magnetic_field,variable).+=g
+    elseif variable in (:B,:inc,:azi)
+        B=atmosphere.magnetic_field; mb=bar.magnetic_field
+        @inbounds for i in eachindex(g)
+            bx=B.Bx[i]; by=B.By[i]; bz=B.Bz[i]; b2=bx^2+by^2+bz^2; b=sqrt(b2)
+            if variable===:B
+                b>0 || continue
+                mb.Bx[i]+=g[i]*bx/b; mb.By[i]+=g[i]*by/b; mb.Bz[i]+=g[i]*bz/b
+            elseif variable===:inc                     # inc = acos(Bz/|B|)
+                (b>0 && abs(bz/b)<1) || continue
+                w=-g[i]/sqrt(1-(bz/b)^2)/(b2*b)
+                mb.Bx[i]+=w*(-bz*bx); mb.By[i]+=w*(-bz*by); mb.Bz[i]+=w*(bx^2+by^2)
+            else                                        # azi = atan(By, Bx)
+                h2=bx^2+by^2; h2>0 || continue
+                mb.Bx[i]+=-g[i]*by/h2; mb.By[i]+=g[i]*bx/h2
+            end
+        end
+    else
+        throw(ArgumentError("unsupported regularized variable $variable"))
+    end
+    bar
+end
+
+"""
+    distributed_regularization_vjp!(bar, distributed, spec, dx, dy, context) -> bar
+
+Adds the gradient of `distributed_regularization_penalty(...).total` with respect to the atmosphere's fields to the
+`AtmosphereCotangent` bar (temperature, velocities, vturb, B, and pgas for `pgas_boundary` or a horizontal pgas term).
+Collective (the horizontal terms send their halo cotangents back to their owners).
+"""
+function distributed_regularization_vjp!(bar,distributed::DistributedAtmosphere,spec::RegularizationSpec,dx,dy,context)
+    a=distributed.local_atmosphere
+    for (i,var) in enumerate(VERTICAL_PARAMETER_ORDER)
+        typ=spec.vertical.types[i]; typ==0 && continue
+        values=_atmospheric_variable(a,var); scale=get(spec.scales,var,one(eltype(values)))
+        factor=spec.vertical.regularize*spec.vertical.weights[i]*length(values)/allreduce_sum(length(values),context)
+        g=var===:pgas_boundary && typ==1 ? 2 .* (values./scale.-1)./length(values) :
+            _vertical_penalty_grad(values./scale,_vertical_spacing_axis(a.grid,spec),typ)
+        _add_variable_cotangent!(bar,a,var,(factor/scale).*g)
+    end
+    nxg=length(distributed.global_grid.x); nyg=length(distributed.global_grid.y)
+    for (var,weight) in spec.horizontal
+        scale=get(spec.scales,var,one(eltype(a.temperature)))
+        values=_atmospheric_variable(a,var)./scale
+        order=spec.horizontal_order
+        halo=exchange_halos(_field(values,distributed.tile,(size(values,1),nxg,nyg)),context,order)
+        cx=cy=0
+        for k in axes(values,1),i in axes(values,2),j in axes(values,3)
+            gi=first(distributed.tile.xrange)+i-1; gj=first(distributed.tile.yrange)+j-1
+            gi<=nxg-order && (cx+=1); gj<=nyg-order && (cy+=1)
+        end
+        Cx=max(allreduce_sum(cx,context),1); Cy=max(allreduce_sum(cy,context),1)
+        hb=zero(halo); o=order
+        for k in axes(values,1),i in axes(values,2),j in axes(values,3)
+            gi=first(distributed.tile.xrange)+i-1; gj=first(distributed.tile.yrange)+j-1
+            if gi<=nxg-o
+                if o==1
+                    d=(halo[k,i+2,j+1]-halo[k,i+1,j+1])/dx; w=weight*2d/Cx/dx
+                    hb[k,i+2,j+1]+=w; hb[k,i+1,j+1]-=w
+                else
+                    d=(halo[k,i+4,j+2]-2halo[k,i+3,j+2]+halo[k,i+2,j+2])/dx^2; w=weight*2d/Cx/dx^2
+                    hb[k,i+4,j+2]+=w; hb[k,i+3,j+2]-=2w; hb[k,i+2,j+2]+=w
+                end
+            end
+            if gj<=nyg-o
+                if o==1
+                    d=(halo[k,i+1,j+2]-halo[k,i+1,j+1])/dy; w=weight*2d/Cy/dy
+                    hb[k,i+1,j+2]+=w; hb[k,i+1,j+1]-=w
+                else
+                    d=(halo[k,i+2,j+4]-2halo[k,i+2,j+3]+halo[k,i+2,j+2])/dy^2; w=weight*2d/Cy/dy^2
+                    hb[k,i+2,j+4]+=w; hb[k,i+2,j+3]-=2w; hb[k,i+2,j+2]+=w
+                end
+            end
+        end
+        _add_variable_cotangent!(bar,a,var,exchange_halos_vjp(hb,distributed.tile,context,order)./scale)
+    end
+    bar
+end
