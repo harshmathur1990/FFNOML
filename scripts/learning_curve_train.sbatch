@@ -38,7 +38,7 @@ export FFNOML_RESUME_LR="${FFNOML_RESUME_LR:-5e-5}"
 MODEL_DIR="${FFNOML_RUN_DIR}/training_FFNO3D_zscale_expand_lognlte"
 mkdir -p "${MODEL_DIR}"
 cd "${FFNOML_REPO_DIR}"
-TORCHRUN=/cluster/home/harshm/nvidiaenv/bin/torchrun
+TORCHRUN=/cluster/projects/nn2834k/harshm/nvidiaenv/bin/torchrun
 
 echo "Experiment: ${FFNOML_EXPERIMENT}"
 echo "Train split: ${FFNOML_TRAIN_SPLIT}"
