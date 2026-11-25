@@ -125,3 +125,46 @@ end
     predict_populations!(direct,inner,za); predict_populations!(wrapped,model,za)
     @test wrapped==direct
 end
+
+@testset "Explicit and adaptive population meshes" begin
+    parse(mesh)=FFNOInversion._population_mesh(Dict{String,Any}("mesh"=>mesh),:log10tau500)
+    c=parse(Dict{String,Any}("heights_m"=>[2e6,1e6,0.0,-5e5]))
+    @test population_mesh(c)==[2e6,1e6,0.0,-5e5] && !c.adaptive
+    @test_throws ArgumentError parse(Dict{String,Any}("heights_m"=>[0.0,1e6]))
+    @test_throws ArgumentError parse(Dict{String,Any}("refinement"=>"dynamic"))
+    @test_throws ArgumentError parse(Dict{String,Any}("refinement"=>"adaptive","growth"=>1.0))
+    c=parse(Dict{String,Any}("refinement"=>"adaptive","lnT_step"=>0.1,"min_spacing_m"=>5e3))
+    @test c.adaptive && c.lnT_step==0.1 && c.min_spacing_m==5e3 && c.corona_temperature_k==1e6
+
+    eos=WittBifrostEOS.load_table(MESH_EOS_TABLE)
+    inner=SmoothMeshTestPopulations([0.8 0.1 -0.2 0.3 1.1 0.9; -0.5 0.2 0.1 -0.4 0.7 1.3],[0.4,-0.6])
+    settings=(bottom_m=-1e6,top_m=3e6,uniform_top_m=2e6,max_spacing_m=1e5,min_spacing_m=5e3,growth=1.2)
+    model=MeshPopulationModel(inner,PopulationMeshConfig(;settings...,adaptive=true),eos,274.0)
+    atmos=mesh_test_atmosphere(); nz,nx,ny=size(atmos.temperature)
+    out=zeros(nz,nx,ny,2); predict_populations!(out,model,atmos); m=model.mesh
+    @test all(FFNOInversion.adaptive_population_mesh(model,atmos)==m for _ in 1:4)     # deterministic
+    @test m[1]==3e6 && m[end]==-1e6 && issorted(m;rev=true)
+    d=-diff(m)
+    @test all(5e3*(1-1e-9) .<= d[1:end-1] .<= 1e5*(1+1e-9))
+    @test maximum(d[2:end-1]./d[1:end-2])<=1.2*1.01 && maximum(d[1:end-2]./d[2:end-1])<=1.2*1.01
+    # the criterion holds on every step that is not at the minimum spacing (to the probe's resolution)
+    f=FFNOInversion._mesh_features(model,atmos); c=model.adaptive
+    for i in findall(>(1.01*5e3),d[1:end-1])
+        @test maximum(abs.(log.(f[1,i,:,:]./f[1,i+1,:,:])))<=1.5c.lnT_step
+        @test maximum(abs.(f[6,i,:,:].-f[6,i+1,:,:]))<=1.5c.log_rho_step
+    end
+    # a steeper atmosphere gets more heights; a twice looser criterion fewer
+    steep=deepcopy(atmos)             # T, nₑ and ρ changing 1.5 times as fast, the bottom (and the deep extension) kept
+    for a in (steep.temperature,steep.ne,steep.rho); b=a[end:end,:,:]; a.=b.*(a./b).^1.5; end
+    predict_populations!(out,model,steep); @test length(model.mesh)>length(m)
+    loose=MeshPopulationModel(inner,PopulationMeshConfig(;settings...,adaptive=true,lnT_step=0.1,log_ne_step=0.2,
+        log_rho_step=0.2,velocity_step_m_s=2e3),eos,274.0)
+    predict_populations!(out,loose,atmos); @test length(loose.mesh)<length(m)
+    # the VJP sees the mesh of the prediction (one mesh per atmosphere)
+    predict_populations!(out,model,atmos); m=copy(model.mesh)
+    population_vjp!(zeros(6,nz,nx,ny),zeros(nz,nx,ny),model,atmos,ones(nz,nx,ny,2)); @test model.mesh==m
+    # an explicit mesh equal to the adaptive one gives the same populations
+    fixed=MeshPopulationModel(inner,PopulationMeshConfig(;settings...,heights_m=m),eos,274.0)
+    ref=zeros(nz,nx,ny,2); predict_populations!(ref,fixed,atmos); predict_populations!(out,model,atmos)
+    @test ref==out
+end

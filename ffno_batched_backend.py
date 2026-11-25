@@ -134,7 +134,7 @@ class BatchedFFNOBackend:
         if devices is None:
             devices = [f"cuda:{i}" for i in range(torch.cuda.device_count())]
         if not devices:
-            raise RuntimeError("no GPU is visible")
+            raise RuntimeError("no GPU is visible (FFNO_BATCHED_DEVICES=cpu runs on the CPU)")
         self.devices = list(devices)
         self.chunk_depth = int(chunk_depth)
         self.chunk_rows = int(chunk_rows)

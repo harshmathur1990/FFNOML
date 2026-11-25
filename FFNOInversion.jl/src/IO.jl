@@ -576,9 +576,12 @@ function load_config(path::AbstractString)
         _given_populations(get(get(cfg,"population",Dict{String,Any}()),"given",nothing),forward_only,dirname(abspath(path))))
 end
 
-const _POPULATION_MESH_KEYS=("enabled","bottom_m","top_m","spacing_m","uniform_top_m","stretch","max_spacing_m","nabla","corona_temperature_k","corona_transition_m")
+const _POPULATION_MESH_KEYS=("enabled","bottom_m","top_m","spacing_m","uniform_top_m","stretch","max_spacing_m","nabla","corona_temperature_k","corona_transition_m",
+    "heights_m","refinement","min_spacing_m","growth","lnT_step","log_ne_step","log_rho_step","velocity_step_m_s")
 
-"""`[population.mesh]`: the height mesh FFNO runs on, on every axis and in both modes, unless `enabled = false` feeds FFNO the native grid."""
+"""`[population.mesh]`: the height mesh FFNO runs on, on every axis and in both modes, unless `enabled = false` feeds FFNO the native grid.
+`refinement = "fixed"` (default) is the generated mesh, or `heights_m` when given; `"adaptive"` builds it from each atmosphere
+(`adaptive_population_mesh`)."""
 function _population_mesh(raw,vertical_coordinate,has_table=true)
     unknown=setdiff(collect(keys(raw)),["mesh","given"])
     isempty(unknown) || throw(ArgumentError("unknown key(s) in [population]: $(join(sort(unknown),", "))"))
@@ -588,7 +591,11 @@ function _population_mesh(raw,vertical_coordinate,has_table=true)
     # always on, whatever the axis and mode, unless the configuration turns it off
     Bool(get(mesh,"enabled",true)) || return nothing
     has_table || throw(ArgumentError("[population.mesh] extends the columns through the EOS table: set [equilibrium] eos_table_file, or [population.mesh] enabled = false"))
-    PopulationMeshConfig(;corona_temperature_k=1.0e6,(Symbol(k)=>Float64(v) for (k,v) in mesh if k!="enabled")...)
+    refinement=String(get(mesh,"refinement","fixed"))
+    refinement in ("fixed","adaptive") || throw(ArgumentError("[population.mesh] refinement must be \"fixed\" or \"adaptive\", got \"$refinement\""))
+    PopulationMeshConfig(;corona_temperature_k=1.0e6,adaptive=refinement=="adaptive",
+        heights_m=Float64.(get(mesh,"heights_m",Float64[])),
+        (Symbol(k)=>Float64(v) for (k,v) in mesh if !(k in ("enabled","refinement","heights_m")))...)
 end
 
 function dry_run_summary(config::RunConfig)

@@ -2,8 +2,8 @@
 """FFNO service for forward runs on small GPUs: the wire protocol of ffno_fsdp_service.py, answering PREDICT from host RAM
 (ffno_batched_backend.py). One process, no torchrun. VJP and JVP are refused: an inversion needs the FSDP service.
 
-Environment: CUDA_VISIBLE_DEVICES picks the GPUs. FFNO_BATCHED_CHUNK_DEPTH (16) and FFNO_BATCHED_CHUNK_ROWS (16) set the
-batches and do not change the result."""
+Environment: CUDA_VISIBLE_DEVICES picks the GPUs; FFNO_BATCHED_DEVICES (comma-separated torch devices, e.g. "cpu") replaces
+them. FFNO_BATCHED_CHUNK_DEPTH (16) and FFNO_BATCHED_CHUNK_ROWS (16) set the batches and do not change the result."""
 
 import argparse
 import importlib
@@ -31,6 +31,7 @@ def build_backends(configuration):
             str(Path(model["checkpoint_path"]).resolve()),
             lambda Cin, Cout, device, kwargs=dict(model.get("factory_kwargs", {})), make=factory: make(
                 Cin=Cin, Cout=Cout, device=device, **kwargs),
+            devices=[d for d in os.environ.get("FFNO_BATCHED_DEVICES", "").split(",") if d] or None,
             chunk_depth=int(os.environ.get("FFNO_BATCHED_CHUNK_DEPTH", 16)),
             chunk_rows=int(os.environ.get("FFNO_BATCHED_CHUNK_ROWS", 16)),
             log=_log,
