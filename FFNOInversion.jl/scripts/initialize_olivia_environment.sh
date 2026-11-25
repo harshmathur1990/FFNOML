@@ -42,26 +42,6 @@ mkdir -p "${wittmann_directory}"
 wittmann_staging=$(mktemp "${wittmann_library}.slurm-${SLURM_JOB_ID}.XXXXXX")
 trap 'rm -f -- "${wittmann_staging}"' EXIT
 
-compiler_candidate=${OLIVIA_CXX:-c++}
-compiler_executable=$(command -v "${compiler_candidate}") || {
-  echo "Cannot resolve accelerator C++ compiler: ${compiler_candidate}" >&2
-  exit 2
-}
-echo "C++ compiler: ${compiler_executable}"
-echo "Building accelerator Wittmann EOS library: ${wittmann_library}"
-CXX="${compiler_executable}" "${julia_executable}" --startup-file=no \
-  "${OLIVIA_REPO_DIR}/scripts/build_wittmann_backend.jl" "${wittmann_staging}"
-"${julia_executable}" --startup-file=no -e '
-using Libdl
-library = only(ARGS)
-handle = Libdl.dlopen(library)
-Libdl.dlclose(handle)
-println("Wittmann EOS load check OK: ", library)
-' "${wittmann_staging}"
-mv -f -- "${wittmann_staging}" "${wittmann_library}"
-trap - EXIT
-file "${wittmann_library}"
-
 # Recreate the disposable project from permanent sources on every job. Pkg
 # operations are complete before the multi-node srun begins.
 "${julia_executable}" --startup-file=no \
@@ -91,3 +71,26 @@ Pkg.instantiate()
 Pkg.precompile()
 println("FFNO_OLIVIA_JULIA_ENVIRONMENT_READY")
 '
+
+# The Wittmann library is built after the environment exists: build_wittmann_backend.jl loads WittBifrostEOS (through
+# FFNOInversion) from the run's project, which a fresh run directory does not have before the steps above (job 3161433).
+compiler_candidate=${OLIVIA_CXX:-c++}
+compiler_executable=$(command -v "${compiler_candidate}") || {
+  echo "Cannot resolve accelerator C++ compiler: ${compiler_candidate}" >&2
+  exit 2
+}
+echo "C++ compiler: ${compiler_executable}"
+echo "Building accelerator Wittmann EOS library: ${wittmann_library}"
+CXX="${compiler_executable}" "${julia_executable}" --startup-file=no \
+  "${OLIVIA_REPO_DIR}/scripts/build_wittmann_backend.jl" "${wittmann_staging}"
+"${julia_executable}" --startup-file=no -e '
+using Libdl
+library = only(ARGS)
+handle = Libdl.dlopen(library)
+Libdl.dlclose(handle)
+println("Wittmann EOS load check OK: ", library)
+' "${wittmann_staging}"
+mv -f -- "${wittmann_staging}" "${wittmann_library}"
+trap - EXIT
+file "${wittmann_library}"
+
