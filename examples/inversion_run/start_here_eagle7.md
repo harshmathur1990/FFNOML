@@ -85,7 +85,7 @@ Measured on 3 T4s, for the H model:
 | 252 × 252 × 467 | 123 s | 2.8 GB |
 | 504 × 504 × 467 | 428 s | 11 GB |
 
-The hidden states took about 90 GB of host RAM at 504 × 504 × 467, which is roughly 760 bytes per cell. The depth is the population mesh's 452 levels by default, whatever the input grid. Julia's own memory comes on top of this and hasn't been measured for a large cube.
+The hidden states took about 90 GB of host RAM at 504 × 504 × 467, which is roughly 760 bytes per cell. The depth is the population mesh's: adaptive by default, so it depends on the atmosphere (204 levels for FALC; a column that reaches the mesh top on a fine grid needs more), or 452 levels with `[population.mesh] refinement = "fixed"`; the measurements above were made with the fixed 452/467-level meshes. Julia's own memory comes on top of this and hasn't been measured for a large cube.
 
 ## 5. Run
 
