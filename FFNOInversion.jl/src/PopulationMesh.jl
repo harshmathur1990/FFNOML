@@ -7,8 +7,9 @@ spacing through the photosphere and chromosphere and bottoms 1-2.5 Mm below the 
 95-point log-tau column (spacing 30 km to several Mm, a different height at every point of every column) is far
 outside that: H n2 is ~100x off in the chromosphere with the simulation's own T, v, ne and rho.
 
-`MeshPopulationModel` maps each column from its log-tau points (HSE heights `z`) onto a fixed mesh, calls the
-wrapped model there and interpolates the populations back:
+`MeshPopulationModel` maps each column from its log-tau points (HSE heights `z`) onto a mesh, calls the wrapped model
+there and interpolates the populations back. The mesh is by default adaptive (`adaptive_population_mesh`: as fine as
+the atmosphere's features need, from `bottom_m` to `top_m`), or fixed (`population_mesh`, or `heights_m`):
   * inside the column: log T, log ne, log rho log-linear in z, velocities linear;
   * above its top: a transition region (ln T linear in z) to `corona_temperature_k` over `corona_transition_m`, then that
     temperature, hydrostatic from the column's top, rho and ne from the HSEMHS EOS table, velocities held; a column already
@@ -35,25 +36,50 @@ struct PopulationMeshConfig{T<:AbstractFloat}
     nabla::T
     corona_temperature_k::T
     corona_transition_m::T
-    function PopulationMeshConfig{T}(bottom_m,top_m,spacing_m,uniform_top_m,stretch,max_spacing_m,nabla,corona_temperature_k,corona_transition_m) where T
+    heights_m::Vector{T}          # an explicit mesh (top first); empty: generated
+    adaptive::Bool                # mesh from each atmosphere's features (adaptive_population_mesh)
+    min_spacing_m::T
+    growth::T
+    lnT_step::T
+    log_ne_step::T
+    log_rho_step::T
+    velocity_step_m_s::T
+    extend::Bool                  # adaptive: from bottom_m to top_m; false: only between the columns' own lowest and highest point
+    function PopulationMeshConfig{T}(bottom_m,top_m,spacing_m,uniform_top_m,stretch,max_spacing_m,nabla,corona_temperature_k,
+            corona_transition_m,heights_m=T[],adaptive=false,min_spacing_m=1.0e4,growth=1.2,lnT_step=0.05,log_ne_step=0.1,
+            log_rho_step=0.1,velocity_step_m_s=1.0e3,extend=true) where T
         bottom_m<uniform_top_m<=top_m || throw(ArgumentError("population mesh needs bottom_m < uniform_top_m <= top_m"))
         0<spacing_m<=max_spacing_m || throw(ArgumentError("population mesh needs 0 < spacing_m <= max_spacing_m"))
         stretch>=1 || throw(ArgumentError("population mesh stretch must be >= 1"))
         0<nabla<1 || throw(ArgumentError("population mesh nabla must lie in (0, 1)"))
         corona_temperature_k>=0 || throw(ArgumentError("population mesh corona_temperature_k must not be negative"))
         corona_transition_m>0 || throw(ArgumentError("population mesh corona_transition_m must be positive"))
-        new{T}(bottom_m,top_m,spacing_m,uniform_top_m,stretch,max_spacing_m,nabla,corona_temperature_k,corona_transition_m)
+        isempty(heights_m) || (length(heights_m)>=2 && issorted(heights_m;rev=true) && allunique(heights_m)) ||
+            throw(ArgumentError("population mesh heights_m must hold at least two distinct heights, top first"))
+        isempty(heights_m) || !adaptive || throw(ArgumentError("population mesh: heights_m and refinement = \"adaptive\" exclude each other"))
+        0<min_spacing_m<=max_spacing_m || throw(ArgumentError("population mesh needs 0 < min_spacing_m <= max_spacing_m"))
+        growth>1 || throw(ArgumentError("population mesh growth must be > 1"))
+        min(lnT_step,log_ne_step,log_rho_step,velocity_step_m_s)>0 || throw(ArgumentError("population mesh refinement steps must be positive"))
+        new{T}(bottom_m,top_m,spacing_m,uniform_top_m,stretch,max_spacing_m,nabla,corona_temperature_k,corona_transition_m,
+            T.(heights_m),adaptive,min_spacing_m,growth,lnT_step,log_ne_step,log_rho_step,velocity_step_m_s,extend)
     end
 end
 """Defaults inside the range of the training grids (bottoms -1 to -2.5 Mm, spacing 12-30 km stretching to
-100-160 km in the corona, tops up to 14.4 Mm)."""
+100-160 km in the corona, tops up to 14.4 Mm). `heights_m` gives the mesh outright; `adaptive = true` builds it from
+each atmosphere (`adaptive_population_mesh`) between the same `bottom_m` and `top_m`, with spacings from `min_spacing_m`
+to `max_spacing_m`; with `extend = false` only between the columns' own lowest and highest point (no corona or deep
+extension)."""
 PopulationMeshConfig(;bottom_m=-1.0e6,top_m=1.4e7,spacing_m=2.0e4,uniform_top_m=4.5e6,stretch=1.01,
-    max_spacing_m=1.0e5,nabla=0.13,corona_temperature_k=0.0,corona_transition_m=2.4e5)=PopulationMeshConfig{Float64}(
-    Float64.((bottom_m,top_m,spacing_m,uniform_top_m,stretch,max_spacing_m,nabla,corona_temperature_k,corona_transition_m))...)
+    max_spacing_m=1.0e5,nabla=0.13,corona_temperature_k=0.0,corona_transition_m=2.4e5,heights_m=Float64[],adaptive=false,
+    min_spacing_m=1.0e4,growth=1.2,lnT_step=0.05,log_ne_step=0.1,log_rho_step=0.1,velocity_step_m_s=1.0e3,extend=true)=
+    PopulationMeshConfig{Float64}(Float64.((bottom_m,top_m,spacing_m,uniform_top_m,stretch,max_spacing_m,nabla,
+        corona_temperature_k,corona_transition_m))...,Float64.(heights_m),Bool(adaptive),
+        Float64.((min_spacing_m,growth,lnT_step,log_ne_step,log_rho_step,velocity_step_m_s))...,Bool(extend))
 
-"""Mesh heights [m], top first: `spacing_m` up to `uniform_top_m`, then growing by `stretch` per point up to
-`max_spacing_m`."""
+"""Mesh heights [m], top first: `heights_m` when given; otherwise `spacing_m` up to `uniform_top_m`, then growing by
+`stretch` per point up to `max_spacing_m`. An adaptive mesh starts as this one and is replaced at each prediction."""
 function population_mesh(c::PopulationMeshConfig{T}) where T
+    isempty(c.heights_m) || return copy(c.heights_m)
     z=T[c.bottom_m]; dz=c.spacing_m
     while z[end]<c.top_m
         z[end]>=c.uniform_top_m && (dz=min(dz*c.stretch,c.max_spacing_m))
@@ -74,11 +100,13 @@ mutable struct MeshPopulationModel{M<:AbstractPopulationModel,E,T<:AbstractFloat
     native_z::Bool            # also on a native z atmosphere ([population.mesh] enabled = true); columns stay Cartesian
     corona_temperature::Float64
     corona_transition::Float64
+    adaptive::Union{Nothing,PopulationMeshConfig}   # set: the mesh follows each atmosphere (adaptive_population_mesh)
 end
 function MeshPopulationModel(inner::AbstractPopulationModel,config::PopulationMeshConfig,eos,gravity;native_z::Bool=false)
     gravity>0 || throw(ArgumentError("population mesh gravity must be positive"))
+    config.adaptive || _log_mesh("fixed",population_mesh(config))
     MeshPopulationModel(inner,population_mesh(config),eos,Float64(gravity),config.nabla,nothing,nothing,nothing,native_z,
-        Float64(config.corona_temperature_k),Float64(config.corona_transition_m))
+        Float64(config.corona_temperature_k),Float64(config.corona_transition_m),config.adaptive ? config : nothing)
 end
 
 _mesh_active(model,atmosphere)=vertical_coordinate(atmosphere.grid)!==:z_m || model.native_z
@@ -155,8 +183,8 @@ function _mesh_locate(zc,zeta,k)
 end
 
 """Mesh features `(6, nmesh)` (T, vx, vy, vz, log10 ne, log10 rho) of column (x, y)."""
-function _mesh_column!(f,model,atmosphere,x,y)
-    a=_mesh_column_variables(atmosphere,x,y); zc=@view atmosphere.z[:,x,y]; mesh=model.mesh
+function _mesh_column!(f,model,atmosphere,x,y,mesh=model.mesh)
+    a=_mesh_column_variables(atmosphere,x,y); zc=@view atmosphere.z[:,x,y]
     k=1; deep=Int[]; top=Int[]
     for m in eachindex(mesh)
         kind,k,w=_mesh_locate(zc,mesh[m],k)
@@ -188,6 +216,73 @@ function _mesh_features(model,atmosphere)
         for y in 1:ny; _mesh_column!(@view(f[:,:,x,y]),model,atmosphere,x,y); end
     end
     f
+end
+
+"""
+Adaptive mesh of `atmosphere` [m], top first, from `bottom_m` to `top_m`: fine where some column's features change
+fast, coarse where every column is smooth. Each column is sampled every `min_spacing_m`/2 as the network sees it
+(interpolated inside the column, the corona and deep extensions outside). On each probe interval the spacing that keeps
+the change per mesh step of ln T within `lnT_step`, of log10 nₑ and log10 ρ within `log_ne_step` and `log_rho_step`, and
+of each velocity component within `velocity_step_m_s` is taken, the smallest over all columns, clamped to
+[`min_spacing_m`, `max_spacing_m`] and graded so that one step is at most `growth` times the next. One mesh serves
+every column, as the fixed one does. With `extend = false` the mesh spans only the columns' own heights, from the
+lowest bottom to the highest top over all columns: points are added between them, never outside.
+"""
+function adaptive_population_mesh(model::MeshPopulationModel,atmosphere)
+    c=model.adaptive
+    top,bottom=c.extend ? (Float64(c.top_m),Float64(c.bottom_m)) :
+        (Float64(maximum(@view atmosphere.z[1,:,:])),Float64(minimum(@view atmosphere.z[end,:,:])))
+    n=max(2,ceil(Int,2(top-bottom)/c.min_spacing_m)+1); probe=collect(range(top,bottom;length=n)); dz=probe[1]-probe[2]
+    nx,ny=size(atmosphere.temperature)[2:3]; columns=vec(CartesianIndices((nx,ny)))
+    tasks=map(Iterators.partition(columns,max(1,cld(length(columns),4Threads.nthreads())))) do chunk
+        Threads.@spawn begin
+            local need=fill(Float64(c.max_spacing_m),n-1); local f=Matrix{Float64}(undef,6,n)
+            for I in chunk
+                _mesh_column!(f,model,atmosphere,I[1],I[2],probe)
+                for i in 1:n-1
+                    r=max(abs(log(f[1,i]/f[1,i+1]))/c.lnT_step,abs(f[5,i]-f[5,i+1])/c.log_ne_step,
+                        abs(f[6,i]-f[6,i+1])/c.log_rho_step)
+                    for v in 2:4; r=max(r,abs(f[v,i]-f[v,i+1])/c.velocity_step_m_s); end
+                    r>0 && (need[i]=min(need[i],dz/r))
+                end
+            end
+            need
+        end
+    end
+    least=reduce((a,b)->min.(a,b),fetch.(tasks))
+    # spacing at the probe heights, linear between them, graded: slope at most growth - 1, so one step is at most
+    # growth times its neighbour
+    h=clamp.([least[1];min.(least[1:end-1],least[2:end]);least[end]],c.min_spacing_m,c.max_spacing_m)
+    a=(c.growth-1)*dz
+    for i in 2:n; h[i]=min(h[i],h[i-1]+a); end
+    for i in n-1:-1:1; h[i]=min(h[i],h[i+1]+a); end
+    spacing(z)=(u=clamp((top-z)/dz,0,n-1); i=min(floor(Int,u),n-2); h[i+1]+(u-i)*(h[i+2]-h[i+1]))
+    lowest(z,s)=min(spacing(z),spacing(z-s),minimum(@view(h[clamp(floor(Int,(top-z)/dz)+2,1,n):clamp(ceil(Int,(top-z+s)/dz),1,n)]);init=Inf))
+    mesh=[top]
+    while true
+        z=mesh[end]; step=spacing(z)
+        for _ in 1:3; step=lowest(z,step); end                 # the smallest spacing over the step itself
+        z-step<=bottom+step/2 && (push!(mesh,bottom); break)
+        push!(mesh,z-step)
+    end
+    eltype(model.mesh).(mesh)
+end
+
+"""The mesh for `atmosphere`: the fixed one, or the adaptive one rebuilt for it (dropping the cached prediction when it
+changes)."""
+function _mesh_for!(model,atmosphere)
+    model.adaptive===nothing && return model.mesh
+    mesh=adaptive_population_mesh(model,atmosphere)
+    mesh==model.mesh && return mesh
+    model.mesh=mesh; model.last_features=nothing; model.last_populations=nothing; model.last_cartesian=nothing
+    _log_mesh("adaptive",mesh)
+    mesh
+end
+
+function _log_mesh(kind,mesh)
+    d=-diff(mesh)
+    println("POPULATION_MESH $kind heights=$(length(mesh)) spacing_km min=$(round(minimum(d)/1e3;digits=1)) ",
+        "median=$(round(sort(d)[cld(length(d),2)]/1e3;digits=1)) max=$(round(maximum(d)/1e3;digits=1))")
 end
 
 function _mesh_atmosphere(model,atmosphere,f)
@@ -250,6 +345,7 @@ function predict_populations!(out::AbstractArray{T,4},model::MeshPopulationModel
     _mesh_active(model,atmosphere) || return predict_populations!(out,model.inner,atmosphere,cache)
     size(out)[1:3]==size(atmosphere.temperature) || throw(DimensionMismatch("population shape differs from atmosphere"))
     atmosphere.z===nothing && throw(ArgumentError("population mesh needs the equilibrium heights z"))
+    _mesh_for!(model,atmosphere)
     f=_mesh_features(model,atmosphere)
     nz,nx,ny=size(atmosphere.temperature); levels=size(out,4)
     pm=_mesh_predict!(model,atmosphere,f,T,levels)
@@ -267,6 +363,7 @@ end
 function population_vjp!(feature_bar::AbstractArray{T,4},z_bar::AbstractArray{T,3},model::MeshPopulationModel,
         atmosphere::Atmosphere3D,population_bar::AbstractArray{T,4}) where T
     _mesh_active(model,atmosphere) || return population_vjp!(feature_bar,z_bar,model.inner,atmosphere,population_bar)
+    _mesh_for!(model,atmosphere)
     nz,nx,ny=size(atmosphere.temperature); levels=size(population_bar,4); mesh=model.mesh; nm=length(mesh)
     f=_mesh_features(model,atmosphere)
     pm=_mesh_populations(model,atmosphere,f,T,levels)
@@ -335,6 +432,7 @@ end
 function population_jvp!(population_dot::AbstractArray{T,4},model::MeshPopulationModel,atmosphere::Atmosphere3D,
         feature_dot::AbstractArray{<:Real,4}) where T
     _mesh_active(model,atmosphere) || return population_jvp!(population_dot,model.inner,atmosphere,feature_dot)
+    _mesh_for!(model,atmosphere)
     nz,nx,ny=size(atmosphere.temperature); levels=size(population_dot,4); mesh=model.mesh; nm=length(mesh)
     f=_mesh_features(model,atmosphere); pm=_mesh_populations(model,atmosphere,f,T,levels)
     fm_dot=zeros(Float32,6,nm,nx,ny)
