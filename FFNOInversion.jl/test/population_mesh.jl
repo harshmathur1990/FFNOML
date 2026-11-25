@@ -135,6 +135,9 @@ end
     @test_throws ArgumentError parse(Dict{String,Any}("refinement"=>"adaptive","growth"=>1.0))
     c=parse(Dict{String,Any}("refinement"=>"adaptive","lnT_step"=>0.1,"min_spacing_m"=>5e3))
     @test c.adaptive && c.lnT_step==0.1 && c.min_spacing_m==5e3 && c.corona_temperature_k==1e6
+    c=parse(Dict{String,Any}()); @test c.adaptive && c.extend && c.max_spacing_m==2e5 && c.min_spacing_m==1e4   # the default
+    c=parse(Dict{String,Any}("refinement"=>"fixed")); @test !c.adaptive && c.max_spacing_m==1e5
+    @test !parse(Dict{String,Any}("extend"=>false)).extend
 
     eos=WittBifrostEOS.load_table(MESH_EOS_TABLE)
     inner=SmoothMeshTestPopulations([0.8 0.1 -0.2 0.3 1.1 0.9; -0.5 0.2 0.1 -0.4 0.7 1.3],[0.4,-0.6])
@@ -163,6 +166,11 @@ end
     # the VJP sees the mesh of the prediction (one mesh per atmosphere)
     predict_populations!(out,model,atmos); m=copy(model.mesh)
     population_vjp!(zeros(6,nz,nx,ny),zeros(nz,nx,ny),model,atmos,ones(nz,nx,ny,2)); @test model.mesh==m
+    # extend = false: only between the columns' own lowest and highest point
+    inside=MeshPopulationModel(inner,PopulationMeshConfig(;settings...,adaptive=true,extend=false),eos,274.0)
+    predict_populations!(out,inside,atmos); mi=inside.mesh
+    @test mi[1]==maximum(atmos.z[1,:,:]) && mi[end]==minimum(atmos.z[end,:,:]) && length(mi)<length(m)
+    @test all(5e3*(1-1e-9) .<= -diff(mi)[1:end-1])
     # an explicit mesh equal to the adaptive one gives the same populations
     fixed=MeshPopulationModel(inner,PopulationMeshConfig(;settings...,heights_m=m),eos,274.0)
     ref=zeros(nz,nx,ny,2); predict_populations!(ref,fixed,atmos); predict_populations!(out,model,atmos)

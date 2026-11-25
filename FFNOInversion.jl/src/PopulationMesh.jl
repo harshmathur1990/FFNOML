@@ -7,8 +7,9 @@ spacing through the photosphere and chromosphere and bottoms 1-2.5 Mm below the 
 95-point log-tau column (spacing 30 km to several Mm, a different height at every point of every column) is far
 outside that: H n2 is ~100x off in the chromosphere with the simulation's own T, v, ne and rho.
 
-`MeshPopulationModel` maps each column from its log-tau points (HSE heights `z`) onto a fixed mesh, calls the
-wrapped model there and interpolates the populations back:
+`MeshPopulationModel` maps each column from its log-tau points (HSE heights `z`) onto a mesh, calls the wrapped model
+there and interpolates the populations back. The mesh is by default adaptive (`adaptive_population_mesh`: as fine as
+the atmosphere's features need, from `bottom_m` to `top_m`), or fixed (`population_mesh`, or `heights_m`):
   * inside the column: log T, log ne, log rho log-linear in z, velocities linear;
   * above its top: a transition region (ln T linear in z) to `corona_temperature_k` over `corona_transition_m`, then that
     temperature, hydrostatic from the column's top, rho and ne from the HSEMHS EOS table, velocities held; a column already

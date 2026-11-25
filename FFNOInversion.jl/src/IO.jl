@@ -580,8 +580,8 @@ const _POPULATION_MESH_KEYS=("enabled","bottom_m","top_m","spacing_m","uniform_t
     "heights_m","refinement","min_spacing_m","growth","lnT_step","log_ne_step","log_rho_step","velocity_step_m_s","extend")
 
 """`[population.mesh]`: the height mesh FFNO runs on, on every axis and in both modes, unless `enabled = false` feeds FFNO the native grid.
-`refinement = "fixed"` (default) is the generated mesh, or `heights_m` when given; `"adaptive"` builds it from each atmosphere
-(`adaptive_population_mesh`)."""
+`refinement = "adaptive"` (the default) builds it from each atmosphere (`adaptive_population_mesh`; `extend = false` keeps it
+within the columns' own heights); `"fixed"` is the generated mesh, or `heights_m` when given (then fixed is the default)."""
 function _population_mesh(raw,vertical_coordinate,has_table=true)
     unknown=setdiff(collect(keys(raw)),["mesh","given"])
     isempty(unknown) || throw(ArgumentError("unknown key(s) in [population]: $(join(sort(unknown),", "))"))
@@ -591,12 +591,14 @@ function _population_mesh(raw,vertical_coordinate,has_table=true)
     # always on, whatever the axis and mode, unless the configuration turns it off
     Bool(get(mesh,"enabled",true)) || return nothing
     has_table || throw(ArgumentError("[population.mesh] extends the columns through the EOS table: set [equilibrium] eos_table_file, or [population.mesh] enabled = false"))
-    refinement=String(get(mesh,"refinement","fixed"))
+    refinement=String(get(mesh,"refinement",haskey(mesh,"heights_m") ? "fixed" : "adaptive"))
     refinement in ("fixed","adaptive") || throw(ArgumentError("[population.mesh] refinement must be \"fixed\" or \"adaptive\", got \"$refinement\""))
     PopulationMeshConfig(;corona_temperature_k=1.0e6,adaptive=refinement=="adaptive",
         heights_m=Float64.(get(mesh,"heights_m",Float64[])),
         extend=Bool(get(mesh,"extend",true)),
-        (Symbol(k)=>Float64(v) for (k,v) in mesh if !(k in ("enabled","refinement","heights_m","extend")))...)
+        # adaptive: up to 200 km where every column is smooth (FALC: 204 heights, the 452-height fixed mesh's accuracy)
+        max_spacing_m=Float64(get(mesh,"max_spacing_m",refinement=="adaptive" ? 2.0e5 : 1.0e5)),
+        (Symbol(k)=>Float64(v) for (k,v) in mesh if !(k in ("enabled","refinement","heights_m","extend","max_spacing_m")))...)
 end
 
 function dry_run_summary(config::RunConfig)
