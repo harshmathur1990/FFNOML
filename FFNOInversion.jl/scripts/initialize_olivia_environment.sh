@@ -48,12 +48,12 @@ trap 'rm -f -- "${wittmann_staging}"' EXIT
   "${OLIVIA_REPO_DIR}/scripts/prepare_olivia_environment.jl" \
   "${OLIVIA_REPO_DIR}" "${julia_project}"
 
-if [[ ! -r "${julia_project}/Manifest.toml" ]]; then
-  "${julia_executable}" --project="${JULIA_PROJECT}" --startup-file=no -e '
+# Always install: the copied Manifest only names the packages, and the depot may not hold them yet (job 3168963
+# failed at `using MPIPreferences` when this ran only without a Manifest).
+"${julia_executable}" --project="${JULIA_PROJECT}" --startup-file=no -e '
 using Pkg
 Pkg.instantiate(; allow_autoprecomp=false)
 '
-fi
 
 "${julia_executable}" --project="${JULIA_PROJECT}" --startup-file=no -e '
 using MPIPreferences
