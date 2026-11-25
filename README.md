@@ -13,7 +13,8 @@ The repository has two halves:
    its hydrostatic structure with HSEMHS unless a forward run supplies its thermodynamics, gets populations from the trained networks
    through a persistent multi-GPU service, synthesizes spectra (H alpha, Ca II 8542 and
    Kurucz LTE lines), and fits the whole 3D volume to observations with bounded L-BFGS.
-   The networks predict on a fixed height mesh: above a column's top the atmosphere is extended
+   The networks predict on a height mesh spanning the training range (adaptive by default: as fine as the atmosphere's
+   features need): above a column's top the atmosphere is extended
    with a hydrostatic corona, below its bottom hydrostatically with a fixed gradient, and the
    continuum is Muspel's with its hydrogen from the EOS. A forward run may supply any of the electron density, density,
    pressure and hydrogen populations, in which case HSEMHS is not used and the EOS fills the rest; inversions always use HSEMHS.
@@ -800,8 +801,8 @@ feeds log10 T and velocities in km/s, the same as training.
 
 For forward runs on GPUs too small for a cube's activations, such as eagle7's T4s at 504 × 504,
 `ffno_batched_service.py` speaks the same protocol from one process, keeps hidden states in host RAM and
-sends batches through the GPUs. It is not tiled prediction: it reproduces the full-domain operator, to float32
-rounding against FSDP on the same machine, and cannot compute gradients. See the
+sends batches through the GPUs (or the CPU: `FFNO_BATCHED_DEVICES=cpu,cpu`). It is not tiled prediction: it reproduces the
+full-domain operator, to float32 rounding against FSDP on the same machine, and cannot compute gradients. See the
 [package README](FFNOInversion.jl/README.md#batched-forward-service-small-gpus).
 
 ## 3D Forward Synthesis And Inversion
@@ -819,9 +820,10 @@ In brief:
 - **Equilibrium.** HSEMHS column hydrostatic equilibrium reconstructs gas pressure,
   density, electron density, heights (or log tau) and the 500 nm opacity. It sets the
   pressure boundary. A forward run given any of nₑ, ρ, P and hydrogen populations does not use it, and builds the geometry as RH does.
-- **Populations.** FFNO3D through the persistent service above. For log-tau and log-m
-  atmospheres each column is first mapped onto a training-like height mesh
-  (`[population.mesh]`), because the networks were trained on simulation height grids.
+- **Populations.** FFNO3D through the persistent service above. Each column is first mapped onto a training-like height
+  mesh (`[population.mesh]`), because the networks were trained on simulation height grids. The mesh is adaptive by default
+  (204 levels for FALC instead of 452, same spectra); its extent, not its resolution, decides the lines
+  ([details](FFNOInversion.jl/README.md#the-adaptive-mesh)).
 - **Synthesis.** Any number of spectral regions, each combining FFNO lines (H alpha,
   Ca II 8542 through Muspel) and Kurucz LTE lines in one formal solution. On log-tau
   and log-m grids the optical depth is integrated on the native grid, with sub-stepping
@@ -835,7 +837,8 @@ In brief:
   [`FFNOInversion.jl/docs/viewing-angle/`](FFNOInversion.jl/docs/viewing-angle/README.md).
 - **Inversion.** Temperature, velocity, microturbulence and magnetic-field
   corrections on coarse node maps, weighted chi-square plus vertical and horizontal
-  regularization, and bounded L-BFGS with matrix-free adjoint gradients.
+  regularization, and bounded L-BFGS with matrix-free adjoint gradients, including the adjoint of the HSEMHS
+  equilibrium (its cost does not depend on the number of controls).
   Checkpoints restart on a different MPI/thread layout.
 - **Runtime.** Hybrid MPI ranks × Julia threads on CPU, with rank 0 controlling the
   multi-GPU FFNO service. Production runs go on Olivia through
@@ -917,19 +920,22 @@ Julia (from `FFNOInversion.jl/`):
 julia --project=. -e 'using Pkg; Pkg.test()'
 ```
 
-The MPI parity checks and the Olivia regression chain are described in the
-[package README](FFNOInversion.jl/README.md#tests-and-validation).
+On hyades set `CXX=g++ CC=gcc` after `loadgcc.sh`. The MPI parity checks and the Olivia regression chain are described
+in the [package README](FFNOInversion.jl/README.md#tests-and-validation).
 
 ## Documentation
 
+- [`docs/physics/ffno-physics.pdf`](docs/physics/ffno-physics.pdf) and
+  [`docs/technical/ffno-technical.pdf`](docs/technical/ffno-technical.pdf) (TeX sources beside them): the physics from
+  atmosphere to spectra and inversion, and the implementation reference (updated 25 Nov 2026).
 - `docs/ffno_model_flowchart.md` and the `docs/ffno_*.svg` diagrams: FFNO3D
   architecture (full forward pass, balanced block, spectral convolution, vertical
   stack).
 - `docs/paper_draft_ffno_nlte.md`: paper draft.
 - `output/pdf/`: inversion development plan, implementation report and HSE bootstrap
   review.
-- `FFNOInversion.jl/docs/`: architecture decisions, the HSEMHS integration plan,
-  the viewing-angle design (`docs/viewing-angle/`) and validation reports.
+- `FFNOInversion.jl/docs/`: architecture decisions, the HSEMHS integration plan, the equilibrium adjoint
+  (`docs/equilibrium-adjoint/`), the viewing-angle design (`docs/viewing-angle/`) and validation reports.
 
 ## Caveats
 

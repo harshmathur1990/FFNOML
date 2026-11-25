@@ -43,7 +43,7 @@ control maps (inversion only)
    ▼
 equilibrium                 Pgas, rho, ne, z (or log10 tau500) and chi500: HSEMHS from T (and B), or a given atmosphere (forward only)
    ▼
-population mesh             columns mapped onto a training-like height mesh, extended above and below
+population mesh             columns mapped onto a training-like height mesh (adaptive), extended above and below
    ▼
 FFNO3D populations          persistent multi-GPU FSDP service, one model per species
    ▼
@@ -66,7 +66,8 @@ One-rank development runs and multi-rank production runs use the same
 | Forward synthesis (`mode = "forward"`) | Production. Native log10 tau500, native log10 column mass or native z atmospheres. |
 | Inversion (`mode = "inversion"`) | Implemented: bounded L-BFGS with matrix-free gradients, checkpoints, restart across topologies. |
 | Equilibrium | HSEMHS column HSE (`column-hse-ltau`, `column-hse-logm`, `column-hse-z`). MHS Poisson modes (`model = "mhs"`) are rejected until HSEMHS-integration Phase 4. |
-| Populations | FFNO3D through the persistent FSDP GPU service (H and Ca II, 6 levels each in the example factory; at least two GPU ranks), or for forward runs on small GPUs the [batched service](#batched-forward-service-small-gpus). |
+| Populations | FFNO3D through the persistent FSDP GPU service (H and Ca II, 6 levels each in the example factory; at least two GPU ranks), or for forward runs on small GPUs or CPUs the [batched service](#batched-forward-service-small-gpus); on an [adaptive height mesh](#the-adaptive-mesh) by default. |
+| Gradient | Matrix-free adjoint, including the HSEMHS equilibrium adjoint (cost independent of the number of controls). |
 | Spectral lines | FFNO: any line of the H and Ca II atoms, found from the region (Lyman, Balmer, Paschen and Brackett lines up to n = 5; Ca II H, K and the infrared triplet). Validated for H alpha and Ca II 8542 only. LTE: any Kurucz line list. |
 | Viewing angle | `[view]` μ, azimuth, `plane_parallel` or `inclined`, all native coordinates, forward and inversion (ADR-013). Validated against MULTI3D at μ = 0.8. |
 | Stokes / redistribution | Stokes I, non-PRD (Release 1). The type boundaries for PRD and full Stokes exist (ADR-004) but are not implemented. |
@@ -369,14 +370,20 @@ for them σ and α must be given or Unsöld is used.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `enabled` | true | predict the FFNO populations on the mesh, on every axis and in both modes; `false` feeds the FFNO the native grid |
+| `refinement` | `"adaptive"` (`"fixed"` when `heights_m` is given) | `adaptive`: the mesh is built for each atmosphere ([below](#the-adaptive-mesh)); `fixed`: the generated mesh, or `heights_m` |
 | `bottom_m`, `top_m` | −1 Mm, 14 Mm | mesh limits |
-| `spacing_m`, `uniform_top_m` | 20 km, 4.5 Mm | uniform spacing up to this height |
-| `stretch`, `max_spacing_m` | 1.01, 100 km | spacing above it grows by this factor per point, up to this spacing |
+| `extend` | true | adaptive: from `bottom_m` to `top_m`; `false`: only between the columns' own lowest and highest point (no corona or deep extension) |
+| `lnT_step`, `log_ne_step`, `log_rho_step`, `velocity_step_m_s` | 0.05, 0.1, 0.1, 1000 | adaptive: largest change per mesh step of ln T, log10 nₑ, log10 ρ and each velocity component |
+| `min_spacing_m`, `max_spacing_m`, `growth` | 10 km, 200 km (fixed: 100 km), 1.2 | adaptive: spacing limits, and the largest ratio of neighbouring steps |
+| `heights_m` | – | an explicit mesh [m], top first (fixed) |
+| `spacing_m`, `uniform_top_m` | 20 km, 4.5 Mm | fixed: uniform spacing up to this height |
+| `stretch` | 1.01 | fixed: spacing above it grows by this factor per point, up to `max_spacing_m` |
 | `nabla` | 0.13 | d ln T / d ln P of the extension below a column's bottom |
 | `corona_temperature_k` | 1 MK | temperature of the corona above a column's top; 0 holds the top values instead |
 | `corona_transition_m` | 240 km | height over which the corona reaches that temperature |
 
-The defaults lie inside the range of the training grids. See [Population mesh](#population-mesh).
+The defaults lie inside the range of the training grids. See [Population mesh](#population-mesh). `PopulationMeshConfig()` called
+directly in Julia still builds the fixed mesh; only configurations read from TOML default to the adaptive one.
 
 ### `[population.given]` (forward only)
 
@@ -649,7 +656,7 @@ spacing and a different height at every point, which is far outside that. Fed
 directly, H n2 is about 100× off in the chromosphere. A 1-D model on z has the same problem with its uneven levels.
 
 `MeshPopulationModel` (`src/PopulationMesh.jl`) therefore maps each column onto a
-fixed height mesh using its heights, calls the FFNO there, and interpolates
+height mesh using its heights (one mesh for all columns), calls the FFNO there, and interpolates
 the populations back. It is on for every axis and in both modes, unless `[population.mesh] enabled = false`.
 The rule is the same for every species and both axes:
 
@@ -670,6 +677,31 @@ The corona matters because the FFNO is not local in height: its deep populations
 FALC, which stops at 2.16 Mm, holding the 100,000 K top values to 14 Mm made total H up to 15× too high in the photosphere, and
 changing a corona from 1 MK to 0.5 MK doubled it at 250 km. Columns that already reach the mesh top, like Bifrost cubes on log τ,
 never use it.
+
+#### The adaptive mesh
+
+The FFNO's GPU memory grows with the number of mesh levels. The adaptive mesh (default) has only the levels the atmosphere needs:
+each column is sampled every `min_spacing_m`/2 as the FFNO sees it (inside, corona and deep extension); per interval the spacing
+keeping each step's change of ln T, log nₑ, log ρ and the velocities within `lnT_step`, `log_ne_step`, `log_rho_step`,
+`velocity_step_m_s` is taken, the smallest over all columns, clamped to [`min_spacing_m`, `max_spacing_m`] and graded by `growth`.
+It is rebuilt for every atmosphere (`adaptive_population_mesh`; the log prints `POPULATION_MESH adaptive heights=…`). In an
+inversion the mesh can therefore change between iterations; the gradient treats its levels as fixed.
+
+FALC with the final (zaug) H and Ca II networks, H alpha and Ca II 8542 against RH and against a 1401-level reference mesh
+(`ffnoml_data/models/zaug/falc/adaptive_mesh`, 25 Nov 2026; CPU and GPU identical):
+
+| Mesh | Levels | H alpha core vs RH | Ca 8542 core vs RH | rms vs reference, H / Ca |
+|---|---|---|---|---|
+| FALC's own grid (`enabled = false`) | 82 | +12.7 % | +38.0 % | 8.4 / 8.4 % |
+| FALC's points + extensions to −1 and 14 Mm | 236 | −2.5 % | +13.5 % | 0.11 / 0.99 % |
+| adaptive, `extend = false` (12 settings) | 58–342 | +11.5 … +12.8 % | +30 … +39 % | ≈ 8 / 5–9 % |
+| fixed | 452 | −2.6 % | +15.5 % | 0.13 / 0.19 % |
+| **adaptive (default)** | **204** | −2.6 % | +15.6 % | 0.09 / 0.19 % |
+
+The extent of the column the FFNO sees decides the lines, not the resolution inside it: adding points only within FALC's range
+does not move the lines from the 82-point result, and cutting the mesh at 3 or 5 Mm or at −0.1 Mm moves them by 2–7 %. Keep
+`extend = true` and `bottom_m`/`top_m` at the training range; the adaptive mesh saves levels by spacing the extensions
+coarsely.
 
 ### Viewing angle
 
@@ -866,6 +898,7 @@ with `CUDA_VISIBLE_DEVICES` choosing the GPUs, `FFNO_FSDP_PYTHON` a Python with 
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `FFNO_BATCHED_CHUNK_DEPTH`, `FFNO_BATCHED_CHUNK_ROWS` | 16, 16 | batch sizes: memory and speed only |
+| `FFNO_BATCHED_DEVICES` | the visible GPUs | comma-separated torch devices, e.g. `cpu,cpu` (one replica per distinct device; FFNOInversion wants a service of at least two ranks, so name one device twice) |
 
 Every GroupNorm of the final model takes whole-volume statistics in both routes (the FSDP route all-reduces them over
 the GPU slabs), so neither result depends on the number of GPUs. `tests/test_height_operator.py` checks the batched
@@ -931,6 +964,9 @@ julia --project=. scripts/validate_phase5_mpi.jl
 julia --project=. scripts/validate_phase6_mpi.jl
 ```
 
+On hyades set `CXX=g++ CC=gcc` after `loadgcc.sh` (its MPI compiler wrappers break the Wittmann library build that several
+tests do). The full suite passed on hyades4 on 25 Nov 2026.
+
 `test/runtests.jl` covers types and coordinates, nodes, the parallel runtime, I/O
 and configuration, Wittmann and continuum opacity, population backends and the
 population mesh, synthesis and Muspel integration, the HSEMHS equilibrium, the
@@ -966,8 +1002,10 @@ is about 2% at H alpha and 5% at Ca II 8542, with cores about 10% and 6% deeper.
 - [`docs/viewing-angle/`](docs/viewing-angle/README.md): viewing-angle design, the Codex review and the validation
   results.
 - [`docs/hsemhs-integration/`](docs/hsemhs-integration/README.md): the six-phase
-  HSEMHS integration plan. Phases 1–3 are done; MHS modes, equilibrium-aware
-  inversion examples and the implicit equilibrium VJP are Phases 4–6.
+  HSEMHS integration plan. Phases 1–3 are done; MHS modes and equilibrium-aware
+  inversion examples are Phases 4–5. The equilibrium VJP is done (below).
+- [`docs/equilibrium-adjoint/`](docs/equilibrium-adjoint/README.md): the equilibrium adjoint in the objective gradient
+  (HSEMHS `design/adjoint/`, Phase 7).
 - `docs/reports/`: validation reports for each phase, the hybrid runtime, the Olivia
   runtime-test guide and the job 2622023 crash investigation.
 
@@ -981,7 +1019,9 @@ is about 2% at H alpha and 5% at Ca II 8542, with cores about 10% and 6% deeper.
   magnetic field is still used by `align = "ptot"` and by synthesis.
 - The equilibrium adjoint of the column modes is exact for the solver with its discrete choices fixed (substep counts,
   EOS cells, branches); at an EOS-table slope break it is one-sided. The MHS modes' adjoint (HSEMHS) is exact at a
-  stationary state, which `poisson.polish` reaches; they are not yet runnable here (Phase 4 of the integration).
+  stationary state, which their `polish` option reaches; they are not yet runnable here (Phase 4 of the integration).
+- The adaptive population mesh is rebuilt for each atmosphere; in an inversion the objective can jump slightly when the mesh
+  changes between iterations, and the gradient treats the mesh as fixed. Not yet tested in an inversion.
 - FFNO lines are limited to H alpha and Ca II 8542, with the 6-level H and Ca II
   atoms used in training.
 - The FSDP service needs CUDA (NVIDIA) GPUs and at least two GPU ranks. The batched service works on one GPU or more, but is forward only.

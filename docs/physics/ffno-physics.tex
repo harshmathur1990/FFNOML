@@ -1,6 +1,6 @@
 \input{../preamble.tex}
 \begin{document}
-\doctitle{The physics of FFNO}{From the solar atmosphere to NLTE populations, synthetic spectra and 3D inversions. FFNOML repository, 4 November 2026, updated 23 November 2026 for the final model (zaug, branch \code{level-fractions-capacity}). The companion document \code{docs/technical/ffno-technical.pdf} covers the implementation.}
+\doctitle{The physics of FFNO}{From the solar atmosphere to NLTE populations, synthetic spectra and 3D inversions. FFNOML repository, 4 November 2026, updated 23 November 2026 for the final model (zaug, branch \code{level-fractions-capacity}) and 25 November 2026 for the adaptive population mesh and the equilibrium adjoint. The companion document \code{docs/technical/ffno-technical.pdf} covers the implementation.}
 
 \begin{abstract}
 \noindent Chromospheric spectral lines are the main window on the layer of the Sun where the atmosphere changes from gas-pressure dominated to magnetically dominated, but they form out of local thermodynamic equilibrium (NLTE). Their atomic level populations depend on the radiation field, and the radiation field depends on the populations everywhere else, so an accurate calculation has to solve radiative transfer and statistical equilibrium together in 3D. That is too expensive for routine use and far too expensive inside an inversion. FFNO is a factorized Fourier neural operator trained to replace exactly that one expensive step. It maps a 3D atmosphere $(T,\mathbf v,\nel,\rho)$ on a height grid to the 3D NLTE populations of a model atom, predicted as departures from MULTI3D's LTE populations and a correction to the element total. Everything around it remains ordinary physics: a hydrostatic reconstruction turns a temperature into pressure, density and height; a formal solution of the radiative transfer equation turns populations into spectra; and a bounded quasi-Newton optimizer, with exact adjoints through the network, fits the whole 3D volume to observations. This document starts from first principles and states what is physics, what is learned, what is assumed, and how well it has been measured to work.
@@ -317,7 +317,7 @@ FFNO still predicts the line populations in this mode. This route exists for com
 FFNO has seen only height grids that are one set of heights for every column, spaced 12--30\,km through the photosphere and chromosphere, with bottoms 1--2.5\,Mm below the surface and tops up to 14\,Mm (and, for the final model, height-cut copies of them). A typical inversion column has 95 log-$\tau$ points spaced from 30\,km to several Mm, at different heights in each column. Fed directly to the paper model, whose vertical filters ran over grid index, H $n=2$ came out about 100 times wrong in the chromosphere, even with the simulation's own $T$, $\mathbf v$, $\nel$ and $\rho$. The final model's height operator does not count grid points, but it has still learned only from columns like its training columns. The safe course for both is to \emph{bring the atmosphere to the network} rather than asking it to extrapolate.
 
 \subsection{Construction}
-The default mesh has 452 levels running from $-1$\,Mm to 14\,Mm: 20\,km spacing to 4.5\,Mm, then growing by 1\% per point up to 100\,km. Then, for each column:
+The mesh runs from $-1$\,Mm to 14\,Mm, the range of the training grids, whatever the column's own range. By default its points are placed \emph{adaptively} (next subsection); the fixed alternative has 452 levels: 20\,km spacing to 4.5\,Mm, then growing by 1\% per point up to 100\,km. Then, for each column:
 
 \begin{figure}[H]\centering
 \begin{tikzpicture}[x=1cm,y=4.7mm]
@@ -331,13 +331,30 @@ The default mesh has 452 levels running from $-1$\,Mm to 14\,Mm: 20\,km spacing 
 \draw[thick,red!70!black](.5,2.16)--(5,2.16);\node[font=\scriptsize,anchor=west,red!70!black]at(5,2.16){column top (e.g.\ FAL-C)};
 \draw[thick,red!70!black](.5,-.1)--(5,-.1);\node[font=\scriptsize,anchor=west,red!70!black]at(5,-.1){column bottom};
 \end{tikzpicture}
-\caption{How one column fills the fixed mesh. Heights are illustrative of a 1D model reaching 2.16\,Mm.}
+\caption{How one column fills the mesh. Heights are illustrative of a 1D model reaching 2.16\,Mm.}
 \end{figure}
 
 The network predicts on the mesh, and the populations are interpolated back to the column's own points, log-linearly in $z$. The extensions exist \emph{only} for the network: synthesis uses the column's own levels. The mesh is on by default for log $\tau$ and log $m$, and optional on $z$, where it is needed for anything unlike a simulation grid.
 
 \subsection{Why the corona matters}
 Filling the volume above a short column is not a detail. The network is not local in height: populations low down respond to what occupies the mesh above. For FAL-C with the paper model, holding its 100\,000\,K top values up to 14\,Mm made total hydrogen up to 15 times too high in the photosphere, and changing a corona from 1\,MK to 0.5\,MK doubled it at 250\,km. This reflects the operator's learned dependence on column context, not a physical influence of that gas on the photosphere; it is the same effect that appears as the column-span dependence in Section~\ref{sec:validation}. Columns already reaching the mesh top, like Bifrost cubes on log $\tau$, never use this extension.
+
+\subsection{The adaptive mesh}
+The network's memory grows with the number of mesh levels, so the mesh should have only the levels a run needs. The adaptive mesh places them where the atmosphere the network sees changes. Each column is sampled finely as the network would see it, inside the column and in its corona and deep extension, and on every interval the largest spacing is taken that keeps the change per mesh step of $\ln T$ within 0.05, of $\log_{10}\nel$ and $\log_{10}\rho$ within 0.1, and of each velocity component within 1\,km\,s$^{-1}$. The smallest such spacing over all columns, clamped to 10--200\,km and allowed to grow by at most a factor 1.2 from one step to the next, gives one mesh for the whole atmosphere, rebuilt for every atmosphere the network is asked about.
+
+On FAL-C with the final networks this gives 204 levels (from 10\,km at the transition region to 200\,km in the corona), and \Halpha{} and Ca\,\textsc{ii} 854.2\,nm agree with a 1401-level reference mesh as closely as the fixed 452-level mesh does (rms 0.09\% and 0.19\% over the line):
+\begin{center}\small
+\begin{tabular}{lccc}
+\toprule
+mesh & levels & \Halpha{} core vs RH & Ca\,\textsc{ii} 854.2 core vs RH \\\midrule
+FAL-C's own grid ($-0.1$ to 2.16\,Mm) & 82 & $+12.7\%$ & $+38.0\%$ \\
+FAL-C's own points, extended to $-1$ and 14\,Mm & 236 & $-2.5\%$ & $+13.5\%$ \\
+adaptive, only within FAL-C's range & 58--342 & $+11.5$ to $+12.8\%$ & $+30$ to $+39\%$ \\
+fixed, extended & 452 & $-2.6\%$ & $+15.5\%$ \\
+adaptive, extended (default) & 204 & $-2.6\%$ & $+15.6\%$ \\\bottomrule
+\end{tabular}
+\end{center}
+What fixes the lines is the \emph{extent} of the column the network sees, not the resolution inside it: FAL-C's own 82 points with the extensions are nearly as good as the fine mesh, while any number of extra points inside FAL-C's range leaves the lines where the 82-point column puts them. Cutting the mesh top at 3 or 5\,Mm, or its bottom at $-0.1$\,Mm, moves the lines by 2--7\%. This is the column-context dependence of the previous subsection again; most likely because the network's height-weighted statistics are those of columns of the training range. An adaptive mesh may therefore save levels only by spacing the extensions coarsely, not by leaving them out. In an inversion the mesh moves with the atmosphere between iterations; the gradient treats the levels as fixed.
 
 \section{Spectral synthesis}
 
@@ -436,7 +453,7 @@ The objective's gradient comes from one reverse pass through the chain:
 \draw[arr](a)--(b);\draw[arr](b)--(c);\draw[arr](c)--(d);\draw[arr](d)--(e);\draw[arr](e)--(f);
 \end{tikzpicture}
 \end{center}
-The contribution of the hydrostatic equilibrium ($\partial P/\partial T$ and so on) and the regularization is added by centred finite differences per control coordinate. The transposes are exact and have been checked: gradient against finite differences to about $4\times10^{-10}$ on log $\tau$ and $3\times10^{-9}$ on $z$ at $\mu=0.8$. The result drives a bounded L-BFGS optimizer with Armijo backtracking.
+The contribution of the hydrostatic equilibrium ($\partial P/\partial T$ and so on) is added by the adjoint of the HSEMHS solve: the cotangents of $P$, $\rho$, $\nel$, $\chi_{500}$ and $z$ pulled back to $T$ and $\mathbf B$ in one reverse pass, at a cost independent of the number of controls (about half a second for a $252^2$ column-HSE reconstruction, about as long as the reconstruction itself, where centred finite differences needed two reconstructions per control coordinate, 1280 per gradient in the first inversion). The regularization adds its analytic gradient. The transposes are exact and have been checked: gradient against finite differences to about $4\times10^{-10}$ on log $\tau$ and $3\times10^{-9}$ on $z$ at $\mu=0.8$. The result drives a bounded L-BFGS optimizer with Armijo backtracking.
 
 \subsection{Regularization}
 A real inversion is ill-posed: many atmospheres fit the same spectra, and layers outside the response function are unconstrained. The penalty has seven STiC-style vertical slots ($T$, $\vlos$, $\vturb$, $B$, inclination, azimuth, boundary pressure), each of which can penalize the first derivative, deviation from the depth mean, deviation from zero, or the second derivative, plus horizontal first or second differences per variable. It acts on the \emph{full} recovered atmosphere.
@@ -568,7 +585,7 @@ Conservation residual $|\log\sum n_i-\log n_{\rm element}|$&Free and needs no la
 \item \textbf{Statistical equilibrium in the labels.} The labels are MULTI3D's solution for the given snapshot. FFNO does not model time-dependent population evolution.
 \item \textbf{Fixed atom, fixed lines.} Six-level H and Ca\,\textsc{ii} from these files. New atoms need new labels and training. Only \Halpha{} and Ca\,\textsc{ii} 854.2\,nm are synthesized from FFNO populations; other transitions are possible in principle but are not wired into the inversion code.
 \item \textbf{Non-PRD, Stokes $I$.} Polarization and PRD are not implemented in synthesis.
-\item \textbf{Hydrostatic columns} in the inversion. MHS modes exist in HSEMHS but are not connected, and the boundary pressure is not a control.
+\item \textbf{Hydrostatic columns} in the inversion. MHS modes exist in HSEMHS, with an adjoint, but are not connected, and the boundary pressure is not a control.
 \item \textbf{LTE EOS} for $P$, $\rho$, $\nel$ and $\chi_{500}$, in a chromosphere that is not in LTE. Composition also differs slightly from the training simulations, whose $\rho/(n_{\rm H}m_{\rm H})$ is 1.357, against 1.398 for Wittmann's composition.
 \item \textbf{Continuum in LTE form}, with hydrogen from the EOS, and scattering treated as thermal.
 \item \textbf{Domain of validity.} Bifrost-like solar atmospheres with column extents and height ranges seen in training (the final model's height operator removes the dependence on how a column is sampled, not on what it contains). No guard stops a user from going beyond this. Very hot corona, new magnetic regimes and other stars are unvalidated.

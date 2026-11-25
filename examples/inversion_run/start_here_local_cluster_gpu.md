@@ -16,7 +16,7 @@ Other guides: [eagle7](start_here_eagle7.md), which has this machine's paths fil
 | Python 3.11 or newer | With CUDA `torch` and `numpy`. |
 | A C++ compiler | For the Wittmann EOS library. |
 
-Depth is the population mesh's 452 levels by default, whatever the input grid.
+The depth is the population mesh's: adaptive by default, so it depends on the atmosphere (204 levels for FALC; a column that reaches the mesh top on a fine grid needs more), or 452 levels with `[population.mesh] refinement = "fixed"`; the measurements above were made with the fixed 452/467-level meshes.
 
 ## 2. Install, once
 

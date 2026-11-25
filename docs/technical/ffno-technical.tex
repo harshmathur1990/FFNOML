@@ -1,6 +1,6 @@
 \input{../preamble.tex}
 \begin{document}
-\doctitle{FFNOML: technical reference}{Implementation of the Python training and inference code, the GPU service and the FFNOInversion.jl synthesis and inversion package. Written from the source at commit \code{3cb9c14} on \code{main}, 4 November 2026; the configuration, network, training and inference sections updated on 23 November 2026 for the final model (zaug) on branch \code{level-fractions-capacity}. The physics is in \code{docs/physics/ffno-physics.pdf}.}
+\doctitle{FFNOML: technical reference}{Implementation of the Python training and inference code, the GPU service and the FFNOInversion.jl synthesis and inversion package. Written from the source at commit \code{3cb9c14} on \code{main}, 4 November 2026; the configuration, network, training and inference sections updated on 23 November 2026 for the final model (zaug) on branch \code{level-fractions-capacity}; the dependencies, equilibrium adjoint, population mesh, batched service and cluster sections updated on 25 November 2026 (branch \code{adaptive-population-mesh}). The physics is in \code{docs/physics/ffno-physics.pdf}.}
 
 \tableofcontents
 
@@ -351,11 +351,14 @@ Variable&Effect\\\midrule
 \end{tabularx}
 \end{table}
 
+\subsection{Batched forward service}
+\code{ffno_batched_service.py} with \code{ffno_batched_backend.py} speaks the same protocol from one process without torchrun, for forward runs on GPUs too small for a cube's activations: hidden states in host RAM, batches through the visible GPUs (kernel-1 layers anywhere, 2D FFTs by plane, the vertical branch by column, GroupNorm by streaming statistics), a batch that runs out of memory split and retried. VJP and JVP are refused. Launcher \code{scripts/ffno_batched_service_local.sh}; \code{CUDA_VISIBLE_DEVICES} picks the GPUs, or \code{FFNO_BATCHED_DEVICES} names torch devices (\code{cpu}, \code{cuda:0}, \dots), one model replica per distinct device. FFNOInversion requires a service of at least two ranks, so one device is named twice (\code{cpu,cpu}). CPU and GPU give the same spectra on FAL-C.
+
 \section{FFNOInversion.jl: structure}
 
 \subsection{Dependencies}
 Julia 1.12 (manifest resolved with 1.12.3). \code{Project.toml} pins by Git revision:
-HSEMHS \code{29f2310} (\code{harshmathur1990/1DHSE3dMHS}, subdirectory \code{HSEMHS}) and Muspel \code{01ec68d} (\code{harshmathur1990/Muspel.jl}). Muspel is a weak dependency, loaded through the extension \code{ext/FFNOInversionMuspelExt.jl}. The local Muspel checkout must match on Olivia.
+HSEMHS \code{11fa58b} (\code{harshmathur1990/1DHSE3dMHS}, subdirectory \code{HSEMHS}; the equilibrium adjoint and the threaded Poisson modes), WittBifrostEOS \code{8e5d56a} (\code{harshmathur1990/WittBifrostEOS}; the EOS for both HSEMHS and the synthesis, \code{state\_d}) and Muspel \code{01ec68d} (\code{harshmathur1990/Muspel.jl}). Muspel is a weak dependency, loaded through the extension \code{ext/FFNOInversionMuspelExt.jl}. The local Muspel checkout must match on Olivia.
 
 \subsection{Source files}
 \begin{longtable}{L{4cm}L{12.5cm}}
@@ -464,10 +467,15 @@ Unknown keys in \code{[equilibrium]} and \code{[population]} are errors. \code{s
 \item \textbf{Given $\nel$} on log $m$ uses \code{_given_ne_column_mass!}: $P$ from \code{HSEMHS.lnP_from_lnne}, then \code{given_geometry!}. On other axes, \code{solve_embedded!(...; lnne)}.
 \item \textbf{Given atmosphere.} \code{set_given_state!} runs on reading; \code{GivenAtmosphereBackend} then only builds geometry, with no table and no MPI. Abundance constants: total 1.0950187898409673, mass per H $2.3396723599405787\times10^{-27}$\,kg, from \code{scripts/witt_eos_cpp.cpp}.
 \end{itemize}
-The HSEMHS Wittmann table and the FFNO Wittmann library are separate builds from the same source. \code{scripts/validate_eos_consistency.jl} compares them.
+\textbf{Adjoint.} \code{reconstruct_equilibrium!} records the solve (\code{set_equilibrium_record!}, HSEMHS \code{record = true}); \code{equilibrium_vjp!} fills an \code{HSEMHS.EquilibriumCotangent} with the cotangents of $P$, $\rho$, $\nel$, $\chi_{500}$ and $z$ and calls \code{HSEMHS.adjoint_embedded!}, returning those of $\ln T$ and $\mathbf B$ on the rank's slab. A given $\nel$ or a given atmosphere has no adjoint.
+
+The HSEMHS table and the FFNO Wittmann library are built from the same source, WittBifrostEOS (\code{scripts/build_wittmann_backend.jl} builds \code{libwitt_ffno.so} through it). \code{scripts/validate_eos_consistency.jl} compares them.
 
 \section{Population mesh}
-\code{MeshPopulationModel} wraps any population model. Default mesh: 452 levels.
+\code{MeshPopulationModel} wraps any population model. The mesh is adaptive by default (\code{[population.mesh] refinement = "adaptive"}); \code{"fixed"} is the generated 452-level mesh, or \code{heights_m} when given.
+\begin{itemize}
+\item \textbf{Adaptive} (\code{adaptive_population_mesh}, called by \code{_mesh_for!} in every \code{predict_populations!}, \code{population_vjp!} and \code{population_jvp!}): each column is sampled every \code{min_spacing_m}/2 between \code{bottom_m} and \code{top_m} (with \code{extend = false} only between the columns' lowest and highest point) by \code{_mesh_column!} on that probe, extensions included. Per probe interval the spacing keeping the change of $\ln T$, $\log_{10}\nel$, $\log_{10}\rho$ and each velocity within \code{lnT_step} (0.05), \code{log_ne_step}, \code{log_rho_step} (0.1) and \code{velocity_step_m_s} (1000) is taken; the minimum over columns (threaded in column chunks), clamped to [\code{min_spacing_m}, \code{max_spacing_m}] = [10, 200]\,km, made Lipschitz with slope \code{growth} $-1$ (0.2) at the probe nodes and linear between them, is marched from the top. A changed mesh drops the cached prediction and prints \code{POPULATION_MESH adaptive heights=...}. The gradient treats the mesh levels as fixed. \code{test/population_mesh.jl}: bounds, grading, the criterion on every unclamped step, determinism, a steeper atmosphere gives more levels, a looser criterion fewer.
+\end{itemize}
 \begin{itemize}
 \item \textbf{Forward.} \code{_mesh_features} per column, threaded. \code{_mesh_locate} classifies each mesh height as inside, above or below. \code{_mesh_corona!} and \code{_mesh_deep!} integrate $\ln P$ by RK4 with at most 20\,km steps, with $\rho,\nel$ from \code{HSEMHS.state}. \code{_mesh_lnP} is a Newton solve for $\ln P$ from $\ln\rho$ on the table. Above the table's low-pressure end the last state is held. Below, leaving the table is an error.
 \item \textbf{Inner call.} \code{_mesh_atmosphere} builds an \code{Atmosphere3D} on the mesh and calls the service.
@@ -536,7 +544,7 @@ Vertical slots, in order: \code{temperature, vlos, vturb, B, inc, azi, pgas_boun
 \item \code{footprint_vjp!} when an inclined $z$ view was used.
 \item \code{predict_distributed_populations_vjp!}: mesh transpose and service VJP; features map back to $\bar T$, $\bar{\mathbf v}$, $\bar{\nel}$, $\bar\rho$, $\bar z$.
 \item \code{accumulate_control_vjp!}: transpose of node expansion for directly controlled fields.
-\item \code{_force_regularization_vjp!}: for each scaled coordinate, centred finite difference of $\langle\text{bar},\text{derived fields}\rangle+R$, second-order on unequal steps and one-sided at bounds. This costs \textbf{two equilibrium solves per control coordinate per gradient}, the main remaining cost. \code{force_balance_step} defaults to $10^{-4}$.
+\item \code{distributed_regularization_vjp!} (analytic, with the transpose of the halo exchange) and \code{equilibrium_vjp!} (the HSEMHS adjoint) before the control accumulation: the cotangents of the derived fields pulled back to $T$ and $\mathbf B$ at a cost independent of the number of controls. \code{HybridAdjointObjectiveGradient(equilibrium = :finite_difference)} keeps the earlier route (\code{_force_regularization_vjp!}: centred differences per scaled coordinate, two equilibrium solves each, \code{force_balance_step} $10^{-4}$) as a check, and a backend without an adjoint uses it. \code{test/equilibrium_adjoint.jl}: the regularization gradient against differences $<10^{-7}$; the equilibrium VJP for column-hse-ltau, -logm, -z $<10^{-6}$; the objective gradient against the finite-difference route $2\times10^{-10}$.
 \end{enumerate}
 
 Opacity pullbacks: Muspel by a centred difference in eight quantities ($T,\nel,\vlos,n_{\rm H\,I},n_{\rm p},n_u,n_l,\vturb$) at each cell against the cotangents, in \code{_cell_pairing}; continuum by local relative differences, including EOS hydrogen derivatives in $T$ and $P$; Wittmann by \code{_local_wittmann_vjp!}, perturbing one level at a time, since the kernels are opaque C++.
@@ -622,7 +630,7 @@ FFNOML_RUN_DIR="$run" FFNO_INVERSION_CONFIG="$run/forward.toml" \
 Six NVIDIA T4s without Slurm. Source \code{~/loadnvidia.sh}, use \code{~/nvidiaenv/bin/python}, and set \code{FFNO_FSDP_LAUNCHER=.../scripts/ffno_fsdp_service_local.sh}, \code{FFNO_GPU_CONTROL_HOST=127.0.0.1}. Full fine-tuning runs out of memory on T4s. A $5\times5$ grid fits at most 2--3 GPUs, because of the rFFT bin constraint. See \code{response_run/falc/run_falc_eagle7.sh}.
 
 \subsection{hyades}
-CPU only. Source \code{~/loadgcc.sh}. Use node-local Julia at \code{/tmp/julia-1.12.3} where present, since Julia on stornext intermittently fails with ``failed to map segment''. System OpenMPI needs \code{libhcoll.so.1}, which is on hyades2, hyades3 and eagle8 only; \code{CXX=g++} builds the Wittmann test library. Use one CPU type per MPI job, and pin the MPICH interface.
+CPU only. Source \code{~/loadgcc.sh}. Use node-local Julia at \code{/tmp/julia-1.12.3} where present, since Julia on stornext intermittently fails with ``failed to map segment''. Set \code{CXX=g++} (and \code{CC=gcc}) for anything that builds the Wittmann library, including \code{Pkg.test()}: \code{loadgcc.sh}'s compilers are MPI wrappers that link the hcoll OpenMPI. Use Zen\,2/Zen\,3 nodes (hyades2--16) and one CPU type per MPI job, and pin the MPICH interface. The network runs on hyades CPUs through the batched service (\code{FFNO_BATCHED_DEVICES=cpu,cpu}), e.g.\ for the population-mesh experiments in \code{ffnoml_data/models/zaug/falc/adaptive_mesh}.
 
 \subsection{Reproducing the FAL-C comparison}
 \begin{lstlisting}
@@ -682,5 +690,5 @@ These come from reading the source. Unless a measurement is mentioned, they have
 \end{longtable}
 
 \section{Limits}
-Stokes $I$ and non-PRD only. \code{model = "mhs"} rejected until HSEMHS-integration Phase 4. Equilibrium derivatives by finite differences. FFNO lines limited to \Halpha{} and Ca\,\textsc{ii} 854.2\,nm. The service needs NVIDIA GPUs and at least two GPU ranks. One viewing angle per run. No calibrated uncertainty. Every labelled snapshot has been used in development, so there is no pristine test set.
+Stokes $I$ and non-PRD only. \code{model = "mhs"} rejected until HSEMHS-integration Phase 4. Equilibrium derivatives by the HSEMHS adjoint (column modes exact for the solver's discrete choices; one-sided at EOS-table slope breaks). FFNO lines limited to \Halpha{} and Ca\,\textsc{ii} 854.2\,nm. The service needs NVIDIA GPUs and at least two GPU ranks. One viewing angle per run. No calibrated uncertainty. Every labelled snapshot has been used in development, so there is no pristine test set.
 \end{document}

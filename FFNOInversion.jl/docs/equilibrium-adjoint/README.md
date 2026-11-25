@@ -1,7 +1,9 @@
 # Equilibrium adjoint in FFNOInversion (Phase 7 of the HSEMHS plan)
 
-Branch `equilibrium-adjoint` (FFNOML), started 24 Nov 2026. **Implemented 24 Nov 2026** (status at the end). The HSEMHS side is planned in HSEMHS
-`design/adjoint/` (same branch name); this file covers what changes here once `HSEMHS.adjoint_embedded!` exists.
+Branch `equilibrium-adjoint` (FFNOML), started 24 Nov 2026. **Implemented 24 Nov 2026 and merged on 25 Nov 2026** (FFNOML #61,
+HSEMHS #16, WittBifrostEOS #1; status at the end). The HSEMHS side is in HSEMHS `design/adjoint/` and its mode documents
+(`docs/physics/common/adjoint.tex`, `docs/technical/common/adjoint.tex`); this file covers what changed here. The sections
+"Today" and "Change" are the plan as written before the implementation.
 
 ## Today
 
