@@ -344,6 +344,49 @@ function exchange_halos(field::DistributedField,context::ParallelContext,width::
     padded
 end
 
+"""
+Transpose of `exchange_halos`: the cotangent of a halo-padded copy (`padded_bar`, the size `exchange_halos` returns) pulled
+back to the rank's own values. Each halo's cotangent goes back to the rank its values came from (the Y stage first, then
+X, the reverse of the forward); at a physical boundary the replicated edge row or column receives the sum.
+"""
+function exchange_halos_vjp(padded_bar::AbstractArray,tile::Tile2D,context::ParallelContext,width::Int)
+    width==0 && return copy(padded_bar)
+    P=copy(padded_bar)
+    lead=size(P)[1:end-2]; prefix=ntuple(_->Colon(),length(lead))
+    lx=size(P,ndims(P)-1)-2width; ly=size(P,ndims(P))-2width
+    cx,cy=tile.coordinates
+    down=_rank_at(tile,cx,cy-1); up=_rank_at(tile,cx,cy+1)
+    lower=copy(@view P[prefix...,:,1:width]); upper=copy(@view P[prefix...,:,width+ly+1:width+ly+width])
+    from_up=zeros(eltype(P),size(lower)); from_down=zeros(eltype(P),size(upper))
+    if context.enabled
+        _assert_mpi_thread(context)
+        MPI.Sendrecv!(lower,from_up,context.comm;dest=something(down,MPI.PROC_NULL),sendtag=213,
+            source=something(up,MPI.PROC_NULL),recvtag=213)
+        MPI.Sendrecv!(upper,from_down,context.comm;dest=something(up,MPI.PROC_NULL),sendtag=214,
+            source=something(down,MPI.PROC_NULL),recvtag=214)
+    end
+    # my upper boundary rows were the lower halo of `up`; my lower boundary rows the upper halo of `down`
+    up===nothing ? (@views P[prefix...,:,width+ly:width+ly].+=sum(upper;dims=ndims(P))) :
+        (@views P[prefix...,:,width+ly-width+1:width+ly].+=from_up)
+    down===nothing ? (@views P[prefix...,:,width+1:width+1].+=sum(lower;dims=ndims(P))) :
+        (@views P[prefix...,:,width+1:width+width].+=from_down)
+    rows=width+1:width+ly
+    left=_rank_at(tile,cx-1,cy); right=_rank_at(tile,cx+1,cy)
+    lefth=copy(@view P[prefix...,1:width,rows]); righth=copy(@view P[prefix...,width+lx+1:width+lx+width,rows])
+    from_right=zeros(eltype(P),size(lefth)); from_left=zeros(eltype(P),size(righth))
+    if context.enabled
+        MPI.Sendrecv!(lefth,from_right,context.comm;dest=something(left,MPI.PROC_NULL),sendtag=211,
+            source=something(right,MPI.PROC_NULL),recvtag=211)
+        MPI.Sendrecv!(righth,from_left,context.comm;dest=something(right,MPI.PROC_NULL),sendtag=212,
+            source=something(left,MPI.PROC_NULL),recvtag=212)
+    end
+    right===nothing ? (@views P[prefix...,width+lx:width+lx,rows].+=sum(righth;dims=ndims(P)-1)) :
+        (@views P[prefix...,width+lx-width+1:width+lx,rows].+=from_right)
+    left===nothing ? (@views P[prefix...,width+1:width+1,rows].+=sum(lefth;dims=ndims(P)-1)) :
+        (@views P[prefix...,width+1:width+width,rows].+=from_left)
+    return P[prefix...,width+1:width+lx,rows]
+end
+
 """Copy one rank-local atmosphere. The returned object owns no global arrays."""
 function local_atmosphere(atmosphere::Atmosphere3D,tile::Tile2D)
     g = atmosphere.grid

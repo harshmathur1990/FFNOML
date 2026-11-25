@@ -211,8 +211,8 @@ version = "2.1.2+0"
 
 [[deps.HSEMHS]]
 deps = ["Dates", "DelimitedFiles", "FFTW", "HDF5", "Libdl", "LinearAlgebra", "MPI", "MPIPreferences", "OffsetArrays", "Printf", "ProgressMeter", "Random", "SHA", "Statistics", "TOML", "WittBifrostEOS"]
-git-tree-sha1 = "2e1835762d60a85865ea7209d1ef2ab82f2ae5f9"
-repo-rev = "7d7dcddb19228cbdbe7bc83a55b0c9e8ddbaac0d"
+git-tree-sha1 = "23290dbe4402455d313ecae8e8a4b4d9c6eca6b2"
+repo-rev = "11fa58be80d714162b50bda19d379c96f1a2a166"
 repo-subdir = "HSEMHS"
 repo-url = "https://github.com/harshmathur1990/1DHSE3dMHS.git"
 uuid = "3f8a2c4e-6b1d-4e7a-9c55-2d0f7e1a9b31"
@@ -724,8 +724,8 @@ version = "1.28.0"
 
 [[deps.WittBifrostEOS]]
 deps = ["HDF5", "Libdl", "Printf", "Random", "SHA", "Scratch", "Statistics"]
-git-tree-sha1 = "7f06a3d108bf0ea159927608da571942aab38b0a"
-repo-rev = "f2575705b81ded04a39cdb2cceb0c6bc8de744e8"
+git-tree-sha1 = "627ea8b1eeb574073a9efd4565358167af7d1935"
+repo-rev = "8e5d56a477cf81f5433343a76328dcdc8fe7db4e"
 repo-url = "https://github.com/harshmathur1990/WittBifrostEOS.git"
 uuid = "ae47c4ec-14cd-4845-8eff-b40a9f32171b"
 version = "0.1.0"

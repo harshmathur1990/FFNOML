@@ -775,9 +775,16 @@ control maps; use it with fresh optimizer history.
 - pullbacks through the FFNO line opacities and Kurucz LTE lines (with local
   fallbacks for the Muspel and Wittmann pieces);
 - the population-mesh transpose and the FFNO VJP from the GPU service;
-- equilibrium and regularization contributions by centred finite differences per
-  control coordinate, one-sided near bounds (an implicit-function equilibrium VJP is
-  HSEMHS-integration Phase 6).
+- the regularization by its analytic gradient (`distributed_regularization_vjp!`, with the transpose of the halo
+  exchange across MPI tiles);
+- the equilibrium by its adjoint (`equilibrium_vjp!` → `HSEMHS.adjoint_embedded!`, design in HSEMHS `design/adjoint/`
+  and `docs/equilibrium-adjoint/`): the cotangents of pgas, rho, ne, z and chi500 pulled back to the temperature and B
+  at the last reconstruction, which the gradient records. Its cost does not depend on the number of control
+  coordinates (column-hse-ltau on 252² × 96: 0.44 s, against 0.52 s for the reconstruction itself).
+
+`HybridAdjointObjectiveGradient(equilibrium = :finite_difference)` restores the earlier route (centred differences per
+control coordinate, two reconstructions each, one-sided near bounds) as a check; a backend without an adjoint (a given
+atmosphere, test stand-ins) uses it automatically.
 
 `FiniteDifferenceObjectiveGradient` is the validation oracle;
 `gradient_taylor_validation` and `dot_product_validation` check the adjoints.
@@ -972,8 +979,9 @@ is about 2% at H alpha and 5% at Ca II 8542, with cores about 10% and 6% deeper.
 - Stokes I and non-PRD only.
 - `equilibrium.model = "mhs"` is rejected until HSEMHS-integration Phase 4. A
   magnetic field is still used by `align = "ptot"` and by synthesis.
-- Equilibrium derivatives are finite differences, which cost two equilibrium solves
-  per control coordinate per gradient.
+- The equilibrium adjoint of the column modes is exact for the solver with its discrete choices fixed (substep counts,
+  EOS cells, branches); at an EOS-table slope break it is one-sided. The MHS modes' adjoint (HSEMHS) is exact at a
+  stationary state, which `poisson.polish` reaches; they are not yet runnable here (Phase 4 of the integration).
 - FFNO lines are limited to H alpha and Ca II 8542, with the 6-level H and Ca II
   atoms used in training.
 - The FSDP service needs CUDA (NVIDIA) GPUs and at least two GPU ranks. The batched service works on one GPU or more, but is forward only.
