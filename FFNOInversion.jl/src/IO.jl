@@ -577,7 +577,7 @@ function load_config(path::AbstractString)
 end
 
 const _POPULATION_MESH_KEYS=("enabled","bottom_m","top_m","spacing_m","uniform_top_m","stretch","max_spacing_m","nabla","corona_temperature_k","corona_transition_m",
-    "heights_m","refinement","min_spacing_m","growth","lnT_step","log_ne_step","log_rho_step","velocity_step_m_s")
+    "heights_m","refinement","min_spacing_m","growth","lnT_step","log_ne_step","log_rho_step","velocity_step_m_s","extend")
 
 """`[population.mesh]`: the height mesh FFNO runs on, on every axis and in both modes, unless `enabled = false` feeds FFNO the native grid.
 `refinement = "fixed"` (default) is the generated mesh, or `heights_m` when given; `"adaptive"` builds it from each atmosphere
@@ -595,7 +595,8 @@ function _population_mesh(raw,vertical_coordinate,has_table=true)
     refinement in ("fixed","adaptive") || throw(ArgumentError("[population.mesh] refinement must be \"fixed\" or \"adaptive\", got \"$refinement\""))
     PopulationMeshConfig(;corona_temperature_k=1.0e6,adaptive=refinement=="adaptive",
         heights_m=Float64.(get(mesh,"heights_m",Float64[])),
-        (Symbol(k)=>Float64(v) for (k,v) in mesh if !(k in ("enabled","refinement","heights_m")))...)
+        extend=Bool(get(mesh,"extend",true)),
+        (Symbol(k)=>Float64(v) for (k,v) in mesh if !(k in ("enabled","refinement","heights_m","extend")))...)
 end
 
 function dry_run_summary(config::RunConfig)

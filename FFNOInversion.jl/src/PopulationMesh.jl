@@ -43,9 +43,10 @@ struct PopulationMeshConfig{T<:AbstractFloat}
     log_ne_step::T
     log_rho_step::T
     velocity_step_m_s::T
+    extend::Bool                  # adaptive: from bottom_m to top_m; false: only between the columns' own lowest and highest point
     function PopulationMeshConfig{T}(bottom_m,top_m,spacing_m,uniform_top_m,stretch,max_spacing_m,nabla,corona_temperature_k,
             corona_transition_m,heights_m=T[],adaptive=false,min_spacing_m=1.0e4,growth=1.2,lnT_step=0.05,log_ne_step=0.1,
-            log_rho_step=0.1,velocity_step_m_s=1.0e3) where T
+            log_rho_step=0.1,velocity_step_m_s=1.0e3,extend=true) where T
         bottom_m<uniform_top_m<=top_m || throw(ArgumentError("population mesh needs bottom_m < uniform_top_m <= top_m"))
         0<spacing_m<=max_spacing_m || throw(ArgumentError("population mesh needs 0 < spacing_m <= max_spacing_m"))
         stretch>=1 || throw(ArgumentError("population mesh stretch must be >= 1"))
@@ -59,19 +60,20 @@ struct PopulationMeshConfig{T<:AbstractFloat}
         growth>1 || throw(ArgumentError("population mesh growth must be > 1"))
         min(lnT_step,log_ne_step,log_rho_step,velocity_step_m_s)>0 || throw(ArgumentError("population mesh refinement steps must be positive"))
         new{T}(bottom_m,top_m,spacing_m,uniform_top_m,stretch,max_spacing_m,nabla,corona_temperature_k,corona_transition_m,
-            T.(heights_m),adaptive,min_spacing_m,growth,lnT_step,log_ne_step,log_rho_step,velocity_step_m_s)
+            T.(heights_m),adaptive,min_spacing_m,growth,lnT_step,log_ne_step,log_rho_step,velocity_step_m_s,extend)
     end
 end
 """Defaults inside the range of the training grids (bottoms -1 to -2.5 Mm, spacing 12-30 km stretching to
 100-160 km in the corona, tops up to 14.4 Mm). `heights_m` gives the mesh outright; `adaptive = true` builds it from
 each atmosphere (`adaptive_population_mesh`) between the same `bottom_m` and `top_m`, with spacings from `min_spacing_m`
-to `max_spacing_m`."""
+to `max_spacing_m`; with `extend = false` only between the columns' own lowest and highest point (no corona or deep
+extension)."""
 PopulationMeshConfig(;bottom_m=-1.0e6,top_m=1.4e7,spacing_m=2.0e4,uniform_top_m=4.5e6,stretch=1.01,
     max_spacing_m=1.0e5,nabla=0.13,corona_temperature_k=0.0,corona_transition_m=2.4e5,heights_m=Float64[],adaptive=false,
-    min_spacing_m=1.0e4,growth=1.2,lnT_step=0.05,log_ne_step=0.1,log_rho_step=0.1,velocity_step_m_s=1.0e3)=
+    min_spacing_m=1.0e4,growth=1.2,lnT_step=0.05,log_ne_step=0.1,log_rho_step=0.1,velocity_step_m_s=1.0e3,extend=true)=
     PopulationMeshConfig{Float64}(Float64.((bottom_m,top_m,spacing_m,uniform_top_m,stretch,max_spacing_m,nabla,
         corona_temperature_k,corona_transition_m))...,Float64.(heights_m),Bool(adaptive),
-        Float64.((min_spacing_m,growth,lnT_step,log_ne_step,log_rho_step,velocity_step_m_s))...)
+        Float64.((min_spacing_m,growth,lnT_step,log_ne_step,log_rho_step,velocity_step_m_s))...,Bool(extend))
 
 """Mesh heights [m], top first: `heights_m` when given; otherwise `spacing_m` up to `uniform_top_m`, then growing by
 `stretch` per point up to `max_spacing_m`. An adaptive mesh starts as this one and is replaced at each prediction."""
@@ -222,10 +224,13 @@ fast, coarse where every column is smooth. Each column is sampled every `min_spa
 the change per mesh step of ln T within `lnT_step`, of log10 nₑ and log10 ρ within `log_ne_step` and `log_rho_step`, and
 of each velocity component within `velocity_step_m_s` is taken, the smallest over all columns, clamped to
 [`min_spacing_m`, `max_spacing_m`] and graded so that one step is at most `growth` times the next. One mesh serves
-every column, as the fixed one does.
+every column, as the fixed one does. With `extend = false` the mesh spans only the columns' own heights, from the
+lowest bottom to the highest top over all columns: points are added between them, never outside.
 """
 function adaptive_population_mesh(model::MeshPopulationModel,atmosphere)
-    c=model.adaptive; top=Float64(c.top_m); bottom=Float64(c.bottom_m)
+    c=model.adaptive
+    top,bottom=c.extend ? (Float64(c.top_m),Float64(c.bottom_m)) :
+        (Float64(maximum(@view atmosphere.z[1,:,:])),Float64(minimum(@view atmosphere.z[end,:,:])))
     n=max(2,ceil(Int,2(top-bottom)/c.min_spacing_m)+1); probe=collect(range(top,bottom;length=n)); dz=probe[1]-probe[2]
     nx,ny=size(atmosphere.temperature)[2:3]; columns=vec(CartesianIndices((nx,ny)))
     tasks=map(Iterators.partition(columns,max(1,cld(length(columns),4Threads.nthreads())))) do chunk
