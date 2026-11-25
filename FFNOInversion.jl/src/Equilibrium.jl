@@ -451,6 +451,7 @@ mutable struct HSEMHSBackend <: AbstractEquilibriumBackend
     provenance::Dict{String,Any}
     closed::Bool
     ne_given::Bool                    # the input supplies nₑ: HSEMHS derives P and rho from it on every reconstruction
+    record::Bool                      # reconstructions keep what HSEMHS.adjoint_embedded! needs (set_equilibrium_record!)
 end
 
 function _backend_comm(context::ParallelContext)
@@ -536,7 +537,7 @@ function _prepare_hsemhs(eq,distributed,context,synthesis_eos)
     provenance["eos_table_file"]=abspath(eq.eos_table_file); provenance["hsemhs_version"]=string(pkgversion(HSEMHS))
     ne_given=distributed.local_atmosphere.ne!==nothing
     ne_given && (provenance["ne_given"]=true)
-    HSEMHSBackend(eq,ws,provenance,false,ne_given)
+    HSEMHSBackend(eq,ws,provenance,false,ne_given,false)
 end
 
 _zxy_to_zyx(a)=permutedims(a,(1,3,2))
@@ -587,13 +588,14 @@ function reconstruct_equilibrium!(backend::HSEMHSBackend,distributed::Distribute
     started=time()
     _forward_stage(context,"equilibrium begin mode=$(hsemhs_mode_name(backend.config.mode))")
     given=backend.ne_given ? (;lnne=_zxy_to_zyx(log.(a.ne))) : (;)
+    rec=backend.record && !backend.ne_given
     res=try
         if B===nothing
             # no magnetic data means B = 0 (the τ- and m-grid alignment then uses the gas pressure alone)
-            backend.config.mode===:column_hse_z ? HSEMHS.solve_embedded!(backend.workspace,lnT;given...) :
-                HSEMHS.solve_embedded!(backend.workspace,lnT,zero(lnT),zero(lnT),zero(lnT);given...)
+            backend.config.mode===:column_hse_z ? HSEMHS.solve_embedded!(backend.workspace,lnT;given...,record=rec) :
+                HSEMHS.solve_embedded!(backend.workspace,lnT,zero(lnT),zero(lnT),zero(lnT);given...,record=rec)
         else
-            HSEMHS.solve_embedded!(backend.workspace,lnT,_zxy_to_zyx(B.Bx),_zxy_to_zyx(B.By),_zxy_to_zyx(B.Bz);given...)
+            HSEMHS.solve_embedded!(backend.workspace,lnT,_zxy_to_zyx(B.Bx),_zxy_to_zyx(B.By),_zxy_to_zyx(B.Bz);given...,record=rec)
         end
     catch e
         e isa WittBifrostEOS.InvalidInput ? throw(ArgumentError(e.msg)) : rethrow()
@@ -609,6 +611,42 @@ function reconstruct_equilibrium!(backend::HSEMHSBackend,distributed::Distribute
     EquilibriumOutcome(st.valid,st.reason,backend.config.model,backend.config.mode,st.steps,st.seconds,copy(st.messages),
         deepcopy(st))
 end
+
+"""Whether reconstructions record what the equilibrium adjoint needs (HSEMHS backends; a no-op for the others)."""
+set_equilibrium_record!(backend::HSEMHSBackend,on::Bool)=(backend.record=on; backend)
+set_equilibrium_record!(backend,on::Bool)=backend
+"""Whether `equilibrium_vjp!` can differentiate this backend (an HSEMHS backend without a given nₑ)."""
+supports_equilibrium_adjoint(backend::HSEMHSBackend)=!backend.ne_given
+supports_equilibrium_adjoint(backend)=false
+
+"""
+    equilibrium_vjp!(bar, backend, distributed, context) -> status or nothing
+
+Pulls the cotangents of the equilibrium's outputs in `bar` (pgas, rho, ne, z, chi500) back to the temperature and, when
+present, the magnetic field (added to `bar`), through `HSEMHS.adjoint_embedded!` at the last reconstruction, which must
+have been recorded (`set_equilibrium_record!`). Collective. Returns HSEMHS's status (:exact, :stationary,
+:not_stationary), or `nothing` for a backend without an adjoint (the caller then differentiates it otherwise).
+"""
+function equilibrium_vjp!(bar,backend::HSEMHSBackend,distributed::DistributedAtmosphere,context::ParallelContext)
+    backend.ne_given && return nothing
+    backend.closed && throw(ArgumentError("the equilibrium backend is closed"))
+    a=distributed.local_atmosphere
+    hb=HSEMHS.EquilibriumCotangent(backend.workspace)
+    hb.Pgas.=_zxy_to_zyx(bar.pgas); hb.rho.=_zxy_to_zyx(bar.rho); hb.ne.=_zxy_to_zyx(bar.ne)
+    hb.chi500.=_zxy_to_zyx(bar.chi500); hb.z.=_zxy_to_zyx(bar.z)
+    adj=try
+        HSEMHS.adjoint_embedded!(backend.workspace,hb)
+    catch e
+        e isa WittBifrostEOS.InvalidInput ? throw(ArgumentError(e.msg)) : rethrow()
+    end
+    bar.temperature.+=_zyx_to_zxy(adj.lnT)./a.temperature
+    if bar.magnetic_field!==nothing && a.magnetic_field!==nothing
+        bar.magnetic_field.Bx.+=_zyx_to_zxy(adj.Bx); bar.magnetic_field.By.+=_zyx_to_zxy(adj.By)
+        bar.magnetic_field.Bz.+=_zyx_to_zxy(adj.Bz)
+    end
+    adj.status
+end
+equilibrium_vjp!(bar,backend,distributed,context)=nothing
 
 """The synthesis's NLTE hydrogen (`build_synthesis_setup(...; nlte_hydrogen)`): the equilibrium's table with `eos_model = "nlte"`, else `nothing`
 (Wittmann's LTE state). A given atmosphere with its own hydrogen populations keeps them."""

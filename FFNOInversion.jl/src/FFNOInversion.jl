@@ -62,7 +62,7 @@ export diagnostic_event!, diagnostic_checkpoint!, set_diagnostic_context!, recor
 export AbstractEOS, WittmannEOS, IdealGasEOS, thermodynamics!
 export ContinuumState, continuum_state, continuum_extinction_cm, continuum_extinction_m
 export AbstractEquilibriumBackend, EquilibriumConfig, EquilibriumOutcome, HSEMHSBackend
-export prepare_equilibrium, reconstruct_equilibrium!, close_equilibrium!
+export prepare_equilibrium, reconstruct_equilibrium!, close_equilibrium!, set_equilibrium_record!, equilibrium_vjp!, supports_equilibrium_adjoint
 export StokesSet, SpectralCube, ObservationCube, CapabilityManifest
 export NodeField, expand_nodes
 export AbstractPopulationModel, predict_populations!, population_vjp!, population_jvp!, MockPopulationModel
@@ -85,7 +85,7 @@ export ForwardWorkspace, MockForwardModel, forward!
 export DistributedAtmosphere, distribute_atmosphere, gather_atmosphere
 export AbstractDistributedPopulationModel
 export LocalDistributedPopulationModel, RootDistributedPopulationModel, CompositeDistributedPopulationModel, predict_distributed_populations!
-export HybridForwardWorkspace, HybridForwardModel, HybridForwardTimings, gather_spectrum, distributed_chi2, distributed_regularization_penalty
+export HybridForwardWorkspace, HybridForwardModel, HybridForwardTimings, gather_spectrum, distributed_chi2, distributed_regularization_penalty, distributed_regularization_vjp!
 export cartesian_populations, synthesis_atmosphere, footprint_state!
 export distributed_memory_report
 export FSDPModelSpec, FSDPServiceClient, FSDPFFNOModel

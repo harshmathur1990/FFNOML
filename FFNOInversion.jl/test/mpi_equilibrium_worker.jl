@@ -42,6 +42,28 @@ ts=@testset "HSEMHS equilibrium n=$R" begin
         gathered=gather_atmosphere(distributed,context); spectrum=gather_spectrum(result.spectrum,distributed,context)
         isroot(context) && (results[kind]=(pgas=gathered.pgas,rho=gathered.rho,ne=gathered.ne,z=gathered.z,
             logtau500=gathered.logtau500,spectrum=spectrum.data))
+        # the equilibrium adjoint and the regularization gradient (halo transposes) on R ranks: deterministic cotangents
+        # from global indices, the pulled-back fields gathered for the driver (mpi_equilibrium_compare.jl)
+        set_equilibrium_record!(backend,true)
+        @test forward!(workspace,model,distributed,context).valid
+        a=distributed.local_atmosphere; xr=distributed.tile.xrange
+        cot(p)=[sin(p+0.7k+1.3(first(xr)+i-1)+0.5j) for k in axes(a.temperature,1),i in axes(a.temperature,2),j in axes(a.temperature,3)]
+        bar=AtmosphereCotangent(a)
+        bar.pgas.=cot(0.1)./a.pgas; bar.rho.=cot(0.2)./a.rho; bar.ne.=cot(0.3)./a.ne; bar.chi500.=cot(0.4)./a.chi500
+        kind===:z_m || (bar.z.=cot(0.5)./1e5)
+        @test equilibrium_vjp!(bar,backend,distributed,context)===:exact
+        spec=RegularizationSpec(vertical=VerticalRegularizationSpec((4,1,0,3,1,2,1),0.7,(1.0,0.5,0.3,0.2,0.4,0.6,0.8);
+                length_scale_m=kind===:z_m ? 1e5 : nothing),
+            horizontal=Dict(:temperature=>1e-3,:Bx=>0.5,:pgas=>1e-3),
+            scales=Dict(:temperature=>1000.0,:B=>0.1,:inc=>1.0,:azi=>1.0,:pgas_boundary=>100.0,:Bx=>0.1,:pgas=>100.0),
+            horizontal_order=2)
+        distributed_regularization_vjp!(bar,distributed,spec,4.8e4,4.8e4,context)
+        dims=(size(a.temperature,1),11,6)
+        g(f)=FFNOInversion.gather_field(FFNOInversion._field(f,distributed.tile,dims),context)
+        adj=(temperature=g(bar.temperature),pgas=g(bar.pgas),Bx=g(bar.magnetic_field.Bx),By=g(bar.magnetic_field.By),
+             Bz=g(bar.magnetic_field.Bz))
+        isroot(context) && (results[Symbol(kind,:_adjoint)]=adj)
+        set_equilibrium_record!(backend,false)
         # out-of-envelope temperature on the last rank only: the same invalid verdict everywhere, no deadlock
         reference_T=copy(distributed.local_atmosphere.temperature)
         context.rank==R-1 && (distributed.local_atmosphere.temperature[:,1,1].=5.0e7)
