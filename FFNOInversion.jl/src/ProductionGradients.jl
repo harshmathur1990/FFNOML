@@ -648,6 +648,8 @@ function objective_gradient!(backend::HybridAdjointObjectiveGradient,
         problem::DistributedInversionProblem,layout::ControlMapLayout{T},parameters,context) where T
     adjoint=backend.equilibrium===:adjoint && supports_equilibrium_adjoint(problem.model.equilibrium)
     set_equilibrium_record!(problem.model.equilibrium,adjoint)          # the reconstruction below keeps its tape
+    # the factory's prepared equilibrium was solved without a tape: reconstruct (job 3175806 failed on the first gradient)
+    adjoint && (problem.prepared_initial_available[]=false)
     evaluation=evaluate_objective!(problem,layout,parameters,context)
     isfinite(evaluation.components.total) || throw(ArgumentError("cannot differentiate an infeasible atmosphere"))
     synthetic=problem.workspace.output.data; observation=problem.observation
