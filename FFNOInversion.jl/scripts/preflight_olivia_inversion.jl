@@ -195,6 +195,122 @@ function _ffno_lines(config,run_dir,population_levels)
     found
 end
 
+"""A value for the report: long vectors shortened, structs as `name=value` of their fields."""
+function _short(value)
+    value===nothing && return "none"
+    value isa AbstractString && return value
+    value isa Symbol && return string(value)
+    if value isa AbstractVector
+        length(value)<=8 && return "[" * join(_short.(value),", ") * "]"
+        return "[" * join(_short.(value[1:3]),", ") * ", … " * join(_short.(value[end-1:end]),", ") * "] (" * string(length(value)) * ")"
+    end
+    value isa AbstractArray && return "array " * join(size(value),"×")
+    value isa AbstractDict && return "{" * join((string(k,"=",_short(v)) for (k,v) in sort!(collect(value);by=string∘first)),", ") * "}"
+    value isa Tuple && return "(" * join(_short.(value),", ") * ")"
+    value isa AbstractFloat && return string(round(value;sigdigits=6))
+    isstructtype(typeof(value)) && !(value isa Number) && !isempty(fieldnames(typeof(value))) && return _fields(value)
+    string(value)
+end
+_fields(value)=join((string(name,"=",_short(getfield(value,name))) for name in fieldnames(typeof(value))),", ")
+
+function _file_description(path)
+    isfile(path) || return "$path (missing)"
+    info=stat(path)
+    "$path ($(round(info.size/2^20;digits=1)) MiB, modified $(Libc.strftime("%Y-%m-%d %H:%M",info.mtime)))"
+end
+
+"""The code that will run: this checkout's commit and the HSEMHS and WittBifrostEOS pins of its Manifest."""
+function _code_description(package_dir)
+    commit=try
+        head=strip(read(`git -C $package_dir rev-parse --short HEAD`,String))
+        branch=strip(read(`git -C $package_dir rev-parse --abbrev-ref HEAD`,String))
+        dirty=isempty(strip(read(`git -C $package_dir status --porcelain --untracked-files=no`,String))) ? "" : ", uncommitted changes"
+        "$head ($branch$dirty)"
+    catch
+        "unknown (not a git checkout)"
+    end
+    manifest=joinpath(package_dir,"Manifest.toml")
+    pins=String[]
+    if isfile(manifest)
+        deps=get(FFNOInversion.TOML.parsefile(manifest),"deps",Dict())
+        for name in ("HSEMHS","WittBifrostEOS")
+            entry=get(deps,name,nothing)
+            entry===nothing && continue
+            rev=get(first(entry),"repo-rev",get(first(entry),"path","?"))
+            push!(pins,"$name $(first(rev,min(7,length(rev))))")
+        end
+    end
+    commit,join(pins,", ")
+end
+
+_eos_description(model)=model=="nlte" ? "NLTE (HSEMHS eos.model = nlte: hydrogen ionization of Bifrost hion runs)" :
+    "LTE (Wittmann)"
+
+"""The configuration as the run will use it: every section with its resolved values."""
+function _configuration_details(io,config,run_dir)
+    eq=config.equilibrium
+    given_atmosphere=config.atmosphere.ne_dataset!==nothing
+    println(io,"  Equilibrium:")
+    if given_atmosphere
+        println(io,"    given atmosphere: nₑ",config.atmosphere.rho_dataset===nothing ? "" : ", ρ",
+            config.atmosphere.hydrogen_populations_dataset===nothing ? "" : ", hydrogen populations"," from the input; no HSEMHS solve")
+    end
+    println(io,"    backend=",eq.backend," model=",eq.model," mode=",eq.mode," gravity=",eq.gravity_m_s2," m/s²",
+        " on_nonconvergence=",eq.on_nonconvergence)
+    println(io,"    EOS:            ",_eos_description(eq.eos_model))
+    println(io,"    EOS table:      ",_file_description(_run_path(run_dir,eq.eos_table_file)))
+    eq.column===nothing || println(io,"    column options: ",_short(eq.column))
+    eq.poisson===nothing || println(io,"    poisson options: ",_short(eq.poisson))
+    a=config.atmosphere
+    println(io,"  Atmosphere input:")
+    println(io,"    format=",a.model_format," vertical=",a.vertical_coordinate," (dataset ",a.vertical_dataset,")",
+        " time_index=",config.time_index," vz_positive=",config.vz_positive)
+    println(io,"    datasets: T=",a.temperature_dataset," vx=",a.vx_dataset," vy=",a.vy_dataset," vz=",a.vz_dataset,
+        " B=",_short(a.magnetic_datasets)," vturb=",_short(a.vturb_dataset)," x=",_short(a.x_dataset)," y=",_short(a.y_dataset))
+    println(io,"    given: ne=",_short(a.ne_dataset)," rho=",_short(a.rho_dataset)," pgas=",_short(a.pgas_dataset),
+        " hydrogen=",_short(a.hydrogen_populations_dataset)," temperature_floor=",a.temperature_floor_k," K")
+    println(io,"  Population mesh:")
+    mesh=config.population_mesh
+    if mesh===nothing
+        println(io,"    off: the FFNO sees the native grid")
+    else
+        kind=!isempty(mesh.heights_m) ? "explicit ($(length(mesh.heights_m)) heights)" : mesh.adaptive ? "adaptive" : "fixed"
+        println(io,"    ",kind,": ",round(mesh.bottom_m/1e3;digits=1)," to ",round(mesh.top_m/1e3;digits=1)," km",
+            mesh.adaptive ? (mesh.extend ? " (extend = true)" : " (extend = false: within the columns' own heights)") : "")
+        if mesh.adaptive
+            println(io,"    spacing ",round(mesh.min_spacing_m/1e3;digits=2),"–",round(mesh.max_spacing_m/1e3;digits=2)," km, growth ",
+                mesh.growth,"; steps |Δln T| ≤ ",mesh.lnT_step,", |Δlog nₑ| ≤ ",mesh.log_ne_step,", |Δlog ρ| ≤ ",mesh.log_rho_step,
+                ", |Δv| ≤ ",mesh.velocity_step_m_s/1e3," km/s")
+        else
+            println(io,"    spacing ",round(mesh.spacing_m/1e3;digits=2)," km up to ",round(mesh.uniform_top_m/1e3;digits=1),
+                " km, stretch ",mesh.stretch,", max ",round(mesh.max_spacing_m/1e3;digits=2)," km")
+        end
+        println(io,"    below the columns: ∇ = ",mesh.nabla,"; corona ",mesh.corona_temperature_k," K over ",
+            round(mesh.corona_transition_m/1e3;digits=1)," km")
+    end
+    config.given_populations===nothing || println(io,"    given populations: ",_short(config.given_populations))
+    println(io,"  Physics:        redistribution=",config.redistribution," stokes=",join(config.stokes.components,","),
+        " continuum_populations=",config.continuum_populations," line_center=",config.line_center,
+        " ffno_population_limit=",config.ffno_population_limit," ffno_no_inversion=",config.ffno_no_inversion)
+    println(io,"  View:           ",_fields(config.view))
+    println(io,"  Grid:           dx=",config.synthesis.dx_m," m dy=",config.synthesis.dy_m," m; ",
+        length(config.synthesis.wavelength_m)," wavelengths")
+    println(io,"  Observation model: ",_fields(config.observation_model))
+    config.observed===nothing || println(io,"  Observed data:  ",_fields(config.observed))
+    config.weights===nothing || println(io,"  Weights:        ",_fields(config.weights))
+    if !isempty(config.controls)
+        println(io,"  Controls:")
+        for c in config.controls
+            println(io,"    ",c.variable,": nodes ",_short(c.nodes)," (",c.kind,") on ",c.control_nx,"×",c.control_ny,
+                " maps; bounds ",c.lower,"–",c.upper,", scale ",c.scale)
+        end
+    end
+    println(io,"  Solver:         ",nameof(typeof(config.solver)),": ",_fields(config.solver))
+    println(io,"  Regularization: ",_short(config.regularization))
+    println(io,"  Parallel:       ",_fields(config.parallel))
+    println(io,"  Output units:   intensity=",config.outputs.intensity_units," wavelength_frame=",config.outputs.wavelength_frame)
+end
+
 function run_submission_preflight(config_path::AbstractString,factory_path::AbstractString,
         run_dir::AbstractString,batch_script::AbstractString;io::IO=stdout)
     run_dir=abspath(run_dir)
@@ -238,7 +354,10 @@ function run_submission_preflight(config_path::AbstractString,factory_path::Abst
         mkpath(dirname(_run_path(run_dir,output)))
     end
 
+    commit,pins=_code_description(dirname(@__DIR__))
     println(io,"FFNO submission preflight")
+    println(io,"  Date:           ",Libc.strftime("%Y-%m-%d %H:%M:%S %Z",time())," on ",gethostname(),", Julia ",VERSION)
+    println(io,"  Code:           FFNOInversion ",commit,"; ",pins)
     println(io,"  Run directory:  ",run_dir)
     println(io,"  Configuration:  ",config_path)
     println(io,"  Model factory:  ",factory_path," (load OK)")
@@ -265,11 +384,16 @@ function run_submission_preflight(config_path::AbstractString,factory_path::Abst
         println(io,"    [$index] ",round(first(wavelength),digits=6),"–",round(last(wavelength),digits=6),
             " Å; count=",region.count,"; step=",round(region.step_m*1e10,digits=6)," Å; ",sources)
     end
+    _configuration_details(io,config,run_dir)
     println(io,"  Outputs:        ",_run_path(run_dir,config.outputs.synthesis_file))
     println(io,"                  ",_run_path(run_dir,config.outputs.atmosphere_file))
     println(io,"  SLURM defaults: nodes=",resources["nodes"]," ranks=",resources["ntasks"],
         " ranks/node=",resources["ntasks-per-node"]," CPUs/rank=",resources["cpus-per-task"],
         " GPUs/node=",resources["gpus-per-node"]," walltime=",get(resources,"time","unspecified"))
+    println(io,"  Configuration file (verbatim):")
+    for line in eachline(config_path)
+        println(io,"    | ",line)
+    end
     println(io,"Sanity check OK")
     config
 end

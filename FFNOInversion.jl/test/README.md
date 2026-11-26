@@ -51,8 +51,8 @@ that use the HSEMHS table need `include("test/hsemhs_equilibrium.jl")` first; it
 
 ## What the suite checks
 
-**Last full run:** 26 Nov 2026 on hyades5. 70 test sets and 16 040 checks passed, with branch
-`adjoint-prepared-reuse`. Its new check in `equilibrium_adjoint.jl` reaches main when that branch is merged. The one skipped check is the optional comparison with STiC (STiC is not installed).
+**Last full run:** 26 Nov 2026 on hyades5. 71 test sets and 16 068 checks passed, with branch
+`preflight-report`. The one skipped check is the optional comparison with STiC (STiC is not installed).
 
 The count column is the number of checks in that run.
 
@@ -61,7 +61,7 @@ The count column is the number of checks in that run.
 | File | Count | What it checks |
 |---|---:|---|
 | `olivia_environment_setup.jl` | 42 | The Olivia scripts read as text, so they run on any machine. **Thread topology:** the number of threads per rank is set in one place (`SLURM_CPUS_PER_TASK`) and reaches Julia and the FFNO service. **Login preflight vs compute-node runtime:** they use separate Julia installations and depots (`julia-depot-login` vs `julia-depot-prod`), and the login-node script never reads the compute-node settings. **Per-job environment:** `prepare_olivia_environment.jl` builds the job's Julia project from the checkout, links `src/`, `ext/` and `scripts/`, and never overwrites a directory it did not make. |
-| `submission_preflight.jl` | 16 | The check `submit_olivia_inversion.sh` runs before `sbatch`. It must refuse a bad configuration. For a good one, it must print the summary seen in the job logs: mode, atmosphere shape and storage order, spectral regions and lines, outputs, Slurm layout (8 nodes, 16 ranks, 4 GPUs/node), and "Sanity check OK". |
+| `submission_preflight.jl` | 44 | The check `submit_olivia_inversion.sh` runs before `sbatch`. It must refuse a bad configuration. For a good one it prints the full report: date, host and Julia; the FFNOML commit with the HSEMHS and WittBifrostEOS pins; mode, atmosphere shape and storage order, spectral regions and lines; the equilibrium with the **EOS model (LTE or NLTE)** and the **EOS table's path, size and date**; atmosphere datasets, population mesh, physics, view, grid, observation model, controls, solver, regularization and parallel settings; outputs and the Slurm layout; the configuration file word for word; and "Sanity check OK". **Saved report:** the real submit helper is run with a stand-in preflight and a fake `sbatch`. The report must be saved as `<run_dir>/preflight/preflight-<time>.log` and `preflight-<job id>.log`, with the sbatch arguments and the job number. A failed preflight must keep its log and not submit. |
 
 ### Basic types, coordinates and configuration
 
