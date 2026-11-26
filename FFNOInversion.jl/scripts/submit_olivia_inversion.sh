@@ -61,19 +61,33 @@ runtime_environment=${FFNO_RUNTIME_ENV_FILE:-${run_dir}/olivia_runtime_environme
   echo "Missing accelerator runtime environment: ${runtime_environment}" >&2
   exit 2
 }
+# The preflight report is kept in the run directory: preflight/preflight-<time>.log, and preflight-<job id>.log once
+# the job is submitted (a failed preflight keeps its log too).
+preflight_dir=${run_dir}/preflight
+mkdir -p "${preflight_dir}"
+preflight_log=${preflight_dir}/preflight-$(date +%Y%m%d-%H%M%S).log
 echo "Checking submission inputs before requesting an allocation..."
+echo "Preflight report: ${preflight_log}"
 FFNOML_RUN_DIR="${run_dir}" "${preflight_runner}" \
-  "${config_file}" "${factory_file}" "${run_dir}" "${batch_script}"
+  "${config_file}" "${factory_file}" "${run_dir}" "${batch_script}" 2>&1 | tee "${preflight_log}"
 
-if (($#)); then
-  printf 'Additional sbatch arguments:'
-  printf ' %q' "$@"
-  printf '\n'
-fi
-echo "Submitting validated ${config_file}..."
+{
+  if (($#)); then
+    printf 'Additional sbatch arguments:'
+    printf ' %q' "$@"
+    printf '\n'
+  fi
+  echo "Submitting validated ${config_file}..."
+} | tee -a "${preflight_log}"
 
-sbatch --chdir="${run_dir}" \
+submission=$(sbatch --chdir="${run_dir}" \
   --output="${run_dir}/slurm-%j.out" \
   --error="${run_dir}/slurm-%j.err" \
   --export="ALL,FFNO_SUBMITTED_REPO_DIR=${package_dir},FFNOML_RUN_DIR=${run_dir},FFNO_RUNTIME_ENV_FILE=${runtime_environment},FFNO_INVERSION_CONFIG=${config_file},FFNO_INVERSION_FACTORY=${factory_file}" \
-  "$@" "${batch_script}"
+  "$@" "${batch_script}")
+echo "${submission}" | tee -a "${preflight_log}"
+job_id=$(awk '/Submitted batch job/ {print $4}' <<<"${submission}")
+if [[ -n "${job_id}" ]]; then
+  cp -- "${preflight_log}" "${preflight_dir}/preflight-${job_id}.log"
+  echo "Preflight report saved: ${preflight_dir}/preflight-${job_id}.log"
+fi
