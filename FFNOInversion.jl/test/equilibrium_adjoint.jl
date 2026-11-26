@@ -153,6 +153,15 @@ if isfile(HSEMHS_TABLE)
         @test norm(oracle.gradient)>0
         @test rel(adjoint,fdeq)<1e-5
         @test rel(adjoint,oracle)<1e-4
+        # the first gradient at the initial parameters, with the factory's prepared (unrecorded) equilibrium
+        initial=initial_parameters(layout)
+        apply_control_maps!(distributed,layout,initial)
+        model.prepared_equilibrium[]=forward!(workspace,model,distributed,context).equilibrium
+        prepared=DistributedInversionProblem(model,workspace,distributed,observation,regularization,4.0e4,4.0e4,context;
+            control_layout=layout,reference_id="adjoint-prepared-$kind")
+        @test prepared.prepared_initial_available[]
+        first=objective_gradient!(HybridAdjointObjectiveGradient(),prepared,layout,initial,context)
+        @test rel(first,objective_gradient!(FiniteDifferenceObjectiveGradient(step=1e-5),prepared,layout,initial,context))<1e-4
         close_equilibrium!(backend)
     end
 end
