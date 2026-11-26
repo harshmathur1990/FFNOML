@@ -951,6 +951,9 @@ final spectra with a reference and any comparison of the Ca predictions have not
 
 ## Tests and validation
 
+What every test checks, how to run them, and the rule that every code change runs the full suite:
+[`test/README.md`](test/README.md).
+
 ```bash
 julia --project=. -e 'using Pkg; Pkg.test()'
 julia --project=. benchmarks/mock_forward.jl
