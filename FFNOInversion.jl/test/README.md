@@ -34,7 +34,8 @@ Inputs and timing:
 
 - **The HSEMHS EOS table:** `HSEMHS_EOS_TABLE`, default `/mn/stornext/d9/data/harshm/hsemhs_data/cache/eos_table_fullz.h5`.
   Without it the HSEMHS tests are skipped.
-- **The NLTE table:** `HSEMHS_NLTE_EOS_TABLE`. It is optional, and without it the NLTE equilibrium tests are skipped
+- **The NLTE table:** `HSEMHS_NLTE_EOS_TABLE`, default `/mn/stornext/d9/data/harshm/hsemhs_data/cache/eos_table_nlte.h5`.
+  It is optional, and without it the NLTE equilibrium tests are skipped
   with a note.
 - **Time:** the full suite takes about 30 to 40 minutes with 8 threads on hyades. The HSEMHS backend tests (7 min) and the
   given-density tests (4 min) take longest.
@@ -52,7 +53,7 @@ that use the HSEMHS table need `include("test/hsemhs_equilibrium.jl")` first; it
 ## What the suite checks
 
 **Last full run:** 27 Nov 2026 on hyades, 8 threads, with the NLTE table. 78 test sets and 23 059 checks passed, with branch
-`threaded-synthesis-adjoint`. The one skipped check is the optional comparison with STiC (STiC is not installed).
+`eos-model-check` merged with main. The one skipped check is the optional comparison with STiC (STiC is not installed).
 
 The count column is the number of checks in that run.
 

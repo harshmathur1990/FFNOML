@@ -15,7 +15,7 @@ function main(args)
     length(args) in (2,3) || error("usage: julia --project=. scripts/validate_eos_consistency.jl LIBWITT TABLE [ATMOSPHERE.h5]")
     library,table_path=args[1],args[2]
     pf=normpath(joinpath(@__DIR__,"..","..","scripts","pf_Kurucz.input"))
-    eos=WittmannEOS(library,pf); table=FFNOInversion.WittBifrostEOS.load_table(table_path)
+    eos=WittmannEOS(library,pf); table=FFNOInversion.WittBifrostEOS.load_table(table_path;model="lte")   # compared with direct (LTE) Wittmann
     T=Float64[]; P=Float64[]
     for lt in range(log10(3000.0),log10(3.0e4);length=120), lp in range(-3.0,5.0;length=60)
         push!(T,exp10(lt)); push!(P,exp10(lp))

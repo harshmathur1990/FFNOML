@@ -182,7 +182,7 @@ import Muspel
         @test occursin("forward synthesis only",refused)
 
         # the NLTE EOS: what the input leaves out comes from the NLTE table at (T, P), and the synthesis hydrogen is the table's
-        nlte_table=get(ENV,"HSEMHS_NLTE_EOS_TABLE","/mn/stornext/d9/data/harshm/MHS_nlte/HSEMHS/cache/eos_table_nlte.h5")
+        nlte_table=get(ENV,"HSEMHS_NLTE_EOS_TABLE","/mn/stornext/d9/data/harshm/hsemhs_data/cache/eos_table_nlte.h5")
         if isfile(nlte_table)
             nlte(table)="[equilibrium]\neos_model = \"nlte\"\neos_table_file = \"$table\"\n"
             cfg=config("z","z_m = \"zm\"";nedata="",extra="rho = \"rho\"\npgas = \"p\"\n",equilibrium="[equilibrium]\neos_model = \"nlte\"\n")
