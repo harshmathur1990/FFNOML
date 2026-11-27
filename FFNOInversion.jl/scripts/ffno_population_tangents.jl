@@ -63,7 +63,7 @@ function main(a)
     service=launch_fsdp_service(specs;(isempty(launcher) ? (;) : (;launcher=launcher))...,
         timeout_seconds=max(600.0,config.parallel.gpu_connect_timeout_seconds),
         diagnostics_directory=get(ENV,"FFNO_GPU_DIAGNOSTICS_DIR",joinpath(dirname(abspath(a.output)),"diagnostics")))
-    eos=WittBifrostEOS.load_table(options.eos_table_file)
+    eos=WittBifrostEOS.load_table(options.eos_table_file;model=options.eos_model)     # refuses a table of the other EOS model
     try
         mkpath(dirname(abspath(a.output)))
         h5open(a.output,"w") do file
