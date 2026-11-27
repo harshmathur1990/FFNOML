@@ -288,15 +288,21 @@ function add_opacity_emissivity_vjp!(atmosphere_bar,population_bar,population_lo
     nothing
 end
 
-"""Numerical pullback of the Wittmann opacities. They are local in depth: perturbing one level changes only that level, so only that
-level is recomputed. The continuum reads T and P; lines also read velocities, vturb and ne."""
+"""Numerical pullback of the Wittmann opacities. They are local in depth: a level's opacity reads only that level, so every level
+of the column is perturbed at once and one column call per field and sign gives each level's central difference (the same
+differences as perturbing one level at a time, with 2 calls per field instead of 2 per field and level). The continuum reads T
+and P; lines also read velocities, vturb and ne, so for those the continuum, which cancels in the difference, is left out."""
 function _local_wittmann_vjp!(atmosphere_bar,chi_bar,eta_bar,model,wavelength,atmosphere,x,y;relative_step=1e-5)
     nz,nlambda=size(chi_bar); T=eltype(chi_bar)
-    chi=zeros(T,1,nlambda); eta=zeros(T,1,nlambda)
-    function pairing(k)
+    chi=zeros(T,nz,nlambda); eta=zeros(T,nz,nlambda); plus=zeros(T,nz); minus=zeros(T,nz)
+    lines_only=KuruczLTEModel(model.lines,model.eos,false)     # the same EOS backend
+    function pairing!(out,kernel)
         fill!(chi,zero(T)); fill!(eta,zero(T))
-        _add_wittmann_kurucz!(chi,eta,model,wavelength,atmosphere,x,y;levels=k:k)
-        sum(chi[1,l]*chi_bar[k,l]+eta[1,l]*eta_bar[k,l] for l in 1:nlambda)
+        _add_wittmann_kurucz!(chi,eta,kernel,wavelength,atmosphere,x,y)
+        for k in 1:nz
+            out[k]=sum(chi[k,l]*chi_bar[k,l]+eta[k,l]*eta_bar[k,l] for l in 1:nlambda)
+        end
+        out
     end
     fields=Any[(:temperature,atmosphere_bar.temperature),(:pgas,atmosphere_bar.pgas)]
     if !isempty(model.lines)
@@ -305,12 +311,15 @@ function _local_wittmann_vjp!(atmosphere_bar,chi_bar,eta_bar,model,wavelength,at
     end
     for (name,bar) in fields
         values=getfield(atmosphere,name); values===nothing && continue
-        for k in 1:nz
-            center=values[k,x,y]; h=T(relative_step)*max(abs(center),one(T))
-            values[k,x,y]=center+h; plus=pairing(k)
-            values[k,x,y]=center-h; minus=pairing(k)
-            values[k,x,y]=center; bar[k,x,y]+=(plus-minus)/(2h)
+        kernel=name in (:temperature,:pgas) ? model : lines_only
+        center=values[:,x,y]; h=T(relative_step).*max.(abs.(center),one(T))
+        try
+            @views values[:,x,y].=center.+h; pairing!(plus,kernel)
+            @views values[:,x,y].=center.-h; pairing!(minus,kernel)
+        finally
+            @views values[:,x,y].=center
         end
+        @views bar[:,x,y].+=(plus.-minus)./(2 .*h)
     end
     nothing
 end
@@ -401,47 +410,83 @@ function synthesis_vjp!(atmosphere_bar::AtmosphereCotangent,setups::AbstractVect
     population_bar
 end
 
+"""Pull the synthesis back column by column. Columns write only their own `[:, x, y]` cotangents and perturb only their
+own atmosphere cells, and the opacity kernels are those the forward synthesis already runs on every thread, so the
+columns run in parallel (`threaded=false`: in order on this task; the result is the same to the bit)."""
 function _mixed_synthesis_vjp!(atmosphere_bar,population_bar,model::MixedIntensitySynthesizer,atmosphere,
-        populations,wavelength,intrinsic_bar)
+        populations,wavelength,intrinsic_bar;threaded::Bool=true)
     model.solver isa ScalarFormalSolver || throw(ArgumentError(
         "production synthesis VJP requires ScalarFormalSolver"))
     _check_synthesis_columns(atmosphere)
     lookup(source)=_population_lookup(populations,population_bar,source)
     nz,nx,ny=size(atmosphere.temperature); nlambda=length(wavelength); T=eltype(intrinsic_bar)
-    for x in 1:nx,y in 1:ny
-        chi=zeros(T,nz,nlambda); eta=zeros(T,nz,nlambda)
-        for contributor in model.contributors
-            source=contributor.populations===nothing ? populations : contributor.populations
-            add_opacity_emissivity!(chi,eta,contributor.model,wavelength,atmosphere,x,y,source)
-        end
-        chi_bar=zeros(T,size(chi)); eta_bar=similar(chi_bar); z_bar=zeros(T,nz)
-        if _axis_integration(atmosphere)
-            # formal_column!: χ' = wχ, η' = wη with w = τ500/χ500 integrated in s = -ln τ500, or w = m/ρ in s = -ln m (native, fixed)
-            weight=_axis_weight(atmosphere,x,y)
-            _formal_solve_vjp!(chi_bar,eta_bar,z_bar,model.solver,chi.*weight,eta.*weight,
-                _axis_coordinate(atmosphere,x,y),@view(intrinsic_bar[:,1,x,y]))
-            weight_bar=vec(sum(chi_bar.*chi.+eta_bar.*eta;dims=2))
-            if _mass_integration(atmosphere)
-                @views atmosphere_bar.rho[:,x,y].-=weight_bar.*weight./atmosphere.rho[:,x,y]
-            else
-                @views atmosphere_bar.chi500[:,x,y].-=weight_bar.*weight./atmosphere.chi500[:,x,y]
-            end
-            chi_bar.*=weight; eta_bar.*=weight
-        else
-            _formal_solve_vjp!(chi_bar,eta_bar,z_bar,model.solver,chi,eta,
-                _geometric_path(atmosphere,x,y),@view(intrinsic_bar[:,1,x,y]))
-            v=atmosphere.grid.view
-            is_vertical(v) || (z_bar.*=T(path_factor(v)))       # path z/μ
-            @views atmosphere_bar.z[:,x,y].+=z_bar
-        end
-        for contributor in model.contributors
-            source=contributor.populations===nothing ? populations : contributor.populations
-            source_bar=contributor.populations===nothing && populations isa AbstractDict ? nothing : lookup(source)
-            add_opacity_emissivity_vjp!(atmosphere_bar,source_bar,lookup,chi_bar,eta_bar,
-                contributor.model,wavelength,atmosphere,x,y,source)
+    columns=vec(CartesianIndices((nx,ny)))
+    chunks=threaded ? Iterators.partition(columns,max(1,cld(length(columns),4Threads.nthreads()))) : (columns,)
+    pull_chunk(chunk)=begin
+        local chi=zeros(T,nz,nlambda); local eta=similar(chi); local chi_bar=similar(chi); local eta_bar=similar(chi)
+        local z_bar=zeros(T,nz)
+        for I in chunk
+            _mixed_synthesis_column_vjp!(atmosphere_bar,population_bar,lookup,chi,eta,chi_bar,eta_bar,z_bar,
+                model,atmosphere,populations,wavelength,intrinsic_bar,I[1],I[2])
         end
     end
+    if threaded
+        _wait_all_rethrow([Threads.@spawn(pull_chunk(chunk)) for chunk in chunks])
+    else
+        foreach(pull_chunk,chunks)
+    end
     population_bar
+end
+
+"""Wait for every task, then throw the first failure as itself (not wrapped in `TaskFailedException`), so the threaded
+pullback fails as the serial one does and no task is still writing when the caller handles the error."""
+function _wait_all_rethrow(tasks)
+    failure=nothing
+    for task in tasks
+        try
+            wait(task)
+        catch exception
+            failure===nothing && (failure=exception isa TaskFailedException ? exception.task.exception : exception)
+        end
+    end
+    failure===nothing || throw(failure)
+    nothing
+end
+
+function _mixed_synthesis_column_vjp!(atmosphere_bar,population_bar,lookup,chi,eta,chi_bar,eta_bar,z_bar,
+        model,atmosphere,populations,wavelength,intrinsic_bar,x,y)
+    T=eltype(chi)
+    fill!(chi,zero(T)); fill!(eta,zero(T)); fill!(z_bar,zero(T))
+    for contributor in model.contributors
+        source=contributor.populations===nothing ? populations : contributor.populations
+        add_opacity_emissivity!(chi,eta,contributor.model,wavelength,atmosphere,x,y,source)
+    end
+    if _axis_integration(atmosphere)
+        # formal_column!: χ' = wχ, η' = wη with w = τ500/χ500 integrated in s = -ln τ500, or w = m/ρ in s = -ln m (native, fixed)
+        weight=_axis_weight(atmosphere,x,y)
+        _formal_solve_vjp!(chi_bar,eta_bar,z_bar,model.solver,chi.*weight,eta.*weight,
+            _axis_coordinate(atmosphere,x,y),@view(intrinsic_bar[:,1,x,y]))
+        weight_bar=vec(sum(chi_bar.*chi.+eta_bar.*eta;dims=2))
+        if _mass_integration(atmosphere)
+            @views atmosphere_bar.rho[:,x,y].-=weight_bar.*weight./atmosphere.rho[:,x,y]
+        else
+            @views atmosphere_bar.chi500[:,x,y].-=weight_bar.*weight./atmosphere.chi500[:,x,y]
+        end
+        chi_bar.*=weight; eta_bar.*=weight
+    else
+        _formal_solve_vjp!(chi_bar,eta_bar,z_bar,model.solver,chi,eta,
+            _geometric_path(atmosphere,x,y),@view(intrinsic_bar[:,1,x,y]))
+        v=atmosphere.grid.view
+        is_vertical(v) || (z_bar.*=T(path_factor(v)))       # path z/μ
+        @views atmosphere_bar.z[:,x,y].+=z_bar
+    end
+    for contributor in model.contributors
+        source=contributor.populations===nothing ? populations : contributor.populations
+        source_bar=contributor.populations===nothing && populations isa AbstractDict ? nothing : lookup(source)
+        add_opacity_emissivity_vjp!(atmosphere_bar,source_bar,lookup,chi_bar,eta_bar,
+            contributor.model,wavelength,atmosphere,x,y,source)
+    end
+    nothing
 end
 
 # ---------------------------------------------------------------------------
@@ -650,7 +695,9 @@ function objective_gradient!(backend::HybridAdjointObjectiveGradient,
     set_equilibrium_record!(problem.model.equilibrium,adjoint)          # the reconstruction below keeps its tape
     # the factory's prepared equilibrium was solved without a tape: reconstruct (job 3175806 failed on the first gradient)
     adjoint && (problem.prepared_initial_available[]=false)
-    evaluation=evaluate_objective!(problem,layout,parameters,context)
+    seconds=zeros(7); clock=Ref(time())
+    lap!(i)=(t=time(); seconds[i]+=t-clock[]; clock[]=t)
+    evaluation=evaluate_objective!(problem,layout,parameters,context); lap!(1)
     isfinite(evaluation.components.total) || throw(ArgumentError("cannot differentiate an infeasible atmosphere"))
     synthetic=problem.workspace.output.data; observation=problem.observation
     output_bar=similar(synthetic)
@@ -658,7 +705,7 @@ function objective_gradient!(backend::HybridAdjointObjectiveGradient,
         (synthetic-observation.spectrum.data)/observation.sigma^2
     intrinsic_bar=similar(problem.workspace.intrinsic.data)
     observation_vjp!(intrinsic_bar,output_bar,problem.model.observation,
-        problem.workspace.intrinsic,problem.distributed,context)
+        problem.workspace.intrinsic,problem.distributed,context); lap!(2)
     atmosphere_bar=AtmosphereCotangent(problem.distributed.local_atmosphere)
     population_bar=if problem.workspace.footprint===nothing
         synthesis_vjp!(atmosphere_bar,problem.model.synthesizer,
@@ -675,12 +722,13 @@ function objective_gradient!(backend::HybridAdjointObjectiveGradient,
         footprint_vjp!(atmosphere_bar,footprint_bar,footprint_population_bar,problem.workspace,
             problem.distributed,context)
     end
+    lap!(3)
     predict_distributed_populations_vjp!(atmosphere_bar,problem.model.populations,
-        problem.distributed,population_bar,context)
+        problem.distributed,population_bar,context); lap!(4)
     if adjoint                      # regularization and equilibrium pulled back onto the fields, then the controls
         distributed_regularization_vjp!(atmosphere_bar,problem.distributed,problem.regularization,problem.dx_m,
-            problem.dy_m,context)
-        status=equilibrium_vjp!(atmosphere_bar,problem.model.equilibrium,problem.distributed,context)
+            problem.dy_m,context); lap!(5)
+        status=equilibrium_vjp!(atmosphere_bar,problem.model.equilibrium,problem.distributed,context); lap!(6)
         _forward_stage(context,"gradient equilibrium adjoint status=$status")
     end
     gradient=zeros(T,layout.parameter_count)
@@ -689,5 +737,11 @@ function objective_gradient!(backend::HybridAdjointObjectiveGradient,
             _direct_bar(atmosphere_bar,spec.variable,problem.distributed.global_grid.view),problem.distributed,context)
     end
     adjoint || _force_regularization_vjp!(gradient,backend,atmosphere_bar,problem,layout,parameters,evaluation,context)
+    lap!(7)
+    # the slowest rank's time for each part (one reduction)
+    slowest=allreduce_max(seconds,context); r(x)=round(x;digits=1)
+    _forward_stage(context,"gradient seconds forward=$(r(slowest[1])) observation=$(r(slowest[2])) "*
+        "synthesis=$(r(slowest[3])) ffno=$(r(slowest[4])) regularization=$(r(slowest[5])) "*
+        "equilibrium=$(r(slowest[6])) controls=$(r(slowest[7])) total=$(r(sum(seconds)))")
     ObjectiveGradientEvaluation(evaluation,gradient,1)
 end

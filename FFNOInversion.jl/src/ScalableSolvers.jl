@@ -198,6 +198,9 @@ function lbfgs_invert!(problem::DistributedInversionProblem,layout::ControlMapLa
     _validate(options); lower,upper=_scaled_bounds(layout)
     iterate || restart || throw(ArgumentError("iterate=false needs restart=true: there is no checkpoint to finish"))
     started=time()
+    # the run log: "Iteration 0" (the first forward model and gradient, or the restart evaluation), then one section
+    # per iteration, each with its forward-model and gradient lines, its objective and the memory
+    _log_section(context,restart ? "Restart from the checkpoint" : "Iteration 0")
     state,current=if restart
         restored=_restore_lbfgs_checkpoint(options.checkpoint_path,layout,manifest,
             options.history_length,context,problem)
@@ -224,9 +227,11 @@ function lbfgs_invert!(problem::DistributedInversionProblem,layout::ControlMapLa
         "checkpoint iteration $(state.iteration) exceeds requested max_iterations $(options.max_iterations)"))
     length(state.s_history)==length(state.y_history)<=options.history_length || throw(ArgumentError(
         "invalid L-BFGS checkpoint history"))
+    _lbfgs_summary(context,problem,state,state.iteration,lower,upper,layout,time()-started)
     if !iterate
         state.termination===:running && (state.termination=:incomplete_checkpoint)
         _lbfgs_progress(context,"finish from checkpoint iteration=$(state.iteration) termination=$(state.termination)")
+        _end_log_section()
         return LBFGSInversionResult(state,current)
     end
     if !state.converged && state.iteration<options.max_iterations
@@ -243,6 +248,7 @@ function lbfgs_invert!(problem::DistributedInversionProblem,layout::ControlMapLa
             _lbfgs_progress(context,"stop reason=$stop before iteration=$iteration longest_iteration_seconds=$(round(longest_iteration;digits=1))")
             break
         end
+        _log_section(context,"Iteration $iteration")
         iteration_started=time()
         if state.forward_evaluations>=options.maximum_forward_evaluations
             state.termination=:maximum_forward_evaluations; break
@@ -296,6 +302,8 @@ function lbfgs_invert!(problem::DistributedInversionProblem,layout::ControlMapLa
                 :maximum_forward_evaluations : :line_search_failed
             push!(state.history,LBFGSIterationRecord(iteration,state.forward_evaluations,state.objective,
                 state.data_term,state.regularization_term,T(gradient_norm),zero(T),trials,rejected,false))
+            _lbfgs_progress(context,"iteration=$iteration line search failed after $trials trials ($(state.termination))")
+            log_memory(context,problem.model.populations)
             _save_lbfgs_checkpoint(options.checkpoint_path,layout,state,manifest,options.history_length,context,problem)
             break
         end
@@ -322,6 +330,7 @@ function lbfgs_invert!(problem::DistributedInversionProblem,layout::ControlMapLa
         _lbfgs_progress(context,"iteration=$iteration forward_evaluations=$(state.forward_evaluations) "*
             "total=$(state.objective) data=$(state.data_term) regularization=$(state.regularization_term) "*
             "projected_gradient=$projected_norm step=$accepted_step trials=$trials seconds=$(round(seconds;digits=1))")
+        log_memory(context,problem.model.populations)
 
         parameter_step=norm(trial_x.-x,Inf)
         objective_change=abs(previous_objective-state.objective)
@@ -342,14 +351,21 @@ function lbfgs_invert!(problem::DistributedInversionProblem,layout::ControlMapLa
     end
     isempty(options.checkpoint_path) ||
         _save_lbfgs_checkpoint(options.checkpoint_path,layout,state,manifest,options.history_length,context,problem)
+    _end_log_section()
     _lbfgs_progress(context,"done iteration=$(state.iteration) termination=$(state.termination) converged=$(state.converged)")
     LBFGSInversionResult(state,current)
 end
 
-function _lbfgs_progress(context,message)
-    isroot(context) || return nothing
-    println(stdout,"LBFGS ",message); flush(stdout); nothing
+"""The line and memory closing the starting section (iteration 0, or the restored checkpoint's iteration)."""
+function _lbfgs_summary(context,problem,state,iteration,lower,upper,layout,seconds)
+    projected=norm(_projected_gradient(scaled_parameters(layout,state.parameters),state.gradient,lower,upper),Inf)
+    _lbfgs_progress(context,"iteration=$iteration forward_evaluations=$(state.forward_evaluations) "*
+        "total=$(state.objective) data=$(state.data_term) regularization=$(state.regularization_term) "*
+        "projected_gradient=$projected seconds=$(round(seconds;digits=1))")
+    log_memory(context,problem.model.populations)
 end
+
+_lbfgs_progress(context,message)=_log_line(context,"LBFGS "*message)
 
 """Write rank-0 Phase 6 convergence diagnostics without gathering model cubes."""
 function write_lbfgs_diagnostics(directory::AbstractString,result::LBFGSInversionResult,

@@ -858,6 +858,25 @@ storing the full Jacobian. `column_response.jl` then adds Σ_{k,l} G_l(k, λ) �
 G_l = ∂I/∂n_l from the same adjoint. pgas, rho, ne and z stay fixed. `test/ffno_jvp_cpu_check.py` checks the
 distributed JVP against finite differences on CPU.
 
+### The run log
+
+Rank 0 writes the run log to stdout (the Slurm `.out`). It is in sections: `Iteration 0` is the first forward model and
+gradient, then one section per iteration, each header at the margin and that iteration's lines under it after a tab
+(illustrative numbers):
+
+```
+Iteration 3
+	FORWARD stage=equilibrium done seconds=1.4 valid=true reason=converged
+	...
+	FORWARD stage=gradient seconds forward=14.8 observation=0.0 synthesis=3.1 ffno=9.2 regularization=0.1 equilibrium=1.6 controls=0.2 total=29.0
+	LBFGS iteration=3 forward_evaluations=7 total=96.48 data=81.61 regularization=14.87 projected_gradient=0.0687 step=1.0 trials=1 seconds=44.0
+	memory node=gpu-1-10 cpu_used=40.1/864.6 GB julia_ranks=2 julia_rss=12.6 GB (peak 16.9 GB) gpu_peak_allocated=[21.3, 20.9, 20.9, 21.0] GB gpu_reserved=[24.0, 24.0, 24.0, 24.0] GB of 94.5 GB each
+```
+
+The gradient line has the slowest rank's time for each part; the memory lines (one per node) have the node's memory in
+use, its Julia ranks' resident and peak memory, and each GPU's peak allocated and reserved memory since the previous
+iteration (the FFNO service's `MEMORY` command). A `Final evaluation (the outputs)` section ends an inversion.
+
 ### Checkpoints
 
 Checkpoints are atomic and bound to the configuration, the baseline atmosphere

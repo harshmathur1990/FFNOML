@@ -228,6 +228,75 @@ function launch_fsdp_service(specs::AbstractVector{FSDPModelSpec};
         ReentrantLock(),false)
 end
 
+"""Every GPU rank's memory since the previous call: `(host, local_rank, peak_allocated, reserved, total)` in bytes (the
+service's `MEMORY` command; the peak is reset by it)."""
+function gpu_memory(service::FSDPServiceClient)
+    service.closed && error("FSDP service is closed")
+    lock(service.lock) do
+        println(service.socket,"MEMORY"); flush(service.socket)
+        fields=split(readline(service.socket))
+        length(fields)==3 && fields[1:2]==["OK","MEMORY"] || error("FSDP service answered MEMORY with: $(join(fields,' '))")
+        map(1:parse(Int,fields[3])) do _
+            host,local_rank,peak,reserved,total=split(readline(service.socket))
+            (host=String(host),local_rank=parse(Int,local_rank),peak_allocated=parse(Int,peak),
+                reserved=parse(Int,reserved),total=parse(Int,total))
+        end
+    end
+end
+
+"""The FSDP service behind a population model on this rank, or `nothing` (other ranks, models without one)."""
+population_service(model)=nothing
+function population_service(model::RootDistributedPopulationModel)
+    root=_unwrap_population_model(model.root_model)
+    root isa FSDPFFNOModel ? root.service : nothing
+end
+function population_service(model::CompositeDistributedPopulationModel)
+    for species in values(model.models)
+        service=population_service(species); service===nothing || return service
+    end
+    nothing
+end
+
+"""This node's (total, available) memory in bytes."""
+function _node_memory()
+    Sys.islinux() || return Float64(Sys.total_memory()),Float64(Sys.free_memory())
+    total=available=NaN
+    for line in eachline("/proc/meminfo")
+        key,value=split(line,':';limit=2)
+        key=="MemTotal" && (total=1024*parse(Float64,split(value)[1]))
+        key=="MemAvailable" && (available=1024*parse(Float64,split(value)[1]))
+    end
+    total,available
+end
+
+"""Collective: one run-log line per node with its CPU memory (in use on the node, and the Julia ranks' resident and
+peak memory) and, from the FSDP service, each GPU's peak allocated and reserved memory since the previous report."""
+function log_memory(context,populations)
+    status=_linux_status(); rss=_status_mib(status,"VmRSS"); hwm=_status_mib(status,"VmHWM")
+    isfinite(rss) || (rss=Sys.maxrss()/2^20); isfinite(hwm) || (hwm=Sys.maxrss()/2^20)
+    total,available=_node_memory()
+    entry=(host=gethostname(),rss=rss/1024,hwm=hwm/1024,used=(total-available)/2^30,total=total/2^30)
+    entries=context.enabled ? (_assert_mpi_thread(context); MPI.gather(entry,context.comm;root=context.root)) : [entry]
+    isroot(context) || return nothing
+    service=population_service(populations)
+    gpus=service===nothing ? NamedTuple[] : gpu_memory(service)
+    gb(x)=round(x;digits=1); list(v)="["*join(gb.(v),", ")*"]"
+    for host in sort!(unique(vcat([e.host for e in entries],[g.host for g in gpus])))
+        ranks=filter(e->e.host==host,entries); line="memory node=$host"
+        if !isempty(ranks)
+            line*=" cpu_used=$(gb(first(ranks).used))/$(gb(first(ranks).total)) GB julia_ranks=$(length(ranks)) "*
+                "julia_rss=$(gb(sum(e->e.rss,ranks))) GB (peak $(gb(sum(e->e.hwm,ranks))) GB)"
+        end
+        on_node=sort!(filter(g->g.host==host,gpus);by=g->g.local_rank)
+        if !isempty(on_node)
+            line*=" gpu_peak_allocated=$(list([g.peak_allocated/2^30 for g in on_node])) GB "*
+                "gpu_reserved=$(list([g.reserved/2^30 for g in on_node])) GB of $(gb(first(on_node).total/2^30)) GB each"
+        end
+        _log_line(context,line)
+    end
+    nothing
+end
+
 """Stop the service and release its socket, process and log; safe to call twice.
 
 Every cleanup step runs even when the service has already died (for example after a
