@@ -51,8 +51,8 @@ that use the HSEMHS table need `include("test/hsemhs_equilibrium.jl")` first; it
 
 ## What the suite checks
 
-**Last full run:** 27 Nov 2026 on hyades. 74 test sets and 16 134 checks passed, with branch
-`soft-stop-restart`. The one skipped check is the optional comparison with STiC (STiC is not installed).
+**Last full run:** 27 Nov 2026 on hyades, 8 threads, with the NLTE table. 78 test sets and 23 059 checks passed, with branch
+`threaded-synthesis-adjoint`. The one skipped check is the optional comparison with STiC (STiC is not installed).
 
 The count column is the number of checks in that run.
 
@@ -83,6 +83,7 @@ The count column is the number of checks in that run.
 | `continuum_opacity.jl` | 13 | The Julia continuum opacity gives finite, positive density, electron density, partial pressures and extinction. If the STiC source is present, it matches STiC's `cop.cc` to 2×10⁻¹² (relative). That comparison is skipped otherwise. |
 | `continuum_source.jl` | 25 | Every region uses one continuum: Wittmann's, with hydrogen from the EOS. It never reads the FFNO hydrogen populations, and it does not depend on the order of a region's sources. |
 | `continuum_adjoint.jl` | 51 | The Wittmann opacity at one depth depends only on that depth. So its derivative is computed by perturbing and recomputing one level, and must equal perturbing and recomputing the whole column. The EOS backend is reused, not rebuilt per call. |
+| `threaded_synthesis_adjoint.jl` | 38 | The synthesis pullback runs its columns on all threads. The threaded result equals the serial one to the bit, the atmosphere cells the Wittmann pullback perturbs are restored, and it matches central differences of the synthesis in T, P, vz and the populations. The Wittmann pullback perturbs a whole column at once and equals the level-by-level form; the continuum it leaves out of the vturb, nₑ and vz differences does not depend on them. A failing column fails with its own exception after every task has stopped. |
 
 ### Populations (FFNO side)
 
@@ -125,6 +126,7 @@ The count column is the number of checks in that run.
 | `phase6_production_gradient.jl` | 9 | The production gradient back through the observation (PSF, weights) and the formal solver, including sub-stepped steps where χ and η jump by e³ to e¹⁴. Then the complete objective with mixed NLTE and Kurucz lines. |
 | `correction_mapping.jl` | 17 | Controls are corrections to the starting atmosphere. Zero corrections reproduce it exactly, a correction never accumulates across trials, and a node bump that would break a bound is rejected. Finite differences at a bound use one-sided steps, and the production adjoint includes this mapping. |
 | `soft_stop_resume.jl` | 66 | Soft stops and resuming. A stop file or the job deadline ends the run cleanly at an iteration boundary, with the checkpoint saved and the outputs written; resuming continues exactly as an uninterrupted run; resuming a converged run does not iterate again; `--finish` writes the outputs of a checkpoint without iterating; the `[solver]` keys and the batch script's job-end export. |
+| `run_log.jl` | 24 | The run log on rank 0 (the Slurm output). Each iteration has a section, its header (`Iteration 0` for the first forward model and gradient) at the margin and its lines under it after a tab, and a line with the objective, data and regularization terms. The production gradient prints the slowest rank's time for each part (forward, observation, synthesis, FFNO, regularization, equilibrium, controls). Each node gets a memory line: CPU memory in use, the Julia ranks' resident and peak memory, and the peak allocated and reserved memory of each of its GPUs from the service's `MEMORY` command. |
 | `integration_mock_forward.jl` | 3 | A deterministic mock forward model: two runs give identical results, the second allocates no more than the first, and a perfect fit has zero residual. |
 | `observation_regularization.jl` | 17 | The PSF applied on the full grid, wavelengths and pixels with zero weight being excluded, and the regularization penalty: zero for a constant atmosphere, positive for a gradient, refused for an unsupported field. |
 
@@ -170,4 +172,5 @@ These need several MPI ranks, a GPU or Olivia. Run them when the code they cover
 
 Other checks: `scripts/validate_eos_consistency.jl` (HSEMHS table vs Wittmann library), `scripts/validate_muspel_reference.jl`
 (synthesis vs a Muspel reference), and the Python tests of the FFNO network and its service in the repository's `tests/`, such as
-`test_batched_backend.py`, `test_height_operator.py` and `test_fsdp_service_launcher.py` (`python -m pytest tests`).
+`test_batched_backend.py`, `test_height_operator.py` and `test_fsdp_service_launcher.py` (`python -m pytest tests`), and
+`test_fsdp_service_memory.py`: the service's `MEMORY` reply, on a GPU (eagle7: `python -m unittest tests.test_fsdp_service_memory`).

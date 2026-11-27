@@ -281,7 +281,7 @@ end
 
 function _log_mesh(kind,mesh)
     d=-diff(mesh)
-    println("POPULATION_MESH $kind heights=$(length(mesh)) spacing_km min=$(round(minimum(d)/1e3;digits=1)) ",
+    println(_LOG_INDENT[],"POPULATION_MESH $kind heights=$(length(mesh)) spacing_km min=$(round(minimum(d)/1e3;digits=1)) ",
         "median=$(round(sort(d)[cld(length(d),2)]/1e3;digits=1)) max=$(round(maximum(d)/1e3;digits=1))")
 end
 
