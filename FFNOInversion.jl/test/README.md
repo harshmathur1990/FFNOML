@@ -51,8 +51,8 @@ that use the HSEMHS table need `include("test/hsemhs_equilibrium.jl")` first; it
 
 ## What the suite checks
 
-**Last full run:** 26 Nov 2026 on hyades5. 71 test sets and 16 068 checks passed, with branch
-`preflight-report`. The one skipped check is the optional comparison with STiC (STiC is not installed).
+**Last full run:** 27 Nov 2026 on hyades. 74 test sets and 16 134 checks passed, with branch
+`soft-stop-restart`. The one skipped check is the optional comparison with STiC (STiC is not installed).
 
 The count column is the number of checks in that run.
 
@@ -124,6 +124,7 @@ The count column is the number of checks in that run.
 | `phase6_gradients_solver.jl` | 22 | The matrix-free node gradient against finite differences. The bounded L-BFGS recovers a known answer, rejects infeasible trial steps without corrupting its state, and restarts. |
 | `phase6_production_gradient.jl` | 9 | The production gradient back through the observation (PSF, weights) and the formal solver, including sub-stepped steps where χ and η jump by e³ to e¹⁴. Then the complete objective with mixed NLTE and Kurucz lines. |
 | `correction_mapping.jl` | 17 | Controls are corrections to the starting atmosphere. Zero corrections reproduce it exactly, a correction never accumulates across trials, and a node bump that would break a bound is rejected. Finite differences at a bound use one-sided steps, and the production adjoint includes this mapping. |
+| `soft_stop_resume.jl` | 66 | Soft stops and resuming. A stop file or the job deadline ends the run cleanly at an iteration boundary, with the checkpoint saved and the outputs written; resuming continues exactly as an uninterrupted run; resuming a converged run does not iterate again; `--finish` writes the outputs of a checkpoint without iterating; the `[solver]` keys and the batch script's job-end export. |
 | `integration_mock_forward.jl` | 3 | A deterministic mock forward model: two runs give identical results, the second allocates no more than the first, and a perfect fit has zero residual. |
 | `observation_regularization.jl` | 17 | The PSF applied on the full grid, wavelengths and pixels with zero weight being excluded, and the regularization penalty: zero for a constant atmosphere, positive for a gradient, refused for an unsupported field. |
 

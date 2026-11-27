@@ -12,6 +12,12 @@ Base.@kwdef struct LBFGSSolverOptions
     curvature_tolerance::Float64=1e-10
     checkpoint_every::Int=1
     checkpoint_path::String=""
+    # soft stops: both end the run cleanly at an iteration boundary, so the outputs are written
+    stop_file::String=""                     # stop when this file exists
+    deadline::Float64=Inf                    # unix time by which the outputs must be written (the job's end)
+    walltime_margin::Float64=1.5             # stop when less than margin x the longest iteration ...
+    walltime_reserve_seconds::Float64=600.0  # ... plus this reserve for the final outputs is left
+    resume::Symbol=:never                    # :never, :always, or :if_present (resume when the checkpoint exists)
 end
 
 function _validate(options::LBFGSSolverOptions)
@@ -27,7 +33,38 @@ function _validate(options::LBFGSSolverOptions)
     options.maximum_forward_evaluations>0 || throw(ArgumentError("maximum_forward_evaluations must be positive"))
     options.curvature_tolerance>=0 || throw(ArgumentError("curvature_tolerance must be non-negative"))
     options.checkpoint_every>0 || throw(ArgumentError("checkpoint_every must be positive"))
+    !isnan(options.deadline) || throw(ArgumentError("deadline must be a unix time or Inf"))
+    options.walltime_margin>0 || throw(ArgumentError("walltime_margin must be positive"))
+    options.walltime_reserve_seconds>=0 || throw(ArgumentError("walltime_reserve_seconds must be non-negative"))
+    options.resume in (:never,:always,:if_present) || throw(ArgumentError("resume must be never, always or if_present"))
+    options.resume===:never || !isempty(options.checkpoint_path) || throw(ArgumentError("resume requires checkpoint_path"))
     options
+end
+
+"""Return a copy of `options` with the given fields replaced."""
+_with_options(options::LBFGSSolverOptions;changes...)=
+    LBFGSSolverOptions(;(name=>getfield(options,name) for name in fieldnames(LBFGSSolverOptions))...,changes...)
+
+"""Whether to resume from the checkpoint; collective, decided on rank 0."""
+function _resume_requested(options::LBFGSSolverOptions,context)
+    options.resume===:always && return true
+    options.resume===:never && return false
+    mpi_broadcast(isroot(context) ? isfile(options.checkpoint_path) : nothing,context)
+end
+
+"""Rank 0's soft-stop verdict before an iteration: `:stop_requested`, `:walltime`, or `:none`; collective."""
+function _soft_stop(options::LBFGSSolverOptions,longest_iteration,context)
+    mpi_broadcast(if isroot(context)
+        if !isempty(options.stop_file) && isfile(options.stop_file)
+            :stop_requested
+        elseif time()+options.walltime_margin*longest_iteration+options.walltime_reserve_seconds>options.deadline
+            :walltime
+        else
+            :none
+        end
+    else
+        nothing
+    end,context)
 end
 
 struct LBFGSIterationRecord{T<:AbstractFloat}
@@ -147,12 +184,20 @@ Controls and solver history are the only replicated arrays.  Rank 0 forms the
 search direction and accepts/rejects trials; all ranks execute every objective
 and VJP through the existing hybrid runtime.  Every rejected line-search path
 explicitly restores the last accepted atmosphere before returning.
+
+Before each iteration rank 0 checks the soft stops (`options.stop_file` exists, or
+less than `walltime_margin` x the longest iteration plus `walltime_reserve_seconds`
+is left before `options.deadline`); either ends the run with termination
+`:stop_requested` or `:walltime` and the checkpoint saved. `iterate=false` (with
+`restart=true`) only restores the checkpoint, so the caller can write its outputs.
 """
 function lbfgs_invert!(problem::DistributedInversionProblem,layout::ControlMapLayout{T},
         gradient_backend::AbstractObjectiveGradient,context::ParallelContext;
         initial=initial_parameters(layout),options::LBFGSSolverOptions=LBFGSSolverOptions(),
-        restart::Bool=false,manifest::CapabilityManifest=problem.model.capabilities) where T
+        restart::Bool=false,iterate::Bool=true,manifest::CapabilityManifest=problem.model.capabilities) where T
     _validate(options); lower,upper=_scaled_bounds(layout)
+    iterate || restart || throw(ArgumentError("iterate=false needs restart=true: there is no checkpoint to finish"))
+    started=time()
     state,current=if restart
         restored=_restore_lbfgs_checkpoint(options.checkpoint_path,layout,manifest,
             options.history_length,context,problem)
@@ -179,11 +224,26 @@ function lbfgs_invert!(problem::DistributedInversionProblem,layout::ControlMapLa
         "checkpoint iteration $(state.iteration) exceeds requested max_iterations $(options.max_iterations)"))
     length(state.s_history)==length(state.y_history)<=options.history_length || throw(ArgumentError(
         "invalid L-BFGS checkpoint history"))
+    if !iterate
+        state.termination===:running && (state.termination=:incomplete_checkpoint)
+        _lbfgs_progress(context,"finish from checkpoint iteration=$(state.iteration) termination=$(state.termination)")
+        return LBFGSInversionResult(state,current)
+    end
     if !state.converged && state.iteration<options.max_iterations
         state.termination=:running
     end
 
-    for iteration in state.iteration+1:options.max_iterations
+    # the setup (first gradient, or the restart evaluation) stands in for an iteration until one is timed
+    longest_iteration=time()-started
+    # a converged checkpoint is finished: resuming it must not iterate again
+    for iteration in (state.converged ? (1:0) : (state.iteration+1:options.max_iterations))
+        stop=_soft_stop(options,longest_iteration,context)
+        if stop!==:none
+            state.termination=stop
+            _lbfgs_progress(context,"stop reason=$stop before iteration=$iteration longest_iteration_seconds=$(round(longest_iteration;digits=1))")
+            break
+        end
+        iteration_started=time()
         if state.forward_evaluations>=options.maximum_forward_evaluations
             state.termination=:maximum_forward_evaluations; break
         end
@@ -258,6 +318,10 @@ function lbfgs_invert!(problem::DistributedInversionProblem,layout::ControlMapLa
         projected_norm=T(norm(projected_new,Inf))
         push!(state.history,LBFGSIterationRecord(iteration,state.forward_evaluations,state.objective,
             state.data_term,state.regularization_term,projected_norm,accepted_step,trials,rejected,true))
+        seconds=time()-iteration_started; longest_iteration=max(longest_iteration,seconds)
+        _lbfgs_progress(context,"iteration=$iteration forward_evaluations=$(state.forward_evaluations) "*
+            "total=$(state.objective) data=$(state.data_term) regularization=$(state.regularization_term) "*
+            "projected_gradient=$projected_norm step=$accepted_step trials=$trials seconds=$(round(seconds;digits=1))")
 
         parameter_step=norm(trial_x.-x,Inf)
         objective_change=abs(previous_objective-state.objective)
@@ -278,7 +342,13 @@ function lbfgs_invert!(problem::DistributedInversionProblem,layout::ControlMapLa
     end
     isempty(options.checkpoint_path) ||
         _save_lbfgs_checkpoint(options.checkpoint_path,layout,state,manifest,options.history_length,context,problem)
+    _lbfgs_progress(context,"done iteration=$(state.iteration) termination=$(state.termination) converged=$(state.converged)")
     LBFGSInversionResult(state,current)
+end
+
+function _lbfgs_progress(context,message)
+    isroot(context) || return nothing
+    println(stdout,"LBFGS ",message); flush(stdout); nothing
 end
 
 """Write rank-0 Phase 6 convergence diagnostics without gathering model cubes."""

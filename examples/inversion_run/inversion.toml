@@ -194,6 +194,10 @@ maximum_forward_evaluations = 100000
 curvature_tolerance = 1.0e-10
 checkpoint_every = 1
 checkpoint_path = "outputs/inversion.checkpoint"
+# touch outputs/STOP to stop at the next iteration; the Olivia batch script also stops it before the time limit
+stop_file = "outputs/STOP"
+# "if_present": continue from checkpoint_path when it exists (delete it to start fresh)
+resume = false
 
 [parallel]
 enabled = true

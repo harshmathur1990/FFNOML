@@ -29,6 +29,7 @@ include("phase6_fsdp_protocol.jl")
 include("fsdp_only_architecture.jl")
 
 include("correction_mapping.jl")
+include("soft_stop_resume.jl")
 
 include("view_angle.jl")
 include("vz_positive.jl")

@@ -326,11 +326,16 @@ function _gather_populations(populations,distributed,context)
     gather_one(populations,779)
 end
 
-"""Execute the sole MPI/hybrid two-input/two-output inversion route."""
+"""Execute the sole MPI/hybrid two-input/two-output inversion route.
+
+`restart=true` (or `solver.resume`) continues from the solver checkpoint; `finish=true`
+does not iterate: it restores the L-BFGS checkpoint and writes the outputs of its
+parameters (a run that was stopped by the time limit before it wrote them).
+"""
 function run_inversion!(config::RunConfig,root_inputs,
         factory::InversionModelFactory,context::ParallelContext;
-        gradient_backend::AbstractObjectiveGradient=HybridAdjointObjectiveGradient(),restart=false)
-    config.mode===:forward && restart && throw(ArgumentError("forward mode does not accept optimizer restart"))
+        gradient_backend::AbstractObjectiveGradient=HybridAdjointObjectiveGradient(),restart=false,finish=false)
+    config.mode===:forward && (restart || finish) && throw(ArgumentError("forward mode does not accept optimizer restart"))
     metadata=mpi_broadcast(if isroot(context)
         root_inputs isa InversionInputBundle || throw(ArgumentError("rank 0 must provide InversionInputBundle"))
         (atmosphere_shape=size(root_inputs.atmosphere.temperature),
@@ -371,8 +376,10 @@ function run_inversion!(config::RunConfig,root_inputs,
             config.regularization,config.synthesis.dx_m,config.synthesis.dy_m,context;
             control_layout=layout,reference_id=metadata.reference_id)
         solver=if config.solver isa LBFGSSolverOptions
-            lbfgs_invert!(problem,layout,gradient_backend,context;options=config.solver,restart=restart)
+            resume=finish || restart || _resume_requested(config.solver,context)
+            lbfgs_invert!(problem,layout,gradient_backend,context;options=config.solver,restart=resume,iterate=!finish)
         else
+            finish && throw(ArgumentError("finishing from a checkpoint needs solver.method = \"lbfgs\""))
             restart ? prototype_invert!(problem,layout,context;options=config.solver,restart=true) :
                 prototype_invert!(problem,layout,context;options=config.solver)
         end
@@ -427,12 +434,25 @@ function _equilibrium_provenance!(provenance,model,outcome)
     provenance
 end
 
+"""Give an L-BFGS run the job's end time (`FFNO_JOB_END_EPOCH`, set by the batch script) as its deadline,
+unless the configuration sets `solver.deadline` itself."""
+function _with_job_deadline(config::RunConfig,environment=ENV)
+    solver=config.solver
+    solver isa LBFGSSolverOptions && isinf(solver.deadline) || return config
+    raw=strip(get(environment,"FFNO_JOB_END_EPOCH",""))
+    isempty(raw) && return config
+    deadline=tryparse(Float64,raw)
+    deadline===nothing && throw(ArgumentError("FFNO_JOB_END_EPOCH must be a unix time, got \"$raw\""))
+    RunConfig((name===:solver ? _with_options(solver;deadline=deadline) : getfield(config,name)
+        for name in fieldnames(RunConfig))...)
+end
+
 function run_inversion_files!(config_path::AbstractString,factory::InversionModelFactory;
-        gradient_backend::AbstractObjectiveGradient=HybridAdjointObjectiveGradient(),restart=false)
-    config=load_config(config_path); context=initialize_parallel(options=config.parallel)
+        gradient_backend::AbstractObjectiveGradient=HybridAdjointObjectiveGradient(),restart=false,finish=false)
+    config=_with_job_deadline(load_config(config_path)); context=initialize_parallel(options=config.parallel)
     try
         inputs=isroot(context) ? read_inversion_inputs(config) : nothing
-        result=run_inversion!(config,inputs,factory,context;gradient_backend=gradient_backend,restart=restart)
+        result=run_inversion!(config,inputs,factory,context;gradient_backend=gradient_backend,restart=restart,finish=finish)
         if isroot(context)
             result.provenance["configuration_hash"]=bytes2hex(open(SHA.sha256,config_path))
             result.provenance["reference_atmosphere_sha256"]=_atmosphere_reference_id(inputs.atmosphere)

@@ -77,6 +77,25 @@ factory_file=${FFNO_INVERSION_FACTORY:-${FFNOML_RUN_DIR}/model_factory.jl}
 [[ -r "${config_file}" ]] || { echo "Missing inversion config: ${config_file}" >&2; exit 2; }
 [[ -r "${factory_file}" ]] || { echo "Missing model factory: ${factory_file}" >&2; exit 2; }
 
+# The solver stops cleanly before the time limit (solver.walltime_margin, walltime_reserve_seconds) when it knows the
+# job's end; touch the configured solver.stop_file to stop it at the next iteration.
+if [[ -z "${FFNO_JOB_END_EPOCH:-}" ]]; then
+  job_end=$(squeue --noheader --jobs="${SLURM_JOB_ID}" --format=%e 2>/dev/null || true)
+  FFNO_JOB_END_EPOCH=$(date --date="${job_end}" +%s 2>/dev/null || true)
+fi
+if [[ -n "${FFNO_JOB_END_EPOCH:-}" ]]; then
+  export FFNO_JOB_END_EPOCH
+  echo "Job end: $(date --date="@${FFNO_JOB_END_EPOCH}") (FFNO_JOB_END_EPOCH=${FFNO_JOB_END_EPOCH})"
+else
+  echo "Job end unknown: no walltime stop" >&2
+fi
+# FFNO_INVERSION_FINISH=1: no iterations, only the outputs of the L-BFGS checkpoint's parameters
+invert_arguments=()
+if [[ "${FFNO_INVERSION_FINISH:-0}" == 1 ]]; then
+  invert_arguments+=(--finish)
+  echo "Finishing from the checkpoint (--finish)"
+fi
+
 python_candidate=${OLIVIA_PYTHON:-python3}
 OLIVIA_PYTHON=$(command -v "${python_candidate}") || {
   echo "Cannot resolve Python executable: ${python_candidate}" >&2
@@ -125,4 +144,4 @@ srun --kill-on-bad-exit=1 --mpi=pmix --gres=none \
   env CUDA_VISIBLE_DEVICES=-1 FFNO_THREADS_PER_RANK="${SLURM_CPUS_PER_TASK}" \
   "${OLIVIA_JULIA}" --project="${JULIA_PROJECT}" --startup-file=no \
     --threads="${SLURM_CPUS_PER_TASK}" \
-    "${OLIVIA_REPO_DIR}/scripts/invert.jl" "${config_file}" "${factory_file}"
+    "${OLIVIA_REPO_DIR}/scripts/invert.jl" "${invert_arguments[@]}" "${config_file}" "${factory_file}"
