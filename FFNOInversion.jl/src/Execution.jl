@@ -356,6 +356,7 @@ function run_inversion!(config::RunConfig,root_inputs,
                 "$(join(given.species,", ")); build its populations with launch_fsdp_population_models"))
         end
         if config.mode===:forward
+            _log_section(context,"Forward model")
             result=forward!(workspace,model,distributed,context;reuse_prepared=true)
             result.valid || throw(ArgumentError("equilibrium reconstruction failed: $(result.equilibrium.reason); "*
                 join(result.equilibrium.messages,"; ")))
@@ -367,6 +368,7 @@ function run_inversion!(config::RunConfig,root_inputs,
                 gather_atmosphere(distributed,context),_gather_populations(cartesian_populations(workspace),distributed,context),
                 nothing,provenance)
             _forward_stage(context,"gather done")
+            log_memory(context,model.populations); _end_log_section()
             return gathered
         end
         local_observation=distribute_observation(Float64,isroot(context) ? root_inputs.observation : nothing,
@@ -384,13 +386,17 @@ function run_inversion!(config::RunConfig,root_inputs,
                 prototype_invert!(problem,layout,context;options=config.solver)
         end
         final_parameters=solver.state.parameters
+        _log_section(context,"Final evaluation (the outputs)")
         objective=evaluate_objective!(problem,layout,final_parameters,context)
+        _forward_stage(context,"final total=$(objective.components.total) data=$(objective.components.data) "*
+            "regularization=$(objective.components.regularization)")
         synthesis=gather_spectrum(workspace.output,distributed,context)
         atmosphere=gather_atmosphere(distributed,context)
         populations=_gather_populations(cartesian_populations(workspace),distributed,context)
         provenance=parallel_provenance(context,distributed.tile;capabilities=["intensity","non_prd",
             "matrix_free_vjp","lbfgs","fsdp_distributed_h_slab"])
         _equilibrium_provenance!(provenance,model,objective.equilibrium)
+        _end_log_section()
         InversionRunResult(solver,synthesis,atmosphere,populations,objective,provenance)
     catch exception
         abort_on_rank_failure(exception,catch_backtrace(),context)

@@ -311,11 +311,23 @@ function _distributed_observation!(output,intrinsic,model::GaussianPSFObservatio
     copyto!(output.data,ydata); output
 end
 
+# The run log is in sections: a header at the margin ("Iteration 3") and that section's lines below it after a tab.
+const _LOG_INDENT=Ref("")
+
 """Root-rank progress line for a forward stage (stdout, flushed so a running job shows where it is)."""
-function _forward_stage(context,message)
+_forward_stage(context,message)=_log_line(context,"FORWARD stage=$message")
+
+"""A root-rank line of the run log, indented under the current section."""
+function _log_line(context,message)
     isroot(context) || return nothing
-    println(stdout,"FORWARD stage=$message"); flush(stdout); nothing
+    println(stdout,_LOG_INDENT[],message); flush(stdout); nothing
 end
+
+"""Start a run-log section: `title` at the margin on rank 0, and the lines that follow it indented by a tab."""
+function _log_section(context,title)
+    _LOG_INDENT[]=""; _log_line(context,title); _LOG_INDENT[]="\t"; nothing
+end
+_end_log_section()=(_LOG_INDENT[]=""; nothing)
 
 """One collective forward evaluation: equilibrium, populations, synthesis,
 observation. If the equilibrium is invalid (identical verdict on every rank) the

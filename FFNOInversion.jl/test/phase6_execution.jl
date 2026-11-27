@@ -43,6 +43,10 @@ function fake_fsdp_population_backend(;levels=1,value=1.0f10,temperature_scaled=
                     println(peer,"OK VJP $nz $nx $ny $nlevels")
                     FFNOInversion._write_float32_array(peer,zeros(Float32,6,nz,nx,ny))
                     FFNOInversion._write_float32_array(peer,zeros(Float32,nz,nx,ny)); flush(peer)
+                elseif operation=="MEMORY"
+                    # two GPUs on this host: peak allocated, reserved and total bytes
+                    println(peer,"OK MEMORY 2\n$(gethostname()) 0 3221225472 4294967296 85899345920\n"*
+                        "$(gethostname()) 1 2147483648 4294967296 85899345920"); flush(peer)
                 elseif operation=="SHUTDOWN"
                     println(peer,"BYE"); flush(peer); break
                 else

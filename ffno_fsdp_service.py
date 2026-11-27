@@ -143,6 +143,16 @@ def _service_device(local_rank):
     return torch.device("cuda", local_rank)
 
 
+def _memory_entry(device, peak_allocated):
+    """This rank's GPU memory for a MEMORY reply: (host, local rank, peak allocated, reserved, total), in bytes."""
+    local_rank = int(os.environ.get("LOCAL_RANK", dist.get_rank()))
+    if device.type != "cuda" or not torch.cuda.is_initialized():
+        return (socket.gethostname(), local_rank, 0, 0, 0)
+    _, total = torch.cuda.mem_get_info(device)
+    peak = max(peak_allocated, torch.cuda.max_memory_allocated(device))
+    return (socket.gethostname(), local_rank, peak, torch.cuda.memory_reserved(device), total)
+
+
 def serve(configuration, backends, command_group, diagnostics):
     rank = dist.get_rank()
     world = dist.get_world_size()
@@ -175,6 +185,7 @@ def serve(configuration, backends, command_group, diagnostics):
         print(f"FFNO_FSDP_SERVICE_CLIENT_CONNECTED address={address}", flush=True)
 
     command_count = 0
+    peak_allocated = 0
     while True:
         if rank == 0:
             line = reader.readline()
@@ -192,6 +203,19 @@ def serve(configuration, backends, command_group, diagnostics):
             if rank == 0 and operation == "SHUTDOWN":
                 stream.sendall(b"BYE\n")
             break
+        if operation == "MEMORY":
+            # every rank's peak since the last MEMORY: host, local rank, peak allocated, reserved, total (bytes)
+            gathered = [None] * world
+            dist.all_gather_object(
+                gathered, _memory_entry(device, peak_allocated), group=command_group
+            )
+            peak_allocated = 0
+            if device.type == "cuda" and torch.cuda.is_initialized():
+                torch.cuda.reset_peak_memory_stats(device)
+            if rank == 0:
+                lines = "".join(" ".join(str(v) for v in entry) + "\n" for entry in gathered)
+                stream.sendall(f"OK MEMORY {world}\n{lines}".encode())
+            continue
         if operation not in ("PREDICT", "VJP", "JVP") or len(command) != 8:
             raise RuntimeError(f"invalid FSDP service command: {command}")
         _, name, nz_raw, nx_raw, ny_raw, levels_raw, dx_raw, dy_raw = command
@@ -297,6 +321,8 @@ def serve(configuration, backends, command_group, diagnostics):
                 write_array(stream, features_bar_global)
                 write_array(stream, z_bar_global)
         command_count += 1
+        if device.type == "cuda":
+            peak_allocated = max(peak_allocated, torch.cuda.max_memory_allocated(device))
         diagnostics.record_memory("request_end", device)
         diagnostics.record("command_done", count=command_count)
         if command_count == 1:
