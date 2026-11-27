@@ -309,7 +309,20 @@ function _lbfgs_solver(section)
         maximum_forward_evaluations=Int(get(section,"maximum_forward_evaluations",typemax(Int))),
         curvature_tolerance=Float64(get(section,"curvature_tolerance",1e-10)),
         checkpoint_every=Int(get(section,"checkpoint_every",1)),
-        checkpoint_path=String(get(section,"checkpoint_path",""))) |> _validate
+        checkpoint_path=String(get(section,"checkpoint_path","")),
+        stop_file=String(get(section,"stop_file","")),
+        deadline=Float64(get(section,"deadline",Inf)),
+        walltime_margin=Float64(get(section,"walltime_margin",1.5)),
+        walltime_reserve_seconds=Float64(get(section,"walltime_reserve_seconds",600.0)),
+        resume=_resume_mode(get(section,"resume",false))) |> _validate
+end
+
+# solver.resume: false/"never", true/"always", or "if_present" (resume when the checkpoint exists)
+function _resume_mode(value)
+    value isa Bool && return value ? :always : :never
+    mode=Symbol(lowercase(String(value)))
+    mode in (:never,:always,:if_present) || throw(ArgumentError("solver.resume must be true, false or \"if_present\""))
+    mode
 end
 
 function _solver(section)

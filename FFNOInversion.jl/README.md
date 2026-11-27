@@ -489,7 +489,24 @@ Repeat `[[inversion.controls]]` for each inverted variable:
 `history_length`, `gradient_tolerance`, `step_tolerance`, `objective_tolerance`,
 `initial_step`, `backtracking_factor`, `armijo_coefficient`,
 `maximum_line_search_trials`, `maximum_forward_evaluations`, `curvature_tolerance`,
-`checkpoint_every`, `checkpoint_path`.
+`checkpoint_every`, `checkpoint_path`, and the stop and resume keys below.
+
+| Key | Meaning |
+|---|---|
+| `stop_file` | path (relative to the run directory); when it exists the run stops before the next iteration |
+| `deadline` | unix time by which the outputs must be written; on Olivia the batch script sets it from the job's end (`FFNO_JOB_END_EPOCH`) unless this key is given |
+| `walltime_margin` | stop when less than this × the longest iteration so far (default 1.5) ... |
+| `walltime_reserve_seconds` | ... plus this reserve for the final outputs (default 600) is left before `deadline` |
+| `resume` | `false` (default), `true` (resume from `checkpoint_path`), or `"if_present"` (resume when the checkpoint exists) |
+
+A soft stop (`termination = stop_requested` or `walltime`) ends at an iteration
+boundary like a converged run: the checkpoint is saved and the atmosphere and
+synthesis outputs are written. To continue, resubmit with `resume = "if_present"`
+(remove the stop file first). `scripts/invert.jl --finish` (`FFNO_INVERSION_FINISH=1`
+for the Olivia batch script) does not iterate: it writes the outputs of the
+checkpoint's parameters, for a run killed before it wrote them. Rank 0 prints one
+`LBFGS iteration=...` line per iteration (objective, data and regularization terms,
+projected gradient, step, seconds).
 
 `method = "prototype_pattern_search"` is the derivative-free Phase 5 reference
 solver (`maximum_evaluations`, `minimum_step`, `step_shrink`,
@@ -846,7 +863,8 @@ distributed JVP against finite differences on CPU.
 Checkpoints are atomic and bound to the configuration, the baseline atmosphere
 checksum, the node initialization and the correction representation. They restart
 on a different MPI/thread topology. A checkpoint from an incompatible run is
-refused, so start that run fresh.
+refused, so start that run fresh. Without `solver.resume` a run starts from its
+initial atmosphere and overwrites `checkpoint_path` after its first iteration.
 
 ## Parallel runtime
 
