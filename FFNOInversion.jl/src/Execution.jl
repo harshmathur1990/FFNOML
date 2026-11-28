@@ -373,17 +373,23 @@ function run_inversion!(config::RunConfig,root_inputs,
         end
         local_observation=distribute_observation(Float64,isroot(context) ? root_inputs.observation : nothing,
             metadata.observation_shape,config.synthesis.wavelength_m,config.stokes,context)
-        layout=mpi_broadcast(isroot(context) ? build_control_layout(root_inputs.atmosphere,config.controls) : nothing,context)
-        problem=DistributedInversionProblem(model,workspace,distributed,local_observation,
-            config.regularization,config.synthesis.dx_m,config.synthesis.dy_m,context;
-            control_layout=layout,reference_id=metadata.reference_id)
-        solver=if config.solver isa LBFGSSolverOptions
-            resume=finish || restart || _resume_requested(config.solver,context)
-            lbfgs_invert!(problem,layout,gradient_backend,context;options=config.solver,restart=resume,iterate=!finish)
+        problem,layout,solver=if isempty(config.cycles)
+            layout=mpi_broadcast(isroot(context) ? build_control_layout(root_inputs.atmosphere,config.controls) : nothing,context)
+            problem=DistributedInversionProblem(model,workspace,distributed,local_observation,
+                config.regularization,config.synthesis.dx_m,config.synthesis.dy_m,context;
+                control_layout=layout,reference_id=metadata.reference_id)
+            solver=if config.solver isa LBFGSSolverOptions
+                resume=finish || restart || _resume_requested(config.solver,context)
+                lbfgs_invert!(problem,layout,gradient_backend,context;options=config.solver,restart=resume,iterate=!finish)
+            else
+                finish && throw(ArgumentError("finishing from a checkpoint needs solver.method = \"lbfgs\""))
+                restart ? prototype_invert!(problem,layout,context;options=config.solver,restart=true) :
+                    prototype_invert!(problem,layout,context;options=config.solver)
+            end
+            (problem,layout,solver)
         else
-            finish && throw(ArgumentError("finishing from a checkpoint needs solver.method = \"lbfgs\""))
-            restart ? prototype_invert!(problem,layout,context;options=config.solver,restart=true) :
-                prototype_invert!(problem,layout,context;options=config.solver)
+            _run_cycles(config,root_inputs.atmosphere,metadata.reference_id,model,workspace,distributed,local_observation,
+                gradient_backend,context;restart=restart,finish=finish)
         end
         final_parameters=solver.state.parameters
         _log_section(context,"Final evaluation (the outputs)")
@@ -404,6 +410,72 @@ function run_inversion!(config::RunConfig,root_inputs,
     finally
         close_model_resources!(model.populations,model.equilibrium,context)
     end
+end
+
+"""The checkpoint of cycle `k` of `n`: `solver.checkpoint_path` for a single cycle, else `<path>.cycle<k>`."""
+_cycle_checkpoint(path,k,n)=isempty(path) || n==1 ? path : "$path.cycle$k"
+
+"""Whether cycle `k`'s checkpoint is `:missing`, `:finished` (converged, out of iterations or line searches) or
+`:unfinished` (stopped by a stop file or the time limit); collective, decided on rank 0."""
+function _cycle_checkpoint_status(path,max_iterations,context)
+    mpi_broadcast(if isroot(context)
+        if isempty(path) || !isfile(path)
+            :missing
+        else
+            state=restore_checkpoint(path).state.state
+            done=state.converged || state.termination in (:line_search_failed,:maximum_forward_evaluations) ||
+                state.iteration>=max_iterations
+            done ? :finished : :unfinished
+        end
+    else
+        nothing
+    end,context)
+end
+
+_cycle_description(layout)=join(("$(spec.variable) nodes=$(spec.nodes) maps=$(size(spec.initial,2))x$(size(spec.initial,3))"
+    for spec in layout.specs),"; ")
+
+"""Run the `[[inversion.cycles]]` in order. Each cycle builds its control layout from the atmosphere the previous one
+ended with (the input atmosphere for the first) and starts L-BFGS afresh, with the cycle's `max_iterations` and its own
+checkpoint (`_cycle_checkpoint`). Resuming (`restart`, `finish` or `solver.resume`) replays the finished cycles from their
+checkpoints without iterating, then resumes the first unfinished one; a cycle without a checkpoint starts fresh, except
+with `finish`, which writes the outputs of the last cycle that has one. A soft stop (stop file, time limit) ends the run."""
+function _run_cycles(config,root_atmosphere,reference_id,model,workspace,distributed,observation,gradient_backend,context;
+        restart=false,finish=false)
+    count=length(config.cycles); problem=nothing; layout=nothing; solver=nothing
+    resume=finish || restart || config.solver.resume!==:never
+    for (k,cycle) in enumerate(config.cycles)
+        options=_with_options(config.solver;max_iterations=cycle.max_iterations,
+            checkpoint_path=_cycle_checkpoint(config.solver.checkpoint_path,k,count))
+        status=resume ? _cycle_checkpoint_status(options.checkpoint_path,cycle.max_iterations,context) : :missing
+        k==1 && status===:missing && config.solver.resume===:always && throw(ArgumentError(
+            "solver.resume = true needs the checkpoint of cycle 1: $(options.checkpoint_path)"))
+        if finish && status===:missing
+            k>1 || throw(ArgumentError("finishing needs the checkpoint of cycle 1: $(options.checkpoint_path)"))
+            break
+        end
+        if k>1
+            # the previous cycle's last accepted point: the atmosphere (and its thermodynamics) the new layout starts from
+            evaluate_objective!(problem,layout,solver.state.parameters,context)
+            root_atmosphere=gather_atmosphere(distributed,context)
+            reference_id=mpi_broadcast(isroot(context) ? _atmosphere_reference_id(root_atmosphere) : nothing,context)
+        end
+        layout=mpi_broadcast(isroot(context) ? build_control_layout(root_atmosphere,cycle_controls(config.controls,cycle)) :
+            nothing,context)
+        problem=DistributedInversionProblem(model,workspace,distributed,observation,config.regularization,
+            config.synthesis.dx_m,config.synthesis.dy_m,context;control_layout=layout,reference_id=reference_id)
+        # the factory's prepared equilibrium belongs to the input atmosphere, not to a later cycle's start
+        k>1 && (problem.prepared_initial_available[]=false)
+        _log_section(context,"Cycle $k of $count: $(_cycle_description(layout)) max_iterations=$(cycle.max_iterations)"*
+            (status===:missing ? "" : " ($(status) checkpoint)"))
+        _end_log_section()
+        # a finished cycle (and every cycle with `finish`) is only restored from its checkpoint
+        replay=finish || status===:finished
+        solver=lbfgs_invert!(problem,layout,gradient_backend,context;options=options,restart=status!==:missing,iterate=!replay)
+        solver.state.termination in (:stop_requested,:walltime) && break
+        finish && status===:unfinished && break
+    end
+    (problem,layout,solver)
 end
 
 """Close the population model and the equilibrium backend, always attempting both.

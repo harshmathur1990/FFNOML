@@ -89,6 +89,67 @@ function wavelengths(region::SpectralRegionConfig{T}) where T
     region.start_m .+ T.(0:region.count-1) .* region.step_m
 end
 
+"""One `[[inversion.cycles]]` entry. The cycles run in order, each a fresh L-BFGS start (new control layout, empty
+history) from the atmosphere the previous cycle ended with; the first starts from the input atmosphere. `variables`
+picks the cycle's controls (empty: every `[[inversion.controls]]` entry), `nodes` replaces a control's node positions,
+and `control_nx`/`control_ny` (0: each control's own) set the map size of all its controls. Bounds and scales are the
+controls' own."""
+struct InversionCycleConfig
+    max_iterations::Int
+    variables::Vector{Symbol}
+    nodes::Dict{Symbol,Vector{Float64}}
+    control_nx::Int
+    control_ny::Int
+end
+
+"""The controls of one cycle: the `[[inversion.controls]]` entries it selects, with its nodes and map size."""
+function cycle_controls(controls::AbstractVector{ControlMapConfig{T}},cycle::InversionCycleConfig) where T
+    selected=isempty(cycle.variables) ? collect(controls) : [c for c in controls if c.variable in cycle.variables]
+    map(selected) do c
+        ControlMapConfig(c.variable,haskey(cycle.nodes,c.variable) ? T.(cycle.nodes[c.variable]) : c.nodes,c.kind,
+            cycle.control_nx>0 ? cycle.control_nx : c.control_nx,cycle.control_ny>0 ? cycle.control_ny : c.control_ny,
+            c.lower,c.upper,c.scale)
+    end
+end
+
+const _CYCLE_KEYS=("max_iterations","variables","control_nx","control_ny")
+
+function _cycles(section,controls,vertical_coordinate::Symbol)
+    node_key=_NODE_KEYS[vertical_coordinate]
+    known=Set(getfield.(controls,:variable))
+    cycles=InversionCycleConfig[]
+    for (i,raw) in enumerate(get(section,"cycles",Any[]))
+        unknown=setdiff(collect(keys(raw)),[_CYCLE_KEYS...,node_key])
+        isempty(unknown) || throw(ArgumentError("unknown key(s) in inversion.cycles[$i]: $(join(sort(unknown),", "))"*
+            (any(k->k in values(_NODE_KEYS),unknown) ? " (nodes for vertical_coordinate=$vertical_coordinate are $node_key)" : "")))
+        iterations=Int(_required(raw,"max_iterations"))
+        iterations>0 || throw(ArgumentError("inversion.cycles[$i].max_iterations must be positive"))
+        name(v)=(n=lowercase(String(v)); get(Dict("bx"=>:Bx,"by"=>:By,"bz"=>:Bz),n,Symbol(n)))
+        variables=Symbol[name(v) for v in get(raw,"variables",String[])]
+        length(unique(variables))==length(variables) || throw(ArgumentError("inversion.cycles[$i].variables must be unique"))
+        for v in variables
+            v in known || throw(ArgumentError("inversion.cycles[$i].variables: $v has no [[inversion.controls]] entry"))
+        end
+        nodes=Dict{Symbol,Vector{Float64}}()
+        for (v,raw_nodes) in get(raw,node_key,Dict{String,Any}())
+            variable=name(v)
+            variable in known || throw(ArgumentError("inversion.cycles[$i].$node_key: $variable has no [[inversion.controls]] entry"))
+            isempty(variables) || variable in variables || throw(ArgumentError(
+                "inversion.cycles[$i].$node_key: $variable is not one of the cycle's variables"))
+            values=Float64.(raw_nodes)
+            length(values)>=2 || throw(ArgumentError("inversion.cycles[$i].$node_key.$variable needs at least two nodes"))
+            all(isfinite,values) || throw(ArgumentError("inversion.cycles[$i].$node_key.$variable must be finite"))
+            d=diff(values); (all(>(0),d)||all(<(0),d)) || throw(ArgumentError(
+                "inversion.cycles[$i].$node_key.$variable must be strictly monotonic"))
+            nodes[variable]=values
+        end
+        nx=Int(get(raw,"control_nx",0)); ny=Int(get(raw,"control_ny",0))
+        nx>=0 && ny>=0 || throw(ArgumentError("inversion.cycles[$i] control_nx and control_ny must be positive"))
+        push!(cycles,InversionCycleConfig(iterations,variables,nodes,nx,ny))
+    end
+    cycles
+end
+
 struct RunConfig{T<:AbstractFloat}
     atmosphere::AtmosphereInputConfig{T}
     mode::Symbol
@@ -114,6 +175,7 @@ struct RunConfig{T<:AbstractFloat}
     ffno_population_limit::Float64
     ffno_no_inversion::Bool
     given_populations::Union{Nothing,GivenPopulationsConfig}   # `[population.given]`, forward only (GivenPopulations.jl)
+    cycles::Vector{InversionCycleConfig}                        # `[[inversion.cycles]]`; empty: one run of the controls
 end
 
 """
@@ -546,6 +608,8 @@ function load_config(path::AbstractString)
     end
     controls=forward_only ? ControlMapConfig{Float64}[] : _controls(_required(cfg,"inversion"),vertical_coordinate)
     controls=_controls_in_code_sign(controls,vz_positive)
+    cycles=forward_only ? InversionCycleConfig[] : _cycles(_required(cfg,"inversion"),controls,vertical_coordinate)
+    isempty(cycles) || solver isa LBFGSSolverOptions || throw(ArgumentError("inversion.cycles needs solver.method = \"lbfgs\""))
     parallel_raw = get(cfg,"parallel",Dict{String,Any}())
     decomposition = Symbol(lowercase(String(get(parallel_raw,"decomposition","cartesian_2d"))))
     decomposition in (:cartesian_2d,:x_slabs) || throw(ArgumentError("parallel.decomposition must be cartesian_2d or x_slabs"))
@@ -586,7 +650,8 @@ function load_config(path::AbstractString)
         observation_model,stokes,redistribution,regularization,parallel,controls,solver,time_index,equilibrium,
         _population_mesh(get(cfg,"population",Dict{String,Any}()),vertical_coordinate,!isempty(equilibrium.eos_table_file)),view,vz_positive,_continuum_populations(physics),_line_center(physics),
         _ffno_population_limit(physics),Bool(get(physics,"ffno_no_inversion",true)),
-        _given_populations(get(get(cfg,"population",Dict{String,Any}()),"given",nothing),forward_only,dirname(abspath(path))))
+        _given_populations(get(get(cfg,"population",Dict{String,Any}()),"given",nothing),forward_only,dirname(abspath(path))),
+        cycles)
 end
 
 const _POPULATION_MESH_KEYS=("enabled","bottom_m","top_m","spacing_m","uniform_top_m","stretch","max_spacing_m","nabla","corona_temperature_k","corona_transition_m",

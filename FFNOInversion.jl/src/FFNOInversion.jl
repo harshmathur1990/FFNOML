@@ -109,7 +109,7 @@ export observation_vjp!, synthesis_vjp!, predict_distributed_populations_vjp!
 export LBFGSSolverOptions, LBFGSIterationRecord, LBFGSSolverState, LBFGSInversionResult
 export lbfgs_invert!, write_lbfgs_diagnostics
 export AtmosphereInputConfig, ObservedDataConfig, WeightInputConfig, OutputConfig, SynthesisGridConfig, SpectralSourceConfig, SpectralRegionConfig, wavelengths, RunConfig
-export ControlMapConfig, build_control_layout
+export ControlMapConfig, build_control_layout, InversionCycleConfig, cycle_controls
 export FFNOLine, ffno_atom_lines, ffno_region_lines, ffno_line_center_nm, describe_ffno_line
 export load_config, dry_run_summary
 export checkpoint!, restore_checkpoint

@@ -305,6 +305,15 @@ function _configuration_details(io,config,run_dir)
                 " maps; bounds ",c.lower,"–",c.upper,", scale ",c.scale)
         end
     end
+    if !isempty(config.cycles)
+        println(io,"  Cycles:         ",length(config.cycles)," (each a fresh L-BFGS start; solver.max_iterations is not used)")
+        for (k,cycle) in enumerate(config.cycles)
+            println(io,"    cycle ",k,": max_iterations ",cycle.max_iterations)
+            for c in cycle_controls(config.controls,cycle)
+                println(io,"      ",c.variable,": nodes ",_short(c.nodes)," on ",c.control_nx,"×",c.control_ny," maps")
+            end
+        end
+    end
     println(io,"  Solver:         ",nameof(typeof(config.solver)),": ",_fields(config.solver))
     println(io,"  Regularization: ",_short(config.regularization))
     println(io,"  Parallel:       ",_fields(config.parallel))
