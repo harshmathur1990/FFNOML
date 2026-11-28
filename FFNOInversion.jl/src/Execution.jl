@@ -371,6 +371,9 @@ function run_inversion!(config::RunConfig,root_inputs,
             log_memory(context,model.populations); _end_log_section()
             return gathered
         end
+        # the adaptive population mesh stays that of the starting atmosphere: rebuilt for every trial it would make the
+        # objective jump ([population.mesh] adapt_during_inversion = true keeps the old behaviour)
+        freeze_population_mesh!(model.populations)
         local_observation=distribute_observation(Float64,isroot(context) ? root_inputs.observation : nothing,
             metadata.observation_shape,config.synthesis.wavelength_m,config.stokes,context)
         layout=mpi_broadcast(isroot(context) ? build_control_layout(root_inputs.atmosphere,config.controls) : nothing,context)

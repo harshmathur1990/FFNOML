@@ -84,6 +84,13 @@ struct CompositeDistributedPopulationModel{M<:AbstractDict} <: AbstractDistribut
     end
 end
 
+freeze_population_mesh!(model::LocalDistributedPopulationModel,frozen::Bool=true;readapt::Bool=false)=
+    (freeze_population_mesh!(model.model,frozen;readapt=readapt); model)
+freeze_population_mesh!(model::RootDistributedPopulationModel,frozen::Bool=true;readapt::Bool=false)=
+    (freeze_population_mesh!(model.root_model,frozen;readapt=readapt); model)
+freeze_population_mesh!(model::CompositeDistributedPopulationModel,frozen::Bool=true;readapt::Bool=false)=
+    (foreach(m->freeze_population_mesh!(m,frozen;readapt=readapt),values(model.models)); model)
+
 function predict_distributed_populations!(out,backend::LocalDistributedPopulationModel,distributed,context)
     predict_populations!(out,backend.model,distributed.local_atmosphere)
 end

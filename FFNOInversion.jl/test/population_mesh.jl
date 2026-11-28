@@ -175,4 +175,37 @@ end
     fixed=MeshPopulationModel(inner,PopulationMeshConfig(;settings...,heights_m=m),eos,274.0)
     ref=zeros(nz,nx,ny,2); predict_populations!(ref,fixed,atmos); predict_populations!(out,model,atmos)
     @test ref==out
+    # an inversion freezes the adaptive mesh on its starting atmosphere: a mesh rebuilt for every trial changes in steps,
+    # so the objective would jump between nearby controls while the gradient sees a fixed mesh
+    @test !parse(Dict{String,Any}()).adapt_during_inversion
+    @test parse(Dict{String,Any}("adapt_during_inversion"=>true)).adapt_during_inversion
+    frozen=MeshPopulationModel(inner,PopulationMeshConfig(;settings...,adaptive=true),eos,274.0)
+    freeze_population_mesh!(frozen)                       # before any prediction: the first prediction's mesh is kept
+    predict_populations!(out,frozen,atmos); @test frozen.mesh==m
+    predict_populations!(out,frozen,steep); @test frozen.mesh==m
+    # it is the explicit mesh: same populations and the same VJP for another atmosphere
+    explicit=MeshPopulationModel(inner,PopulationMeshConfig(;settings...,heights_m=m),eos,274.0)
+    predict_populations!(ref,explicit,steep); @test out==ref
+    bar=reshape(collect(1.0:nz*nx*ny*2),nz,nx,ny,2)./(nz*nx*ny)
+    fb,zb=population_vjp!(zeros(6,nz,nx,ny),zeros(nz,nx,ny),frozen,steep,bar)
+    fe,ze=population_vjp!(zeros(6,nz,nx,ny),zeros(nz,nx,ny),explicit,steep,bar)
+    @test fb==fe && zb==ze && frozen.mesh==m
+    # readapt: the next prediction builds the mesh for its own atmosphere and keeps it
+    freeze_population_mesh!(frozen;readapt=true)
+    predict_populations!(out,frozen,steep); steep_mesh=copy(frozen.mesh); @test length(steep_mesh)>length(m)
+    predict_populations!(out,frozen,atmos); @test frozen.mesh==steep_mesh
+    # unfrozen it follows every atmosphere again
+    freeze_population_mesh!(frozen,false); predict_populations!(out,frozen,atmos); @test frozen.mesh==m
+    # adapt_during_inversion = true, a fixed mesh and models without a mesh are left alone
+    free=MeshPopulationModel(inner,PopulationMeshConfig(;settings...,adaptive=true,adapt_during_inversion=true),eos,274.0)
+    freeze_population_mesh!(free); predict_populations!(out,free,atmos); predict_populations!(out,free,steep)
+    @test !free.frozen && free.mesh==steep_mesh
+    @test !freeze_population_mesh!(fixed).frozen
+    @test freeze_population_mesh!(inner)===inner
+    # the distributed wrappers reach the mesh model of every species
+    a=MeshPopulationModel(inner,PopulationMeshConfig(;settings...,adaptive=true),eos,274.0)
+    b=MeshPopulationModel(inner,PopulationMeshConfig(;settings...,adaptive=true),eos,274.0)
+    freeze_population_mesh!(CompositeDistributedPopulationModel(Dict(:H=>LocalDistributedPopulationModel(a,2),
+        :CA=>RootDistributedPopulationModel(b,2))))
+    @test a.frozen && b.frozen
 end

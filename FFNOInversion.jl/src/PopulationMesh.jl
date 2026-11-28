@@ -45,9 +45,10 @@ struct PopulationMeshConfig{T<:AbstractFloat}
     log_rho_step::T
     velocity_step_m_s::T
     extend::Bool                  # adaptive: from bottom_m to top_m; false: only between the columns' own lowest and highest point
+    adapt_during_inversion::Bool  # adaptive: rebuild the mesh for every trial atmosphere of an inversion (false: keep the start's)
     function PopulationMeshConfig{T}(bottom_m,top_m,spacing_m,uniform_top_m,stretch,max_spacing_m,nabla,corona_temperature_k,
             corona_transition_m,heights_m=T[],adaptive=false,min_spacing_m=1.0e4,growth=1.2,lnT_step=0.05,log_ne_step=0.1,
-            log_rho_step=0.1,velocity_step_m_s=1.0e3,extend=true) where T
+            log_rho_step=0.1,velocity_step_m_s=1.0e3,extend=true,adapt_during_inversion=false) where T
         bottom_m<uniform_top_m<=top_m || throw(ArgumentError("population mesh needs bottom_m < uniform_top_m <= top_m"))
         0<spacing_m<=max_spacing_m || throw(ArgumentError("population mesh needs 0 < spacing_m <= max_spacing_m"))
         stretch>=1 || throw(ArgumentError("population mesh stretch must be >= 1"))
@@ -61,20 +62,24 @@ struct PopulationMeshConfig{T<:AbstractFloat}
         growth>1 || throw(ArgumentError("population mesh growth must be > 1"))
         min(lnT_step,log_ne_step,log_rho_step,velocity_step_m_s)>0 || throw(ArgumentError("population mesh refinement steps must be positive"))
         new{T}(bottom_m,top_m,spacing_m,uniform_top_m,stretch,max_spacing_m,nabla,corona_temperature_k,corona_transition_m,
-            T.(heights_m),adaptive,min_spacing_m,growth,lnT_step,log_ne_step,log_rho_step,velocity_step_m_s,extend)
+            T.(heights_m),adaptive,min_spacing_m,growth,lnT_step,log_ne_step,log_rho_step,velocity_step_m_s,extend,
+            adapt_during_inversion)
     end
 end
 """Defaults inside the range of the training grids (bottoms -1 to -2.5 Mm, spacing 12-30 km stretching to
 100-160 km in the corona, tops up to 14.4 Mm). `heights_m` gives the mesh outright; `adaptive = true` builds it from
 each atmosphere (`adaptive_population_mesh`) between the same `bottom_m` and `top_m`, with spacings from `min_spacing_m`
 to `max_spacing_m`; with `extend = false` only between the columns' own lowest and highest point (no corona or deep
-extension)."""
+extension). An inversion keeps the adaptive mesh of its starting atmosphere unless `adapt_during_inversion = true`
+(`freeze_population_mesh!`)."""
 PopulationMeshConfig(;bottom_m=-1.0e6,top_m=1.4e7,spacing_m=2.0e4,uniform_top_m=4.5e6,stretch=1.01,
     max_spacing_m=1.0e5,nabla=0.13,corona_temperature_k=0.0,corona_transition_m=2.4e5,heights_m=Float64[],adaptive=false,
-    min_spacing_m=1.0e4,growth=1.2,lnT_step=0.05,log_ne_step=0.1,log_rho_step=0.1,velocity_step_m_s=1.0e3,extend=true)=
+    min_spacing_m=1.0e4,growth=1.2,lnT_step=0.05,log_ne_step=0.1,log_rho_step=0.1,velocity_step_m_s=1.0e3,extend=true,
+    adapt_during_inversion=false)=
     PopulationMeshConfig{Float64}(Float64.((bottom_m,top_m,spacing_m,uniform_top_m,stretch,max_spacing_m,nabla,
         corona_temperature_k,corona_transition_m))...,Float64.(heights_m),Bool(adaptive),
-        Float64.((min_spacing_m,growth,lnT_step,log_ne_step,log_rho_step,velocity_step_m_s))...,Bool(extend))
+        Float64.((min_spacing_m,growth,lnT_step,log_ne_step,log_rho_step,velocity_step_m_s))...,Bool(extend),
+        Bool(adapt_during_inversion))
 
 """Mesh heights [m], top first: `heights_m` when given; otherwise `spacing_m` up to `uniform_top_m`, then growing by
 `stretch` per point up to `max_spacing_m`. An adaptive mesh starts as this one and is replaced at each prediction."""
@@ -101,12 +106,30 @@ mutable struct MeshPopulationModel{M<:AbstractPopulationModel,E,T<:AbstractFloat
     corona_temperature::Float64
     corona_transition::Float64
     adaptive::Union{Nothing,PopulationMeshConfig}   # set: the mesh follows each atmosphere (adaptive_population_mesh)
+    frozen::Bool              # adaptive: keep the mesh of the last prediction (freeze_population_mesh!)
 end
 function MeshPopulationModel(inner::AbstractPopulationModel,config::PopulationMeshConfig,eos,gravity;native_z::Bool=false)
     gravity>0 || throw(ArgumentError("population mesh gravity must be positive"))
     config.adaptive || _log_mesh("fixed",population_mesh(config))
     MeshPopulationModel(inner,population_mesh(config),eos,Float64(gravity),config.nabla,nothing,nothing,nothing,native_z,
-        Float64(config.corona_temperature_k),Float64(config.corona_transition_m),config.adaptive ? config : nothing)
+        Float64(config.corona_temperature_k),Float64(config.corona_transition_m),config.adaptive ? config : nothing,false)
+end
+
+"""Keep an adaptive population mesh as it is (`frozen = true`), or let it follow every atmosphere again (`false`).
+
+An inversion freezes it on the mesh of its starting atmosphere: a mesh rebuilt for every trial atmosphere changes in
+steps (its spacing follows ln T, nₑ, ρ and velocity), so the objective jumps between nearby controls, the gradient does
+not see the jumps, and the line search fails near them. With `readapt = true` the next prediction builds the mesh
+again (for that prediction's atmosphere) and keeps it. A model that has not predicted yet keeps the mesh of its first
+prediction. Fixed meshes, models without a mesh and `adapt_during_inversion = true` are left alone."""
+freeze_population_mesh!(model,frozen::Bool=true;readapt::Bool=false)=model
+function freeze_population_mesh!(model::MeshPopulationModel,frozen::Bool=true;readapt::Bool=false)
+    (model.adaptive===nothing || model.adaptive.adapt_during_inversion) && return model
+    model.frozen=frozen
+    readapt && (model.last_features=nothing; model.last_populations=nothing; model.last_cartesian=nothing)
+    frozen && (model.last_features===nothing ? println(_LOG_INDENT[],"POPULATION_MESH frozen at the next prediction") :
+        _log_mesh("frozen",model.mesh))
+    model
 end
 
 _mesh_active(model,atmosphere)=vertical_coordinate(atmosphere.grid)!==:z_m || model.native_z
@@ -268,10 +291,12 @@ function adaptive_population_mesh(model::MeshPopulationModel,atmosphere)
     eltype(model.mesh).(mesh)
 end
 
-"""The mesh for `atmosphere`: the fixed one, or the adaptive one rebuilt for it (dropping the cached prediction when it
-changes)."""
+"""The mesh for `atmosphere`: the fixed one, the frozen one (`freeze_population_mesh!`), or the adaptive one rebuilt for
+it (dropping the cached prediction when it changes)."""
 function _mesh_for!(model,atmosphere)
     model.adaptive===nothing && return model.mesh
+    # frozen: the mesh of the last prediction (its features are kept until the mesh changes)
+    model.frozen && model.last_features!==nothing && return model.mesh
     mesh=adaptive_population_mesh(model,atmosphere)
     mesh==model.mesh && return mesh
     model.mesh=mesh; model.last_features=nothing; model.last_populations=nothing; model.last_cartesian=nothing

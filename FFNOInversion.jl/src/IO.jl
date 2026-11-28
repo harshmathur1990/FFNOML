@@ -590,11 +590,14 @@ function load_config(path::AbstractString)
 end
 
 const _POPULATION_MESH_KEYS=("enabled","bottom_m","top_m","spacing_m","uniform_top_m","stretch","max_spacing_m","nabla","corona_temperature_k","corona_transition_m",
-    "heights_m","refinement","min_spacing_m","growth","lnT_step","log_ne_step","log_rho_step","velocity_step_m_s","extend")
+    "heights_m","refinement","min_spacing_m","growth","lnT_step","log_ne_step","log_rho_step","velocity_step_m_s","extend",
+    "adapt_during_inversion")
 
 """`[population.mesh]`: the height mesh FFNO runs on, on every axis and in both modes, unless `enabled = false` feeds FFNO the native grid.
 `refinement = "adaptive"` (the default) builds it from each atmosphere (`adaptive_population_mesh`; `extend = false` keeps it
-within the columns' own heights); `"fixed"` is the generated mesh, or `heights_m` when given (then fixed is the default)."""
+within the columns' own heights); `"fixed"` is the generated mesh, or `heights_m` when given (then fixed is the default).
+An inversion keeps the adaptive mesh of its starting atmosphere (`freeze_population_mesh!`) unless
+`adapt_during_inversion = true`."""
 function _population_mesh(raw,vertical_coordinate,has_table=true)
     unknown=setdiff(collect(keys(raw)),["mesh","given"])
     isempty(unknown) || throw(ArgumentError("unknown key(s) in [population]: $(join(sort(unknown),", "))"))
@@ -609,9 +612,11 @@ function _population_mesh(raw,vertical_coordinate,has_table=true)
     PopulationMeshConfig(;corona_temperature_k=1.0e6,adaptive=refinement=="adaptive",
         heights_m=Float64.(get(mesh,"heights_m",Float64[])),
         extend=Bool(get(mesh,"extend",true)),
+        adapt_during_inversion=Bool(get(mesh,"adapt_during_inversion",false)),
         # adaptive: up to 200 km where every column is smooth (FALC: 204 heights, the 452-height fixed mesh's accuracy)
         max_spacing_m=Float64(get(mesh,"max_spacing_m",refinement=="adaptive" ? 2.0e5 : 1.0e5)),
-        (Symbol(k)=>Float64(v) for (k,v) in mesh if !(k in ("enabled","refinement","heights_m","extend","max_spacing_m")))...)
+        (Symbol(k)=>Float64(v) for (k,v) in mesh if !(k in ("enabled","refinement","heights_m","extend","max_spacing_m",
+            "adapt_during_inversion")))...)
 end
 
 function dry_run_summary(config::RunConfig)
