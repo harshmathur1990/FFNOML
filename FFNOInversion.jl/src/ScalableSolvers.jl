@@ -8,6 +8,7 @@ Base.@kwdef struct LBFGSSolverOptions
     backtracking_factor::Float64=0.5
     armijo_coefficient::Float64=1e-4
     maximum_line_search_trials::Int=20
+    reset_history::Bool=true                 # a failed line search clears the history and retries along the gradient
     maximum_forward_evaluations::Int=typemax(Int)
     curvature_tolerance::Float64=1e-10
     checkpoint_every::Int=1
@@ -178,12 +179,51 @@ function _append_history!(state,s,y,options)
     true
 end
 
+"""One backtracking line search from `x`: along the L-BFGS direction, or along the projected gradient when the history
+is empty or gives no descent. `status` is `:accepted`, `:failed`, or `:step_tolerance` (the direction is negligible);
+`from_history` says whether the direction came from the L-BFGS history."""
+function _lbfgs_line_search(problem,layout,state,current,x,projected,lower,upper,options,context)
+    T=eltype(x)
+    direction,from_history=mpi_broadcast(if isroot(context)
+        proposed=_lbfgs_direction(projected,state.s_history,state.y_history)
+        _feasible_direction!(proposed,x,lower,upper)
+        descent=dot(projected,proposed)<0
+        descent || (proposed.=-projected; _feasible_direction!(proposed,x,lower,upper))
+        (proposed,descent && !isempty(state.s_history))
+    else
+        nothing
+    end,context)
+    norm(direction,Inf)<=options.step_tolerance && return (status=:step_tolerance,from_history=from_history,
+        step=zero(T),trials=0,rejected=0,parameters=state.parameters,evaluation=current,x=x)
+    trials=0; rejected=0; step=T(options.initial_step)
+    for line_trial in 1:options.maximum_line_search_trials
+        state.forward_evaluations>=options.maximum_forward_evaluations && break
+        candidate_x=clamp.(x.+step.*direction,lower,upper); delta=candidate_x.-x
+        norm(delta,Inf)>options.step_tolerance || break
+        candidate_parameters=mpi_broadcast(isroot(context) ?
+            _physical_from_scaled(layout,candidate_x) : nothing,context)
+        evaluation=evaluate_objective!(problem,layout,candidate_parameters,context)
+        state.forward_evaluations+=1; trials=line_trial
+        decision=mpi_broadcast(isroot(context) ?
+            evaluation.components.total<=state.objective+options.armijo_coefficient*dot(state.gradient,delta) :
+            nothing,context)
+        decision && return (status=:accepted,from_history=from_history,step=step,trials=trials,rejected=rejected,
+            parameters=candidate_parameters,evaluation=evaluation,x=candidate_x)
+        rejected+=1; step*=T(options.backtracking_factor)
+    end
+    (status=:failed,from_history=from_history,step=zero(T),trials=trials,rejected=rejected,
+        parameters=state.parameters,evaluation=current,x=x)
+end
+
 """Run synchronized bounded limited-memory BFGS on the distributed objective.
 
 Controls and solver history are the only replicated arrays.  Rank 0 forms the
 search direction and accepts/rejects trials; all ranks execute every objective
 and VJP through the existing hybrid runtime.  Every rejected line-search path
-explicitly restores the last accepted atmosphere before returning.
+explicitly restores the last accepted atmosphere before returning. When every trial
+along the L-BFGS direction fails, the history is cleared and the line search is tried
+once more along the projected gradient (`options.reset_history`); the run ends with
+`:line_search_failed` only when that also fails.
 
 Before each iteration rank 0 checks the soft stops (`options.stop_file` exists, or
 less than `walltime_margin` x the longest iteration plus `walltime_reserve_seconds`
@@ -259,39 +299,23 @@ function lbfgs_invert!(problem::DistributedInversionProblem,layout::ControlMapLa
         if gradient_norm<=options.gradient_tolerance
             state.converged=true; state.termination=:gradient_tolerance; break
         end
-        direction=mpi_broadcast(if isroot(context)
-            proposed=_lbfgs_direction(projected,state.s_history,state.y_history)
-            _feasible_direction!(proposed,x,lower,upper)
-            dot(projected,proposed)<0 || (proposed.=-projected; _feasible_direction!(proposed,x,lower,upper))
-            proposed
-        else
-            nothing
-        end,context)
-        if norm(direction,Inf)<=options.step_tolerance
+        search=_lbfgs_line_search(problem,layout,state,current,x,projected,lower,upper,options,context)
+        # a line search that fails along the L-BFGS direction clears the history and is tried once more along the
+        # projected gradient; the run stops only when that also fails
+        if search.status===:failed && search.from_history && options.reset_history &&
+                state.forward_evaluations<options.maximum_forward_evaluations
+            push!(state.history,LBFGSIterationRecord(iteration,state.forward_evaluations,state.objective,
+                state.data_term,state.regularization_term,T(gradient_norm),zero(T),search.trials,search.rejected,false))
+            _lbfgs_progress(context,"iteration=$iteration line search failed after $(search.trials) trials along the "*
+                "L-BFGS direction; history cleared, retrying along the projected gradient")
+            empty!(state.s_history); empty!(state.y_history)
+            search=_lbfgs_line_search(problem,layout,state,current,x,projected,lower,upper,options,context)
+        end
+        if search.status===:step_tolerance
             state.converged=true; state.termination=:step_tolerance; break
         end
-
-        accepted=false; accepted_step=zero(T); trials=0; rejected=0
-        trial_parameters=state.parameters; trial_evaluation=current; trial_x=x
-        step=T(options.initial_step)
-        for line_trial in 1:options.maximum_line_search_trials
-            state.forward_evaluations>=options.maximum_forward_evaluations && break
-            candidate_x=clamp.(x.+step.*direction,lower,upper); delta=candidate_x.-x
-            norm(delta,Inf)>options.step_tolerance || break
-            candidate_parameters=mpi_broadcast(isroot(context) ?
-                _physical_from_scaled(layout,candidate_x) : nothing,context)
-            evaluation=evaluate_objective!(problem,layout,candidate_parameters,context)
-            state.forward_evaluations+=1; trials=line_trial
-            decision=mpi_broadcast(isroot(context) ?
-                evaluation.components.total<=state.objective+options.armijo_coefficient*dot(state.gradient,delta) :
-                nothing,context)
-            if decision
-                accepted=true; accepted_step=step; trial_parameters=candidate_parameters
-                trial_evaluation=evaluation; trial_x=candidate_x
-                break
-            end
-            rejected+=1; step*=T(options.backtracking_factor)
-        end
+        accepted=search.status===:accepted; accepted_step=search.step; trials=search.trials; rejected=search.rejected
+        trial_parameters=search.parameters; trial_evaluation=search.evaluation; trial_x=search.x
 
         if !accepted
             # A rejected trial leaves mutable forward workspaces at that trial.

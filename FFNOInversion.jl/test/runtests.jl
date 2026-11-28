@@ -30,6 +30,7 @@ include("fsdp_only_architecture.jl")
 
 include("correction_mapping.jl")
 include("soft_stop_resume.jl")
+include("lbfgs_history_reset.jl")
 include("run_log.jl")
 
 include("view_angle.jl")
