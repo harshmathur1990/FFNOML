@@ -306,6 +306,7 @@ function _lbfgs_solver(section)
         backtracking_factor=Float64(get(section,"backtracking_factor",0.5)),
         armijo_coefficient=Float64(get(section,"armijo_coefficient",1e-4)),
         maximum_line_search_trials=Int(get(section,"maximum_line_search_trials",20)),
+        reset_history=Bool(get(section,"reset_history",true)),
         maximum_forward_evaluations=Int(get(section,"maximum_forward_evaluations",typemax(Int))),
         curvature_tolerance=Float64(get(section,"curvature_tolerance",1e-10)),
         checkpoint_every=Int(get(section,"checkpoint_every",1)),
