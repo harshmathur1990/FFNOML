@@ -40,6 +40,7 @@ include("Solvers.jl")
 include("Gradients.jl")
 include("ProductionGradients.jl")
 include("ScalableSolvers.jl")
+include("FirstOrderSolvers.jl")
 include("IO.jl")
 include("IrisAtmosphere.jl")
 include("Multi3dAtmosphere.jl")
@@ -107,6 +108,7 @@ export objective_gradient!, TaylorRemainderSample, GradientTaylorReport, gradien
 export AtmosphereCotangent, HybridAdjointObjectiveGradient
 export observation_vjp!, synthesis_vjp!, predict_distributed_populations_vjp!
 export LBFGSSolverOptions, LBFGSIterationRecord, LBFGSSolverState, LBFGSInversionResult
+export FirstOrderSolverOptions, FirstOrderSolverState, FirstOrderInversionResult, first_order_invert!, learning_rate
 export lbfgs_invert!, write_lbfgs_diagnostics
 export AtmosphereInputConfig, ObservedDataConfig, WeightInputConfig, OutputConfig, SynthesisGridConfig, SpectralSourceConfig, SpectralRegionConfig, wavelengths, RunConfig
 export ControlMapConfig, build_control_layout

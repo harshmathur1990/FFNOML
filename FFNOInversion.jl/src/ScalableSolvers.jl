@@ -46,14 +46,14 @@ _with_options(options::LBFGSSolverOptions;changes...)=
     LBFGSSolverOptions(;(name=>getfield(options,name) for name in fieldnames(LBFGSSolverOptions))...,changes...)
 
 """Whether to resume from the checkpoint; collective, decided on rank 0."""
-function _resume_requested(options::LBFGSSolverOptions,context)
+function _resume_requested(options,context)
     options.resume===:always && return true
     options.resume===:never && return false
     mpi_broadcast(isroot(context) ? isfile(options.checkpoint_path) : nothing,context)
 end
 
 """Rank 0's soft-stop verdict before an iteration: `:stop_requested`, `:walltime`, or `:none`; collective."""
-function _soft_stop(options::LBFGSSolverOptions,longest_iteration,context)
+function _soft_stop(options,longest_iteration,context)
     mpi_broadcast(if isroot(context)
         if !isempty(options.stop_file) && isfile(options.stop_file)
             :stop_requested

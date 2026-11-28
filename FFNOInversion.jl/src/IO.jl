@@ -103,7 +103,7 @@ struct RunConfig{T<:AbstractFloat}
     regularization::RegularizationSpec{T}
     parallel::ParallelOptions
     controls::Vector{ControlMapConfig{T}}
-    solver::Union{PrototypeSolverOptions,LBFGSSolverOptions}
+    solver::Union{PrototypeSolverOptions,LBFGSSolverOptions,FirstOrderSolverOptions}
     time_index::Int
     equilibrium::EquilibriumConfig
     population_mesh::Union{Nothing,PopulationMeshConfig{T}}
@@ -325,11 +325,37 @@ function _resume_mode(value)
     mode
 end
 
+const _FIRST_ORDER_KEYS=("method","max_iterations","learning_rate","momentum","nesterov","beta1","beta2","epsilon",
+    "rmsprop_alpha","weight_decay","schedule","warmup_iterations","min_learning_rate","step_size","gamma",
+    "gradient_tolerance","keep_best","checkpoint_every","checkpoint_path","stop_file","deadline","walltime_margin",
+    "walltime_reserve_seconds","resume")
+
+# solver.method = "sgd", "adam", "adamw", "rmsprop" or "adagrad": a learning rate (and schedule) instead of a line search
+function _first_order_solver(section,method)
+    unknown=setdiff(collect(keys(section)),_FIRST_ORDER_KEYS)
+    isempty(unknown) || throw(ArgumentError("unknown key(s) in [solver] for method = \"$method\": $(join(sort(unknown),", "))"))
+    defaults=FirstOrderSolverOptions()
+    value(key,type)=type(get(section,key,getfield(defaults,Symbol(key))))
+    FirstOrderSolverOptions(method=method,
+        max_iterations=value("max_iterations",Int),learning_rate=value("learning_rate",Float64),
+        momentum=value("momentum",Float64),nesterov=value("nesterov",Bool),beta1=value("beta1",Float64),
+        beta2=value("beta2",Float64),epsilon=value("epsilon",Float64),rmsprop_alpha=value("rmsprop_alpha",Float64),
+        weight_decay=value("weight_decay",Float64),schedule=Symbol(lowercase(String(get(section,"schedule","constant")))),
+        warmup_iterations=value("warmup_iterations",Int),min_learning_rate=value("min_learning_rate",Float64),
+        step_size=value("step_size",Int),gamma=value("gamma",Float64),gradient_tolerance=value("gradient_tolerance",Float64),
+        keep_best=value("keep_best",Bool),checkpoint_every=value("checkpoint_every",Int),
+        checkpoint_path=value("checkpoint_path",String),stop_file=value("stop_file",String),
+        deadline=value("deadline",Float64),walltime_margin=value("walltime_margin",Float64),
+        walltime_reserve_seconds=value("walltime_reserve_seconds",Float64),
+        resume=_resume_mode(get(section,"resume",false))) |> _validate
+end
+
 function _solver(section)
     method=Symbol(lowercase(String(get(section,"method","lbfgs"))))
     method in (:lbfgs,:bounded_lbfgs) && return _lbfgs_solver(section)
     method in (:prototype,:prototype_pattern_search) && return _prototype_solver(section)
-    throw(ArgumentError("solver.method must be lbfgs or prototype_pattern_search"))
+    method in FIRST_ORDER_METHODS && return _first_order_solver(section,method)
+    throw(ArgumentError("solver.method must be lbfgs, $(join(FIRST_ORDER_METHODS,", ")) or prototype_pattern_search"))
 end
 
 function _sample_control_field(atmosphere::Atmosphere3D{T},config::ControlMapConfig{T}) where T
@@ -620,7 +646,8 @@ function dry_run_summary(config::RunConfig)
     regvars = sort!(collect(union(vertical_vars,keys(config.regularization.horizontal))))
     nsources=sum(length(r.sources) for r in config.regions)
     controlvars=join(getfield.(config.controls,:variable),',')
-    solver_name=config.solver isa LBFGSSolverOptions ? "bounded_lbfgs" : "prototype_pattern_search"
+    solver_name=config.solver isa LBFGSSolverOptions ? "bounded_lbfgs" :
+        config.solver isa FirstOrderSolverOptions ? string(config.solver.method) : "prototype_pattern_search"
     "mode=$(config.mode) observation_input=$(config.observed===nothing ? "none" : config.observed.file) atmosphere_input=$(config.atmosphere.file) atmosphere_storage_order=$(config.atmosphere.storage_order) synthesis_output=$(config.outputs.synthesis_file) intensity_units=$(config.outputs.intensity_units) wavelength_frame=$(config.outputs.wavelength_frame) atmosphere_output=$(config.outputs.atmosphere_file) time_index=$(config.time_index) vertical_coordinate=$(config.atmosphere.vertical_coordinate) vertical_dataset=$(config.atmosphere.vertical_dataset) nodes_unit=$(vertical_unit(config.atmosphere.vertical_coordinate)) dx_m=$(config.synthesis.dx_m) dy_m=$(config.synthesis.dy_m) spectral_regions=$(length(config.regions)) spectral_sources=$nsources synthesis_wavelengths=$nlambda full_grid_psf=true zero_weight_exclusion=true stokes=$(join(config.stokes.components,',')) redistribution=$(config.redistribution) continuum_populations=$(config.continuum_populations) line_center=$(config.line_center) equilibrium=HSEMHS:$(hsemhs_mode_name(config.equilibrium.mode)) eos_table=$(config.equilibrium.eos_table_file) eos_model=$(config.equilibrium.eos_model) controls=$controlvars solver=$solver_name max_iterations=$(config.solver.max_iterations) checkpoint=$(config.solver.checkpoint_path) regularized=$(join(regvars,',')) mpi=$(config.parallel.enabled) decomposition=$(config.parallel.decomposition) threads_per_rank=$(config.parallel.threads_per_rank) gpu_launcher_rank=$(config.parallel.gpu_launcher_rank) gpu_connect_timeout_seconds=$(config.parallel.gpu_connect_timeout_seconds) gpu_status_timeout_seconds=$(config.parallel.gpu_status_timeout_seconds) gpu_diagnostic_interval_seconds=$(config.parallel.gpu_diagnostic_interval_seconds)"*
         (is_vertical(config.view) ? "" : " view_mu=$(config.view.mu) view_azimuth_deg=$(config.view.azimuth_deg) view_geometry=$(config.view.geometry)")*
         (config.given_populations===nothing ? "" : " given_populations=$(join(sort!(string.(collect(keys(config.given_populations.files)))),',')) given_format=$(config.given_populations.format) given_orientation=$(config.given_populations.orientation)")

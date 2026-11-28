@@ -380,8 +380,11 @@ function run_inversion!(config::RunConfig,root_inputs,
         solver=if config.solver isa LBFGSSolverOptions
             resume=finish || restart || _resume_requested(config.solver,context)
             lbfgs_invert!(problem,layout,gradient_backend,context;options=config.solver,restart=resume,iterate=!finish)
+        elseif config.solver isa FirstOrderSolverOptions
+            resume=finish || restart || _resume_requested(config.solver,context)
+            first_order_invert!(problem,layout,gradient_backend,context;options=config.solver,restart=resume,iterate=!finish)
         else
-            finish && throw(ArgumentError("finishing from a checkpoint needs solver.method = \"lbfgs\""))
+            finish && throw(ArgumentError("finishing from a checkpoint needs solver.method = \"lbfgs\" or a first-order method"))
             restart ? prototype_invert!(problem,layout,context;options=config.solver,restart=true) :
                 prototype_invert!(problem,layout,context;options=config.solver)
         end
@@ -444,7 +447,7 @@ end
 unless the configuration sets `solver.deadline` itself."""
 function _with_job_deadline(config::RunConfig,environment=ENV)
     solver=config.solver
-    solver isa LBFGSSolverOptions && isinf(solver.deadline) || return config
+    solver isa Union{LBFGSSolverOptions,FirstOrderSolverOptions} && isinf(solver.deadline) || return config
     raw=strip(get(environment,"FFNO_JOB_END_EPOCH",""))
     isempty(raw) && return config
     deadline=tryparse(Float64,raw)
